@@ -138,6 +138,12 @@ impl OneumApp {
                                     response.request_focus();
                                 }
                                 has_focus = response.has_focus();
+                                // Esc in the search field clears it (egui itself only drops focus).
+                                if response.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                {
+                                    state.query.clear();
+                                }
                                 if state.query.is_empty() {
                                     ui.add_space(20.0);
                                 } else if widgets::icon_button(
