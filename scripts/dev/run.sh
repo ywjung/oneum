@@ -11,14 +11,16 @@ MODE=--debug
 if [ "${1:-}" = "--release" ]; then MODE=""; shift; fi
 # shellcheck disable=SC2086
 scripts/package.sh $MODE >/dev/null
-pkill -f "dist/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true
+# Run from a private copy so an OnEum the user is running from dist/ is left alone.
+pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true
 sleep 0.5
+rm -rf dist/dev && mkdir -p dist/dev && cp -R dist/OnEum.app dist/dev/OnEum.app
 mkdir -p "$PROFILE"
 : > "$PROFILE/script.txt"
 MEDIA_ENV="--env ONEUM_NO_MEDIA_SESSION=1"
 [ "${ONEUM_MEDIA:-0}" = 1 ] && MEDIA_ENV=""
 # shellcheck disable=SC2086
-open -n dist/OnEum.app --env ONEUM_DATA_DIR="$PROFILE" --env ONEUM_SCRIPT="$PROFILE/script.txt" $MEDIA_ENV \
+open -n dist/dev/OnEum.app --env ONEUM_DATA_DIR="$PROFILE" --env ONEUM_SCRIPT="$PROFILE/script.txt" $MEDIA_ENV \
   --env ONEUM_LOG="${ONEUM_LOG:-info}" --stderr "$PROFILE/stderr.log" "$@"
 sleep 3
-pgrep -f "dist/OnEum.app/Contents/MacOS/OnEum" >/dev/null && echo "running" || { echo "not running" >&2; tail -20 "$PROFILE/stderr.log" >&2; exit 1; }
+pgrep -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" >/dev/null && echo "running" || { echo "not running" >&2; tail -20 "$PROFILE/stderr.log" >&2; exit 1; }

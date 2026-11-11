@@ -77,6 +77,7 @@ strings! {
     volume: "볼륨", "Volume";
     seek_bar: "재생 위치", "Playback position";
     nothing_playing: "재생 중인 곡 없음", "Not Playing";
+    drop_hint: "여기에 놓아 음악 추가", "Drop to add music";
     // Context menu
     play_now: "재생", "Play";
     play_next: "다음에 재생", "Play Next";

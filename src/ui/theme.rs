@@ -29,8 +29,63 @@ pub fn apply_choice(ctx: &egui::Context, choice: ThemeChoice) {
     });
 }
 
+/// Family name of the semibold UI face (always defined, see [`install_fonts`]).
+const SEMIBOLD: &str = "oneum-semibold";
+/// The macOS system UI font (San Francisco). A variable font: one file, several weights.
+const SYSTEM_UI_FONT: &str = "/System/Library/Fonts/SFNS.ttf";
+const SYSTEM_UI_Y_OFFSET: f32 = -0.06;
+
+/// A semibold font for titles and the names of things that are playing.
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
+}
+
+/// Uses the system UI font for Latin text (Korean and other scripts come from eframe's
+/// system-font fallback). If the system font cannot be read the bundled egui fonts are
+/// used and "semibold" simply maps to the regular face.
+fn install_fonts(ctx: &egui::Context) {
+    use egui::epaint::text::{FontData, FontTweak, VariationCoords};
+    let mut fonts = egui::FontDefinitions::default();
+    let regular_stack = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let mut semibold_stack = regular_stack.clone();
+    if let Ok(bytes) = std::fs::read(SYSTEM_UI_FONT) {
+        let blob: egui::epaint::text::Blob = std::sync::Arc::new(bytes);
+        let face = |weight: f32| {
+            FontData::from_blob(blob.clone(), 0).tweak(FontTweak {
+                coords: VariationCoords::new([("wght", weight)]),
+                // San Francisco sits lower in its line box than the Korean fallback font;
+                // raise it so mixed Korean/Latin text shares a baseline.
+                y_offset_factor: SYSTEM_UI_Y_OFFSET,
+                ..Default::default()
+            })
+        };
+        fonts
+            .font_data
+            .insert("system-ui".into(), std::sync::Arc::new(face(430.0)));
+        fonts.font_data.insert(
+            "system-ui-semibold".into(),
+            std::sync::Arc::new(face(620.0)),
+        );
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, "system-ui".into());
+        semibold_stack.insert(0, "system-ui-semibold".into());
+    }
+    fonts
+        .families
+        .insert(FontFamily::Name(SEMIBOLD.into()), semibold_stack);
+    ctx.set_fonts(fonts);
+}
+
 /// One-time style setup for both themes.
 pub fn install(ctx: &egui::Context) {
+    install_fonts(ctx);
     for theme in [Theme::Dark, Theme::Light] {
         let dark = theme == Theme::Dark;
         ctx.style_mut_of(theme, |style| {
@@ -39,7 +94,7 @@ pub fn install(ctx: &egui::Context) {
                     TextStyle::Heading,
                     FontId::new(22.0, FontFamily::Proportional),
                 ),
-                (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+                (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
                 (
                     TextStyle::Button,
                     FontId::new(13.5, FontFamily::Proportional),

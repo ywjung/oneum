@@ -2,7 +2,7 @@
 use super::icons::Icon;
 use super::{Action, ListState, Nav, OneumApp, Row, theme, widgets};
 use crate::i18n::format_time;
-use crate::library::{Library, LibrarySnapshot, SortKey};
+use crate::library::{Album, Library, LibrarySnapshot, SortKey};
 use crate::model::TrackId;
 use crate::playback::PlayState;
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
@@ -148,6 +148,23 @@ fn build_rows(
         rows.sort_by_key(|r| rank.get(&r.idx).copied().unwrap_or(usize::MAX));
     }
     rows
+}
+
+/// Title to show for an album. Untagged files have no album name; their folder name is
+/// the best available description ("Unknown album" only if even that is missing).
+fn album_title<'a>(album: &'a Album, snap: &'a LibrarySnapshot, unknown: &'a str) -> &'a str {
+    if !album.title.is_empty() {
+        return &album.title;
+    }
+    album
+        .tracks
+        .first()
+        .and_then(|&i| snap.tracks.get(i as usize))
+        .and_then(|t| t.path.parent())
+        .and_then(|folder| folder.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(unknown)
 }
 
 fn selected_tracks(snap: &LibrarySnapshot, rows: &[Row], selection: &HashSet<u64>) -> Vec<TrackId> {
@@ -335,7 +352,11 @@ impl OneumApp {
                 theme::accent(ui.visuals().dark_mode),
             );
             ui.add_space(10.0);
-            ui.label(RichText::new(s.empty_library_title).size(22.0).strong());
+            ui.label(
+                RichText::new(s.empty_library_title)
+                    .font(theme::semibold(22.0))
+                    .strong(),
+            );
             ui.add_space(4.0);
             ui.label(RichText::new(s.empty_library_body).color(theme::dim(ui)));
             ui.add_space(18.0);
@@ -857,11 +878,7 @@ impl OneumApp {
                                 egui::vec2(GRID_CELL, GRID_ROW),
                                 Sense::click(),
                             );
-                            let title = if album.title.is_empty() {
-                                s.unknown_album
-                            } else {
-                                album.title.as_str()
-                            };
+                            let title = album_title(album, &snap, s.unknown_album);
                             let artist = if album.artist.is_empty() {
                                 s.unknown_artist
                             } else {
@@ -897,7 +914,10 @@ impl OneumApp {
                                     .layout(Layout::top_down(Align::Min)),
                             );
                             text_ui.spacing_mut().item_spacing.y = 1.0;
-                            widgets::truncated(&mut text_ui, RichText::new(title).strong());
+                            widgets::truncated(
+                                &mut text_ui,
+                                RichText::new(title).font(theme::semibold(13.0)).strong(),
+                            );
                             widgets::truncated(
                                 &mut text_ui,
                                 RichText::new(artist).small().color(dim),
@@ -955,11 +975,7 @@ impl OneumApp {
             ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.add_space(14.0);
-                let title = if album.title.is_empty() {
-                    s.unknown_album
-                } else {
-                    album.title.as_str()
-                };
+                let title = album_title(album, &snap, s.unknown_album);
                 ui.add(egui::Label::new(RichText::new(title).heading().strong()).truncate());
                 let artist = if album.artist.is_empty() {
                     s.unknown_artist
@@ -1044,7 +1060,10 @@ impl OneumApp {
                         } else {
                             artist.name.as_str()
                         };
-                        widgets::truncated(ui, RichText::new(name).strong());
+                        widgets::truncated(
+                            ui,
+                            RichText::new(name).font(theme::semibold(13.0)).strong(),
+                        );
                     });
                     row.col(|ui| {
                         ui.label(

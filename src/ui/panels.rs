@@ -14,6 +14,7 @@ const QUEUE_ROW: f32 = 44.0;
 fn sidebar_row(
     ui: &mut Ui,
     selected: bool,
+    icon: Icon,
     text: &str,
     trailing: Option<String>,
 ) -> egui::Response {
@@ -39,14 +40,23 @@ fn sidebar_row(
         } else {
             visuals.text_color()
         };
+        let icon_color = if selected {
+            theme::accent(visuals.dark_mode)
+        } else {
+            visuals.weak_text_color()
+        };
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 18.0, rect.center().y),
+            egui::Vec2::splat(15.0),
+        );
+        super::icons::paint(ui.painter(), icon_rect, icon, icon_color);
         let font = egui::TextStyle::Body.resolve(ui.style());
         let trailing_width = trailing.as_ref().map_or(0.0, |_| 44.0);
-        let text_rect = rect
-            .shrink2(egui::vec2(10.0, 0.0))
-            .with_max_x(rect.right() - 8.0 - trailing_width);
-        let galley = ui
-            .painter()
-            .layout_no_wrap(text.to_string(), font.clone(), color);
+        let text_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 34.0, rect.top()),
+            egui::pos2(rect.right() - 8.0 - trailing_width, rect.bottom()),
+        );
+        let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
         let clipped = ui.painter().with_clip_rect(text_rect);
         clipped.galley(
             egui::pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0),
@@ -82,33 +92,70 @@ impl OneumApp {
                     // Search field for the current view.
                     let nav = self.nav.clone();
                     let state = self.views.entry(nav).or_default();
-                    let (icon_rect, _) =
-                        ui.allocate_exact_size(egui::Vec2::splat(16.0), Sense::hover());
-                    super::icons::paint(
-                        ui.painter(),
-                        icon_rect,
-                        Icon::Search,
-                        ui.visuals().weak_text_color(),
+                    let width = (ui.available_width() - 250.0).clamp(170.0, 400.0);
+                    let outline = if self.search_had_focus {
+                        egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode))
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke
+                    };
+                    let frame = egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .stroke(outline)
+                        .corner_radius(8.0)
+                        .inner_margin(egui::Margin::symmetric(8, 3));
+                    let mut has_focus = false;
+                    let mut want_focus = std::mem::take(&mut self.focus_search);
+                    let field_size = egui::vec2(width, 28.0);
+                    ui.allocate_ui_with_layout(
+                        field_size,
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            frame.show(ui, |ui| {
+                                ui.set_height(20.0);
+                                let (icon_rect, _) =
+                                    ui.allocate_exact_size(egui::Vec2::splat(14.0), Sense::hover());
+                                super::icons::paint(
+                                    ui.painter(),
+                                    icon_rect,
+                                    Icon::Search,
+                                    ui.visuals().weak_text_color(),
+                                );
+                                let edit = egui::TextEdit::singleline(&mut state.query)
+                                    .hint_text(s.search_hint)
+                                    .frame(egui::Frame::NONE)
+                                    .align(egui::Align2::LEFT_CENTER)
+                                    .min_size(egui::vec2(0.0, 20.0))
+                                    .desired_width(width - 72.0);
+                                let response = ui.add(edit);
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::SearchInput,
+                                        true,
+                                        s.search_label,
+                                    )
+                                });
+                                if std::mem::take(&mut want_focus) {
+                                    response.request_focus();
+                                }
+                                has_focus = response.has_focus();
+                                if state.query.is_empty() {
+                                    ui.add_space(20.0);
+                                } else if widgets::icon_button(
+                                    ui,
+                                    Icon::Close,
+                                    s.clear_search,
+                                    20.0,
+                                    false,
+                                )
+                                .clicked()
+                                {
+                                    state.query.clear();
+                                    response.request_focus();
+                                }
+                            });
+                        },
                     );
-                    let width = (ui.available_width() - 260.0).clamp(140.0, 360.0);
-                    let edit = egui::TextEdit::singleline(&mut state.query)
-                        .hint_text(s.search_hint)
-                        .desired_width(width);
-                    let response = ui.add(edit);
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::SearchInput, true, s.search_label)
-                    });
-                    if self.focus_search {
-                        self.focus_search = false;
-                        response.request_focus();
-                    }
-                    self.search_had_focus = response.has_focus();
-                    if !state.query.is_empty()
-                        && widgets::icon_button(ui, Icon::Close, s.clear_search, 22.0, false)
-                            .clicked()
-                    {
-                        state.query.clear();
-                    }
+                    self.search_had_focus = has_focus;
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(4.0);
@@ -183,19 +230,26 @@ impl OneumApp {
                 header(ui, s.library);
                 let total = self.snapshot.len();
                 let entries = [
-                    (Nav::Songs, s.all_songs, Some(group_digits(total))),
-                    (Nav::Albums, s.albums, None),
-                    (Nav::Artists, s.artists, None),
-                    (Nav::Favorites, s.favorites, None),
-                    (Nav::Recent, s.recently_played, None),
+                    (
+                        Nav::Songs,
+                        Icon::Note,
+                        s.all_songs,
+                        Some(group_digits(total)),
+                    ),
+                    (Nav::Albums, Icon::Album, s.albums, None),
+                    (Nav::Artists, Icon::Person, s.artists, None),
+                    (Nav::Favorites, Icon::Heart, s.favorites, None),
+                    (Nav::Recent, Icon::Clock, s.recently_played, None),
                 ];
-                for (nav, label, trailing) in entries {
+                for (nav, icon, label, trailing) in entries {
                     let selected = self.nav == nav
                         || matches!(
                             (&self.nav, &nav),
                             (Nav::Album(_), Nav::Albums) | (Nav::Artist(_), Nav::Artists)
                         ) && self.history.first() == Some(&nav);
-                    if sidebar_row(ui, selected, label, trailing.filter(|_| total > 0)).clicked() {
+                    if sidebar_row(ui, selected, icon, label, trailing.filter(|_| total > 0))
+                        .clicked()
+                    {
                         actions.push(Action::Go(nav));
                     }
                 }
@@ -257,6 +311,7 @@ impl OneumApp {
                             let response = sidebar_row(
                                 ui,
                                 self.nav == Nav::Playlist(id),
+                                Icon::Playlist,
                                 &name,
                                 Some(count.to_string()),
                             );
@@ -377,7 +432,11 @@ impl OneumApp {
         let queue = self.player.queue.clone();
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(s.show_queue).strong().size(15.0));
+            ui.label(
+                RichText::new(s.show_queue)
+                    .font(theme::semibold(15.0))
+                    .strong(),
+            );
             ui.label(
                 RichText::new(self.lang.song_count(queue.len()))
                     .small()
@@ -646,7 +705,11 @@ impl OneumApp {
             .or(self.info_track)
             .or(self.player.current.map(|c| c.track_id));
         ui.add_space(4.0);
-        ui.label(RichText::new(s.show_info).strong().size(15.0));
+        ui.label(
+            RichText::new(s.show_info)
+                .font(theme::semibold(15.0))
+                .strong(),
+        );
         ui.separator();
         let Some(track) = id.and_then(|id| self.track(id)).cloned() else {
             widgets::empty_state(ui, Icon::Info, s.no_selection, "");
@@ -664,7 +727,14 @@ impl OneumApp {
                     widgets::art(ui, rect, texture, 8.0);
                 });
                 ui.add_space(8.0);
-                ui.add(egui::Label::new(RichText::new(&track.title).size(17.0).strong()).wrap());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&track.title)
+                            .font(theme::semibold(17.0))
+                            .strong(),
+                    )
+                    .wrap(),
+                );
                 let artist = if track.artist.is_empty() {
                     s.unknown_artist
                 } else {

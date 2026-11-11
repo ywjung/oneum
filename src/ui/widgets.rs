@@ -102,7 +102,11 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, body: &str) {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
         icons::paint(ui.painter(), rect, icon, ui.visuals().weak_text_color());
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(title).size(17.0).strong());
+        ui.label(
+            egui::RichText::new(title)
+                .font(theme::semibold(17.0))
+                .strong(),
+        );
         if !body.is_empty() {
             ui.label(egui::RichText::new(body).color(theme::dim(ui)));
         }

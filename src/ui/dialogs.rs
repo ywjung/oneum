@@ -62,7 +62,11 @@ impl OneumApp {
                 ),
                 Dialog::NewPlaylist { .. } => (s.new_playlist, String::new(), s.ok),
             };
-            ui.label(RichText::new(title).size(16.0).strong());
+            ui.label(
+                RichText::new(title)
+                    .font(super::theme::semibold(16.0))
+                    .strong(),
+            );
             ui.add_space(6.0);
             let mut can_confirm = true;
             if let Dialog::NewPlaylist { name, focus, .. } = &mut dialog {

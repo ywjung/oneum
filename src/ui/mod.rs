@@ -174,6 +174,7 @@ pub struct OneumApp {
     queue_anchor: Option<u64>,
     queue_scroll_to_current: bool,
     seek_drag: Option<f64>,
+    volume_before_mute: f32,
 
     art: ArtCache,
     toast: Option<Toast>,
@@ -242,6 +243,7 @@ impl OneumApp {
             queue_anchor: None,
             queue_scroll_to_current: true,
             seek_drag: None,
+            volume_before_mute: 0.0,
             toast: None,
             dialog: None,
             renaming: None,
@@ -845,6 +847,38 @@ impl OneumApp {
         }
     }
 
+    /// While files are dragged over the window, shows where they will go.
+    fn drop_overlay(&self, ctx: &egui::Context) {
+        if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+            return;
+        }
+        let rect = ctx.content_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("drop-overlay"),
+        ));
+        let dark = ctx.global_style().visuals.dark_mode;
+        let accent = theme::accent(dark);
+        painter.rect_filled(
+            rect,
+            0.0,
+            egui::Color32::from_black_alpha(if dark { 150 } else { 90 }),
+        );
+        painter.rect_stroke(
+            rect.shrink(14.0),
+            14.0,
+            egui::Stroke::new(2.5, accent),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            self.s().drop_hint,
+            theme::semibold(20.0),
+            egui::Color32::WHITE,
+        );
+    }
+
     /// Carries out the app-side steps of a verification script (see `automation`).
     fn run_automation(&mut self, ctx: &egui::Context) {
         let Some(automation) = self.automation.as_mut() else {
@@ -1047,6 +1081,7 @@ impl eframe::App for OneumApp {
         self.right_panel(ui, &mut actions);
         egui::CentralPanel::default().show(ui, |ui| self.central(ui, &mut actions));
 
+        self.drop_overlay(&ctx);
         self.settings_window(&ctx);
         self.dialogs(&ctx);
         for action in actions {

@@ -24,6 +24,10 @@ pub enum Icon {
     Gear,
     Note,
     Warning,
+    Album,
+    Person,
+    Clock,
+    Playlist,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -204,6 +208,42 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
             painter.line_segment([p(0.5, 0.40), p(0.5, 0.62)], stroke);
             painter.circle_filled(p(0.5, 0.73), w * 0.8, color);
+        }
+        Icon::Album => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.12, 0.12), p(0.88, 0.88)),
+                s * 0.14,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.circle_stroke(c, s * 0.20, stroke);
+            painter.circle_filled(c, w * 0.8, color);
+        }
+        Icon::Person => {
+            painter.circle_stroke(p(0.5, 0.33), s * 0.17, stroke);
+            let pts: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 12.0);
+                    p(0.5 + 0.36 * a.cos(), 0.90 + 0.34 * a.sin())
+                })
+                .collect();
+            painter.add(Shape::line(pts, stroke));
+        }
+        Icon::Clock => {
+            painter.circle_stroke(c, s * 0.38, stroke);
+            painter.add(Shape::line(
+                vec![p(0.5, 0.28), p(0.5, 0.5), p(0.66, 0.60)],
+                stroke,
+            ));
+        }
+        Icon::Playlist => {
+            for y in [0.26, 0.46] {
+                painter.line_segment([p(0.12, y), p(0.80, y)], stroke);
+            }
+            painter.line_segment([p(0.12, 0.66), p(0.48, 0.66)], stroke);
+            painter.circle_filled(p(0.66, 0.78), s * 0.10, color);
+            painter.line_segment([p(0.75, 0.78), p(0.75, 0.52)], stroke);
+            painter.line_segment([p(0.75, 0.52), p(0.90, 0.58)], stroke);
         }
     }
 }

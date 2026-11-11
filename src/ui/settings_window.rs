@@ -125,7 +125,11 @@ impl OneumApp {
 
     fn settings_library(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        ui.label(RichText::new(s.music_folders).strong());
+        ui.label(
+            RichText::new(s.music_folders)
+                .font(theme::semibold(13.0))
+                .strong(),
+        );
         ui.add_space(4.0);
         let roots = self.core.library.roots();
         if roots.is_empty() {
@@ -178,7 +182,11 @@ impl OneumApp {
         let s = self.s();
         self.refresh_devices();
         let player = self.core.player.clone();
-        ui.label(RichText::new(s.output_device).strong());
+        ui.label(
+            RichText::new(s.output_device)
+                .font(theme::semibold(13.0))
+                .strong(),
+        );
         ui.add_space(4.0);
         let before = self.settings.output_device.clone();
         let selected_text = match &before {
@@ -219,7 +227,11 @@ impl OneumApp {
         }
 
         ui.add_space(14.0);
-        ui.label(RichText::new(s.replaygain).strong());
+        ui.label(
+            RichText::new(s.replaygain)
+                .font(theme::semibold(13.0))
+                .strong(),
+        );
         ui.add_space(4.0);
         let before = self.settings.replaygain;
         ui.horizontal(|ui| {
@@ -262,7 +274,11 @@ impl OneumApp {
 
     fn settings_about(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        ui.label(RichText::new(s.app_name).size(20.0).strong());
+        ui.label(
+            RichText::new(s.app_name)
+                .font(theme::semibold(20.0))
+                .strong(),
+        );
         ui.label(format!("{} {}", s.version, crate::app::VERSION));
         ui.add_space(6.0);
         ui.label(s.about_body);
