@@ -132,27 +132,34 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([p(0.5, 0.45), p(0.5, 0.72)], stroke);
         }
         Icon::Heart | Icon::HeartFilled => {
-            // Parametric heart outline.
-            let pts: Vec<Pos2> = (0..40)
-                .map(|i| {
-                    let t = i as f32 / 40.0 * std::f32::consts::TAU;
-                    let x = 16.0 * t.sin().powi(3);
-                    let y = 13.0 * t.cos()
-                        - 5.0 * (2.0 * t).cos()
-                        - 2.0 * (3.0 * t).cos()
-                        - (4.0 * t).cos();
-                    p(0.5 + x / 40.0, 0.47 - y / 40.0)
-                })
-                .collect();
+            // Two lobes and a point. Built from convex pieces so it can be filled.
+            let lobe = s * 0.215;
+            let left = p(0.30, 0.36);
+            let right = p(0.70, 0.36);
+            let tip = p(0.5, 0.88);
             if icon == Icon::HeartFilled {
-                // The outline is concave: fill it as a triangle fan around the centre.
-                let centre = p(0.5, 0.5);
-                for pair in pts.windows(2) {
-                    painter.add(fill(vec![centre, pair[0], pair[1]]));
+                painter.circle_filled(left, lobe, color);
+                painter.circle_filled(right, lobe, color);
+                painter.add(fill(vec![
+                    p(0.105, 0.46),
+                    p(0.5, 0.30),
+                    p(0.895, 0.46),
+                    tip,
+                ]));
+            } else {
+                // Outline: upper arcs of both lobes joined to the tip.
+                let mut pts: Vec<Pos2> = Vec::new();
+                for i in 0..=10 {
+                    let a = std::f32::consts::PI * (0.80 + 1.05 * i as f32 / 10.0);
+                    pts.push(left + vec2(a.cos(), a.sin()) * lobe);
                 }
-                painter.add(fill(vec![centre, pts[pts.len() - 1], pts[0]]));
+                for i in 0..=10 {
+                    let a = std::f32::consts::PI * (1.15 + 1.05 * i as f32 / 10.0);
+                    pts.push(right + vec2(a.cos(), a.sin()) * lobe);
+                }
+                pts.push(tip);
+                painter.add(Shape::closed_line(pts, stroke));
             }
-            painter.add(Shape::closed_line(pts, stroke));
         }
         Icon::Search => {
             painter.circle_stroke(p(0.43, 0.43), s * 0.25, stroke);

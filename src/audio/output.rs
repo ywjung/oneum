@@ -51,7 +51,7 @@ pub enum OutputEvent {
 fn device_name(device: &cpal::Device) -> String {
     device
         .description()
-        .map(|d| d.name().to_string())
+        .map(|d| d.name().trim().to_string())
         .unwrap_or_else(|_| "Unknown device".to_string())
 }
 

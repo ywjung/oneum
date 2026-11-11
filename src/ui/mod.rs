@@ -815,6 +815,16 @@ impl OneumApp {
                 }
                 automation::AppStep::Open(path) => self.open_paths(vec![path]),
                 automation::AppStep::Volume(v) => self.core.player.send(Command::SetVolume(v)),
+                automation::AppStep::OsKey(code, cmd, shift) => {
+                    if !crate::platform::macos::testing::post_key(code, cmd, shift) {
+                        tracing::warn!("oskey: no key window");
+                    }
+                }
+                automation::AppStep::InputSource(id) => {
+                    crate::platform::macos::testing::select_input_source(&id);
+                }
+                automation::AppStep::Activate => window::show_main_window(),
+                automation::AppStep::Hide => window::hide_main_window(),
                 automation::AppStep::Quit => {
                     self.shutdown();
                     std::process::exit(0);
@@ -869,6 +879,7 @@ impl OneumApp {
             "dark": ctx.global_style().visuals.dark_mode,
             "text_focus": ctx.text_edit_focused(),
             "window_visible": window::is_main_window_visible(),
+            "input_source": crate::platform::macos::testing::current_input_source(),
             "pixels_per_point": ctx.pixels_per_point(),
         })
     }

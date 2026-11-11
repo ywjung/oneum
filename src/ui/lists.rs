@@ -496,6 +496,24 @@ impl OneumApp {
             ..
         } = &mut state;
         let rows: &[Row] = rows;
+        // Column widths are derived from the available width every frame, so the table
+        // always fits, also in a small window or next to the side panel.
+        let column_count = 4
+            + usize::from(options.track_no)
+            + usize::from(!options.hide_album)
+            + usize::from(show_format);
+        let fixed = 26.0
+            + 58.0
+            + if options.track_no { 32.0 } else { 0.0 }
+            + if show_format { 64.0 } else { 0.0 };
+        let gaps =
+            ui.spacing().item_spacing.x * column_count as f32 + ui.spacing().scroll.bar_width + 6.0;
+        let flexible = (ui.available_width() - fixed - gaps).max(180.0);
+        let (title_w, artist_w, album_w) = if options.hide_album {
+            (flexible * 0.62, flexible * 0.38, 0.0)
+        } else {
+            (flexible * 0.44, flexible * 0.26, flexible * 0.30)
+        };
         let mut table = TableBuilder::new(ui)
             .id_salt(("tracks", nav.clone()))
             .striped(true)
@@ -506,20 +524,10 @@ impl OneumApp {
         if options.track_no {
             table = table.column(Column::exact(32.0));
         }
-        table = table.column(Column::remainder().at_least(160.0).clip(true));
-        table = table.column(
-            Column::initial(190.0)
-                .at_least(80.0)
-                .clip(true)
-                .resizable(true),
-        );
+        table = table.column(Column::exact(title_w).clip(true));
+        table = table.column(Column::exact(artist_w).clip(true));
         if !options.hide_album {
-            table = table.column(
-                Column::initial(210.0)
-                    .at_least(80.0)
-                    .clip(true)
-                    .resizable(true),
-            );
+            table = table.column(Column::exact(album_w).clip(true));
         }
         table = table.column(Column::exact(58.0));
         if show_format {

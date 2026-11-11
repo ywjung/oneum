@@ -116,7 +116,20 @@ impl OneumApp {
     fn confirm(&mut self, dialog: Dialog) {
         let library = self.core.library.clone();
         let result = match dialog {
-            Dialog::RemoveFolder(id, _) => library.remove_folder(id),
+            Dialog::RemoveFolder(id, _) => {
+                // Removing a large folder deletes many rows: keep it off the UI thread.
+                let spawned = std::thread::Builder::new()
+                    .name("oneum-remove-folder".into())
+                    .spawn(move || {
+                        if let Err(error) = library.remove_folder(id) {
+                            tracing::warn!("removing a music folder failed: {error}");
+                        }
+                    });
+                if spawned.is_err() {
+                    self.warn_toast(self.s().notice_generic_error);
+                }
+                return;
+            }
             Dialog::DeletePlaylist(id, _) => library.delete_playlist(id),
             Dialog::RemoveTracks(tracks) => {
                 library.remove_tracks(&tracks);

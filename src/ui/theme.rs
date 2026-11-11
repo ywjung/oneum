@@ -71,7 +71,14 @@ pub fn install(ctx: &egui::Context) {
             v.window_corner_radius = CornerRadius::same(10);
             v.menu_corner_radius = CornerRadius::same(8);
             v.selection.bg_fill = accent.gamma_multiply(if dark { 0.45 } else { 0.28 });
-            v.selection.stroke = Stroke::new(1.0, accent);
+            // Text of selected rows uses this colour: keep it neutral so that "selected"
+            // (background) and "now playing" (accent text) remain distinguishable.
+            let strong = if dark {
+                Color32::from_rgb(0xF5, 0xF5, 0xF7)
+            } else {
+                Color32::from_rgb(0x12, 0x12, 0x16)
+            };
+            v.selection.stroke = Stroke::new(1.0, strong);
             v.hyperlink_color = accent;
             v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent.gamma_multiply(0.6));
             v.widgets.active.bg_stroke = Stroke::new(1.0, accent);

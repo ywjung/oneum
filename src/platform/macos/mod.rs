@@ -6,6 +6,7 @@ pub mod menu;
 pub mod nowplaying;
 pub mod power;
 pub mod responder;
+pub mod testing;
 pub mod window;
 
 use block2::RcBlock;

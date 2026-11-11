@@ -8,6 +8,7 @@
 //!   click X Y [cmd] [shift] · dclick X Y · rclick X Y · move X Y · drag X1 Y1 X2 Y2
 //!   scroll X Y DY · key NAME [cmd] [shift] [alt] · text STRING · wait MS
 //!   shot FILE.png · dump FILE.json · open PATH · volume V · quit
+//!   oskey KEYCODE [cmd] [shift] (real OS key event) · inputsource ID · activate · hide
 use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, pos2};
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -21,10 +22,18 @@ pub(super) enum AppStep {
     Open(PathBuf),
     Volume(f32),
     Quit,
+    OsKey(u16, bool, bool),
+    InputSource(String),
+    Activate,
+    Hide,
 }
 
 enum Step {
     Input(Vec<Event>, Modifiers),
+    /// Like `Input`, but consecutive gesture steps are timestamped 20 ms apart no matter
+    /// how slowly frames arrive (the OS throttles frames of background windows, which
+    /// would otherwise turn a double-click into two single clicks).
+    Gesture(Vec<Event>, Modifiers),
     Wait(u64),
     App(AppStep),
 }
@@ -35,6 +44,7 @@ pub(super) struct Automation {
     partial: String,
     steps: VecDeque<Step>,
     wait_until: Option<Instant>,
+    gesture_time: Option<f64>,
     pub(super) app_steps: Vec<AppStep>,
 }
 
@@ -72,6 +82,7 @@ impl Automation {
             partial: String::new(),
             steps: VecDeque::new(),
             wait_until: None,
+            gesture_time: None,
             app_steps: Vec::new(),
         })
     }
@@ -129,9 +140,9 @@ impl Automation {
                 let times = if words[0] == "dclick" { 2 } else { 1 };
                 for _ in 0..times {
                     self.steps
-                        .push_back(Step::Input(vec![button(p, which, true, m)], m));
+                        .push_back(Step::Gesture(vec![button(p, which, true, m)], m));
                     self.steps
-                        .push_back(Step::Input(vec![button(p, which, false, m)], m));
+                        .push_back(Step::Gesture(vec![button(p, which, false, m)], m));
                 }
             }
             Some("move") => {
@@ -213,6 +224,19 @@ impl Automation {
                 .steps
                 .push_back(Step::App(AppStep::Volume(num(1).unwrap_or(0.0)))),
             Some("quit") => self.steps.push_back(Step::App(AppStep::Quit)),
+            Some("oskey") => {
+                let Some(code) = words.get(1).and_then(|w| w.parse::<u16>().ok()) else {
+                    return;
+                };
+                let (cmd, shift) = (words.contains(&"cmd"), words.contains(&"shift"));
+                self.steps
+                    .push_back(Step::App(AppStep::OsKey(code, cmd, shift)));
+            }
+            Some("inputsource") => self
+                .steps
+                .push_back(Step::App(AppStep::InputSource(rest(1)))),
+            Some("activate") => self.steps.push_back(Step::App(AppStep::Activate)),
+            Some("hide") => self.steps.push_back(Step::App(AppStep::Hide)),
             _ => {}
         }
     }
@@ -228,14 +252,31 @@ impl Automation {
         }
         match self.steps.pop_front() {
             Some(Step::Input(events, modifiers)) => {
+                self.gesture_time = None;
+                raw.events.push(Event::ModifiersChanged(modifiers));
+                raw.events.extend(events);
+            }
+            Some(Step::Gesture(events, modifiers)) => {
+                // Never ahead of the real clock (egui requires monotonic time), but at
+                // most 20 ms after the previous gesture step when frames arrive slowly.
+                let time = match (self.gesture_time, raw.time) {
+                    (Some(previous), Some(now)) if now - previous > 0.05 => Some(previous + 0.02),
+                    (_, now) => now,
+                };
+                self.gesture_time = time;
+                raw.time = time;
                 raw.events.push(Event::ModifiersChanged(modifiers));
                 raw.events.extend(events);
             }
             Some(Step::Wait(ms)) => {
-                self.wait_until = Some(Instant::now() + Duration::from_millis(ms))
+                self.gesture_time = None;
+                self.wait_until = Some(Instant::now() + Duration::from_millis(ms));
             }
-            Some(Step::App(step)) => self.app_steps.push(step),
-            None => {}
+            Some(Step::App(step)) => {
+                self.gesture_time = None;
+                self.app_steps.push(step);
+            }
+            None => self.gesture_time = None,
         }
     }
 }

@@ -18,6 +18,7 @@ pub fn hide_main_window() {
         && let Some(window) = main_window(mtm)
     {
         window.orderOut(None);
+        tracing::info!("main window hidden");
     }
 }
 
@@ -27,6 +28,9 @@ pub fn show_main_window() {
         if let Some(window) = main_window(mtm) {
             if window.isMiniaturized() {
                 window.deminiaturize(None);
+            }
+            if !window.isVisible() {
+                tracing::info!("main window shown");
             }
             window.makeKeyAndOrderFront(None);
         }
