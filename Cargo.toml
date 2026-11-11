@@ -47,7 +47,6 @@ objc2-media-player = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
-objc2-core-graphics = "0.3"
 
 [profile.release]
 opt-level = 3
