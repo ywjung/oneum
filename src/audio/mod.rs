@@ -8,18 +8,12 @@ pub mod feed;
 pub mod output;
 pub mod render;
 
-
-
-
 pub mod resample;
 
 pub use dsp::{ReplayGainMode, ReplayGainSettings};
 pub use engine::{Engine, EngineEvent};
 pub use feed::{NextSlot, NextTrack, TrackRequest};
 pub use output::{OutputDeviceInfo, OutputError};
-
-
-
 
 /// Why a track could not be played. The UI turns this into a localized message.
 #[derive(Debug, Clone, PartialEq, Eq)]

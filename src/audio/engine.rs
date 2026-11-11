@@ -1,10 +1,10 @@
 //! Ties feeds, the renderer and the output device together. Owned by the player thread.
+use super::PlaybackError;
 use super::decoder::SourceInfo;
 use super::dsp::{ReplayGainSettings, volume_to_gain};
 use super::feed::{FeedEvent, FeedHandle, FeedParams, NextSlot, RgShared, TrackRequest};
 use super::output::{self, OutputError, OutputEvent, OutputStream};
 use super::render::{RenderLink, RenderShared, Renderer, render_pair};
-use super::PlaybackError;
 use crate::model::TrackId;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -19,8 +19,20 @@ const DEVICE_POLL: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
     /// Decode side: this track begins at `at_frame` of feed `epoch`.
-    TrackStarted { epoch: u16, item_id: u64, track_id: TrackId, at_frame: u64, start_ms: u64, info: SourceInfo },
-    TrackFailed { epoch: u16, item_id: u64, track_id: TrackId, error: PlaybackError },
+    TrackStarted {
+        epoch: u16,
+        item_id: u64,
+        track_id: TrackId,
+        at_frame: u64,
+        start_ms: u64,
+        info: SourceInfo,
+    },
+    TrackFailed {
+        epoch: u16,
+        item_id: u64,
+        track_id: TrackId,
+        error: PlaybackError,
+    },
     /// The decode thread finished; the feed is `total_frames` long.
     FeedFinished { epoch: u16, total_frames: u64 },
     /// Everything in feed `epoch` has been played.
@@ -137,8 +149,16 @@ impl Engine {
             return Ok(());
         }
         self.stop_feeds();
-        let stream = OutputStream::open(self.device_pref.as_deref(), self.shared.clone(), self.out_tx.clone())?;
-        tracing::info!(rate = stream.sample_rate(), channels = stream.channels, "output stream opened");
+        let stream = OutputStream::open(
+            self.device_pref.as_deref(),
+            self.shared.clone(),
+            self.out_tx.clone(),
+        )?;
+        tracing::info!(
+            rate = stream.sample_rate(),
+            channels = stream.channels,
+            "output stream opened"
+        );
         self.sink = Sink::Device(Box::new(stream));
         self.idle_since = Some(Instant::now());
         Ok(())
@@ -153,15 +173,32 @@ impl Engine {
 
     /// Starts a new feed at `start_ms` of `first`. Audio of the previous feed keeps playing
     /// until the new one has pre-buffered, then the callback cross-switches with a short fade.
-    pub fn start_feed(&mut self, first: TrackRequest, start_ms: u64, next: Arc<NextSlot>) -> Result<u16, OutputError> {
+    pub fn start_feed(
+        &mut self,
+        first: TrackRequest,
+        start_ms: u64,
+        next: Arc<NextSlot>,
+    ) -> Result<u16, OutputError> {
         let Some(out_rate) = self.sample_rate() else {
             return Err(OutputError::NoDevice);
         };
-        self.last_epoch = if self.last_epoch == u16::MAX { 1 } else { self.last_epoch + 1 };
+        self.last_epoch = if self.last_epoch == u16::MAX {
+            1
+        } else {
+            self.last_epoch + 1
+        };
         let epoch = self.last_epoch;
-        let params =
-            FeedParams { epoch, out_rate, first, start_ms, next, rg: self.rg.clone(), events: self.feed_tx.clone() };
-        let handle = FeedHandle::spawn(params).ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;
+        let params = FeedParams {
+            epoch,
+            out_rate,
+            first,
+            start_ms,
+            next,
+            rg: self.rg.clone(),
+            events: self.feed_tx.clone(),
+        };
+        let handle = FeedHandle::spawn(params)
+            .ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;
         self.loading = Some(handle); // replaces (and cancels) a feed that was still loading
         // Silence whatever is playing right now; only the new feed may be heard.
         self.shared.require_epoch(epoch);
@@ -193,7 +230,11 @@ impl Engine {
     }
 
     fn wake_stream(&mut self) {
-        self.idle_since = if self.shared.is_playing() { None } else { Some(Instant::now()) };
+        self.idle_since = if self.shared.is_playing() {
+            None
+        } else {
+            Some(Instant::now())
+        };
         if let Sink::Device(stream) = &mut self.sink
             && let Err(e) = stream.set_running(true)
         {
@@ -214,7 +255,10 @@ impl Engine {
     /// `(epoch, frames)` played by the callback, compensated for output latency.
     pub fn played(&self) -> (u16, u64) {
         let (epoch, frames) = self.shared.position();
-        (epoch, frames.saturating_sub(u64::from(self.shared.latency_frames())))
+        (
+            epoch,
+            frames.saturating_sub(u64::from(self.shared.latency_frames())),
+        )
     }
 
     /// Frames of the active feed that are decoded but not yet played, and whether its
@@ -223,7 +267,10 @@ impl Engine {
         let feed = self.active.as_ref()?;
         let (epoch, consumed) = self.shared.position();
         let consumed = if epoch == feed.epoch { consumed } else { 0 };
-        Some((feed.written_frames().saturating_sub(consumed), feed.is_finished()))
+        Some((
+            feed.written_frames().saturating_sub(consumed),
+            feed.is_finished(),
+        ))
     }
 
     pub fn underruns(&self) -> u64 {
@@ -266,14 +313,44 @@ impl Engine {
             };
             // Events of abandoned feeds are stale by definition.
             match event {
-                FeedEvent::TrackStarted { epoch, item_id, track_id, at_frame, start_ms, info } if current(epoch) => {
-                    events.push(EngineEvent::TrackStarted { epoch, item_id, track_id, at_frame, start_ms, info });
+                FeedEvent::TrackStarted {
+                    epoch,
+                    item_id,
+                    track_id,
+                    at_frame,
+                    start_ms,
+                    info,
+                } if current(epoch) => {
+                    events.push(EngineEvent::TrackStarted {
+                        epoch,
+                        item_id,
+                        track_id,
+                        at_frame,
+                        start_ms,
+                        info,
+                    });
                 }
-                FeedEvent::TrackFailed { epoch, item_id, track_id, error } if current(epoch) => {
-                    events.push(EngineEvent::TrackFailed { epoch, item_id, track_id, error });
+                FeedEvent::TrackFailed {
+                    epoch,
+                    item_id,
+                    track_id,
+                    error,
+                } if current(epoch) => {
+                    events.push(EngineEvent::TrackFailed {
+                        epoch,
+                        item_id,
+                        track_id,
+                        error,
+                    });
                 }
-                FeedEvent::Finished { epoch, total_frames } if current(epoch) => {
-                    events.push(EngineEvent::FeedFinished { epoch, total_frames });
+                FeedEvent::Finished {
+                    epoch,
+                    total_frames,
+                } if current(epoch) => {
+                    events.push(EngineEvent::FeedFinished {
+                        epoch,
+                        total_frames,
+                    });
                 }
                 _ => {}
             }

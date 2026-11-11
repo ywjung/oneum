@@ -90,8 +90,10 @@ impl RgShared {
             ReplayGainMode::Album => 2,
         };
         self.mode.store(mode, Ordering::Relaxed);
-        self.preamp_bits.store(settings.preamp_db.to_bits(), Ordering::Relaxed);
-        self.prevent_clipping.store(settings.prevent_clipping, Ordering::Relaxed);
+        self.preamp_bits
+            .store(settings.preamp_db.to_bits(), Ordering::Relaxed);
+        self.prevent_clipping
+            .store(settings.prevent_clipping, Ordering::Relaxed);
     }
     pub fn get(&self) -> ReplayGainSettings {
         ReplayGainSettings {
@@ -119,7 +121,12 @@ pub enum FeedEvent {
         info: SourceInfo,
     },
     /// The track could not be opened or broke mid-way. The feed ends after what was written.
-    TrackFailed { epoch: u16, item_id: u64, track_id: TrackId, error: PlaybackError },
+    TrackFailed {
+        epoch: u16,
+        item_id: u64,
+        track_id: TrackId,
+        error: PlaybackError,
+    },
     /// The decode thread wrote its last frame; `total_frames` is the feed length.
     Finished { epoch: u16, total_frames: u64 },
 }
@@ -158,13 +165,20 @@ impl FeedHandle {
             finished: finished.clone(),
             written: written.clone(),
         };
-        std::thread::Builder::new().name(format!("oneum-decode-{epoch}")).spawn(move || worker.run()).ok()?;
+        std::thread::Builder::new()
+            .name(format!("oneum-decode-{epoch}"))
+            .spawn(move || worker.run())
+            .ok()?;
         Some(FeedHandle {
             epoch,
             cancel,
             finished: finished.clone(),
             written,
-            consumer: Some(FeedConsumer { epoch, consumer, finished }),
+            consumer: Some(FeedConsumer {
+                epoch,
+                consumer,
+                finished,
+            }),
         })
     }
 
@@ -218,7 +232,9 @@ impl Worker {
                 continue;
             }
             let n = free.min(samples.len() - offset);
-            let Ok(mut chunk) = self.producer.write_chunk(n) else { continue };
+            let Ok(mut chunk) = self.producer.write_chunk(n) else {
+                continue;
+            };
             let (a, b) = chunk.as_mut_slices();
             a.copy_from_slice(&samples[offset..offset + a.len()]);
             b.copy_from_slice(&samples[offset + a.len()..offset + n]);
@@ -286,7 +302,9 @@ impl Worker {
             }
             // Keep the resampler across tracks of the same rate so the signal stays continuous.
             let needs_resampling = info.sample_rate != out_rate;
-            let reusable = resampler.as_ref().is_some_and(|r| needs_resampling && r.in_rate() == info.sample_rate);
+            let reusable = resampler
+                .as_ref()
+                .is_some_and(|r| needs_resampling && r.in_rate() == info.sample_rate);
             if !reusable {
                 if let Some(mut old) = resampler.take() {
                     resampled.clear();
@@ -304,7 +322,10 @@ impl Worker {
                             chain_base = written;
                         }
                         Err(detail) => {
-                            self.send(fail(PlaybackError { kind: PlaybackErrorKind::Unsupported, detail }));
+                            self.send(fail(PlaybackError {
+                                kind: PlaybackErrorKind::Unsupported,
+                                detail,
+                            }));
                             break 'tracks;
                         }
                     }
@@ -337,7 +358,7 @@ impl Worker {
                         // Settings may change while playing: ramp towards the new gain.
                         let target = replaygain_factor(&req.replaygain, &self.params.rg.get());
                         if (gain_now - target).abs() > f32::EPSILON {
-                            for frame in stereo.chunks_exact_mut(2) {
+                            for frame in stereo.as_chunks_mut::<2>().0 {
                                 if gain_now < target {
                                     gain_now = (gain_now + ramp_step).min(target);
                                 } else if gain_now > target {
@@ -355,7 +376,10 @@ impl Worker {
                             Some(rs) => {
                                 resampled.clear();
                                 if let Err(detail) = rs.process(&stereo, &mut resampled) {
-                                    self.send(fail(PlaybackError { kind: PlaybackErrorKind::Corrupt, detail }));
+                                    self.send(fail(PlaybackError {
+                                        kind: PlaybackErrorKind::Corrupt,
+                                        detail,
+                                    }));
                                     break 'tracks;
                                 }
                                 let buf = std::mem::take(&mut resampled);
@@ -404,6 +428,9 @@ impl Worker {
         }
         self.written.store(written, Ordering::Relaxed);
         self.finished.store(true, Ordering::Release);
-        self.send(FeedEvent::Finished { epoch, total_frames: written });
+        self.send(FeedEvent::Finished {
+            epoch,
+            total_frames: written,
+        });
     }
 }

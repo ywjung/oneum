@@ -45,7 +45,8 @@ impl RenderShared {
     }
     /// Sets the linear output gain (already mapped from the volume slider).
     pub fn set_volume_gain(&self, gain: f32) {
-        self.volume_bits.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.volume_bits
+            .store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
     pub fn set_playing(&self, playing: bool) {
         self.playing.store(playing, Ordering::Relaxed);
@@ -54,7 +55,8 @@ impl RenderShared {
     /// starts another track or seeks, so the old audio stops at once instead of playing
     /// on until the new feed has buffered.
     pub fn require_epoch(&self, epoch: u16) {
-        self.required_epoch.store(u32::from(epoch), Ordering::Relaxed);
+        self.required_epoch
+            .store(u32::from(epoch), Ordering::Relaxed);
     }
     pub fn is_playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed)
@@ -133,10 +135,21 @@ pub fn render_pair(shared: Arc<RenderShared>, sample_rate: u32) -> (Renderer, Re
         vol_step: 1.0 / (VOLUME_RAMP_SECONDS * rate),
         block: [0.0; BLOCK * 2],
     };
-    (renderer, RenderLink { incoming: in_tx, garbage: gc_rx, sample_rate })
+    (
+        renderer,
+        RenderLink {
+            incoming: in_tx,
+            garbage: gc_rx,
+            sample_rate,
+        },
+    )
 }
 
 impl Renderer {
+    pub fn shared(&self) -> &Arc<RenderShared> {
+        &self.shared
+    }
+
     /// Hands a replaced feed back to the control thread so its memory is freed there.
     fn retire(&mut self, old: FeedConsumer) {
         if let Err(rtrb::PushError::Full(old)) = self.garbage.push(old) {
@@ -172,7 +185,9 @@ impl Renderer {
                 self.consumed = 0;
                 self.fade = 0.0;
             }
-            let Some(cur) = self.current.as_mut() else { break };
+            let Some(cur) = self.current.as_mut() else {
+                break;
+            };
             let superseded = required != 0 && u32::from(cur.epoch) != required;
             let fading_out = !playing || superseded || self.pending.is_some();
             if fading_out && self.fade <= 0.0 {
@@ -192,7 +207,9 @@ impl Renderer {
                     // Re-check: the producer writes its last samples before setting the flag.
                     avail = cur.consumer.slots() / 2;
                     if avail == 0 {
-                        self.shared.drained_epoch.store(u32::from(cur.epoch), Ordering::Relaxed);
+                        self.shared
+                            .drained_epoch
+                            .store(u32::from(cur.epoch), Ordering::Relaxed);
                         self.fade = 0.0;
                         break;
                     }
@@ -203,7 +220,9 @@ impl Renderer {
                 }
             }
             n = n.min(avail);
-            let Ok(chunk) = cur.consumer.read_chunk(n * 2) else { break };
+            let Ok(chunk) = cur.consumer.read_chunk(n * 2) else {
+                break;
+            };
             let (a, b) = chunk.as_slices();
             self.block[..a.len()].copy_from_slice(a);
             self.block[a.len()..a.len() + b.len()].copy_from_slice(b);
@@ -244,7 +263,10 @@ impl Renderer {
             self.shared.underruns.fetch_add(1, Ordering::Relaxed);
         }
         let epoch = self.current.as_ref().map_or(0, |c| u64::from(c.epoch));
-        self.shared.position.store((epoch << EPOCH_SHIFT) | (self.consumed & FRAME_MASK), Ordering::Relaxed);
+        self.shared.position.store(
+            (epoch << EPOCH_SHIFT) | (self.consumed & FRAME_MASK),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -252,13 +274,25 @@ impl Renderer {
 mod tests {
     use super::*;
 
-    fn feed(epoch: u16, samples: &[f32], finished: bool) -> (FeedConsumer, rtrb::Producer<f32>, Arc<AtomicBool>) {
+    fn feed(
+        epoch: u16,
+        samples: &[f32],
+        finished: bool,
+    ) -> (FeedConsumer, rtrb::Producer<f32>, Arc<AtomicBool>) {
         let (mut tx, rx) = rtrb::RingBuffer::new(samples.len().max(2) + 64);
         for s in samples {
             tx.push(*s).expect("ring has room");
         }
         let flag = Arc::new(AtomicBool::new(finished));
-        (FeedConsumer { epoch, consumer: rx, finished: flag.clone() }, tx, flag)
+        (
+            FeedConsumer {
+                epoch,
+                consumer: rx,
+                finished: flag.clone(),
+            },
+            tx,
+            flag,
+        )
     }
 
     fn setup(rate: u32) -> (Arc<RenderShared>, Renderer, RenderLink) {
@@ -271,7 +305,7 @@ mod tests {
     fn silent_and_not_consuming_while_paused() {
         let (shared, mut r, mut link) = setup(48_000);
         let (f, _tx, _) = feed(1, &[0.5; 2000], false);
-        link.incoming.push(f).ok().expect("push");
+        link.incoming.push(f).expect("push");
         let mut out = vec![1.0; 512];
         r.render(&mut out, 2);
         assert!(out.iter().all(|s| *s == 0.0));
@@ -283,12 +317,15 @@ mod tests {
     fn fades_in_then_plays_at_unity_and_counts_frames() {
         let (shared, mut r, mut link) = setup(48_000);
         let (f, _tx, _) = feed(7, &[0.5; 4000], false);
-        link.incoming.push(f).ok().expect("push");
+        link.incoming.push(f).expect("push");
         shared.set_playing(true);
         let mut out = vec![0.0; 2000];
         r.render(&mut out, 2);
         assert!(out[0].abs() < 0.01, "starts from silence");
-        assert!(out.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01), "no jumps during fade-in");
+        assert!(
+            out.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01),
+            "no jumps during fade-in"
+        );
         assert_eq!(out[1998], 0.5);
         assert_eq!(shared.position(), (7, 1000));
     }
@@ -297,12 +334,15 @@ mod tests {
     fn underrun_is_counted_but_end_of_feed_is_not() {
         let (shared, mut r, mut link) = setup(48_000);
         let (f, mut tx, flag) = feed(1, &[0.25; 200], false);
-        link.incoming.push(f).ok().expect("push");
+        link.incoming.push(f).expect("push");
         shared.set_playing(true);
         let mut out = vec![0.0; 800];
         r.render(&mut out, 2);
         assert_eq!(shared.underruns(), 1);
-        assert!(out[400..].iter().all(|s| *s == 0.0), "missing data is silence");
+        assert!(
+            out[400..].iter().all(|s| *s == 0.0),
+            "missing data is silence"
+        );
         assert_eq!(shared.drained_epoch(), 0);
         // More data, then the decoder finishes: draining is not an underrun.
         for _ in 0..100 {
@@ -320,17 +360,20 @@ mod tests {
     fn swap_fades_out_old_feed_and_returns_it() {
         let (shared, mut r, mut link) = setup(48_000);
         let (a, _atx, _) = feed(1, &[0.5; 96_000], false);
-        link.incoming.push(a).ok().expect("push");
+        link.incoming.push(a).expect("push");
         shared.set_playing(true);
         let mut out = vec![0.0; 4800];
         r.render(&mut out, 2);
         assert_eq!(*out.last().expect("sample"), 0.5);
         let (b, _btx, _) = feed(2, &[-0.5; 96_000], false);
-        link.incoming.push(b).ok().expect("push");
+        link.incoming.push(b).expect("push");
         r.render(&mut out, 2);
         // Old feed fades to zero, new feed fades in from zero: no step larger than the ramp.
-        let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
-        assert!(left.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01), "click at swap");
+        let left: Vec<f32> = out.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
+        assert!(
+            left.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01),
+            "click at swap"
+        );
         assert_eq!(*left.last().expect("sample"), -0.5);
         assert_eq!(shared.position().0, 2);
         let old = link.garbage.pop().expect("old feed handed back");
@@ -341,7 +384,7 @@ mod tests {
     fn superseded_feed_is_silenced_until_the_required_one_arrives() {
         let (shared, mut r, mut link) = setup(48_000);
         let (a, _atx, _) = feed(1, &[0.5; 96_000], false);
-        link.incoming.push(a).ok().expect("push");
+        link.incoming.push(a).expect("push");
         shared.set_playing(true);
         let mut out = vec![0.0; 4800];
         r.render(&mut out, 2);
@@ -352,10 +395,14 @@ mod tests {
         let held = shared.position();
         r.render(&mut out, 2);
         assert!(out.iter().all(|s| *s == 0.0));
-        assert_eq!(shared.position(), held, "old feed is not consumed while superseded");
+        assert_eq!(
+            shared.position(),
+            held,
+            "old feed is not consumed while superseded"
+        );
         assert_eq!(shared.underruns(), 0);
         let (b, _btx, _) = feed(2, &[-0.5; 96_000], false);
-        link.incoming.push(b).ok().expect("push");
+        link.incoming.push(b).expect("push");
         r.render(&mut out, 2);
         assert_eq!(*out.last().expect("sample"), -0.5);
         assert_eq!(shared.position().0, 2);
@@ -365,13 +412,13 @@ mod tests {
     fn pause_fades_out_and_stops_consuming() {
         let (shared, mut r, mut link) = setup(48_000);
         let (a, _atx, _) = feed(1, &[0.5; 96_000], false);
-        link.incoming.push(a).ok().expect("push");
+        link.incoming.push(a).expect("push");
         shared.set_playing(true);
         let mut out = vec![0.0; 4800];
         r.render(&mut out, 2);
         shared.set_playing(false);
         r.render(&mut out, 2);
-        let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+        let left: Vec<f32> = out.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
         assert!(left.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01));
         assert_eq!(*left.last().expect("sample"), 0.0);
         let pos = shared.position().1;
@@ -383,13 +430,13 @@ mod tests {
     fn volume_changes_are_ramped() {
         let (shared, mut r, mut link) = setup(48_000);
         let (a, _atx, _) = feed(1, &[1.0; 96_000], false);
-        link.incoming.push(a).ok().expect("push");
+        link.incoming.push(a).expect("push");
         shared.set_playing(true);
         let mut out = vec![0.0; 9600];
         r.render(&mut out, 2);
         shared.set_volume_gain(0.1);
         r.render(&mut out, 2);
-        let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+        let left: Vec<f32> = out.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
         assert!(left.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01));
         assert!((left.last().expect("sample") - 0.1).abs() < 1e-4);
     }
@@ -399,7 +446,7 @@ mod tests {
         let (shared, mut r, mut link) = setup(48_000);
         let samples: Vec<f32> = (0..4000).flat_map(|_| [0.4, 0.2]).collect();
         let (a, _atx, _) = feed(1, &samples, false);
-        link.incoming.push(a).ok().expect("push");
+        link.incoming.push(a).expect("push");
         shared.set_playing(true);
         let mut mono = vec![0.0; 1000];
         r.render(&mut mono, 1);

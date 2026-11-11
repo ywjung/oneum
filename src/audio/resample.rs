@@ -19,8 +19,14 @@ pub struct StereoResampler {
 
 impl StereoResampler {
     pub fn new(in_rate: u32, out_rate: u32) -> Result<Self, String> {
-        let inner = Fft::<f32>::new(in_rate as usize, out_rate as usize, CHUNK_FRAMES, 2, FixedSync::Input)
-            .map_err(|e| e.to_string())?;
+        let inner = Fft::<f32>::new(
+            in_rate as usize,
+            out_rate as usize,
+            CHUNK_FRAMES,
+            2,
+            FixedSync::Input,
+        )
+        .map_err(|e| e.to_string())?;
         let delay_left = inner.output_delay();
         let scratch = vec![0.0; inner.output_frames_max() * 2];
         Ok(Self {
@@ -41,7 +47,8 @@ impl StereoResampler {
 
     /// Output frames that the input fed so far corresponds to (independent of buffering).
     pub fn expected_out_frames(&self) -> u64 {
-        (u128::from(self.total_in_frames) * u128::from(self.out_rate)).div_ceil(u128::from(self.in_rate)) as u64
+        (u128::from(self.total_in_frames) * u128::from(self.out_rate))
+            .div_ceil(u128::from(self.in_rate)) as u64
     }
 
     pub fn total_out_frames(&self) -> u64 {
@@ -61,7 +68,13 @@ impl StereoResampler {
             if (pending.len() - offset) / 2 < need {
                 break;
             }
-            result = self.run(&pending[offset..offset + need * 2], need, None, out, u64::MAX);
+            result = self.run(
+                &pending[offset..offset + need * 2],
+                need,
+                None,
+                out,
+                u64::MAX,
+            );
             if result.is_err() {
                 break;
             }
@@ -103,10 +116,13 @@ impl StereoResampler {
     ) -> Result<(), String> {
         let input = InterleavedSlice::new(chunk, 2, frames).map_err(|e| e.to_string())?;
         let cap = self.scratch.len() / 2;
-        let mut output = InterleavedSlice::new_mut(&mut self.scratch, 2, cap).map_err(|e| e.to_string())?;
+        let mut output =
+            InterleavedSlice::new_mut(&mut self.scratch, 2, cap).map_err(|e| e.to_string())?;
         let indexing = partial.map(|len| Indexing::new().partial_len(len));
-        let (_, produced) =
-            self.inner.process_into_buffer(&input, &mut output, indexing.as_ref()).map_err(|e| e.to_string())?;
+        let (_, produced) = self
+            .inner
+            .process_into_buffer(&input, &mut output, indexing.as_ref())
+            .map_err(|e| e.to_string())?;
         let skip = self.delay_left.min(produced);
         self.delay_left -= skip;
         let usable = ((produced - skip) as u64).min(max_out_frames) as usize;
@@ -141,7 +157,12 @@ mod tests {
 
     #[test]
     fn output_length_is_exact() {
-        for (i, o, frames) in [(44_100, 48_000, 44_100), (48_000, 44_100, 48_000), (96_000, 44_100, 12_345), (22_050, 48_000, 777)] {
+        for (i, o, frames) in [
+            (44_100, 48_000, 44_100),
+            (48_000, 44_100, 48_000),
+            (96_000, 44_100, 12_345),
+            (22_050, 48_000, 777),
+        ] {
             let out = resample_all(i, o, &sine(i, frames, 440.0), 333);
             let expected = (frames as u64 * u64::from(o)).div_ceil(u64::from(i)) as usize;
             assert_eq!(out.len() / 2, expected, "{i}->{o} with {frames} frames");
@@ -155,10 +176,17 @@ mod tests {
         let mid = &out[9600..out.len() - 9600];
         let peak = mid.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!((peak - 0.5).abs() < 0.01, "peak {peak}");
-        let left: Vec<f32> = mid.chunks_exact(2).map(|f| f[0]).collect();
-        let crossings = left.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let left: Vec<f32> = mid.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
+        let crossings = left
+            .windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count();
         let secs = left.len() as f32 / 48_000.0;
-        assert!((crossings as f32 / secs - 1000.0).abs() < 2.0, "freq {}", crossings as f32 / secs);
+        assert!(
+            (crossings as f32 / secs - 1000.0).abs() < 2.0,
+            "freq {}",
+            crossings as f32 / secs
+        );
     }
 
     #[test]
@@ -167,7 +195,10 @@ mod tests {
         let a = resample_all(44_100, 48_000, &input, 64);
         let b = resample_all(44_100, 48_000, &input, 5000);
         assert_eq!(a.len(), b.len());
-        let max_diff = a.iter().zip(&b).fold(0f32, |m, (x, y)| m.max((x - y).abs()));
+        let max_diff = a
+            .iter()
+            .zip(&b)
+            .fold(0f32, |m, (x, y)| m.max((x - y).abs()));
         assert!(max_diff < 1e-6, "max diff {max_diff}");
     }
 }

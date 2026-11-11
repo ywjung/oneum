@@ -34,7 +34,10 @@ fn push(action: EditAction) {
 
 /// Takes all pending edit actions (called from the UI thread once per frame).
 pub fn drain() -> Vec<EditAction> {
-    QUEUE.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    QUEUE
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
 }
 
 macro_rules! handler {
@@ -76,7 +79,12 @@ pub fn install(waker: impl Fn() + Send + Sync + 'static) -> bool {
         // `class_addMethod` is a no-op (returns NO) if it already exists.
         unsafe {
             let imp: Imp = std::mem::transmute::<Handler, Imp>(f);
-            ffi::class_addMethod(std::ptr::from_ref(cls).cast_mut(), sel, imp, c"v@:@".as_ptr());
+            ffi::class_addMethod(
+                std::ptr::from_ref(cls).cast_mut(),
+                sel,
+                imp,
+                c"v@:@".as_ptr(),
+            );
         }
     }
     true

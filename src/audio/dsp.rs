@@ -20,7 +20,11 @@ pub struct ReplayGainSettings {
 
 impl Default for ReplayGainSettings {
     fn default() -> Self {
-        Self { mode: ReplayGainMode::Off, preamp_db: 0.0, prevent_clipping: true }
+        Self {
+            mode: ReplayGainMode::Off,
+            preamp_db: 0.0,
+            prevent_clipping: true,
+        }
     }
 }
 
@@ -66,7 +70,11 @@ pub fn replaygain_factor(tags: &ReplayGainTags, settings: &ReplayGainSettings) -
 
 /// Maps the 0..=1 volume slider to a linear gain with a perceptual (cubic) curve.
 pub fn volume_to_gain(volume: f32) -> f32 {
-    let v = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 0.0 };
+    let v = if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     v * v * v
 }
 
@@ -93,7 +101,7 @@ pub fn to_stereo(src: &[f32], channels: usize, dst: &mut Vec<f32>) {
             for f in src.chunks_exact(channels) {
                 let mut l = f[0] + C * f[2];
                 let mut r = f[1] + C * f[2];
-                for pair in f[4..].chunks_exact(2) {
+                for pair in f[4..].as_chunks::<2>().0 {
                     l += C * pair[0];
                     r += C * pair[1];
                 }
@@ -126,10 +134,23 @@ mod tests {
     use super::*;
 
     fn tags(tg: Option<f32>, tp: Option<f32>, ag: Option<f32>, ap: Option<f32>) -> ReplayGainTags {
-        ReplayGainTags { track_gain_db: tg, track_peak: tp, album_gain_db: ag, album_peak: ap }
+        ReplayGainTags {
+            track_gain_db: tg,
+            track_peak: tp,
+            album_gain_db: ag,
+            album_peak: ap,
+        }
     }
-    fn settings(mode: ReplayGainMode, preamp_db: f32, prevent_clipping: bool) -> ReplayGainSettings {
-        ReplayGainSettings { mode, preamp_db, prevent_clipping }
+    fn settings(
+        mode: ReplayGainMode,
+        preamp_db: f32,
+        prevent_clipping: bool,
+    ) -> ReplayGainSettings {
+        ReplayGainSettings {
+            mode,
+            preamp_db,
+            prevent_clipping,
+        }
     }
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
@@ -138,44 +159,83 @@ mod tests {
     #[test]
     fn replaygain_off_and_untagged_are_unity() {
         let t = tags(Some(-6.0), Some(0.9), Some(-3.0), Some(0.95));
-        assert_eq!(replaygain_factor(&t, &settings(ReplayGainMode::Off, 6.0, true)), 1.0);
+        assert_eq!(
+            replaygain_factor(&t, &settings(ReplayGainMode::Off, 6.0, true)),
+            1.0
+        );
         let none = tags(None, None, None, None);
         // Pre-amp must not be applied to untagged tracks.
-        assert_eq!(replaygain_factor(&none, &settings(ReplayGainMode::Track, 6.0, false)), 1.0);
-        assert_eq!(replaygain_factor(&none, &settings(ReplayGainMode::Album, 6.0, false)), 1.0);
+        assert_eq!(
+            replaygain_factor(&none, &settings(ReplayGainMode::Track, 6.0, false)),
+            1.0
+        );
+        assert_eq!(
+            replaygain_factor(&none, &settings(ReplayGainMode::Album, 6.0, false)),
+            1.0
+        );
     }
 
     #[test]
     fn replaygain_mode_selection_and_fallback() {
         let t = tags(Some(-6.0), Some(0.5), Some(-3.0), Some(0.5));
-        assert!(close(replaygain_factor(&t, &settings(ReplayGainMode::Track, 0.0, true)), db_to_linear(-6.0)));
-        assert!(close(replaygain_factor(&t, &settings(ReplayGainMode::Album, 0.0, true)), db_to_linear(-3.0)));
+        assert!(close(
+            replaygain_factor(&t, &settings(ReplayGainMode::Track, 0.0, true)),
+            db_to_linear(-6.0)
+        ));
+        assert!(close(
+            replaygain_factor(&t, &settings(ReplayGainMode::Album, 0.0, true)),
+            db_to_linear(-3.0)
+        ));
         let only_track = tags(Some(-4.0), None, None, None);
-        assert!(close(replaygain_factor(&only_track, &settings(ReplayGainMode::Album, 0.0, true)), db_to_linear(-4.0)));
+        assert!(close(
+            replaygain_factor(&only_track, &settings(ReplayGainMode::Album, 0.0, true)),
+            db_to_linear(-4.0)
+        ));
         let only_album = tags(None, None, Some(-2.0), None);
-        assert!(close(replaygain_factor(&only_album, &settings(ReplayGainMode::Track, 0.0, true)), db_to_linear(-2.0)));
+        assert!(close(
+            replaygain_factor(&only_album, &settings(ReplayGainMode::Track, 0.0, true)),
+            db_to_linear(-2.0)
+        ));
     }
 
     #[test]
     fn replaygain_clipping_prevention() {
         // +6 dB on a track peaking at 0.9 would clip: capped to 1/0.9.
         let loud = tags(Some(6.0), Some(0.9), None, None);
-        assert!(close(replaygain_factor(&loud, &settings(ReplayGainMode::Track, 0.0, true)), 1.0 / 0.9));
+        assert!(close(
+            replaygain_factor(&loud, &settings(ReplayGainMode::Track, 0.0, true)),
+            1.0 / 0.9
+        ));
         // Without prevention the tag gain is used as is.
-        assert!(close(replaygain_factor(&loud, &settings(ReplayGainMode::Track, 0.0, false)), db_to_linear(6.0)));
+        assert!(close(
+            replaygain_factor(&loud, &settings(ReplayGainMode::Track, 0.0, false)),
+            db_to_linear(6.0)
+        ));
         // Unknown peak: never amplify.
         let no_peak = tags(Some(4.0), None, None, None);
-        assert_eq!(replaygain_factor(&no_peak, &settings(ReplayGainMode::Track, 0.0, true)), 1.0);
+        assert_eq!(
+            replaygain_factor(&no_peak, &settings(ReplayGainMode::Track, 0.0, true)),
+            1.0
+        );
         // Pre-amp is added before the clip check.
         let quiet = tags(Some(-10.0), Some(1.0), None, None);
-        assert!(close(replaygain_factor(&quiet, &settings(ReplayGainMode::Track, 4.0, true)), db_to_linear(-6.0)));
-        assert!(close(replaygain_factor(&quiet, &settings(ReplayGainMode::Track, 20.0, true)), 1.0));
+        assert!(close(
+            replaygain_factor(&quiet, &settings(ReplayGainMode::Track, 4.0, true)),
+            db_to_linear(-6.0)
+        ));
+        assert!(close(
+            replaygain_factor(&quiet, &settings(ReplayGainMode::Track, 20.0, true)),
+            1.0
+        ));
     }
 
     #[test]
     fn replaygain_ignores_garbage_values() {
         let bad = tags(Some(f32::NAN), Some(0.0), None, None);
-        assert_eq!(replaygain_factor(&bad, &settings(ReplayGainMode::Track, 0.0, true)), 1.0);
+        assert_eq!(
+            replaygain_factor(&bad, &settings(ReplayGainMode::Track, 0.0, true)),
+            1.0
+        );
     }
 
     #[test]

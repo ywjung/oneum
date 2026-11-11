@@ -40,12 +40,18 @@ pub struct TrackDecoder {
 }
 
 fn err(kind: PlaybackErrorKind, detail: impl Into<String>) -> PlaybackError {
-    PlaybackError { kind, detail: detail.into() }
+    PlaybackError {
+        kind,
+        detail: detail.into(),
+    }
 }
 
 fn map_open_error(e: SymError) -> PlaybackError {
     match e {
-        SymError::IoError(io) => err(PlaybackErrorKind::Corrupt, format!("io while probing: {}", io.kind())),
+        SymError::IoError(io) => err(
+            PlaybackErrorKind::Corrupt,
+            format!("io while probing: {}", io.kind()),
+        ),
         SymError::Unsupported(what) => err(PlaybackErrorKind::Unsupported, what),
         other => err(PlaybackErrorKind::Corrupt, other.to_string()),
     }
@@ -55,7 +61,10 @@ impl TrackDecoder {
     pub fn open(path: &Path) -> Result<Self, PlaybackError> {
         let file = std::fs::File::open(path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => err(PlaybackErrorKind::FileMissing, "file not found"),
-            kind => err(PlaybackErrorKind::FileUnreadable, format!("open failed: {kind}")),
+            kind => err(
+                PlaybackErrorKind::FileUnreadable,
+                format!("open failed: {kind}"),
+            ),
         })?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
@@ -63,7 +72,12 @@ impl TrackDecoder {
             hint.with_extension(ext);
         }
         let format = symphonia::default::get_probe()
-            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+            .probe(
+                &hint,
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
             .map_err(|e| match e {
                 // An unrecognised container is reported as an I/O "end of stream" by the probe.
                 SymError::IoError(_) | SymError::Unsupported(_) => {
@@ -103,7 +117,13 @@ impl TrackDecoder {
             decoder,
             track_id,
             time_base,
-            info: SourceInfo { sample_rate, channels, total_frames, codec, has_gapless_info },
+            info: SourceInfo {
+                sample_rate,
+                channels,
+                total_frames,
+                codec,
+                has_gapless_info,
+            },
             drop_until: None,
             consecutive_errors: 0,
             skipped_packets: 0,
@@ -118,7 +138,8 @@ impl TrackDecoder {
     fn ts_to_frame(&self, ts: i64) -> i64 {
         match self.time_base {
             Some(tb) => {
-                let num = i128::from(ts) * i128::from(tb.numer.get()) * i128::from(self.info.sample_rate);
+                let num =
+                    i128::from(ts) * i128::from(tb.numer.get()) * i128::from(self.info.sample_rate);
                 (num / i128::from(tb.denom.get())) as i64
             }
             None => ts,
@@ -135,9 +156,18 @@ impl TrackDecoder {
         let preroll = u64::from(self.info.sample_rate) / 8;
         let secs = frame.saturating_sub(preroll) as f64 / f64::from(self.info.sample_rate);
         let Some(time) = Time::try_from_secs_f64(secs) else {
-            return Err(err(PlaybackErrorKind::Corrupt, "seek position out of range"));
+            return Err(err(
+                PlaybackErrorKind::Corrupt,
+                "seek position out of range",
+            ));
         };
-        match self.format.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(self.track_id) }) {
+        match self.format.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time,
+                track_id: Some(self.track_id),
+            },
+        ) {
             Ok(_) => {
                 self.decoder.reset();
                 self.drop_until = Some(frame);
@@ -163,10 +193,15 @@ impl TrackDecoder {
             let packet = match self.format.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => return Ok(false),
-                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(false);
+                }
                 Err(SymError::ResetRequired) => return Ok(false),
                 Err(SymError::IoError(e)) => {
-                    return Err(err(PlaybackErrorKind::FileUnreadable, format!("read failed: {}", e.kind())));
+                    return Err(err(
+                        PlaybackErrorKind::FileUnreadable,
+                        format!("read failed: {}", e.kind()),
+                    ));
                 }
                 Err(other) => return Err(err(PlaybackErrorKind::Corrupt, other.to_string())),
             };
@@ -177,8 +212,12 @@ impl TrackDecoder {
                 Ok(buf) => {
                     self.consecutive_errors = 0;
                     let channels = buf.spec().channels().count();
-                    if channels != self.info.channels || buf.spec().rate() != self.info.sample_rate {
-                        return Err(err(PlaybackErrorKind::Unsupported, "stream parameters change mid-file"));
+                    if channels != self.info.channels || buf.spec().rate() != self.info.sample_rate
+                    {
+                        return Err(err(
+                            PlaybackErrorKind::Unsupported,
+                            "stream parameters change mid-file",
+                        ));
                     }
                     let frames = buf.frames();
                     if frames == 0 {
@@ -205,7 +244,10 @@ impl TrackDecoder {
                     self.consecutive_errors += 1;
                     self.skipped_packets += 1;
                     if self.consecutive_errors > MAX_CONSECUTIVE_DECODE_ERRORS {
-                        return Err(err(PlaybackErrorKind::Corrupt, "too many undecodable packets"));
+                        return Err(err(
+                            PlaybackErrorKind::Corrupt,
+                            "too many undecodable packets",
+                        ));
                     }
                 }
                 Err(SymError::ResetRequired) => return Ok(false),

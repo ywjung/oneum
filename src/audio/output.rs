@@ -49,23 +49,36 @@ pub enum OutputEvent {
 }
 
 fn device_name(device: &cpal::Device) -> String {
-    device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "Unknown device".to_string())
+    device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "Unknown device".to_string())
 }
 
 /// Id of the current system default output device.
 pub fn default_output_id() -> Option<String> {
-    cpal::default_host().default_output_device()?.id().ok().map(|id| id.to_string())
+    cpal::default_host()
+        .default_output_device()?
+        .id()
+        .ok()
+        .map(|id| id.to_string())
 }
 
 /// Lists connected output devices (cheap CoreAudio property queries; safe on any thread).
 pub fn list_output_devices() -> Vec<OutputDeviceInfo> {
     let host = cpal::default_host();
     let default_id = default_output_id();
-    let Ok(devices) = host.output_devices() else { return Vec::new() };
+    let Ok(devices) = host.output_devices() else {
+        return Vec::new();
+    };
     devices
         .filter_map(|d| {
             let id = d.id().ok()?.to_string();
-            Some(OutputDeviceInfo { name: device_name(&d), is_default: default_id.as_deref() == Some(&id), id })
+            Some(OutputDeviceInfo {
+                name: device_name(&d),
+                is_default: default_id.as_deref() == Some(&id),
+                id,
+            })
         })
         .collect()
 }
@@ -98,7 +111,9 @@ impl OutputStream {
         };
         // Resolve by id so the stream is pinned to this device (never "follow default").
         let parsed: cpal::DeviceId = wanted.parse().map_err(|_| OutputError::DeviceNotFound)?;
-        let device = host.device_by_id(&parsed).ok_or(OutputError::DeviceNotFound)?;
+        let device = host
+            .device_by_id(&parsed)
+            .ok_or(OutputError::DeviceNotFound)?;
         let supported = device.default_output_config().map_err(|e| match e.kind() {
             cpal::ErrorKind::DeviceNotAvailable => OutputError::DeviceNotFound,
             _ => OutputError::Backend(e.to_string()),
@@ -112,21 +127,38 @@ impl OutputStream {
         let on_error = move |e: cpal::Error| {
             let event = match e.kind() {
                 cpal::ErrorKind::DeviceNotAvailable => OutputEvent::DeviceLost,
-                cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceChanged => OutputEvent::Invalidated,
+                cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceChanged => {
+                    OutputEvent::Invalidated
+                }
                 _ => OutputEvent::Notice(e.to_string()),
             };
             let _ = err_events.send(event);
         };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => build_f32(&device, config, renderer, shared, on_error),
-            cpal::SampleFormat::I16 => build_converting::<i16>(&device, config, renderer, shared, on_error),
-            cpal::SampleFormat::I32 => build_converting::<i32>(&device, config, renderer, shared, on_error),
-            cpal::SampleFormat::U16 => build_converting::<u16>(&device, config, renderer, shared, on_error),
-            other => Err(OutputError::Backend(format!("unsupported sample format {other}"))),
+            cpal::SampleFormat::I16 => {
+                build_converting::<i16>(&device, config, renderer, shared, on_error)
+            }
+            cpal::SampleFormat::I32 => {
+                build_converting::<i32>(&device, config, renderer, shared, on_error)
+            }
+            cpal::SampleFormat::U16 => {
+                build_converting::<u16>(&device, config, renderer, shared, on_error)
+            }
+            other => Err(OutputError::Backend(format!(
+                "unsupported sample format {other}"
+            ))),
         }?;
         // Some backends start streams immediately; make the initial state explicit.
         let _ = stream.pause();
-        Ok(Self { stream, link, device_id: wanted, device_name: device_name(&device), channels, running: false })
+        Ok(Self {
+            stream,
+            link,
+            device_id: wanted,
+            device_name: device_name(&device),
+            channels,
+            running: false,
+        })
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -142,7 +174,11 @@ impl OutputStream {
         if run == self.running {
             return Ok(());
         }
-        let result = if run { self.stream.play() } else { self.stream.pause() };
+        let result = if run {
+            self.stream.play()
+        } else {
+            self.stream.pause()
+        };
         result.map_err(|e| match e.kind() {
             cpal::ErrorKind::DeviceNotAvailable => OutputError::DeviceNotFound,
             _ => OutputError::Backend(e.to_string()),
