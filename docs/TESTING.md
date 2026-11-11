@@ -195,6 +195,12 @@ scripts/dev/run.sh /tmp/oneum-profile
 scripts/dev/ui.sh /tmp/oneum-profile 'open /tmp/oneum-music' 'wait 2000' 'dclick 300 93' 'wait 1500' 'dump state.json' 'shot shot.png'
 ```
 
+스모크 테스트(새 프로필 + 합성 라이브러리로 앱을 띄워 29개 항목을 자동 확인, 무음):
+```bash
+scripts/dev/smoke.sh
+```
+첫 실행 → 폴더 추가 → 한글·초성·다중 단어 검색 → 더블클릭 재생 → Space → 다음/이전/탐색 → 셔플·반복 → 앨범·아티스트 보기 → 즐겨찾기 → 대기열 패널 → 종료 후 재실행 복원까지 확인합니다. 2026-11-12 기준 3회 연속 통과.
+
 - `click/dclick/rclick/drag/scroll/key/text`는 egui 입력 이벤트로 들어가므로 실제 마우스·키보드와 같은 경로를 탑니다.
 - `oskey`는 OS 키 이벤트를 앱 이벤트 큐에 넣어 메뉴 단축키·응답 체인·입력기를 거칩니다.
 - `dump`는 상태(JSON), `shot`은 앱이 그린 화면(PNG)을 프로필 폴더에 씁니다.

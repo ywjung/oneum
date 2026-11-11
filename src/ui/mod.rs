@@ -175,6 +175,7 @@ pub struct OneumApp {
     queue_scroll_to_current: bool,
     seek_drag: Option<f64>,
     volume_before_mute: f32,
+    last_settings_save: Instant,
 
     art: ArtCache,
     toast: Option<Toast>,
@@ -244,6 +245,7 @@ impl OneumApp {
             queue_scroll_to_current: true,
             seek_drag: None,
             volume_before_mute: 0.0,
+            last_settings_save: Instant::now(),
             toast: None,
             dialog: None,
             renaming: None,
@@ -795,7 +797,30 @@ impl OneumApp {
         self.snapshot.get(id)
     }
 
+    /// Remembers the window size (saved with the other settings, at most every few seconds).
+    fn track_window_size(&mut self, ctx: &egui::Context) {
+        let Some(rect) = ctx.input(|i| i.viewport().inner_rect) else {
+            return;
+        };
+        let size = [rect.width().round(), rect.height().round()];
+        if self.settings.window_size != Some(size) && size[0] >= 100.0 && size[1] >= 100.0 {
+            self.settings.window_size = Some(size);
+        }
+        if self.settings == self.saved_settings {
+            return;
+        }
+        // Preference changes are saved at once; a window being resized only now and then.
+        let only_size_changed = Settings {
+            window_size: self.saved_settings.window_size,
+            ..self.settings.clone()
+        } == self.saved_settings;
+        if !only_size_changed || self.last_settings_save.elapsed() > Duration::from_secs(2) {
+            self.persist_settings();
+        }
+    }
+
     fn persist_settings(&mut self) {
+        self.last_settings_save = Instant::now();
         if self.settings != self.saved_settings {
             if let Err(e) = crate::storage::settings::save_json_atomic(
                 &self.core.paths.settings_file(),
@@ -982,6 +1007,7 @@ impl OneumApp {
             "window_visible": window::is_main_window_visible(),
             "input_source": crate::platform::macos::testing::current_input_source(),
             "pixels_per_point": ctx.pixels_per_point(),
+            "window_size": ctx.input(|i| i.viewport().inner_rect).map(|r| [r.width(), r.height()]),
         });
         state["perf"] = serde_json::json!({
             "first_frame_ms": self.perf.first_frame_ms,
@@ -1101,7 +1127,7 @@ impl eframe::App for OneumApp {
                 expires.saturating_duration_since(Instant::now()) + Duration::from_millis(50),
             );
         }
-        self.persist_settings();
+        self.track_window_size(&ctx);
         let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
         self.perf.last_frame_ms = frame_ms;
         self.perf.max_frame_ms = self.perf.max_frame_ms.max(frame_ms);

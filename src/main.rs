@@ -15,10 +15,18 @@ fn main() {
         }
     };
     let core = startup.core.clone();
+    // Restore the last window size (clamped to something usable); macOS picks the position.
+    let size = startup
+        .settings
+        .window_size
+        .filter(|[w, h]| w.is_finite() && h.is_finite())
+        .map_or([1180.0, 760.0], |[w, h]| {
+            [w.clamp(760.0, 6000.0), h.clamp(480.0, 4000.0)]
+        });
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("OnEum")
-            .with_inner_size([1180.0, 760.0])
+            .with_inner_size(size)
             .with_min_inner_size([760.0, 480.0])
             .with_drag_and_drop(true),
         event_loop_builder: Some(Box::new(|builder| {

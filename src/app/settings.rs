@@ -30,6 +30,8 @@ pub struct Settings {
     pub output_device: Option<String>,
     pub show_format_column: bool,
     pub right_panel: RightPanel,
+    /// Inner size of the main window in points, restored at the next launch.
+    pub window_size: Option<[f32; 2]>,
 }
 
 impl Default for Settings {
@@ -41,6 +43,7 @@ impl Default for Settings {
             output_device: None,
             show_format_column: false,
             right_panel: RightPanel::Hidden,
+            window_size: None,
         }
     }
 }
