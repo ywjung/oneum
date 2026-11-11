@@ -1048,7 +1048,7 @@ impl OneumApp {
                 header.col(|_| {});
             })
             .body(|body| {
-                body.rows(theme::ROW_HEIGHT + 4.0, state.rows.len(), |mut row| {
+                body.rows(theme::ROW_HEIGHT + 6.0, state.rows.len(), |mut row| {
                     let Some(artist) = snap.artists().get(state.rows[row.index()].idx as usize)
                     else {
                         return;
@@ -1060,6 +1060,26 @@ impl OneumApp {
                         } else {
                             artist.name.as_str()
                         };
+                        // A small monogram disc in place of an artist picture.
+                        let (disc, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(22.0), Sense::hover());
+                        if ui.is_rect_visible(disc) {
+                            let accent = theme::accent(ui.visuals().dark_mode);
+                            ui.painter().circle_filled(
+                                disc.center(),
+                                11.0,
+                                accent.gamma_multiply(0.22),
+                            );
+                            if let Some(initial) = name.chars().find(|c| c.is_alphanumeric()) {
+                                ui.painter().text(
+                                    disc.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    initial.to_uppercase().to_string(),
+                                    theme::semibold(11.5),
+                                    accent,
+                                );
+                            }
+                        }
                         widgets::truncated(
                             ui,
                             RichText::new(name).font(theme::semibold(13.0)).strong(),
