@@ -160,6 +160,7 @@ pub struct OneumApp {
     last_notice_seq: u64,
     scan_was_running: bool,
     announce_scan: bool,
+    scan_started_at: Option<Instant>,
 
     nav: Nav,
     history: Vec<Nav>,
@@ -230,6 +231,7 @@ impl OneumApp {
             player,
             scan_was_running: false,
             announce_scan: false,
+            scan_started_at: None,
             nav: Nav::Songs,
             history: Vec::new(),
             views: HashMap::new(),
@@ -360,10 +362,49 @@ impl OneumApp {
         let scan = self.core.library.scan_status();
         // Only scans the user asked for are announced; background rescans stay quiet.
         if self.scan_was_running && !scan.running && std::mem::take(&mut self.announce_scan) {
-            let text = self
-                .lang
-                .scan_finished(self.snapshot.len(), scan.unsupported, scan.errors);
-            self.info_toast(text);
+            // A folder macOS refuses to let us read (Downloads, Documents, Desktop and
+            // external volumes need the user's consent) looks like an empty folder.
+            let denied = self.core.library.roots().into_iter().any(|root| {
+                root.track_count == 0
+                    && std::fs::read_dir(&root.path)
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+            });
+            if denied {
+                self.toast = Some(Toast {
+                    text: self.s().notice_folder_permission.into(),
+                    warning: true,
+                    action: None,
+                    expires: None,
+                });
+            } else {
+                let text =
+                    self.lang
+                        .scan_finished(self.snapshot.len(), scan.unsupported, scan.errors);
+                self.info_toast(text);
+            }
+        }
+        // A scan that finds nothing for a long time is most likely blocked on the
+        // system's consent prompt; say so instead of spinning silently.
+        if scan.running && !self.scan_was_running {
+            self.scan_started_at = Some(Instant::now());
+        }
+        if !scan.running {
+            self.scan_started_at = None;
+        }
+        if scan.running
+            && scan.files_found == 0
+            && self.toast.is_none()
+            && self
+                .scan_started_at
+                .is_some_and(|t| t.elapsed() > Duration::from_secs(4))
+        {
+            self.toast = Some(Toast {
+                text: self.s().scan_waiting_permission.into(),
+                warning: false,
+                action: None,
+                expires: Some(Instant::now() + Duration::from_secs(20)),
+            });
+            self.scan_started_at = None;
         }
         self.scan_was_running = scan.running;
 

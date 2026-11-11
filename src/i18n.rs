@@ -200,6 +200,10 @@ strings! {
     notice_folder_contains_existing: "이미 추가한 폴더를 포함하는 폴더입니다. 기존 폴더를 먼저 제거하세요.",
         "This folder contains a folder you already added. Remove that one first.";
     notice_not_a_folder: "폴더가 아닙니다.", "That is not a folder.";
+    notice_folder_permission: "이 폴더를 읽을 권한이 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더에서 OnEum을 허용한 뒤 설정 → 라이브러리에서 다시 스캔하세요.",
+        "OnEum is not allowed to read this folder. Allow it in System Settings → Privacy & Security → Files and Folders, then rescan in Settings → Library.";
+    scan_waiting_permission: "폴더 접근 허용을 기다리는 중일 수 있습니다. macOS 승인 창을 확인하세요.",
+        "Possibly waiting for permission. Check for a macOS prompt asking to allow access to the folder.";
     notice_generic_error: "작업을 완료하지 못했습니다.", "The operation could not be completed.";
     notice_export_failed: "플레이리스트를 내보내지 못했습니다. 저장 위치를 확인하세요.", "Could not export the playlist. Check the destination.";
     notice_import_failed: "플레이리스트 파일을 읽지 못했습니다.", "Could not read the playlist file.";

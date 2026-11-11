@@ -38,6 +38,14 @@ cp "target/$PROFILE/oneum" "$APP/Contents/MacOS/OnEum"
 cp assets/OnEum.icns "$APP/Contents/Resources/OnEum.icns"
 sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" assets/Info.plist.in > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+# Localised permission prompts (the Info.plist carries the Korean text as default).
+EN_DESC="Reads the music files in the folders you add in order to play them. Files are never changed."
+mkdir -p "$APP/Contents/Resources/en.lproj" "$APP/Contents/Resources/ko.lproj"
+: > "$APP/Contents/Resources/ko.lproj/InfoPlist.strings"
+for key in NSDownloadsFolderUsageDescription NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription \
+           NSRemovableVolumesUsageDescription NSNetworkVolumesUsageDescription; do
+  printf '"%s" = "%s";\n' "$key" "$EN_DESC" >> "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
+done
 for doc in docs/USER_GUIDE.md THIRD_PARTY_NOTICES.md LICENSE; do
   [ -f "$doc" ] && cp "$doc" "$APP/Contents/Resources/"
 done

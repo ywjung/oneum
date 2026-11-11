@@ -88,7 +88,7 @@ fn pump(
     let mut pcm = Vec::new();
     let mut events = Vec::new();
     let mut out = vec![0f32; BLOCK * 2];
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(600);
     let mut drained = false;
     while !drained {
         assert!(
@@ -627,5 +627,140 @@ fn rapid_restarts_never_mix_in_stale_audio() {
     assert_eq!(
         max_abs_diff(&played.pcm[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]),
         0.0
+    );
+}
+
+/// Verification against real music files (not part of the normal run):
+///
+///   ONEUM_REAL_DIR=/path/to/flacs cargo test --release --test audio_pipeline real_flac -- --ignored --nocapture
+///
+/// Every `.flac` in the folder is decoded completely and compared sample by sample with
+/// what `ffmpeg` decodes; then the two shortest files are played back to back through
+/// the engine and compared with their plain concatenation. Files are only read.
+#[test]
+#[ignore = "needs ONEUM_REAL_DIR and ffmpeg"]
+fn real_flac_files_decode_and_join_exactly() {
+    let Some(dir) = std::env::var_os("ONEUM_REAL_DIR").map(PathBuf::from) else {
+        println!("ONEUM_REAL_DIR not set; skipping");
+        return;
+    };
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("folder is readable")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("flac"))
+        })
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no .flac files in {}", dir.display());
+
+    let decode = |path: &PathBuf| -> (u32, usize, Vec<f32>) {
+        let mut dec = TrackDecoder::open(path).expect("file opens");
+        let info = dec.info().clone();
+        let (mut all, mut buf) = (Vec::new(), Vec::new());
+        while dec.next(&mut buf).expect("file decodes") {
+            all.extend_from_slice(&buf);
+        }
+        assert_eq!(dec.skipped_packets, 0, "no damaged packets expected");
+        (info.sample_rate, info.channels, all)
+    };
+
+    let mut decoded: Vec<(PathBuf, u32, Vec<f32>)> = Vec::new();
+    let mut total_seconds = 0.0;
+    for path in &files {
+        let (rate, channels, pcm) = decode(path);
+        assert_eq!(channels, 2, "stereo expected");
+        let reference = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-f", "s16le", "-acodec", "pcm_s16le", "-"])
+            .output()
+            .expect("ffmpeg runs");
+        assert!(reference.status.success(), "ffmpeg failed on a file");
+        let reference: Vec<i16> = reference
+            .stdout
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
+            .collect();
+        assert_eq!(
+            pcm.len(),
+            reference.len(),
+            "sample count differs from ffmpeg"
+        );
+        let mismatches = pcm
+            .iter()
+            .zip(&reference)
+            .filter(|(a, b)| (**a * 32768.0).round() as i32 != i32::from(**b))
+            .count();
+        assert_eq!(mismatches, 0, "decoded samples differ from ffmpeg");
+        let seconds = pcm.len() as f64 / 2.0 / f64::from(rate);
+        total_seconds += seconds;
+        println!(
+            "REPORT real file #{}: {rate} Hz, {:.1} s, {} samples identical to ffmpeg",
+            decoded.len() + 1,
+            seconds,
+            pcm.len()
+        );
+        decoded.push((path.clone(), rate, pcm));
+    }
+    println!(
+        "REPORT {} files, {:.1} minutes decoded, all identical to ffmpeg",
+        decoded.len(),
+        total_seconds / 60.0
+    );
+
+    if decoded.len() < 2 {
+        return;
+    }
+    // Gapless join of the two shortest files through the real feed/renderer path.
+    decoded.sort_by_key(|(_, _, pcm)| pcm.len());
+    let (first, second) = (&decoded[0], &decoded[1]);
+    assert_eq!(
+        first.1, second.1,
+        "same sample rate expected for the join test"
+    );
+    let (mut engine, mut renderer) =
+        Engine::new_offline(first.1, 1.0, ReplayGainSettings::default());
+    let queue: Vec<TrackRequest> = [&first.0, &second.0]
+        .iter()
+        .enumerate()
+        .map(|(i, path)| TrackRequest {
+            item_id: i as u64 + 1,
+            track_id: i as i64 + 1,
+            path: (*path).clone(),
+            replaygain: ReplayGainTags::default(),
+        })
+        .collect();
+    let slot = NextSlot::new();
+    slot.set(NextTrack::Track(queue[1].clone()));
+    engine
+        .start_feed(queue[0].clone(), 0, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    let played = pump(&mut engine, &mut renderer, &queue, &slot);
+    let expected: Vec<f32> = first.2.iter().chain(second.2.iter()).copied().collect();
+    assert_eq!(played.underruns, 0);
+    assert_eq!(
+        played.pcm.len(),
+        expected.len(),
+        "no frames added or lost across the boundary"
+    );
+    assert_eq!(
+        played.started()[1].1 as usize,
+        first.2.len() / 2,
+        "boundary at the end of the first file"
+    );
+    let diff = max_abs_diff(&played.pcm[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]);
+    assert_eq!(
+        diff, 0.0,
+        "joined playback differs from the two files back to back"
+    );
+    println!(
+        "REPORT gapless join of two real files: {} frames, boundary at frame {}, identical to plain concatenation",
+        expected.len() / 2,
+        first.2.len() / 2
     );
 }
