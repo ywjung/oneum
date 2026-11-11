@@ -9,6 +9,7 @@
 //!   scroll X Y DY · key NAME [cmd] [shift] [alt] · text STRING · wait MS
 //!   shot FILE.png · dump FILE.json · open PATH · volume V · quit
 //!   oskey KEYCODE [cmd] [shift] (real OS key event) · inputsource ID · activate · hide
+//!   resize W H
 use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, pos2};
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -26,6 +27,7 @@ pub(super) enum AppStep {
     InputSource(String),
     Activate,
     Hide,
+    Resize(f32, f32),
 }
 
 enum Step {
@@ -235,6 +237,11 @@ impl Automation {
             Some("inputsource") => self
                 .steps
                 .push_back(Step::App(AppStep::InputSource(rest(1)))),
+            Some("resize") => {
+                if let (Some(w), Some(h)) = (num(1), num(2)) {
+                    self.steps.push_back(Step::App(AppStep::Resize(w, h)));
+                }
+            }
             Some("activate") => self.steps.push_back(Step::App(AppStep::Activate)),
             Some("hide") => self.steps.push_back(Step::App(AppStep::Hide)),
             _ => {}

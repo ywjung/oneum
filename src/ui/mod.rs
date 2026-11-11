@@ -847,6 +847,9 @@ impl OneumApp {
                 }
                 automation::AppStep::Activate => window::show_main_window(),
                 automation::AppStep::Hide => window::hide_main_window(),
+                automation::AppStep::Resize(w, h) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                }
                 automation::AppStep::Quit => {
                     self.shutdown();
                     std::process::exit(0);
