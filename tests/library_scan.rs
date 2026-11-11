@@ -380,7 +380,15 @@ fn formats_and_korean_metadata_round_trip() {
     let album = &snapshot.albums()[snapshot
         .album_index(*album_keys.iter().next().unwrap())
         .unwrap() as usize];
-    assert_eq!(album.tracks.len(), full.len());
+    // Files of the same folder and album title that lack the album-artist tag (formats
+    // that cannot carry it) are shown as part of that album too.
+    let same_title = snapshot
+        .tracks
+        .iter()
+        .filter(|t| t.album == album.title)
+        .count();
+    assert!(album.tracks.len() >= full.len());
+    assert_eq!(album.tracks.len(), same_title);
     assert_eq!(album.artist, "아이유 (IU)");
     assert_eq!(album.year, Some(2017));
 

@@ -575,12 +575,17 @@ fn build_albums(
     indexes: &[Arc<TrackIndex>],
     title_rank: &[u32],
 ) -> AlbumTables {
+    let aliases = album_aliases(tracks, indexes);
     let mut slot_by_key: HashMap<u64, usize> = HashMap::new();
     let mut albums: Vec<Album> = Vec::new();
     for (i, track) in tracks.iter().enumerate() {
-        let slot = *slot_by_key.entry(track.album_key).or_insert_with(|| {
+        let key = aliases
+            .get(&track.album_key)
+            .copied()
+            .unwrap_or(track.album_key);
+        let slot = *slot_by_key.entry(key).or_insert_with(|| {
             albums.push(Album {
-                key: track.album_key,
+                key,
                 title: track.album.clone(),
                 artist: String::new(),
                 year: None,
@@ -660,7 +665,62 @@ fn build_albums(
             album_of_track[i as usize] = position as u32;
         }
     }
+    // Tracks keep their own key; make it resolve to the album they were merged into.
+    for (from, to) in &aliases {
+        if let Some(&position) = by_key.get(to) {
+            by_key.insert(*from, position);
+        }
+    }
     (albums, by_key, album_of_track)
+}
+
+/// Album keys that should be shown as part of another album.
+///
+/// A track without an album-artist tag gets a folder-based key, a tagged track an
+/// artist-based one, so an album whose files are tagged inconsistently would show up
+/// twice. When a folder holds, for one album title, untagged tracks and tracks of exactly
+/// one tagged album, the untagged ones join that album. Two differently tagged albums of
+/// the same title are never merged, and a key used in more than one folder is left alone.
+fn album_aliases(tracks: &[Arc<Track>], indexes: &[Arc<TrackIndex>]) -> HashMap<u64, u64> {
+    #[derive(Default)]
+    struct Bucket {
+        tagged: Vec<u64>,
+        untagged: Vec<u64>,
+    }
+    let mut buckets: HashMap<(&std::path::Path, &str), Bucket> = HashMap::new();
+    let mut folders_of_key: HashMap<u64, (&std::path::Path, bool)> = HashMap::new();
+    for (track, index) in tracks.iter().zip(indexes) {
+        if track.album.is_empty() {
+            continue;
+        }
+        let Some(folder) = track.path.parent() else {
+            continue;
+        };
+        folders_of_key
+            .entry(track.album_key)
+            .and_modify(|(first, single)| *single &= *first == folder)
+            .or_insert((folder, true));
+        let bucket = buckets.entry((folder, index.album.as_str())).or_default();
+        let list = if track.album_artist.is_empty() {
+            &mut bucket.untagged
+        } else {
+            &mut bucket.tagged
+        };
+        if !list.contains(&track.album_key) {
+            list.push(track.album_key);
+        }
+    }
+    let mut aliases = HashMap::new();
+    for bucket in buckets.values() {
+        if let [target] = bucket.tagged[..] {
+            for &key in &bucket.untagged {
+                if key != target && folders_of_key.get(&key).is_some_and(|(_, single)| *single) {
+                    aliases.insert(key, target);
+                }
+            }
+        }
+    }
+    aliases
 }
 
 fn build_artists(
@@ -770,6 +830,47 @@ mod tests {
             .collect();
         titles.sort();
         titles
+    }
+
+    #[test]
+    fn inconsistently_tagged_album_in_one_folder_is_one_album() {
+        let folder = "/music/mixed/Sessions";
+        let mut tagged = track(1, "One", "A", "Sessions");
+        tagged.path = PathBuf::from(format!("{folder}/01.flac"));
+        tagged.album_artist = "Various Artists".into();
+        tagged.album_key = album_key("Sessions", "Various Artists", false, &tagged.path);
+        let mut untagged = track(2, "Two", "B", "Sessions");
+        untagged.path = PathBuf::from(format!("{folder}/02.wav"));
+        untagged.album_key = album_key("Sessions", "", false, &untagged.path);
+        assert_ne!(tagged.album_key, untagged.album_key);
+        let (tagged_key, untagged_key) = (tagged.album_key, untagged.album_key);
+        let snapshot = LibrarySnapshot::from_tracks(vec![tagged, untagged]);
+        assert_eq!(snapshot.albums().len(), 1);
+        assert_eq!(snapshot.albums()[0].tracks.len(), 2);
+        assert_eq!(snapshot.albums()[0].artist, "Various Artists");
+        // Both keys lead to the merged album.
+        assert_eq!(snapshot.album_index(tagged_key), Some(0));
+        assert_eq!(snapshot.album_index(untagged_key), Some(0));
+    }
+
+    #[test]
+    fn same_title_albums_by_different_album_artists_in_one_folder_stay_apart() {
+        let folder = "/music/flat";
+        let mut tracks = Vec::new();
+        for (id, artist) in [(1, "Queen"), (2, "ABBA")] {
+            let mut t = track(id, "Song", artist, "Greatest Hits");
+            t.path = PathBuf::from(format!("{folder}/{id}.flac"));
+            t.album_artist = artist.into();
+            t.album_key = album_key("Greatest Hits", artist, false, &t.path);
+            tracks.push(t);
+        }
+        // An untagged file next to two differently tagged albums cannot be assigned.
+        let mut loose = track(3, "Song", "Someone", "Greatest Hits");
+        loose.path = PathBuf::from(format!("{folder}/3.flac"));
+        loose.album_key = album_key("Greatest Hits", "", false, &loose.path);
+        tracks.push(loose);
+        let snapshot = LibrarySnapshot::from_tracks(tracks);
+        assert_eq!(snapshot.albums().len(), 3);
     }
 
     #[test]
