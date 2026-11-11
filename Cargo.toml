@@ -1,0 +1,59 @@
+[package]
+name = "oneum"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "OnEum — a local music player for macOS"
+license = "MIT"
+publish = false
+default-run = "oneum"
+
+[lib]
+name = "oneum"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oneum"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
+egui_extras = { version = "0.37", default-features = false }
+cpal = "0.18"
+symphonia = { version = "0.6", default-features = false, features = ["opt-simd", "all-meta", "flac", "mp3", "wav", "aiff", "pcm", "aac", "alac", "isomp4", "caf", "ogg", "vorbis"] }
+lofty = "0.25"
+rusqlite = { version = "0.42", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "8"
+rfd = "0.18"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rubato = "5"
+rtrb = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+unicode-normalization = "0.1"
+walkdir = "2"
+fastrand = "2"
+muda = { version = "0.21", default-features = false }
+winit = { version = "0.30", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-media-player = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+objc2-core-graphics = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"
+
+[profile.dev.package."*"]
+opt-level = 2
