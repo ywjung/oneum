@@ -1,0 +1,202 @@
+//! Vector icons drawn with the painter, so they stay crisp at any scale and do not depend
+//! on which glyphs a font happens to contain.
+use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke, Vec2, pos2, vec2};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Icon {
+    Play,
+    Pause,
+    Next,
+    Previous,
+    Shuffle,
+    Repeat,
+    RepeatOne,
+    Volume,
+    VolumeMuted,
+    Queue,
+    Info,
+    Heart,
+    HeartFilled,
+    Search,
+    Close,
+    Plus,
+    Back,
+    Gear,
+    Note,
+    Warning,
+}
+
+fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
+    let d = dir.normalized();
+    let n = vec2(-d.y, d.x);
+    Shape::convex_polygon(
+        vec![
+            tip,
+            tip - d * size + n * size * 0.6,
+            tip - d * size - n * size * 0.6,
+        ],
+        color,
+        Stroke::NONE,
+    )
+}
+
+/// Paints `icon` centred in `rect` (drawn inside a square of `rect`'s smaller side).
+pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    let s = rect.width().min(rect.height());
+    let c = rect.center();
+    let p = |x: f32, y: f32| pos2(c.x + (x - 0.5) * s, c.y + (y - 0.5) * s);
+    let w = (s / 11.0).clamp(1.2, 2.2);
+    let stroke = Stroke::new(w, color);
+    let fill = |pts: Vec<Pos2>| Shape::convex_polygon(pts, color, Stroke::NONE);
+    match icon {
+        Icon::Play => {
+            painter.add(fill(vec![p(0.28, 0.16), p(0.86, 0.5), p(0.28, 0.84)]));
+        }
+        Icon::Pause => {
+            painter.rect_filled(Rect::from_min_max(p(0.24, 0.18), p(0.42, 0.82)), 1.5, color);
+            painter.rect_filled(Rect::from_min_max(p(0.58, 0.18), p(0.76, 0.82)), 1.5, color);
+        }
+        Icon::Next => {
+            painter.add(fill(vec![p(0.16, 0.22), p(0.62, 0.5), p(0.16, 0.78)]));
+            painter.rect_filled(Rect::from_min_max(p(0.68, 0.22), p(0.80, 0.78)), 1.0, color);
+        }
+        Icon::Previous => {
+            painter.add(fill(vec![p(0.84, 0.22), p(0.38, 0.5), p(0.84, 0.78)]));
+            painter.rect_filled(Rect::from_min_max(p(0.20, 0.22), p(0.32, 0.78)), 1.0, color);
+        }
+        Icon::Shuffle => {
+            // Two crossing paths ending in arrow heads on the right.
+            let a = [p(0.12, 0.30), p(0.34, 0.30), p(0.62, 0.70), p(0.80, 0.70)];
+            let b = [p(0.12, 0.70), p(0.34, 0.70), p(0.62, 0.30), p(0.80, 0.30)];
+            painter.add(Shape::line(a.to_vec(), stroke));
+            painter.add(Shape::line(b.to_vec(), stroke));
+            painter.add(arrow_head(p(0.92, 0.70), vec2(1.0, 0.0), s * 0.16, color));
+            painter.add(arrow_head(p(0.92, 0.30), vec2(1.0, 0.0), s * 0.16, color));
+        }
+        Icon::Repeat | Icon::RepeatOne => {
+            // A loop: top edge going right, bottom edge going left.
+            painter.add(Shape::line(
+                vec![p(0.16, 0.50), p(0.16, 0.30), p(0.74, 0.30)],
+                stroke,
+            ));
+            painter.add(arrow_head(p(0.88, 0.30), vec2(1.0, 0.0), s * 0.16, color));
+            painter.add(Shape::line(
+                vec![p(0.84, 0.50), p(0.84, 0.70), p(0.26, 0.70)],
+                stroke,
+            ));
+            painter.add(arrow_head(p(0.12, 0.70), vec2(-1.0, 0.0), s * 0.16, color));
+            if icon == Icon::RepeatOne {
+                painter.add(Shape::line(
+                    vec![p(0.45, 0.43), p(0.52, 0.38), p(0.52, 0.62)],
+                    Stroke::new(w * 0.9, color),
+                ));
+            }
+        }
+        Icon::Volume | Icon::VolumeMuted => {
+            painter.add(fill(vec![
+                p(0.10, 0.38),
+                p(0.26, 0.38),
+                p(0.26, 0.62),
+                p(0.10, 0.62),
+            ]));
+            painter.add(fill(vec![
+                p(0.26, 0.38),
+                p(0.48, 0.18),
+                p(0.48, 0.82),
+                p(0.26, 0.62),
+            ]));
+            if icon == Icon::Volume {
+                for (r, span) in [(0.16, 0.9f32), (0.30, 0.8)] {
+                    let pts: Vec<Pos2> = (0..=8)
+                        .map(|i| {
+                            let a = -span / 2.0 + span * i as f32 / 8.0;
+                            p(0.50 + r * a.cos(), 0.5 + r * a.sin())
+                        })
+                        .collect();
+                    painter.add(Shape::line(pts, stroke));
+                }
+            } else {
+                painter.line_segment([p(0.60, 0.36), p(0.88, 0.64)], stroke);
+                painter.line_segment([p(0.88, 0.36), p(0.60, 0.64)], stroke);
+            }
+        }
+        Icon::Queue => {
+            for y in [0.28, 0.50, 0.72] {
+                painter.circle_filled(p(0.16, y), w * 0.9, color);
+                painter.line_segment([p(0.30, y), p(0.88, y)], stroke);
+            }
+        }
+        Icon::Info => {
+            painter.circle_stroke(c, s * 0.38, stroke);
+            painter.circle_filled(p(0.5, 0.31), w * 0.85, color);
+            painter.line_segment([p(0.5, 0.45), p(0.5, 0.72)], stroke);
+        }
+        Icon::Heart | Icon::HeartFilled => {
+            // Parametric heart outline.
+            let pts: Vec<Pos2> = (0..40)
+                .map(|i| {
+                    let t = i as f32 / 40.0 * std::f32::consts::TAU;
+                    let x = 16.0 * t.sin().powi(3);
+                    let y = 13.0 * t.cos()
+                        - 5.0 * (2.0 * t).cos()
+                        - 2.0 * (3.0 * t).cos()
+                        - (4.0 * t).cos();
+                    p(0.5 + x / 40.0, 0.47 - y / 40.0)
+                })
+                .collect();
+            if icon == Icon::HeartFilled {
+                // The outline is concave: fill it as a triangle fan around the centre.
+                let centre = p(0.5, 0.5);
+                for pair in pts.windows(2) {
+                    painter.add(fill(vec![centre, pair[0], pair[1]]));
+                }
+                painter.add(fill(vec![centre, pts[pts.len() - 1], pts[0]]));
+            }
+            painter.add(Shape::closed_line(pts, stroke));
+        }
+        Icon::Search => {
+            painter.circle_stroke(p(0.43, 0.43), s * 0.25, stroke);
+            painter.line_segment([p(0.62, 0.62), p(0.86, 0.86)], stroke);
+        }
+        Icon::Close => {
+            painter.line_segment([p(0.24, 0.24), p(0.76, 0.76)], stroke);
+            painter.line_segment([p(0.76, 0.24), p(0.24, 0.76)], stroke);
+        }
+        Icon::Plus => {
+            painter.line_segment([p(0.5, 0.20), p(0.5, 0.80)], stroke);
+            painter.line_segment([p(0.20, 0.5), p(0.80, 0.5)], stroke);
+        }
+        Icon::Back => {
+            painter.add(Shape::line(
+                vec![p(0.60, 0.20), p(0.30, 0.5), p(0.60, 0.80)],
+                stroke,
+            ));
+        }
+        Icon::Gear => {
+            painter.circle_stroke(c, s * 0.22, stroke);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.0;
+                let d = vec2(a.cos(), a.sin());
+                painter.line_segment(
+                    [c + d * s * 0.30, c + d * s * 0.42],
+                    Stroke::new(w * 1.4, color),
+                );
+            }
+        }
+        Icon::Note => {
+            painter.circle_filled(p(0.34, 0.72), s * 0.13, color);
+            painter.circle_filled(p(0.72, 0.64), s * 0.13, color);
+            painter.line_segment([p(0.45, 0.72), p(0.45, 0.24)], stroke);
+            painter.line_segment([p(0.83, 0.64), p(0.83, 0.16)], stroke);
+            painter.line_segment([p(0.45, 0.24), p(0.83, 0.16)], Stroke::new(w * 1.6, color));
+        }
+        Icon::Warning => {
+            painter.add(Shape::closed_line(
+                vec![p(0.5, 0.14), p(0.90, 0.84), p(0.10, 0.84)],
+                stroke,
+            ));
+            painter.line_segment([p(0.5, 0.40), p(0.5, 0.62)], stroke);
+            painter.circle_filled(p(0.5, 0.73), w * 0.8, color);
+        }
+    }
+}

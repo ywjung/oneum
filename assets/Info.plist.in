@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>OnEum</string>
+  <key>CFBundleDisplayName</key><string>OnEum</string>
+  <key>CFBundleIdentifier</key><string>app.oneum.OnEum</string>
+  <key>CFBundleExecutable</key><string>OnEum</string>
+  <key>CFBundleIconFile</key><string>OnEum</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@BUILD@</string>
+  <key>CFBundleDevelopmentRegion</key><string>ko</string>
+  <key>CFBundleLocalizations</key>
+  <array><string>ko</string><string>en</string></array>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+  <key>LSArchitecturePriority</key>
+  <array><string>arm64</string></array>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSHumanReadableCopyright</key><string>OnEum — MIT License</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Audio File</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.mp3</string>
+        <string>org.xiph.flac</string>
+        <string>com.microsoft.waveform-audio</string>
+        <string>public.aiff-audio</string>
+        <string>public.aifc-audio</string>
+        <string>com.apple.m4a-audio</string>
+        <string>public.mpeg-4-audio</string>
+        <string>org.xiph.ogg-audio</string>
+      </array>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>mp3</string><string>flac</string><string>wav</string><string>aif</string>
+        <string>aiff</string><string>m4a</string><string>m4b</string><string>ogg</string><string>oga</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>M3U Playlist</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.m3u-playlist</string></array>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>m3u8</string><string>m3u</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>Music Folder</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>None</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.folder</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>

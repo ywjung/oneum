@@ -1,0 +1,241 @@
+//! Scripted UI driving for verification (inactive unless `ONEUM_SCRIPT` is set).
+//!
+//! The app reads commands appended to the script file and feeds them into egui as real
+//! input events (pointer, keys, text), so hit-testing, focus and shortcuts are exercised
+//! exactly as with a mouse and keyboard. `shot` and `dump` report what happened.
+//!
+//! Commands (one per line, coordinates in points):
+//!   click X Y [cmd] [shift] · dclick X Y · rclick X Y · move X Y · drag X1 Y1 X2 Y2
+//!   scroll X Y DY · key NAME [cmd] [shift] [alt] · text STRING · wait MS
+//!   shot FILE.png · dump FILE.json · open PATH · volume V · quit
+use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, pos2};
+use std::collections::VecDeque;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// Steps the app itself has to carry out.
+pub(super) enum AppStep {
+    Shot(PathBuf),
+    Dump(PathBuf),
+    Open(PathBuf),
+    Volume(f32),
+    Quit,
+}
+
+enum Step {
+    Input(Vec<Event>, Modifiers),
+    Wait(u64),
+    App(AppStep),
+}
+
+pub(super) struct Automation {
+    path: PathBuf,
+    offset: u64,
+    partial: String,
+    steps: VecDeque<Step>,
+    wait_until: Option<Instant>,
+    pub(super) app_steps: Vec<AppStep>,
+}
+
+fn mods(words: &[&str]) -> Modifiers {
+    let mut m = Modifiers::default();
+    for w in words {
+        match *w {
+            "cmd" => {
+                m.command = true;
+                m.mac_cmd = true;
+            }
+            "shift" => m.shift = true,
+            "alt" => m.alt = true,
+            _ => {}
+        }
+    }
+    m
+}
+
+fn button(pos: Pos2, button: PointerButton, pressed: bool, modifiers: Modifiers) -> Event {
+    Event::PointerButton {
+        pos,
+        button,
+        pressed,
+        modifiers,
+    }
+}
+
+impl Automation {
+    pub(super) fn from_env() -> Option<Self> {
+        let path = PathBuf::from(std::env::var_os("ONEUM_SCRIPT")?);
+        Some(Self {
+            path,
+            offset: 0,
+            partial: String::new(),
+            steps: VecDeque::new(),
+            wait_until: None,
+            app_steps: Vec::new(),
+        })
+    }
+
+    /// How soon the next frame is needed to keep the script moving.
+    pub(super) fn poll_interval(&self) -> Duration {
+        Duration::from_millis(if self.steps.is_empty() && self.wait_until.is_none() {
+            100
+        } else {
+            16
+        })
+    }
+
+    fn read_new_lines(&mut self) {
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return;
+        };
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return;
+        }
+        let mut text = String::new();
+        if let Ok(n) = file.read_to_string(&mut text) {
+            self.offset += n as u64;
+        }
+        self.partial.push_str(&text);
+        while let Some(end) = self.partial.find('\n') {
+            let line: String = self.partial.drain(..=end).collect();
+            self.parse(line.trim());
+        }
+    }
+
+    fn parse(&mut self, line: &str) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let num = |i: usize| words.get(i).and_then(|w| w.parse::<f32>().ok());
+        let point = |i: usize| Some(pos2(num(i)?, num(i + 1)?));
+        let rest = |n: usize| {
+            line.splitn(n + 1, char::is_whitespace)
+                .nth(n)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let none = Modifiers::default();
+        match words.first().copied() {
+            Some("click" | "dclick" | "rclick") => {
+                let Some(p) = point(1) else { return };
+                let m = mods(&words[3..]);
+                let which = if words[0] == "rclick" {
+                    PointerButton::Secondary
+                } else {
+                    PointerButton::Primary
+                };
+                self.steps
+                    .push_back(Step::Input(vec![Event::PointerMoved(p)], m));
+                let times = if words[0] == "dclick" { 2 } else { 1 };
+                for _ in 0..times {
+                    self.steps
+                        .push_back(Step::Input(vec![button(p, which, true, m)], m));
+                    self.steps
+                        .push_back(Step::Input(vec![button(p, which, false, m)], m));
+                }
+            }
+            Some("move") => {
+                if let Some(p) = point(1) {
+                    self.steps
+                        .push_back(Step::Input(vec![Event::PointerMoved(p)], none));
+                }
+            }
+            Some("drag") => {
+                let (Some(a), Some(b)) = (point(1), point(3)) else {
+                    return;
+                };
+                self.steps
+                    .push_back(Step::Input(vec![Event::PointerMoved(a)], none));
+                self.steps.push_back(Step::Input(
+                    vec![button(a, PointerButton::Primary, true, none)],
+                    none,
+                ));
+                for i in 1..=8 {
+                    let t = i as f32 / 8.0;
+                    self.steps.push_back(Step::Input(
+                        vec![Event::PointerMoved(a + (b - a) * t)],
+                        none,
+                    ));
+                }
+                self.steps.push_back(Step::Input(
+                    vec![button(b, PointerButton::Primary, false, none)],
+                    none,
+                ));
+            }
+            Some("scroll") => {
+                let (Some(p), Some(dy)) = (point(1), num(3)) else {
+                    return;
+                };
+                self.steps
+                    .push_back(Step::Input(vec![Event::PointerMoved(p)], none));
+                self.steps.push_back(Step::Input(
+                    vec![Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, dy),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: none,
+                        source: egui::MouseWheelSource::Wheel,
+                    }],
+                    none,
+                ));
+            }
+            Some("key") => {
+                let Some(key) = words.get(1).and_then(|n| Key::from_name(n)) else {
+                    return;
+                };
+                let m = mods(&words[2..]);
+                let event = |pressed| Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: m,
+                };
+                self.steps.push_back(Step::Input(vec![event(true)], m));
+                self.steps.push_back(Step::Input(vec![event(false)], m));
+            }
+            Some("text") => self
+                .steps
+                .push_back(Step::Input(vec![Event::Text(rest(1))], none)),
+            Some("wait") => self
+                .steps
+                .push_back(Step::Wait(num(1).unwrap_or(100.0) as u64)),
+            Some("shot") => self
+                .steps
+                .push_back(Step::App(AppStep::Shot(PathBuf::from(rest(1))))),
+            Some("dump") => self
+                .steps
+                .push_back(Step::App(AppStep::Dump(PathBuf::from(rest(1))))),
+            Some("open") => self
+                .steps
+                .push_back(Step::App(AppStep::Open(PathBuf::from(rest(1))))),
+            Some("volume") => self
+                .steps
+                .push_back(Step::App(AppStep::Volume(num(1).unwrap_or(0.0)))),
+            Some("quit") => self.steps.push_back(Step::App(AppStep::Quit)),
+            _ => {}
+        }
+    }
+
+    /// Called from `raw_input_hook`: performs at most one step per frame.
+    pub(super) fn step(&mut self, raw: &mut egui::RawInput) {
+        self.read_new_lines();
+        if let Some(until) = self.wait_until {
+            if Instant::now() < until {
+                return;
+            }
+            self.wait_until = None;
+        }
+        match self.steps.pop_front() {
+            Some(Step::Input(events, modifiers)) => {
+                raw.events.push(Event::ModifiersChanged(modifiers));
+                raw.events.extend(events);
+            }
+            Some(Step::Wait(ms)) => {
+                self.wait_until = Some(Instant::now() + Duration::from_millis(ms))
+            }
+            Some(Step::App(step)) => self.app_steps.push(step),
+            None => {}
+        }
+    }
+}
