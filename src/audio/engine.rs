@@ -200,8 +200,10 @@ impl Engine {
         let handle = FeedHandle::spawn(params)
             .ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;
         self.loading = Some(handle); // replaces (and cancels) a feed that was still loading
-        // Silence whatever is playing right now; only the new feed may be heard.
+        // Silence whatever is playing right now; only the new feed may be heard. The old
+        // feed is abandoned: its decode thread stops and its remaining events are stale.
         self.shared.require_epoch(epoch);
+        self.active = None;
         Ok(epoch)
     }
 
