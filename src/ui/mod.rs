@@ -889,6 +889,7 @@ impl OneumApp {
             "queue_len": p.queue.len(),
             "queue_index": p.queue_index,
             "underruns": p.underruns,
+            "start_latency_ms": p.last_start_latency_ms,
             "output_device": p.output_device,
             "output_rate": p.output_sample_rate,
             "source": p.source.as_ref().map(|s| format!("{} {}Hz {}ch", s.codec, s.sample_rate, s.channels)),

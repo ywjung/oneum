@@ -162,6 +162,9 @@ pub struct PlayerSnapshot {
     /// Format of the track being decoded (for the info panel).
     pub source: Option<SourceInfo>,
     pub output_sample_rate: Option<u32>,
+    /// Time from the most recent start request (play a track, seek) until its audio
+    /// reached the output callback, in milliseconds.
+    pub last_start_latency_ms: Option<u32>,
 }
 
 impl PlayerSnapshot {
@@ -186,6 +189,7 @@ impl PlayerSnapshot {
             underruns: 0,
             source: None,
             output_sample_rate: None,
+            last_start_latency_ms: None,
         }
     }
 
@@ -340,6 +344,8 @@ struct Player<H: PlayerHost> {
     last_session_save: Instant,
     last_position_publish: Instant,
     running: bool,
+    start_requested_at: Option<Instant>,
+    last_start_latency_ms: Option<u32>,
 }
 
 impl<H: PlayerHost> Player<H> {
@@ -390,6 +396,8 @@ impl<H: PlayerHost> Player<H> {
             last_session_save: Instant::now(),
             last_position_publish: Instant::now(),
             running: true,
+            start_requested_at: None,
+            last_start_latency_ms: None,
         }
     }
 
@@ -574,6 +582,7 @@ impl<H: PlayerHost> Player<H> {
         });
         self.announce_next_after(item.id);
         self.engine.set_playing(true);
+        self.start_requested_at = Some(Instant::now());
         Ok(())
     }
 
@@ -1062,6 +1071,15 @@ impl<H: PlayerHost> Player<H> {
             };
             chain.is_seek = false;
             self.dirty = true;
+            if let Some(requested) = self.start_requested_at.take() {
+                // Until the callback switched to the new feed, plus what the device
+                // reports as its own output latency.
+                let device_ms = u64::from(self.engine.shared().latency_frames()) * 1000
+                    / u64::from(chain.rate.max(1));
+                let total = requested.elapsed().as_millis() as u64 + device_ms;
+                self.last_start_latency_ms = Some(total.min(u64::from(u32::MAX)) as u32);
+                tracing::debug!(latency_ms = total, "playback started");
+            }
         }
         // Count the play once enough of the track has been heard.
         if self.state == PlayState::Playing && played_epoch == chain.epoch {
@@ -1125,6 +1143,7 @@ impl<H: PlayerHost> Player<H> {
                 .and_then(|c| c.segments.front())
                 .map(|s| s.info.clone()),
             output_sample_rate: self.engine.sample_rate(),
+            last_start_latency_ms: self.last_start_latency_ms,
         };
         match self.shared.lock() {
             Ok(mut shared) => *shared = snapshot,
