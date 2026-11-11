@@ -6,7 +6,7 @@
 use super::render::{RenderLink, RenderShared, Renderer, render_pair};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputDeviceInfo {
@@ -38,14 +38,49 @@ impl std::fmt::Display for OutputError {
 
 impl std::error::Error for OutputError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutputEvent {
+/// What the stream's error callback has to tell the engine.
+///
+/// The callback can run on the device's real-time thread, so it only flips atomics:
+/// no allocation, no lock, no channel. The engine reads them from its poll.
+#[derive(Debug, Default)]
+pub struct OutputSignals {
+    lost: AtomicBool,
+    invalidated: AtomicBool,
+    other_errors: AtomicU32,
+}
+
+/// One reading of [`OutputSignals`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutputSignal {
     /// The device disappeared; the stream is dead.
-    DeviceLost,
+    pub lost: bool,
     /// The stream configuration changed (e.g. sample rate); it must be rebuilt.
-    Invalidated,
-    /// Informational backend message (xrun reported by the OS, etc.).
-    Notice(String),
+    pub invalidated: bool,
+    /// Other backend errors since the last reading (xruns reported by the OS, etc.).
+    pub other_errors: u32,
+}
+
+impl OutputSignals {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    pub fn signal_lost(&self) {
+        self.lost.store(true, Ordering::Release);
+    }
+    pub fn signal_invalidated(&self) {
+        self.invalidated.store(true, Ordering::Release);
+    }
+    fn signal_other(&self) {
+        self.other_errors.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Reads and clears everything signalled so far.
+    pub fn take(&self) -> OutputSignal {
+        OutputSignal {
+            lost: self.lost.swap(false, Ordering::AcqRel),
+            invalidated: self.invalidated.swap(false, Ordering::AcqRel),
+            other_errors: self.other_errors.swap(0, Ordering::Relaxed),
+        }
+    }
 }
 
 fn device_name(device: &cpal::Device) -> String {
@@ -83,8 +118,17 @@ pub fn list_output_devices() -> Vec<OutputDeviceInfo> {
         .collect()
 }
 
-pub fn device_exists(id: &str) -> bool {
-    list_output_devices().iter().any(|d| d.id == id)
+/// Whether the device is connected. `None` when the system could not be asked, which
+/// says nothing about the device and must not be read as "gone".
+pub fn device_present(id: &str) -> Option<bool> {
+    let devices = cpal::default_host().output_devices().ok()?;
+    let mut found = false;
+    for device in devices {
+        if device.id().is_ok_and(|d| d.to_string() == id) {
+            found = true;
+        }
+    }
+    Some(found)
 }
 
 pub struct OutputStream {
@@ -102,7 +146,7 @@ impl OutputStream {
     pub fn open(
         device_id: Option<&str>,
         shared: Arc<RenderShared>,
-        events: Sender<OutputEvent>,
+        signals: Arc<OutputSignals>,
     ) -> Result<Self, OutputError> {
         let host = cpal::default_host();
         let wanted = match device_id {
@@ -123,16 +167,12 @@ impl OutputStream {
         let channels = config.channels;
         let sample_rate = config.sample_rate;
         let (renderer, link) = render_pair(shared.clone(), sample_rate);
-        let err_events = events.clone();
-        let on_error = move |e: cpal::Error| {
-            let event = match e.kind() {
-                cpal::ErrorKind::DeviceNotAvailable => OutputEvent::DeviceLost,
-                cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceChanged => {
-                    OutputEvent::Invalidated
-                }
-                _ => OutputEvent::Notice(e.to_string()),
-            };
-            let _ = err_events.send(event);
+        let on_error = move |e: cpal::Error| match e.kind() {
+            cpal::ErrorKind::DeviceNotAvailable => signals.signal_lost(),
+            cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceChanged => {
+                signals.signal_invalidated();
+            }
+            _ => signals.signal_other(),
         };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => build_f32(&device, config, renderer, shared, on_error),

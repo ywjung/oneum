@@ -58,7 +58,13 @@ pub fn replaygain_factor(tags: &ReplayGainTags, settings: &ReplayGainSettings) -
     if !gain_db.is_finite() {
         return 1.0;
     }
-    let mut gain = db_to_linear((gain_db + settings.preamp_db).clamp(-60.0, 24.0));
+    // A damaged settings file must never turn into NaN samples.
+    let preamp_db = if settings.preamp_db.is_finite() {
+        settings.preamp_db
+    } else {
+        0.0
+    };
+    let mut gain = db_to_linear((gain_db + preamp_db).clamp(-60.0, 24.0));
     if settings.prevent_clipping {
         match peak.filter(|p| p.is_finite() && *p > 0.0) {
             Some(p) => gain = gain.min(1.0 / p),

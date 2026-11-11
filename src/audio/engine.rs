@@ -3,7 +3,7 @@ use super::PlaybackError;
 use super::decoder::SourceInfo;
 use super::dsp::{ReplayGainSettings, volume_to_gain};
 use super::feed::{FeedEvent, FeedHandle, FeedParams, NextSlot, RgShared, TrackRequest};
-use super::output::{self, OutputError, OutputEvent, OutputStream};
+use super::output::{self, OutputError, OutputSignals, OutputStream};
 use super::render::{RenderLink, RenderShared, Renderer, render_pair};
 use crate::model::TrackId;
 use std::sync::Arc;
@@ -15,6 +15,8 @@ const PREBUFFER_SECONDS: f64 = 0.12;
 /// A silent stream is stopped after this long so the device and the Mac can sleep.
 const IDLE_STOP: Duration = Duration::from_secs(3);
 const DEVICE_POLL: Duration = Duration::from_secs(1);
+/// Polls in a row that must miss the device before it counts as disconnected.
+const DEVICE_MISSING_POLLS: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
@@ -59,8 +61,11 @@ pub struct Engine {
     device_pref: Option<String>,
     feed_tx: Sender<FeedEvent>,
     feed_rx: Receiver<FeedEvent>,
-    out_tx: Sender<OutputEvent>,
-    out_rx: Receiver<OutputEvent>,
+    /// Written by the error callback of the stream that is open now. Replaced with every
+    /// new stream so that a late error of an old stream cannot touch the new one.
+    signals: Arc<OutputSignals>,
+    /// Consecutive device polls that did not find the device.
+    device_missing_polls: u8,
     /// Feed whose consumer has been handed to the renderer.
     active: Option<FeedHandle>,
     /// Feed still pre-buffering.
@@ -74,7 +79,6 @@ pub struct Engine {
 impl Engine {
     pub fn new(device_pref: Option<String>, volume: f32, rg: ReplayGainSettings) -> Self {
         let (feed_tx, feed_rx) = channel();
-        let (out_tx, out_rx) = channel();
         Self {
             shared: RenderShared::new(volume_to_gain(volume)),
             rg: RgShared::new(rg),
@@ -82,8 +86,8 @@ impl Engine {
             device_pref,
             feed_tx,
             feed_rx,
-            out_tx,
-            out_rx,
+            signals: OutputSignals::new(),
+            device_missing_polls: 0,
             active: None,
             loading: None,
             last_epoch: 0,
@@ -99,6 +103,12 @@ impl Engine {
         let (renderer, link) = render_pair(engine.shared.clone(), sample_rate);
         engine.sink = Sink::Offline(link);
         (engine, renderer)
+    }
+
+    /// The signals of the current stream. Tests use this to stand in for the device's
+    /// error callback.
+    pub fn output_signals(&self) -> Arc<OutputSignals> {
+        self.signals.clone()
     }
 
     pub fn shared(&self) -> &Arc<RenderShared> {
@@ -149,11 +159,14 @@ impl Engine {
             return Ok(());
         }
         self.stop_feeds();
+        let signals = OutputSignals::new();
         let stream = OutputStream::open(
             self.device_pref.as_deref(),
             self.shared.clone(),
-            self.out_tx.clone(),
+            signals.clone(),
         )?;
+        self.signals = signals;
+        self.device_missing_polls = 0;
         tracing::info!(
             rate = stream.sample_rate(),
             channels = stream.channels,
@@ -241,7 +254,7 @@ impl Engine {
             && let Err(e) = stream.set_running(true)
         {
             tracing::warn!("could not start output stream: {e}");
-            let _ = self.out_tx.send(OutputEvent::DeviceLost);
+            self.signals.signal_lost();
         }
     }
 
@@ -273,6 +286,19 @@ impl Engine {
             feed.written_frames().saturating_sub(consumed),
             feed.is_finished(),
         ))
+    }
+
+    /// True when feed `epoch` has decoded audio waiting to be played (or is complete).
+    /// If nothing is heard in that situation, the output side is at fault, not the file.
+    pub fn feed_has_audio(&self, epoch: u16) -> bool {
+        if let Some(feed) = self.active.as_ref().filter(|f| f.epoch == epoch) {
+            let (played_epoch, consumed) = self.shared.position();
+            let consumed = if played_epoch == epoch { consumed } else { 0 };
+            return feed.is_finished() || feed.written_frames() > consumed;
+        }
+        self.loading
+            .as_ref()
+            .is_some_and(|f| f.epoch == epoch && (f.is_finished() || f.written_frames() > 0))
     }
 
     pub fn underruns(&self) -> u64 {
@@ -364,37 +390,60 @@ impl Engine {
             events.push(EngineEvent::Drained { epoch: drained });
         }
 
-        while let Ok(event) = self.out_rx.try_recv() {
-            match event {
-                OutputEvent::DeviceLost => {
-                    tracing::warn!("output device lost");
-                    self.close_output();
-                    events.push(EngineEvent::DeviceLost);
-                }
-                OutputEvent::Invalidated => {
-                    tracing::info!("output stream invalidated");
-                    self.close_output();
-                    events.push(EngineEvent::OutputChanged);
-                }
-                OutputEvent::Notice(msg) => tracing::debug!("output notice: {msg}"),
-            }
+        let signal = self.signals.take();
+        if signal.other_errors > 0 {
+            tracing::debug!(count = signal.other_errors, "output backend errors");
         }
-
-        // Follow the system default device, but only when the user changed it while the
-        // old device is still connected. A vanished device is "lost", never silently replaced.
-        if self.last_device_poll.elapsed() >= DEVICE_POLL {
+        // Only a real device can tell us whether it is still there; offline sinks trust the signal.
+        let device_id = match &self.sink {
+            Sink::Device(stream) => Some(stream.device_id.clone()),
+            _ => None,
+        };
+        if signal.lost {
+            tracing::warn!("output device lost");
+            self.close_output();
+            events.push(EngineEvent::DeviceLost);
+        } else if signal.invalidated {
+            // A stream is also invalidated when its device is unplugged. Reopening would
+            // then land on the default device, i.e. move the music to the speakers.
+            let gone = device_id
+                .as_deref()
+                .is_some_and(|id| output::device_present(id) == Some(false));
+            tracing::info!(gone, "output stream invalidated");
+            self.close_output();
+            events.push(if gone {
+                EngineEvent::DeviceLost
+            } else {
+                EngineEvent::OutputChanged
+            });
+        } else if self.last_device_poll.elapsed() >= DEVICE_POLL
+            && let Some(current_id) = device_id
+        {
+            // Follow the system default device, but only when the user changed it while the
+            // old device is still connected. A vanished device is "lost", never silently
+            // replaced. One failed lookup proves nothing (the device list is briefly
+            // incomplete while the system reconfigures), so it takes two in a row.
             self.last_device_poll = Instant::now();
-            if let Sink::Device(stream) = &self.sink {
-                let current_id = stream.device_id.clone();
-                if !output::device_exists(&current_id) {
-                    self.close_output();
-                    events.push(EngineEvent::DeviceLost);
-                } else if self.device_pref.is_none()
-                    && output::default_output_id().is_some_and(|id| id != current_id)
-                {
-                    self.close_output();
-                    events.push(EngineEvent::OutputChanged);
+            match output::device_present(&current_id) {
+                Some(false) => {
+                    self.device_missing_polls += 1;
+                    if self.device_missing_polls >= DEVICE_MISSING_POLLS {
+                        tracing::warn!("output device no longer listed");
+                        self.close_output();
+                        events.push(EngineEvent::DeviceLost);
+                    }
                 }
+                Some(true) => {
+                    self.device_missing_polls = 0;
+                    if self.device_pref.is_none()
+                        && output::default_output_id().is_some_and(|id| id != current_id)
+                    {
+                        self.close_output();
+                        events.push(EngineEvent::OutputChanged);
+                    }
+                }
+                // The system could not be asked; keep playing and ask again.
+                None => {}
             }
         }
 

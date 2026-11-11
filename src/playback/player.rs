@@ -27,6 +27,9 @@ const QUEUE_SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 pub const MAX_CONSECUTIVE_FAILURES: usize = 10;
 /// A play is counted once this much of the track has been heard (or half of it, if shorter).
 const PLAY_CREDIT_MS: u64 = 240_000;
+/// A paused feed is released after this long: the decode thread ends and the file is
+/// closed, so the drive it is on can be ejected. Playback resumes from the same position.
+const PAUSE_RELEASE: Duration = Duration::from_secs(30);
 
 /// What the player needs to know about a track in order to play it.
 #[derive(Debug, Clone, PartialEq)]
@@ -211,6 +214,9 @@ pub struct PlayerConfig {
     pub default_volume: f32,
     pub replaygain: ReplayGainSettings,
     pub device_pref: Option<String>,
+    /// Playback that is wanted but produces no audio for this long is treated as a
+    /// failure (a read stuck on a dead drive, a device that stopped asking for audio).
+    pub stall_timeout: Duration,
 }
 
 impl Default for PlayerConfig {
@@ -219,6 +225,7 @@ impl Default for PlayerConfig {
             default_volume: 0.8,
             replaygain: ReplayGainSettings::default(),
             device_pref: None,
+            stall_timeout: Duration::from_secs(15),
         }
     }
 }
@@ -295,7 +302,61 @@ struct Segment {
     start_ms: u64,
     duration_ms: u64,
     info: SourceInfo,
+}
+
+/// How much of the current playthrough of a queue item has really been heard.
+///
+/// This lives outside the feed on purpose: a seek, a queue edit or a device change
+/// replaces the feed, but it is still the same playthrough and must count once.
+#[derive(Debug, Default)]
+struct Listen {
+    item_id: Option<ItemId>,
+    /// Audio heard, in microseconds (frames are converted at the feed's rate).
+    heard_us: u64,
     credited: bool,
+    /// Feed position up to which audio has been accounted: `(epoch, frames)`.
+    mark: Option<(u16, u64)>,
+}
+
+impl Listen {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Accounts for feed `epoch` having played up to `frames` while `seg` is audible.
+    fn hear(&mut self, seg: &Segment, epoch: u16, frames: u64, rate: u32) {
+        if self.item_id != Some(seg.item_id) {
+            *self = Self {
+                item_id: Some(seg.item_id),
+                ..Self::default()
+            };
+        }
+        let from = match self.mark {
+            Some((e, f)) if e == epoch => f.max(seg.at_frame),
+            _ => seg.at_frame,
+        };
+        let upto = frames.max(from);
+        self.heard_us += (upto - from).saturating_mul(1_000_000) / u64::from(rate.max(1));
+        self.mark = Some((epoch, upto));
+    }
+
+    /// True exactly once per playthrough: when `threshold_ms` of audio has been heard.
+    fn take_credit(&mut self, threshold_ms: u64) -> bool {
+        if self.credited || self.heard_us / 1000 < threshold_ms {
+            return false;
+        }
+        self.credited = true;
+        true
+    }
+}
+
+/// Listening time after which a track of `length_ms` counts as played.
+fn credit_threshold_ms(length_ms: u64) -> u64 {
+    if length_ms > 0 {
+        (length_ms / 2).min(PLAY_CREDIT_MS)
+    } else {
+        PLAY_CREDIT_MS
+    }
 }
 
 /// One feed of the engine and what the player knows about its contents.
@@ -340,7 +401,18 @@ struct Player<H: PlayerHost> {
     device_lost: bool,
     consecutive_failures: usize,
     dirty: bool,
+    /// The queue's items changed (the queue table must be rewritten).
     queue_dirty_since: Option<Instant>,
+    /// Only the current item, repeat mode or the like changed (cheap to save).
+    meta_dirty_since: Option<Instant>,
+    listen: Listen,
+    stall_timeout: Duration,
+    /// Since when playback is wanted but no audio is coming.
+    starved_since: Option<Instant>,
+    /// Renderer position at the previous tick, to tell whether audio is moving.
+    last_render_position: (u16, u64),
+    /// Since when a feed exists although playback is paused.
+    paused_since: Option<Instant>,
     last_session_save: Instant,
     last_position_publish: Instant,
     running: bool,
@@ -393,6 +465,12 @@ impl<H: PlayerHost> Player<H> {
             consecutive_failures: 0,
             dirty: true,
             queue_dirty_since: None,
+            meta_dirty_since: None,
+            listen: Listen::default(),
+            stall_timeout: config.stall_timeout,
+            starved_since: None,
+            last_render_position: (0, 0),
+            paused_since: None,
             last_session_save: Instant::now(),
             last_position_publish: Instant::now(),
             running: true,
@@ -427,6 +505,8 @@ impl<H: PlayerHost> Player<H> {
                 self.on_engine_event(event);
             }
             self.follow_playback();
+            self.watch_for_stall();
+            self.release_paused_feed();
             self.publish_if_needed();
             self.save_session_if_due();
         }
@@ -674,6 +754,7 @@ impl<H: PlayerHost> Player<H> {
                 self.mark_queue_changed();
                 self.want_playing = true;
                 self.consecutive_failures = 0;
+                self.listen.reset();
                 self.start_current(0, false);
             }
             Command::PlayNext(tracks) => self.add_tracks(&tracks, true),
@@ -682,6 +763,8 @@ impl<H: PlayerHost> Player<H> {
                 if self.queue.jump_to(id).is_some() {
                     self.want_playing = true;
                     self.consecutive_failures = 0;
+                    self.listen.reset();
+                    self.meta_dirty_since.get_or_insert_with(Instant::now);
                     self.start_current(0, false);
                 }
             }
@@ -716,13 +799,18 @@ impl<H: PlayerHost> Player<H> {
                     self.engine.set_playing(false);
                     self.resume_ms = 0;
                     self.state = PlayState::Paused;
+                    self.listen.reset();
                     self.dirty = true;
                 }
             }
             Command::Next => {
                 self.consecutive_failures = 0;
                 match self.queue.next_manual() {
-                    Some(_) => self.start_current(0, false),
+                    Some(_) => {
+                        self.listen.reset();
+                        self.meta_dirty_since.get_or_insert_with(Instant::now);
+                        self.start_current(0, false);
+                    }
                     None if self.queue.current().is_some() => self.end_of_queue(),
                     None => {}
                 }
@@ -731,7 +819,11 @@ impl<H: PlayerHost> Player<H> {
                 self.consecutive_failures = 0;
                 match self.queue.previous_manual(self.position_ms()) {
                     Some(Previous::Restart) => self.seek_to(0),
-                    Some(Previous::Item(_)) => self.start_current(0, false),
+                    Some(Previous::Item(_)) => {
+                        self.listen.reset();
+                        self.meta_dirty_since.get_or_insert_with(Instant::now);
+                        self.start_current(0, false);
+                    }
                     None => {}
                 }
             }
@@ -757,7 +849,7 @@ impl<H: PlayerHost> Player<H> {
             }
             Command::SetRepeat(mode) => {
                 self.queue.set_repeat(mode);
-                self.queue_dirty_since.get_or_insert_with(Instant::now);
+                self.meta_dirty_since.get_or_insert_with(Instant::now);
                 self.dirty = true;
                 self.sync_next();
             }
@@ -847,6 +939,7 @@ impl<H: PlayerHost> Player<H> {
         {
             self.queue.rewind();
             self.want_playing = true;
+            self.listen.reset();
             self.start_current(0, false);
             return;
         }
@@ -928,7 +1021,6 @@ impl<H: PlayerHost> Player<H> {
                         start_ms,
                         duration_ms,
                         info,
-                        credited: false,
                     });
                 }
                 self.announce_next_after(item_id);
@@ -991,47 +1083,79 @@ impl<H: PlayerHost> Player<H> {
 
     /// Everything in the feed has been played.
     fn on_drained(&mut self) {
+        let (played_epoch, frames) = self.engine.shared().position();
         let Some(chain) = self.chain.as_mut() else {
             return;
         };
+        let end_frames = (played_epoch == chain.epoch).then_some(frames);
         // Follow any boundaries not yet observed (very short final tracks).
         while chain.segments.len() > 1 {
-            chain.segments.pop_front();
-            let Some(next) = chain.segments.front().map(|s| s.item_id) else {
+            let (Some(finished), Some(next)) = (chain.segments.pop_front(), chain.segments.front())
+            else {
                 break;
             };
-            if self.queue.advance_auto().map(|i| i.id) != Some(next) {
-                self.queue.jump_to(next);
+            let boundary = next.at_frame;
+            let next_id = next.item_id;
+            self.listen
+                .hear(&finished, chain.epoch, boundary, chain.rate);
+            let length_ms = finished.start_ms
+                + boundary.saturating_sub(finished.at_frame) * 1000 / u64::from(chain.rate.max(1));
+            if self.listen.take_credit(credit_threshold_ms(length_ms)) {
+                self.host.record_play(finished.track_id);
+            }
+            self.listen.reset();
+            if self.queue.advance_auto().map(|i| i.id) != Some(next_id) {
+                self.queue.jump_to(next_id);
             }
         }
         let failed = chain.failed.take();
-        let finished = chain.segments.front().cloned();
-        if let Some(seg) = finished.filter(|s| !s.credited && failed != Some(s.item_id)) {
-            // Played to its natural end.
-            self.host.record_play(seg.track_id);
+        if let Some(seg) = chain.segments.front() {
+            // The feed length is only known as "what was played": the track's real length.
+            let end = end_frames.unwrap_or(seg.at_frame).max(seg.at_frame);
+            self.listen.hear(seg, chain.epoch, end, chain.rate);
+            let length_ms =
+                seg.start_ms + (end - seg.at_frame) * 1000 / u64::from(chain.rate.max(1));
+            // A track that broke mid-way did not play to its end.
+            if failed != Some(seg.item_id)
+                && self.listen.take_credit(credit_threshold_ms(length_ms))
+            {
+                self.host.record_play(seg.track_id);
+            }
         }
+        self.listen.reset();
+        self.meta_dirty_since.get_or_insert_with(Instant::now);
+        let current = self.queue.current().map(|c| c.id);
         let next = match failed {
+            Some(item_id) if current == Some(item_id) => self.advance_past_failure(),
             Some(item_id) => {
-                if self.queue.current().map(|c| c.id) != Some(item_id) {
-                    self.queue.jump_to(item_id);
+                // A track after the audible one could not be opened. The queue may have
+                // changed since then (something queued to play next, the broken item
+                // removed), so continue from the track that just ended and only skip the
+                // broken item if it really is what follows.
+                match self.queue.advance_auto() {
+                    Some(item) if item.id == item_id => self.advance_past_failure(),
+                    other => other.map(|_| ()).ok_or(false),
                 }
-                if self.consecutive_failures
-                    >= MAX_CONSECUTIVE_FAILURES.min(self.queue.len().max(1))
-                {
-                    self.give_up();
-                    return;
-                }
-                self.queue.advance_after_failure()
             }
             None => {
                 self.consecutive_failures = 0;
-                self.queue.advance_auto()
+                self.queue.advance_auto().map(|_| ()).ok_or(false)
             }
         };
         match next {
-            Some(_) => self.start_current(0, false),
-            None => self.end_of_queue(),
+            Ok(()) => self.start_current(0, false),
+            Err(true) => self.give_up(),
+            Err(false) => self.end_of_queue(),
         }
+    }
+
+    /// The queue's current item cannot be played: move to the next one.
+    /// `Err(true)` = too many failures in a row, `Err(false)` = the queue is over.
+    fn advance_past_failure(&mut self) -> Result<(), bool> {
+        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES.min(self.queue.len().max(1)) {
+            return Err(true);
+        }
+        self.queue.advance_after_failure().map(|_| ()).ok_or(false)
     }
 
     /// Per tick: follow track boundaries, update the state from what is audible.
@@ -1043,12 +1167,21 @@ impl<H: PlayerHost> Player<H> {
         };
         if played_epoch == chain.epoch {
             while chain.segments.len() > 1 && frames >= chain.segments[1].at_frame {
+                let boundary = chain.segments[1].at_frame;
                 let Some(finished) = chain.segments.pop_front() else {
                     break;
                 };
-                if !finished.credited {
+                // Played to its natural end.
+                self.listen
+                    .hear(&finished, chain.epoch, boundary, chain.rate);
+                let length_ms = finished.start_ms
+                    + boundary.saturating_sub(finished.at_frame) * 1000
+                        / u64::from(chain.rate.max(1));
+                if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                     self.host.record_play(finished.track_id);
                 }
+                // The next segment is a new playthrough, also of the same item (repeat one).
+                self.listen.reset();
                 let Some(next) = chain.segments.front().map(|s| s.item_id) else {
                     break;
                 };
@@ -1057,7 +1190,8 @@ impl<H: PlayerHost> Player<H> {
                 }
                 self.consecutive_failures = 0;
                 self.dirty = true;
-                self.queue_dirty_since.get_or_insert_with(Instant::now);
+                // Only "which item is current" changed: no need to rewrite the queue table.
+                self.meta_dirty_since.get_or_insert_with(Instant::now);
             }
         }
         if matches!(self.state, PlayState::Loading | PlayState::Seeking)
@@ -1082,20 +1216,89 @@ impl<H: PlayerHost> Player<H> {
             }
         }
         // Count the play once enough of the track has been heard.
-        if self.state == PlayState::Playing && played_epoch == chain.epoch {
-            let rate = u64::from(chain.rate.max(1));
-            if let Some(seg) = chain.segments.front_mut().filter(|s| !s.credited) {
-                let position = seg.start_ms + frames.saturating_sub(seg.at_frame) * 1000 / rate;
-                let threshold = if seg.duration_ms > 0 {
-                    (seg.duration_ms / 2).min(PLAY_CREDIT_MS)
-                } else {
-                    PLAY_CREDIT_MS
-                };
-                if position >= threshold && threshold > 0 {
-                    seg.credited = true;
-                    self.host.record_play(seg.track_id);
-                }
+        if played_epoch == chain.epoch
+            && let Some(seg) = chain.segments.front()
+        {
+            self.listen.hear(seg, chain.epoch, frames, chain.rate);
+            if self
+                .listen
+                .take_credit(credit_threshold_ms(seg.duration_ms))
+            {
+                self.host.record_play(seg.track_id);
             }
+            // Real audio proves this track plays: earlier failures are history.
+            if self.consecutive_failures > 0
+                && chain.failed != Some(seg.item_id)
+                && frames.saturating_sub(seg.at_frame) >= u64::from(chain.rate / 4)
+            {
+                self.consecutive_failures = 0;
+            }
+        }
+    }
+
+    /// Playback is wanted but nothing is coming: a read stuck on a dead drive, or a device
+    /// that no longer asks for audio. Without this the player would wait forever.
+    fn watch_for_stall(&mut self) {
+        let Some(chain) = &self.chain else {
+            self.starved_since = None;
+            return;
+        };
+        let position = self.engine.shared().position();
+        let moving = position != self.last_render_position;
+        self.last_render_position = position;
+        let starved = self.want_playing
+            && match self.state {
+                PlayState::Loading | PlayState::Seeking => true,
+                PlayState::Playing => !moving,
+                _ => false,
+            };
+        if !starved {
+            self.starved_since = None;
+            return;
+        }
+        let since = *self.starved_since.get_or_insert_with(Instant::now);
+        if since.elapsed() < self.stall_timeout {
+            return;
+        }
+        self.starved_since = None;
+        if self.engine.feed_has_audio(chain.epoch) {
+            // Audio is waiting; the device is not taking it.
+            let position = self.position_ms();
+            self.output_failed(OutputError::Backend(
+                "the output device stopped responding".into(),
+            ));
+            self.resume_ms = position;
+            self.save_session(false);
+            return;
+        }
+        let item = chain
+            .segments
+            .front()
+            .map_or((chain.first_item.id, chain.first_item.track), |s| {
+                (s.item_id, s.track_id)
+            });
+        tracing::warn!(track_id = item.1, "no audio from the decoder; skipping");
+        if self.queue.current().map(|c| c.id) != Some(item.0) {
+            self.queue.jump_to(item.0);
+        }
+        self.note_failure(item.1, PlaybackErrorKind::FileUnreadable);
+        self.listen.reset();
+        self.skip_failed_current();
+    }
+
+    /// Lets go of the file (and the decode thread) after a long pause.
+    fn release_paused_feed(&mut self) {
+        if self.chain.is_none() || self.want_playing {
+            self.paused_since = None;
+            return;
+        }
+        let since = *self.paused_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= PAUSE_RELEASE {
+            let position = self.position_ms();
+            self.drop_chain();
+            self.resume_ms = position;
+            self.paused_since = None;
+            self.dirty = true;
         }
     }
 
@@ -1156,6 +1359,7 @@ impl<H: PlayerHost> Player<H> {
 
     fn save_session(&mut self, force: bool) {
         let queue_changed = self.queue_dirty_since.take().is_some() || force;
+        self.meta_dirty_since = None;
         let session = Session {
             queue: self.queue.to_state(),
             position_ms: self.position_ms(),
@@ -1168,6 +1372,7 @@ impl<H: PlayerHost> Player<H> {
     fn save_session_if_due(&mut self) {
         let queue_due = self
             .queue_dirty_since
+            .or(self.meta_dirty_since)
             .is_some_and(|t| t.elapsed() >= QUEUE_SAVE_DEBOUNCE);
         let position_due = self.state == PlayState::Playing
             && self.last_session_save.elapsed() >= SESSION_SAVE_INTERVAL;

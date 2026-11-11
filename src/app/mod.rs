@@ -183,6 +183,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         default_volume: 0.8,
         replaygain: settings.replaygain,
         device_pref: settings.output_device.clone(),
+        ..PlayerConfig::default()
     };
     let (player, player_thread) = playback::player::spawn(host, config);
     let core = Arc::new(Core {

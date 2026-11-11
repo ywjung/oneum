@@ -12,6 +12,10 @@ use symphonia::core::units::{Time, TimeBase};
 
 /// Give up on a stream after this many undecodable packets in a row.
 const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 64;
+/// Sample rates outside this range are a damaged header, not music.
+const SAMPLE_RATE_RANGE: std::ops::RangeInclusive<u32> = 4_000..=768_000;
+/// More channels than any real layout: a damaged header.
+const MAX_CHANNELS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
@@ -54,6 +58,15 @@ fn map_open_error(e: SymError) -> PlaybackError {
         ),
         SymError::Unsupported(what) => err(PlaybackErrorKind::Unsupported, what),
         other => err(PlaybackErrorKind::Corrupt, other.to_string()),
+    }
+}
+
+/// Replaces non-finite samples with silence.
+pub(crate) fn sanitize(samples: &mut [f32]) {
+    for s in samples {
+        if !s.is_finite() {
+            *s = 0.0;
+        }
     }
 }
 
@@ -103,14 +116,14 @@ impl TrackDecoder {
             })?;
         let sample_rate = params
             .sample_rate
-            .filter(|r| *r > 0)
-            .ok_or_else(|| err(PlaybackErrorKind::Unsupported, "unknown sample rate"))?;
+            .filter(|r| SAMPLE_RATE_RANGE.contains(r))
+            .ok_or_else(|| err(PlaybackErrorKind::Unsupported, "unusable sample rate"))?;
         let channels = params
             .channels
             .as_ref()
             .map(|c| c.count())
-            .filter(|c| *c > 0)
-            .ok_or_else(|| err(PlaybackErrorKind::Unsupported, "unknown channel layout"))?;
+            .filter(|c| (1..=MAX_CHANNELS).contains(c))
+            .ok_or_else(|| err(PlaybackErrorKind::Unsupported, "unusable channel layout"))?;
         let codec = decoder.codec_info().short_name.to_string();
         Ok(Self {
             format,
@@ -224,6 +237,9 @@ impl TrackDecoder {
                         continue;
                     }
                     buf.copy_to_vec_interleaved::<f32>(out);
+                    // Float files can carry NaN/infinity; those would poison the
+                    // resampler and every gain stage after it.
+                    sanitize(out);
                     if let Some(target) = self.drop_until {
                         // First audible frame of this buffer (encoder-delay trim included).
                         let trim = i64::try_from(packet.trim_start.get()).unwrap_or(0);
@@ -254,5 +270,17 @@ impl TrackDecoder {
                 Err(other) => return Err(err(PlaybackErrorKind::Corrupt, other.to_string())),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize;
+
+    #[test]
+    fn non_finite_samples_become_silence() {
+        let mut samples = [0.25, f32::NAN, -0.5, f32::INFINITY, f32::NEG_INFINITY, 1.0];
+        sanitize(&mut samples);
+        assert_eq!(samples, [0.25, 0.0, -0.5, 0.0, 0.0, 1.0]);
     }
 }

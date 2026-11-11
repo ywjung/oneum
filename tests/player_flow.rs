@@ -1,6 +1,7 @@
 //! End-to-end checks of the player thread against an offline engine: commands in,
 //! snapshots and rendered audio out. No audio device is used.
 use oneum::audio::decoder::TrackDecoder;
+use oneum::audio::output::{OutputError, OutputSignals};
 use oneum::audio::render::Renderer;
 use oneum::audio::{Engine, PlaybackErrorKind, ReplayGainSettings};
 use oneum::model::{ReplayGainTags, TrackId};
@@ -11,7 +12,7 @@ use oneum::playback::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,8 @@ struct TestHost {
     session: Mutex<Option<Session>>,
     saved: Mutex<Option<Session>>,
     saves: AtomicUsize,
+    /// Saves that had to rewrite the queue's items.
+    queue_saves: AtomicUsize,
     changes: AtomicUsize,
 }
 
@@ -74,6 +77,19 @@ impl TestHost {
             ..Default::default()
         }
     }
+    /// Adds a track outside the fixture set.
+    fn with_track(mut self, id: TrackId, path: PathBuf, duration_ms: u64) -> Self {
+        self.tracks.insert(
+            id,
+            PlayableTrack {
+                path,
+                replaygain: ReplayGainTags::default(),
+                duration_ms,
+                available: true,
+            },
+        );
+        self
+    }
     fn plays(&self) -> Vec<TrackId> {
         self.plays.lock().expect("lock").clone()
     }
@@ -89,9 +105,12 @@ impl PlayerHost for TestHost {
     fn load_session(&self) -> Option<Session> {
         self.session.lock().expect("lock").clone()
     }
-    fn save_session(&self, session: &Session, _queue_changed: bool) {
+    fn save_session(&self, session: &Session, queue_changed: bool) {
         *self.saved.lock().expect("lock") = Some(session.clone());
         self.saves.fetch_add(1, Ordering::Relaxed);
+        if queue_changed {
+            self.queue_saves.fetch_add(1, Ordering::Relaxed);
+        }
     }
     fn changed(&self) {
         self.changes.fetch_add(1, Ordering::Relaxed);
@@ -108,29 +127,46 @@ struct Rig {
     host: Arc<TestHost>,
     audio: HeardAudio,
     stop: Arc<AtomicBool>,
+    /// Stands in for the error callback of the device stream.
+    signals: Arc<OutputSignals>,
+    /// Sleep between rendered blocks, in ms. 2 = about six times real time, 12 = real time.
+    pace_ms: Arc<AtomicU64>,
+    /// While set, the "device" does not ask for audio at all.
+    frozen: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Rig {
     fn start(host: TestHost) -> Self {
+        Self::start_with(host, Duration::from_secs(15))
+    }
+
+    fn start_with(host: TestHost, stall_timeout: Duration) -> Self {
         let host = Arc::new(host);
-        let (renderer_tx, renderer_rx) = std::sync::mpsc::channel::<Renderer>();
+        let (renderer_tx, renderer_rx) =
+            std::sync::mpsc::channel::<(Renderer, Arc<OutputSignals>)>();
         let (player, player_thread) = player::spawn_with_engine(
             host.clone(),
             PlayerConfig {
                 default_volume: 1.0,
+                stall_timeout,
                 ..Default::default()
             },
             move |volume| {
                 let (engine, renderer) =
                     Engine::new_offline(44_100, volume, ReplayGainSettings::default());
-                renderer_tx.send(renderer).expect("test is alive");
+                renderer_tx
+                    .send((renderer, engine.output_signals()))
+                    .expect("test is alive");
                 engine
             },
         );
-        let mut renderer = renderer_rx
+        let (mut renderer, signals) = renderer_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("engine created");
+        let pace_ms = Arc::new(AtomicU64::new(2));
+        let frozen = Arc::new(AtomicBool::new(false));
+        let (pace2, frozen2) = (pace_ms.clone(), frozen.clone());
         let audio: HeardAudio = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (audio2, stop2) = (audio.clone(), stop.clone());
@@ -138,6 +174,10 @@ impl Rig {
             const BLOCK: usize = 512;
             let mut out = vec![0f32; BLOCK * 2];
             while !stop2.load(Ordering::Relaxed) {
+                if frozen2.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
                 let (epoch_before, before) = renderer.shared().position();
                 renderer.render(&mut out, 2);
                 let (epoch_after, after) = renderer.shared().position();
@@ -158,7 +198,7 @@ impl Rig {
                         _ => audio.push((epoch_after, data.to_vec())),
                     }
                 }
-                std::thread::sleep(Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(pace2.load(Ordering::Relaxed)));
             }
         });
         Self {
@@ -166,6 +206,9 @@ impl Rig {
             host,
             audio,
             stop,
+            signals,
+            pace_ms,
+            frozen,
             threads: vec![player_thread, pump],
         }
     }
@@ -187,6 +230,19 @@ impl Rig {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// Waits for something that is not part of the snapshot (play counts, saves).
+    fn wait_host(&self, what: &str, cond: impl Fn(&TestHost) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !cond(&self.host) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn feeds(&self) -> usize {
+        self.audio.lock().expect("lock").len()
     }
 
     fn track(snap: &PlayerSnapshot) -> Option<TrackId> {
@@ -757,4 +813,299 @@ fn random_command_storm_keeps_invariants() {
         Rig::track(s) == Some(A) && s.state == PlayState::Playing
     });
     rig.wait("ends", |s| s.state == PlayState::Ended);
+}
+
+// ----- long tracks, play counts, devices and stalls ---------------------------------------
+
+const LONG: TrackId = 60; // generated, 12 s
+const STUCK: TrackId = 61; // a path whose open() never returns
+
+/// Writes a quiet 16-bit stereo 44.1 kHz WAV of `seconds` and returns its path.
+fn write_long_wav(dir: &std::path::Path, seconds: u32) -> PathBuf {
+    let frames = 44_100 * seconds;
+    let data_len = frames * 4;
+    let mut bytes = Vec::with_capacity(44 + data_len as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&44_100u32.to_le_bytes());
+    bytes.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    for n in 0..frames {
+        let v = ((f64::from(n) * 440.0 * std::f64::consts::TAU / 44_100.0).sin() * 3000.0) as i16;
+        bytes.extend_from_slice(&v.to_le_bytes());
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let path = dir.join("long.wav");
+    std::fs::write(&path, bytes).expect("write long fixture");
+    path
+}
+
+fn long_host(dir: &tempfile::TempDir) -> TestHost {
+    TestHost::new().with_track(LONG, write_long_wav(dir.path(), 12), 12_000)
+}
+
+#[test]
+fn a_playthrough_counts_once_however_often_it_is_refed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG], 0));
+    // Half of the track heard: the play is counted.
+    rig.wait_host("first credit", |h| h.plays() == vec![LONG]);
+    // Each of these replaces the feed; the position passes the half-way mark again.
+    rig.send(Command::SeekTo(5_000));
+    rig.wait("seek", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 5_000
+    });
+    rig.send(Command::Pause);
+    rig.wait("paused", |s| s.state == PlayState::Paused);
+    rig.send(Command::SeekTo(5_500));
+    rig.send(Command::Play);
+    rig.send(Command::Enqueue(vec![A]));
+    rig.send(Command::SetShuffle(true));
+    rig.send(Command::SetShuffle(false));
+    // Previous after three seconds restarts the track: still the same playthrough.
+    rig.send(Command::Previous);
+    rig.wait("restarted", |s| {
+        s.state == PlayState::Playing && Rig::track(s) == Some(LONG) && s.position_ms < 4_000
+    });
+    rig.wait("the queued track follows", |s| Rig::track(s) == Some(A));
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![LONG, A]);
+}
+
+#[test]
+fn skipping_through_a_track_is_not_a_play_but_choosing_it_again_is() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    // Jump to the last second: the track "finishes" with one second heard out of twelve.
+    rig.send(Command::SeekTo(11_000));
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), Vec::<TrackId>::new());
+
+    // Play again from the top and listen to more than half.
+    rig.send(Command::Play);
+    rig.wait_host("credit", |h| h.plays() == vec![LONG]);
+    // Starting the same track once more is a new playthrough and counts again.
+    let item = rig.player.snapshot().queue[0].id;
+    rig.send(Command::JumpTo(item));
+    rig.wait_host("second credit", |h| h.plays() == vec![LONG, LONG]);
+}
+
+#[test]
+fn losing_the_device_pauses_and_retry_continues_from_there() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG, A], 0));
+    rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 500
+    });
+    rig.signals.signal_lost();
+    let lost = rig.wait("paused by the lost device", |s| s.device_lost);
+    assert_eq!(lost.state, PlayState::Paused);
+    assert_eq!(lost.notice, Some(Notice::DeviceLost));
+    assert_eq!(Rig::track(&lost), Some(LONG));
+    assert!(
+        lost.position_ms >= 500,
+        "position kept: {}",
+        lost.position_ms
+    );
+    let frames = rig.total_frames();
+    std::thread::sleep(Duration::from_millis(80));
+    assert!(
+        rig.total_frames() <= frames + 600,
+        "nothing plays meanwhile"
+    );
+    assert_eq!(
+        rig.host
+            .saved
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .map(|s| s.position_ms),
+        Some(lost.position_ms),
+        "the position is saved when the device goes away"
+    );
+
+    rig.send(Command::RetryOutput);
+    let back = rig.wait("playing again", |s| s.state == PlayState::Playing);
+    assert!(!back.device_lost);
+    assert_eq!(Rig::track(&back), Some(LONG));
+    assert!(back.position_ms >= lost.position_ms);
+}
+
+#[test]
+fn an_invalidated_stream_or_a_device_change_continues_at_the_same_position() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG], 0));
+    let before = rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 500
+    });
+    assert_eq!(rig.feeds(), 1);
+
+    // The stream has to be rebuilt (sample-rate change, default device moved).
+    rig.signals.signal_invalidated();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.feeds() < 2 {
+        assert!(Instant::now() < deadline, "no new feed after invalidation");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let after = rig.wait("playing on the new stream", |s| {
+        s.state == PlayState::Playing
+    });
+    assert!(!after.device_lost);
+    assert_eq!(Rig::track(&after), Some(LONG));
+    assert!(after.position_ms >= before.position_ms);
+
+    // Choosing another device does the same.
+    rig.send(Command::SetOutputDevice(None));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.feeds() < 3 {
+        assert!(Instant::now() < deadline, "no new feed after device change");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let changed = rig.wait("playing on the chosen device", |s| {
+        s.state == PlayState::Playing
+    });
+    assert_eq!(Rig::track(&changed), Some(LONG));
+    assert!(changed.position_ms >= after.position_ms);
+    assert_eq!(changed.notice, None);
+}
+
+#[test]
+fn sleep_pauses_keeps_the_position_and_never_resumes_on_its_own() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 500
+    });
+    rig.send(Command::SystemWillSleep);
+    let asleep = rig.wait("paused for sleep", |s| s.state == PlayState::Paused);
+    assert!(asleep.position_ms >= 500);
+    assert!(!asleep.device_lost, "sleep is not an error");
+    let frames = rig.total_frames();
+    std::thread::sleep(Duration::from_millis(120));
+    assert!(rig.total_frames() <= frames + 600);
+    assert_eq!(rig.player.snapshot().state, PlayState::Paused);
+
+    rig.send(Command::Play);
+    let awake = rig.wait("playing after wake", |s| s.state == PlayState::Playing);
+    assert!(awake.position_ms >= asleep.position_ms);
+}
+
+#[test]
+fn a_file_that_never_opens_is_skipped_after_the_stall_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Opening a FIFO for reading blocks until somebody writes: a stand-in for a read
+    // stuck on a dead network or USB drive.
+    let fifo = dir.path().join("stuck.wav");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    let host = TestHost::new().with_track(STUCK, fifo, 1000);
+    let rig = Rig::start_with(host, Duration::from_millis(300));
+    rig.send(play(&[STUCK, A], 0));
+    let s = rig.wait("skips the stuck file", |s| {
+        Rig::track(s) == Some(A) && s.state == PlayState::Playing
+    });
+    assert_eq!(
+        s.notice,
+        Some(Notice::TrackSkipped {
+            track_id: STUCK,
+            kind: PlaybackErrorKind::FileUnreadable
+        })
+    );
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A]);
+}
+
+#[test]
+fn a_device_that_stops_asking_for_audio_is_reported_not_blamed_on_the_track() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start_with(long_host(&dir), Duration::from_millis(300));
+    rig.send(play(&[LONG, A], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    rig.frozen.store(true, Ordering::Relaxed);
+    let s = rig.wait("output reported", |s| s.device_lost);
+    assert_eq!(s.state, PlayState::Paused);
+    assert!(matches!(
+        s.notice,
+        Some(Notice::OutputUnavailable(OutputError::Backend(_)))
+    ));
+    assert_eq!(Rig::track(&s), Some(LONG), "the track is not skipped");
+    // The device is back.
+    rig.frozen.store(false, Ordering::Relaxed);
+    rig.send(Command::RetryOutput);
+    rig.wait("playing again", |s| {
+        s.state == PlayState::Playing && Rig::track(s) == Some(LONG)
+    });
+}
+
+#[test]
+fn a_broken_track_between_good_ones_never_adds_up_to_giving_up() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(Command::SetRepeat(RepeatMode::All));
+    rig.send(play(&[GONE, A], 0));
+    // Every pass hits the broken track once. That is one failure, then music, again
+    // and again: far more passes than the limit of failures in a row.
+    rig.wait_host("many passes", |h| {
+        h.plays().len() > MAX_CONSECUTIVE_FAILURES + 2
+    });
+    let s = rig.player.snapshot();
+    assert_ne!(s.state, PlayState::Error);
+    assert_ne!(s.notice, Some(Notice::TooManyFailures));
+    assert!(rig.host.plays().iter().all(|t| *t == A));
+}
+
+#[test]
+fn a_track_queued_after_a_failed_lookahead_is_still_played() {
+    let rig = Rig::start(TestHost::new());
+    // Real time, so that there is time to edit the queue while A plays.
+    rig.pace_ms.store(12, Ordering::Relaxed);
+    rig.send(play(&[A, GONE, B], 0));
+    // The decode thread has already tried to open what follows A, and failed.
+    rig.wait("lookahead failure", |s| {
+        s.notice
+            == Some(Notice::TrackSkipped {
+                track_id: GONE,
+                kind: PlaybackErrorKind::FileMissing,
+            })
+    });
+    assert_eq!(Rig::track(&rig.player.snapshot()), Some(A));
+    rig.send(Command::PlayNext(vec![MONO]));
+    rig.wait("the queued track plays next", |s| {
+        Rig::track(s) == Some(MONO) && s.state == PlayState::Playing
+    });
+    rig.pace_ms.store(2, Ordering::Relaxed);
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, MONO, B]);
+}
+
+#[test]
+fn track_boundaries_do_not_rewrite_the_queue() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(Command::SetRepeat(RepeatMode::One));
+    rig.send(play(&[A, B], 0));
+    // Several seconds of looping: many boundaries, several save intervals.
+    rig.wait_host("loops", |h| h.plays().len() >= 12);
+    rig.wait_host("state saved meanwhile", |h| {
+        h.saves.load(Ordering::Relaxed) >= 2
+    });
+    assert_eq!(
+        rig.host.queue_saves.load(Ordering::Relaxed),
+        1,
+        "only the initial queue is written"
+    );
 }

@@ -22,6 +22,16 @@ const RING_SECONDS: f64 = 1.0;
 /// How long the decode thread waits for the controller to announce the next track.
 const NEXT_WAIT: Duration = Duration::from_millis(300);
 const GAIN_RAMP_SECONDS: f32 = 0.05;
+/// How long the decode thread sleeps when the ring has no room. The ring holds a second
+/// of audio, so this is far from letting it run dry, and a paused feed costs almost nothing.
+const RING_FULL_SLEEP: Duration = Duration::from_millis(10);
+/// The decode thread waits for at least this much room (in seconds of audio) before
+/// writing again, instead of trickling a few frames in after every sleep.
+const RING_REFILL_SECONDS: f64 = 0.1;
+
+/// Unit tests only: a feed whose first request has this item id panics while decoding.
+#[cfg(test)]
+pub(crate) const TEST_PANIC_ITEM: u64 = 0x0DEC_0DE0_DEAD;
 
 /// What to play: enough for the decode thread to work without touching the library.
 #[derive(Debug, Clone, PartialEq)]
@@ -159,6 +169,9 @@ impl FeedHandle {
         let written = Arc::new(AtomicU64::new(0));
         let epoch = params.epoch;
         let worker = Worker {
+            current: (params.first.item_id, params.first.track_id),
+            refill: ((f64::from(params.out_rate) * RING_REFILL_SECONDS) as usize * 2)
+                .clamp(2, capacity / 2),
             params,
             producer,
             cancel: cancel.clone(),
@@ -206,6 +219,10 @@ impl Drop for FeedHandle {
 }
 
 struct Worker {
+    /// `(item, track)` being decoded, for the failure report of a panic.
+    current: (u64, TrackId),
+    /// Samples of room to wait for when the ring is full.
+    refill: usize,
     params: FeedParams,
     producer: rtrb::Producer<f32>,
     cancel: Arc<AtomicBool>,
@@ -227,11 +244,12 @@ impl Worker {
             }
             // Keep whole frames together so the reader always sees an even sample count.
             let free = self.producer.slots() & !1;
-            if free == 0 {
-                std::thread::sleep(Duration::from_millis(2));
+            let rest = samples.len() - offset;
+            if free < rest.min(self.refill) {
+                std::thread::sleep(RING_FULL_SLEEP);
                 continue;
             }
-            let n = free.min(samples.len() - offset);
+            let n = free.min(rest);
             let Ok(mut chunk) = self.producer.write_chunk(n) else {
                 continue;
             };
@@ -264,7 +282,41 @@ impl Worker {
         let _ = self.params.events.send(event);
     }
 
+    /// Thread body. Whatever happens inside the decoder, the feed always ends with
+    /// `finished` set and a `Finished` event (unless it was cancelled), so the player can
+    /// never be left waiting for audio that will not come.
     fn run(mut self) {
+        let epoch = self.params.epoch;
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.decode_tracks()));
+        match outcome {
+            Ok(true) => {}
+            // Cancelled: nobody listens to this feed any more.
+            Ok(false) => return,
+            Err(_) => {
+                tracing::error!("decode thread panicked; skipping the track");
+                let (item_id, track_id) = self.current;
+                self.send(FeedEvent::TrackFailed {
+                    epoch,
+                    item_id,
+                    track_id,
+                    error: PlaybackError {
+                        kind: PlaybackErrorKind::Corrupt,
+                        detail: "decoder panicked".into(),
+                    },
+                });
+            }
+        }
+        let written = self.written.load(Ordering::Relaxed);
+        self.finished.store(true, Ordering::Release);
+        self.send(FeedEvent::Finished {
+            epoch,
+            total_frames: written,
+        });
+    }
+
+    /// Decodes track after track into the ring. Returns false when cancelled.
+    fn decode_tracks(&mut self) -> bool {
         let epoch = self.params.epoch;
         let out_rate = self.params.out_rate;
         let mut req = self.params.first.clone();
@@ -279,6 +331,7 @@ impl Worker {
         let mut gain_now;
 
         'tracks: loop {
+            self.current = (req.item_id, req.track_id);
             let fail = |error: PlaybackError| FeedEvent::TrackFailed {
                 epoch,
                 item_id: req.item_id,
@@ -310,9 +363,10 @@ impl Worker {
                     resampled.clear();
                     if old.flush(&mut resampled).is_ok() {
                         if !self.push_all(&resampled) {
-                            return;
+                            return false;
                         }
                         written += (resampled.len() / 2) as u64;
+                        self.written.store(written, Ordering::Relaxed);
                     }
                 }
                 if needs_resampling {
@@ -349,8 +403,13 @@ impl Worker {
 
             loop {
                 if self.cancelled() {
-                    return;
+                    return false;
                 }
+                #[cfg(test)]
+                assert!(
+                    self.params.first.item_id != TEST_PANIC_ITEM,
+                    "test: decoder panic"
+                );
                 match dec.next(&mut decoded) {
                     Ok(true) => {
                         stereo.clear();
@@ -397,7 +456,7 @@ impl Worker {
                             }
                         };
                         if !pushed {
-                            return;
+                            return false;
                         }
                         self.written.store(written, Ordering::Relaxed);
                     }
@@ -421,16 +480,116 @@ impl Worker {
             resampled.clear();
             if rs.flush(&mut resampled).is_ok() {
                 if !self.push_all(&resampled) {
-                    return;
+                    return false;
                 }
                 written += (resampled.len() / 2) as u64;
             }
         }
         self.written.store(written, Ordering::Relaxed);
-        self.finished.store(true, Ordering::Release);
-        self.send(FeedEvent::Finished {
-            epoch,
-            total_frames: written,
-        });
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    fn params(item_id: u64, events: Sender<FeedEvent>) -> FeedParams {
+        FeedParams {
+            epoch: 7,
+            out_rate: 44_100,
+            first: TrackRequest {
+                item_id,
+                track_id: 3,
+                path: fixture("gap_a.wav"),
+                replaygain: ReplayGainTags::default(),
+            },
+            start_ms: 0,
+            next: {
+                let slot = NextSlot::new();
+                slot.set(NextTrack::End);
+                slot
+            },
+            rg: RgShared::new(ReplayGainSettings::default()),
+            events,
+        }
+    }
+
+    fn collect(rx: &std::sync::mpsc::Receiver<FeedEvent>) -> Vec<FeedEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(Duration::from_secs(10)) {
+            let last = matches!(event, FeedEvent::Finished { .. });
+            events.push(event);
+            if last {
+                break;
+            }
+        }
+        events
+    }
+
+    /// A panic inside the decoder must end the feed like any other failure: the track is
+    /// reported as failed and the feed as finished, so the player moves on.
+    #[test]
+    fn decoder_panic_is_reported_as_a_failed_track() {
+        let (tx, rx) = channel();
+        let mut feed = FeedHandle::spawn(params(TEST_PANIC_ITEM, tx)).expect("spawn");
+        let _consumer = feed.take_consumer();
+        let events = collect(&rx);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                FeedEvent::TrackFailed {
+                    epoch: 7,
+                    item_id: TEST_PANIC_ITEM,
+                    track_id: 3,
+                    error,
+                } if error.kind == PlaybackErrorKind::Corrupt
+            )),
+            "{events:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(FeedEvent::Finished { epoch: 7, .. })
+        ));
+        assert!(feed.is_finished());
+    }
+
+    /// The reader is slower than the decoder: everything still arrives, in order, although
+    /// the decode thread now waits for room instead of trickling frames in.
+    #[test]
+    fn slow_reader_receives_every_frame() {
+        let (tx, rx) = channel();
+        let mut feed = FeedHandle::spawn(params(1, tx)).expect("spawn");
+        let mut consumer = feed.take_consumer().expect("consumer").consumer;
+        let mut read: u64 = 0;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let available = consumer.slots();
+            if available > 0 {
+                let chunk = consumer.read_chunk(available).expect("chunk");
+                read += available as u64;
+                chunk.commit_all();
+            } else if feed.is_finished() && consumer.slots() == 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "feed never finished");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let total = collect(&rx)
+            .iter()
+            .find_map(|e| match e {
+                FeedEvent::Finished { total_frames, .. } => Some(*total_frames),
+                _ => None,
+            })
+            .expect("finished event");
+        assert_eq!(read, total * 2);
+        assert!(total > 0);
     }
 }

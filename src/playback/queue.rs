@@ -5,6 +5,7 @@
 //! have their own ids, so the same track can be queued several times.
 use crate::model::TrackId;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 pub type ItemId = u64;
 
@@ -215,6 +216,8 @@ impl Queue {
     /// Removes items. Returns true when the current item was among them; the item that
     /// followed it (if any) is then current, otherwise the queue has no current item.
     pub fn remove(&mut self, ids: &[ItemId]) -> bool {
+        // Sets, so that removing thousands of items from a large queue stays linear.
+        let ids: HashSet<ItemId> = ids.iter().copied().collect();
         let current_id = self.current().map(|c| c.id);
         let current_removed = current_id.is_some_and(|id| ids.contains(&id));
         // The successor of a removed current item is the first survivor after it.
@@ -258,6 +261,7 @@ impl Queue {
     /// Moves the given items (keeping their relative order) so that they start at
     /// `to_index` of the list with those items taken out. The current item stays current.
     pub fn move_items(&mut self, ids: &[ItemId], to_index: usize) {
+        let ids: HashSet<ItemId> = ids.iter().copied().collect();
         let current_id = self.current().map(|c| c.id);
         let moved: Vec<QueueItem> = self
             .items
@@ -300,26 +304,29 @@ impl Queue {
                 None => self.shuffle_tail(0),
             }
         } else {
-            let order = std::mem::take(&mut self.unshuffled);
-            // Items missing from the remembered order keep their relative order at the end.
-            self.items.sort_by_key(|i| {
-                order
-                    .iter()
-                    .position(|id| *id == i.id)
-                    .unwrap_or(usize::MAX)
-            });
+            let order: HashMap<ItemId, usize> = std::mem::take(&mut self.unshuffled)
+                .into_iter()
+                .enumerate()
+                .map(|(position, id)| (id, position))
+                .collect();
+            // Items missing from the remembered order keep their relative order at the end
+            // (the sort is stable).
+            self.items
+                .sort_by_key(|i| order.get(&i.id).copied().unwrap_or(usize::MAX));
         }
         self.current = current_id.and_then(|id| self.index_of(id));
     }
 
-    /// Starts another pass over a shuffled queue in a fresh order, avoiding an immediate
-    /// repeat of the track that just played.
+    /// Starts another pass over a shuffled queue in a fresh order. The track that just
+    /// played goes to the very end of the new order: it cannot come up again right away,
+    /// and since "previous" from the first item wraps to the last one, going back still
+    /// leads to the track that was actually heard before.
     fn reshuffle_for_wrap(&mut self) {
         let last = self.current().map(|c| c.id);
         self.shuffle_tail(0);
-        if self.items.len() > 1 && self.items.first().map(|i| i.id) == last {
-            let other = self.rng.usize(1..self.items.len());
-            self.items.swap(0, other);
+        if let Some(at) = last.and_then(|id| self.index_of(id)) {
+            let end = self.items.len() - 1;
+            self.items.swap(at, end);
         }
     }
 
@@ -714,5 +721,85 @@ mod tests {
         assert_eq!(tracks(&q), vec![1, 2, 4, 5]);
         assert_eq!(cur(&q), 4);
         assert!(!q.retain_tracks(|_| true));
+    }
+
+    #[test]
+    fn previous_after_a_shuffled_wrap_returns_to_the_track_just_played() {
+        for seed in 0..50 {
+            let mut q = Queue::with_seed(seed);
+            q.set_repeat(RepeatMode::All);
+            q.set_shuffle(true);
+            q.replace(&[1, 2, 3, 4, 5, 6], 0);
+            while q.current_index() != Some(q.len() - 1) {
+                q.advance_auto().expect("not at the end yet");
+            }
+            let last = q.current().expect("current");
+            let first_of_new_pass = q.advance_auto().expect("wraps");
+            assert_ne!(first_of_new_pass.id, last.id, "seed {seed}");
+            assert_eq!(q.current_index(), Some(0));
+            // Going back from the start of the new pass leads to what was heard before.
+            assert_eq!(
+                q.previous_manual(0),
+                Some(Previous::Item(last)),
+                "seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_item_survives_a_shuffled_wrap() {
+        let mut q = Queue::with_seed(3);
+        q.set_repeat(RepeatMode::All);
+        q.set_shuffle(true);
+        q.replace(&[9], 0);
+        assert_eq!(q.advance_auto().map(|i| i.track), Some(9));
+        assert_eq!(q.next_manual().map(|i| i.track), Some(9));
+    }
+
+    #[test]
+    fn large_queue_edits_stay_fast() {
+        const N: i64 = 50_000;
+        let tracks: Vec<TrackId> = (0..N).collect();
+        let mut q = Queue::with_seed(11);
+        q.replace(&tracks, 20_000);
+        let original: Vec<ItemId> = q.items().iter().map(|i| i.id).collect();
+        let started = std::time::Instant::now();
+
+        q.set_shuffle(true);
+        assert_eq!(q.current().map(|c| c.track), Some(20_000));
+        q.set_shuffle(false);
+        assert_eq!(
+            q.items().iter().map(|i| i.id).collect::<Vec<_>>(),
+            original,
+            "turning shuffle off restores the order"
+        );
+        assert_eq!(q.current_index(), Some(20_000));
+
+        // Move every fourth item to the front, then remove every second one.
+        let moved: Vec<ItemId> = original.iter().copied().step_by(4).collect();
+        q.move_items(&moved, 0);
+        assert_eq!(
+            q.items()[..moved.len()]
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<_>>(),
+            moved
+        );
+        assert_eq!(q.current().map(|c| c.track), Some(20_000));
+        let removed: Vec<ItemId> = original.iter().copied().step_by(2).collect();
+        assert!(q.remove(&removed), "the current item is among them");
+        assert_eq!(q.len(), N as usize / 2);
+        // The current item sat among the moved ones (all removed); the first survivor
+        // after it is the first item that was not moved.
+        assert_eq!(q.current().map(|c| c.track), Some(1));
+        let gone = q.retain_tracks(|t| t % 3 != 0);
+        assert!(!gone || q.current().is_some());
+
+        // Quadratic versions of these took minutes at this size.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }
