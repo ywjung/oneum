@@ -1,0 +1,463 @@
+//! Playlists, M3U8 import/export, favourites, history, queue and key-value persistence.
+#[path = "library_support.rs"]
+mod support;
+
+use oneum::library::{Library, LibraryError};
+use oneum::model::TrackId;
+use std::fs;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use support::*;
+
+/// A library with five scanned tracks; returns their ids in title order (T1..T5).
+fn library_with_tracks(env: &TestEnv) -> (Arc<Library>, Vec<TrackId>) {
+    for i in 1..=5u32 {
+        write_tagged_wav(
+            &env.music().join(format!("앨범/곡 {i}.wav")),
+            200 + i * 100,
+            &format!("T{i}"),
+            "아이유",
+            "앨범",
+        );
+    }
+    let (library, _) = env.open_scanned();
+    let snapshot = library.snapshot();
+    let mut tracks: Vec<_> = snapshot.tracks.iter().collect();
+    tracks.sort_by(|a, b| a.title.cmp(&b.title));
+    let ids = tracks.iter().map(|t| t.id).collect();
+    (library, ids)
+}
+
+fn track_ids(library: &Library, playlist: i64) -> Vec<TrackId> {
+    library
+        .playlist_items(playlist)
+        .iter()
+        .map(|item| item.track_id)
+        .collect()
+}
+
+#[test]
+fn playlist_crud() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let generation = library.playlists_generation();
+    assert!(library.playlists().is_empty());
+
+    assert!(matches!(
+        library.create_playlist(""),
+        Err(LibraryError::InvalidName)
+    ));
+    assert!(matches!(
+        library.create_playlist("  \t "),
+        Err(LibraryError::InvalidName)
+    ));
+    let first = library.create_playlist("  드라이브 🚗  ").unwrap();
+    let second = library.create_playlist("드라이브 🚗").unwrap();
+    assert_ne!(first, second, "duplicate names are allowed");
+    assert!(library.playlists_generation() > generation);
+    let lists = library.playlists();
+    assert_eq!(lists.len(), 2);
+    assert_eq!(lists[0].name, "드라이브 🚗", "the name is trimmed");
+    assert_eq!((lists[0].id, lists[0].item_count), (first, 0));
+
+    // Items keep their order and may repeat; unknown track ids are skipped.
+    library
+        .add_to_playlist(first, &[ids[2], ids[0], ids[2], 987_654, ids[4]])
+        .unwrap();
+    assert_eq!(track_ids(&library, first), [ids[2], ids[0], ids[2], ids[4]]);
+    let items = library.playlist_items(first);
+    let unique: std::collections::HashSet<i64> = items.iter().map(|i| i.item_id).collect();
+    assert_eq!(unique.len(), 4, "every entry has its own item id");
+    library.add_to_playlist(first, &[ids[1]]).unwrap();
+    assert_eq!(
+        track_ids(&library, first),
+        [ids[2], ids[0], ids[2], ids[4], ids[1]]
+    );
+    assert_eq!(library.playlists()[0].item_count, 5);
+    assert!(library.playlist_items(second).is_empty());
+
+    // Removing one of the two entries of the same track leaves the other.
+    let generation = library.playlists_generation();
+    library
+        .remove_playlist_items(first, &[items[0].item_id])
+        .unwrap();
+    assert_eq!(track_ids(&library, first), [ids[0], ids[2], ids[4], ids[1]]);
+    assert!(library.playlists_generation() > generation);
+    // Item ids of another playlist are not affected.
+    library.add_to_playlist(second, &[ids[3]]).unwrap();
+    let foreign = library.playlist_items(second)[0].item_id;
+    library.remove_playlist_items(first, &[foreign]).unwrap();
+    assert_eq!(library.playlist_items(second).len(), 1);
+
+    library.rename_playlist(first, " 새 이름 ").unwrap();
+    assert_eq!(library.playlists()[0].name, "새 이름");
+    assert!(matches!(
+        library.rename_playlist(first, " "),
+        Err(LibraryError::InvalidName)
+    ));
+
+    // Unknown playlists.
+    assert!(matches!(
+        library.rename_playlist(999, "x"),
+        Err(LibraryError::NotFound)
+    ));
+    assert!(matches!(
+        library.delete_playlist(999),
+        Err(LibraryError::NotFound)
+    ));
+    assert!(matches!(
+        library.add_to_playlist(999, &ids),
+        Err(LibraryError::NotFound)
+    ));
+    assert!(matches!(
+        library.remove_playlist_items(999, &[1]),
+        Err(LibraryError::NotFound)
+    ));
+    assert!(matches!(
+        library.move_playlist_items(999, &[1], 0),
+        Err(LibraryError::NotFound)
+    ));
+    assert!(library.playlist_items(999).is_empty());
+
+    // Everything is persistent.
+    drop(library);
+    let library = env.open();
+    assert_eq!(library.playlists().len(), 2);
+    assert_eq!(track_ids(&library, first), [ids[0], ids[2], ids[4], ids[1]]);
+
+    library.delete_playlist(first).unwrap();
+    assert_eq!(library.playlists().len(), 1);
+    assert!(library.playlist_items(first).is_empty());
+    // Deleting a playlist does not delete tracks.
+    assert_eq!(library.snapshot().len(), 5);
+}
+
+#[test]
+fn moving_playlist_items() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let playlist = library.create_playlist("order").unwrap();
+    library.add_to_playlist(playlist, &ids).unwrap();
+    let item = |index: usize| library.playlist_items(playlist)[index].item_id;
+    let order = |library: &Library| -> Vec<usize> {
+        track_ids(library, playlist)
+            .iter()
+            .map(|id| ids.iter().position(|x| x == id).unwrap() + 1)
+            .collect()
+    };
+    assert_eq!(order(&library), [1, 2, 3, 4, 5]);
+
+    // One item down: T1 lands at index 2 of [2,3,4,5].
+    library
+        .move_playlist_items(playlist, &[item(0)], 2)
+        .unwrap();
+    assert_eq!(order(&library), [2, 3, 1, 4, 5]);
+    // One item to the front.
+    library
+        .move_playlist_items(playlist, &[item(4)], 0)
+        .unwrap();
+    assert_eq!(order(&library), [5, 2, 3, 1, 4]);
+    // Several items keep their relative order in the list, whatever order they are
+    // named in: moving {T4, T2} to the front gives T2, T4.
+    library
+        .move_playlist_items(playlist, &[item(4), item(1)], 0)
+        .unwrap();
+    assert_eq!(order(&library), [2, 4, 5, 3, 1]);
+    // An index past the end appends.
+    library
+        .move_playlist_items(playlist, &[item(0), item(2)], 99)
+        .unwrap();
+    assert_eq!(order(&library), [4, 3, 1, 2, 5]);
+    // Into the middle: [4,1,5] with {3,2} inserted at index 1.
+    library
+        .move_playlist_items(playlist, &[item(1), item(3)], 1)
+        .unwrap();
+    assert_eq!(order(&library), [4, 3, 2, 1, 5]);
+    // Unknown item ids and an empty selection change nothing.
+    let generation = library.playlists_generation();
+    library
+        .move_playlist_items(playlist, &[123_456], 0)
+        .unwrap();
+    library.move_playlist_items(playlist, &[], 0).unwrap();
+    assert_eq!(order(&library), [4, 3, 2, 1, 5]);
+    assert_eq!(library.playlists_generation(), generation);
+
+    // The order is what gets stored.
+    drop(library);
+    let library = env.open();
+    assert_eq!(order(&library), [4, 3, 2, 1, 5]);
+}
+
+#[test]
+fn deleting_tracks_cascades_to_playlists_history_and_queue() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let playlist = library.create_playlist("p").unwrap();
+    library
+        .add_to_playlist(playlist, &[ids[0], ids[1], ids[0], ids[2]])
+        .unwrap();
+    library.record_play(ids[0]);
+    library.record_play(ids[1]);
+    library.save_queue(&[(10, ids[0]), (11, ids[1]), (12, ids[0])]);
+    let generation = library.playlists_generation();
+
+    library.remove_tracks(&[ids[0]]);
+    assert_eq!(track_ids(&library, playlist), [ids[1], ids[2]]);
+    assert!(library.playlists_generation() > generation);
+    assert_eq!(library.recent_plays(10), [ids[1]]);
+    assert_eq!(library.load_queue(), [(11, ids[1])]);
+    assert_eq!(library.snapshot().len(), 4);
+    assert!(library.snapshot().get(ids[0]).is_none());
+}
+
+#[test]
+fn favourites_history_and_play_counts() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let notified = Arc::new(AtomicUsize::new(0));
+    {
+        let notified = Arc::clone(&notified);
+        library.set_notifier(Box::new(move || {
+            notified.fetch_add(1, Ordering::Relaxed);
+        }));
+    }
+
+    let generation = library.generation();
+    library.set_favorite(&[ids[0], ids[3], 424_242], true);
+    assert!(library.generation() > generation);
+    assert!(notified.load(Ordering::Relaxed) > 0);
+    let snapshot = library.snapshot();
+    assert!(snapshot.get(ids[0]).unwrap().favorite);
+    assert!(snapshot.get(ids[3]).unwrap().favorite);
+    assert!(!snapshot.get(ids[1]).unwrap().favorite);
+    // The index is intact after the cheap update.
+    assert_eq!(snapshot.search("t4").len(), 1);
+    assert_eq!(snapshot.search("ㅇㅇㅇ").len(), 5);
+    library.set_favorite(&[ids[0]], false);
+    assert!(!library.track(ids[0]).unwrap().favorite);
+    assert!(!library.snapshot().get(ids[0]).unwrap().favorite);
+    // Setting the value it already has does not publish anything.
+    let generation = library.generation();
+    library.set_favorite(&[ids[0]], false);
+    assert_eq!(library.generation(), generation);
+
+    assert!(library.recent_plays(10).is_empty());
+    library.record_play(ids[1]);
+    library.record_play(ids[2]);
+    library.record_play(ids[1]);
+    library.record_play(777_777); // unknown ids are ignored
+    assert_eq!(
+        library.recent_plays(10),
+        [ids[1], ids[2]],
+        "most recent first, distinct"
+    );
+    assert_eq!(library.recent_plays(1), [ids[1]]);
+    assert!(library.recent_plays(0).is_empty());
+    let played = library.snapshot().get(ids[1]).cloned().unwrap();
+    assert_eq!(played.play_count, 2);
+    assert!(played.last_played_at.is_some());
+    assert_eq!(library.snapshot().get(ids[0]).unwrap().play_count, 0);
+
+    drop(snapshot);
+    drop(library);
+    let library = env.open();
+    assert_eq!(library.recent_plays(10), [ids[1], ids[2]]);
+    assert_eq!(library.track(ids[1]).unwrap().play_count, 2);
+    assert!(library.track(ids[3]).unwrap().favorite);
+}
+
+#[test]
+fn kv_and_queue_persistence() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    assert_eq!(library.kv_get("player.volume"), None);
+    library.kv_set("player.volume", "0.8");
+    library.kv_set("player.volume", "0.5");
+    library.kv_set("상태", "{\"반복\": \"전체\", \"note\": \"it's\"}");
+    library.kv_set("empty", "");
+    assert_eq!(library.kv_get("player.volume").as_deref(), Some("0.5"));
+    assert_eq!(library.kv_get("empty").as_deref(), Some(""));
+
+    assert!(library.load_queue().is_empty());
+    library.save_queue(&[(1, ids[0]), (2, ids[1])]);
+    // Saving replaces the previous queue; the same track may be queued twice and item
+    // ids are opaque 64-bit values. Unknown tracks are dropped.
+    let queue = [(u64::MAX, ids[4]), (7, ids[4]), (3, 555_555), (0, ids[2])];
+    library.save_queue(&queue);
+    assert_eq!(
+        library.load_queue(),
+        [(u64::MAX, ids[4]), (7, ids[4]), (0, ids[2])]
+    );
+
+    drop(library);
+    let library = env.open();
+    assert_eq!(library.kv_get("player.volume").as_deref(), Some("0.5"));
+    assert_eq!(
+        library.kv_get("상태").as_deref(),
+        Some("{\"반복\": \"전체\", \"note\": \"it's\"}")
+    );
+    assert_eq!(
+        library.load_queue(),
+        [(u64::MAX, ids[4]), (7, ids[4]), (0, ids[2])]
+    );
+    library.save_queue(&[]);
+    assert!(library.load_queue().is_empty());
+}
+
+#[test]
+fn m3u8_export_and_import_round_trip() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let playlist = library.create_playlist("원본").unwrap();
+    library
+        .add_to_playlist(playlist, &[ids[1], ids[0], ids[1]])
+        .unwrap();
+
+    let dest = env.dir.path().join("exports/내 목록.m3u8");
+    assert_eq!(library.export_m3u8(playlist, &dest).unwrap(), 3);
+    let text = fs::read_to_string(&dest).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "#EXTM3U");
+    assert_eq!(lines.len(), 7);
+    // Durations: T2 is 400 ms (rounds to 0 s), T1 is 300 ms.
+    assert_eq!(lines[1], "#EXTINF:0,아이유 - T2");
+    let t2_path = library.track(ids[1]).unwrap().path.clone();
+    assert!(t2_path.is_absolute());
+    assert_eq!(lines[2], t2_path.to_str().unwrap());
+    assert_eq!(lines[3], "#EXTINF:0,아이유 - T1");
+    assert!(matches!(
+        library.export_m3u8(999, &dest),
+        Err(LibraryError::NotFound)
+    ));
+
+    let imported = library.import_m3u8(&dest).unwrap();
+    assert_eq!(imported.name, "내 목록");
+    assert_eq!(imported.matched, 3);
+    assert!(imported.missing.is_empty());
+    assert_ne!(imported.playlist_id, playlist);
+    assert_eq!(
+        track_ids(&library, imported.playlist_id),
+        [ids[1], ids[0], ids[1]]
+    );
+    assert_eq!(
+        library.snapshot().len(),
+        5,
+        "known files are not imported twice"
+    );
+}
+
+#[test]
+fn m3u8_import_tolerates_real_world_files() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let music = env.music();
+    let path_of = |i: usize| library.track(ids[i]).unwrap().path.clone();
+
+    // A file outside the library that exists on disk: it gets imported.
+    let lists = env.dir.path().join("lists");
+    write_tagged_wav(
+        &lists.join("extra/밖의 곡.wav"),
+        250,
+        "Outside",
+        "Other",
+        "Elsewhere",
+    );
+    // A file that exists but is not audio the library can read.
+    fs::write(lists.join("extra/broken.mp3"), noise(2000, 21)).unwrap();
+
+    let file_url = format!(
+        "file://{}",
+        path_of(2)
+            .to_str()
+            .unwrap()
+            .bytes()
+            .map(|b| match b {
+                b'/' | b'.' | b'-' | b'_' => (b as char).to_string(),
+                b if b.is_ascii_alphanumeric() => (b as char).to_string(),
+                b => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    );
+    let relative_to_music = "../music/앨범/곡 4.wav";
+    let mut text = String::from("\u{feff}#EXTM3U\r\n");
+    text.push_str("#EXTINF:1,아이유 - T1\r\n");
+    text.push_str(&format!("{}\r\n", path_of(0).display()));
+    text.push_str("\r\n   \r\n# a plain comment\r\n");
+    text.push_str(&format!("{file_url}\r\n"));
+    text.push_str(&format!("{relative_to_music}\r\n"));
+    text.push_str("extra/밖의 곡.wav\r\n");
+    text.push_str("extra/broken.mp3\r\n");
+    text.push_str("extra/없는 파일.flac\r\n");
+    text.push_str("http://example.com/stream.mp3\r\n");
+    text.push_str(&format!("{}", path_of(0).display())); // no trailing newline
+    let list_path = lists.join("섞인 목록.m3u");
+    fs::write(&list_path, text).unwrap();
+    assert!(music.join("앨범/곡 4.wav").is_file());
+
+    let generation = library.playlists_generation();
+    let imported = library.import_m3u8(&list_path).unwrap();
+    assert_eq!(imported.name, "섞인 목록");
+    assert_eq!(
+        imported.missing,
+        [
+            "extra/broken.mp3",
+            "extra/없는 파일.flac",
+            "http://example.com/stream.mp3"
+        ]
+    );
+    assert_eq!(imported.matched, 5);
+    assert!(library.playlists_generation() > generation);
+
+    let outside = library
+        .snapshot()
+        .tracks
+        .iter()
+        .find(|t| t.title == "Outside")
+        .cloned()
+        .expect("the file outside the library was imported");
+    assert_eq!(outside.root_id, None);
+    assert_eq!(
+        track_ids(&library, imported.playlist_id),
+        [ids[0], ids[2], ids[3], outside.id, ids[0]]
+    );
+    assert_eq!(library.snapshot().len(), 6);
+
+    // A missing playlist file is an I/O error, not a panic or an empty playlist.
+    let count = library.playlists().len();
+    assert!(matches!(
+        library.import_m3u8(&lists.join("nope.m3u8")),
+        Err(LibraryError::Io(_))
+    ));
+    assert_eq!(library.playlists().len(), count);
+}
+
+#[test]
+fn m3u8_import_matches_paths_across_unicode_normal_forms() {
+    use unicode_normalization::UnicodeNormalization;
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    // The library has the path as the file system reported it. Write the playlist with
+    // the opposite normal form; the entry must resolve to the existing row.
+    let original = library
+        .track(ids[0])
+        .unwrap()
+        .path
+        .to_str()
+        .unwrap()
+        .to_string();
+    let nfd: String = original.nfd().collect();
+    let nfc: String = original.nfc().collect();
+    let other = if original == nfc { nfd } else { nfc };
+    assert_ne!(other, original, "the fixture path must contain Hangul");
+    let list = env.dir.path().join("forms.m3u8");
+    fs::write(&list, format!("#EXTM3U\n{other}\n")).unwrap();
+
+    let imported = library.import_m3u8(&list).unwrap();
+    assert_eq!(imported.matched, 1);
+    assert_eq!(track_ids(&library, imported.playlist_id), [ids[0]]);
+    assert_eq!(
+        library.snapshot().len(),
+        5,
+        "no duplicate row for the same file"
+    );
+}
