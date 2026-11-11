@@ -2,6 +2,10 @@
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::sync::Mutex;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -22,13 +26,28 @@ pub fn init(log_dir: &Path) {
         .append(true)
         .open(&path)
         .ok();
-    let builder = tracing_subscriber::fmt()
-        .with_max_level(level)
+    // Third-party crates are chatty at `info` (decoder and tag-reader details that may
+    // include file names): keep them at `warn` unless tracing is requested explicitly.
+    let third_party = if level >= tracing::Level::DEBUG {
+        level
+    } else {
+        tracing::Level::WARN
+    };
+    let filter = Targets::new()
+        .with_default(third_party)
+        .with_target("oneum", level)
+        .with_target("symphonia", third_party.min(tracing::Level::WARN))
+        .with_target("lofty", third_party.min(tracing::Level::WARN));
+    let layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_target(false);
     let result = match file {
-        Some(file) => builder.with_writer(Mutex::new(file)).try_init(),
-        None => builder.with_writer(std::io::stderr).try_init(),
+        Some(file) => tracing_subscriber::registry()
+            .with(layer.with_writer(Mutex::new(file)).with_filter(filter))
+            .try_init(),
+        None => tracing_subscriber::registry()
+            .with(layer.with_writer(std::io::stderr).with_filter(filter))
+            .try_init(),
     };
     if result.is_err() {
         eprintln!("logging was already initialised");

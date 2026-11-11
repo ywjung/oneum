@@ -145,8 +145,18 @@ pub struct Startup {
     pub system_prefers_korean: bool,
 }
 
+static PROCESS_START: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Time since `start()` was entered (close to process start).
+pub fn process_uptime() -> std::time::Duration {
+    PROCESS_START
+        .get()
+        .map_or(std::time::Duration::ZERO, |t| t.elapsed())
+}
+
 /// Opens the library, starts the player and the file watcher.
 pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
+    let _ = PROCESS_START.set(std::time::Instant::now());
     let paths = AppPaths::resolve()?;
     logging::init(&paths.log_dir);
     tracing::info!(version = VERSION, "starting OnEum");

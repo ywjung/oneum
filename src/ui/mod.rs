@@ -130,7 +130,22 @@ enum UiRequest {
     UserGuide,
 }
 
+/// Timings reported by verification dumps (cost: a few `Instant` reads per frame).
+#[derive(Default)]
+struct Perf {
+    /// Process start to the first UI frame.
+    first_frame_ms: Option<f64>,
+    /// CPU time of the UI pass (layout and input; excludes GPU presentation).
+    last_frame_ms: f64,
+    max_frame_ms: f64,
+    frames: u64,
+    /// Time of the most recent row-list rebuild (search, sort or library change).
+    last_rows_build_ms: f64,
+    max_rows_build_ms: f64,
+}
+
 pub struct OneumApp {
+    perf: Perf,
     core: Arc<Core>,
     settings: Settings,
     saved_settings: Settings,
@@ -144,6 +159,7 @@ pub struct OneumApp {
     player: PlayerSnapshot,
     last_notice_seq: u64,
     scan_was_running: bool,
+    announce_scan: bool,
 
     nav: Nav,
     history: Vec<Nav>,
@@ -204,6 +220,7 @@ impl OneumApp {
         let (events_tx, events_rx) = channel();
         let player = core.player.snapshot();
         let mut this = Self {
+            perf: Perf::default(),
             art: ArtCache::new(core.library.clone(), ctx.clone()),
             snapshot: core.library.snapshot(),
             lib_generation: core.library.generation(),
@@ -212,6 +229,7 @@ impl OneumApp {
             last_notice_seq: player.notice_seq,
             player,
             scan_was_running: false,
+            announce_scan: false,
             nav: Nav::Songs,
             history: Vec::new(),
             views: HashMap::new(),
@@ -340,7 +358,8 @@ impl OneumApp {
         }
 
         let scan = self.core.library.scan_status();
-        if self.scan_was_running && !scan.running {
+        // Only scans the user asked for are announced; background rescans stay quiet.
+        if self.scan_was_running && !scan.running && std::mem::take(&mut self.announce_scan) {
             let text = self
                 .lang
                 .scan_finished(self.snapshot.len(), scan.unsupported, scan.errors);
@@ -564,6 +583,7 @@ impl OneumApp {
     fn add_folder(&mut self, path: PathBuf) {
         match self.core.library.add_folder(&path) {
             Ok(_) => {
+                self.announce_scan = true;
                 let name = path.file_name().map_or_else(
                     || path.display().to_string(),
                     |n| n.to_string_lossy().into_owned(),
@@ -812,6 +832,8 @@ impl OneumApp {
                 }
                 automation::AppStep::Dump(target) => {
                     let _ = std::fs::write(&target, self.state_json(ctx).to_string());
+                    self.perf.max_frame_ms = 0.0;
+                    self.perf.max_rows_build_ms = 0.0;
                 }
                 automation::AppStep::Open(path) => self.open_paths(vec![path]),
                 automation::AppStep::Volume(v) => self.core.player.send(Command::SetVolume(v)),
@@ -839,7 +861,7 @@ impl OneumApp {
         let title = |id: TrackId| self.snapshot.get(id).map(|t| t.title.clone());
         let view = self.views.get(&self.nav);
         let scan = self.core.library.scan_status();
-        serde_json::json!({
+        let mut state = serde_json::json!({
             "nav": format!("{:?}", self.nav),
             "library_tracks": self.snapshot.len(),
             "albums": self.snapshot.albums().len(),
@@ -881,7 +903,16 @@ impl OneumApp {
             "window_visible": window::is_main_window_visible(),
             "input_source": crate::platform::macos::testing::current_input_source(),
             "pixels_per_point": ctx.pixels_per_point(),
-        })
+        });
+        state["perf"] = serde_json::json!({
+            "first_frame_ms": self.perf.first_frame_ms,
+            "last_frame_ms": self.perf.last_frame_ms,
+            "max_frame_ms": self.perf.max_frame_ms,
+            "frames": self.perf.frames,
+            "last_rows_build_ms": self.perf.last_rows_build_ms,
+            "max_rows_build_ms": self.perf.max_rows_build_ms,
+        });
+        state
     }
 
     fn shutdown(&mut self) {
@@ -955,6 +986,10 @@ impl eframe::App for OneumApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_started = Instant::now();
+        if self.perf.first_frame_ms.is_none() {
+            self.perf.first_frame_ms = Some(crate::app::process_uptime().as_secs_f64() * 1000.0);
+        }
         let ctx = ui.ctx().clone();
         self.sync(&ctx);
         self.global_shortcuts(&ctx);
@@ -987,6 +1022,10 @@ impl eframe::App for OneumApp {
             );
         }
         self.persist_settings();
+        let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
+        self.perf.last_frame_ms = frame_ms;
+        self.perf.max_frame_ms = self.perf.max_frame_ms.max(frame_ms);
+        self.perf.frames += 1;
         self.run_automation(&ctx);
     }
 

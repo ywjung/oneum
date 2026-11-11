@@ -164,6 +164,7 @@ impl OneumApp {
                 .add_enabled(!scanning, egui::Button::new(s.rescan))
                 .clicked()
             {
+                self.announce_scan = true;
                 self.core.library.rescan();
             }
             if scanning {

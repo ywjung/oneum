@@ -207,6 +207,7 @@ impl OneumApp {
         if current {
             return;
         }
+        let build_started = std::time::Instant::now();
         let rows = build_rows(
             &self.snapshot,
             &self.core.library,
@@ -232,6 +233,9 @@ impl OneumApp {
                 .sum()
         };
         state.rows = rows;
+        let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+        self.perf.last_rows_build_ms = build_ms;
+        self.perf.max_rows_build_ms = self.perf.max_rows_build_ms.max(build_ms);
         state.built = Some((
             stamp_generation,
             playlists_generation,
