@@ -1,0 +1,1072 @@
+//! Immutable in-memory view of the library: tracks in default order plus the search,
+//! sort and album/artist indexes derived from them.
+//!
+//! A snapshot is built off the UI thread and published as `Arc<LibrarySnapshot>`; readers
+//! never lock. Everything that depends on a track's text (normalised strings, choseong
+//! form) is cached per track in [`TrackIndex`], so rebuilding after a scan batch only
+//! pays for sorting and concatenation, not for re-normalising unchanged tracks.
+use super::search::{FIELD_SEP, PreparedQuery, Term, choseong_form, normalize};
+use crate::model::{Track, TrackId};
+use std::cmp::{Ordering, Reverse};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Column a track list can be sorted by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKey {
+    /// Album artist (or artist), album, disc, track number, title — the snapshot order.
+    Default,
+    Title,
+    Artist,
+    Album,
+    Duration,
+    TrackNo,
+    Year,
+    DateAdded,
+    PlayCount,
+    LastPlayed,
+    Format,
+}
+
+/// A group of tracks with the same album identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Album {
+    pub key: u64,
+    pub title: String,
+    /// Album artist; for albums without one, the common track artist or "Various Artists".
+    pub artist: String,
+    pub year: Option<i32>,
+    pub art_id: Option<String>,
+    /// Indices into `LibrarySnapshot::tracks`, sorted by disc, track number, title.
+    pub tracks: Vec<u32>,
+    pub duration_ms: u64,
+}
+
+/// Tracks grouped by album artist (falling back to the track artist).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Artist {
+    pub name: String,
+    /// Indices into `LibrarySnapshot::albums()`.
+    pub albums: Vec<u32>,
+    pub track_count: usize,
+}
+
+/// Normalised text of one track, computed once when the track is loaded or changed.
+#[derive(Debug)]
+pub(crate) struct TrackIndex {
+    title: String,
+    artist: String,
+    album: String,
+    album_artist: String,
+    /// Choseong form of the four fields joined by [`FIELD_SEP`]; empty without Hangul.
+    cho: String,
+}
+
+impl TrackIndex {
+    pub(crate) fn new(track: &Track) -> Self {
+        let title = normalize(&track.title);
+        let artist = normalize(&track.artist);
+        let album = normalize(&track.album);
+        let album_artist = normalize(&track.album_artist);
+        let forms = [&title, &artist, &album, &album_artist].map(|s| choseong_form(s));
+        let mut cho = String::new();
+        if forms.iter().any(Option::is_some) {
+            let fields = [&title, &artist, &album, &album_artist];
+            for (i, (form, field)) in forms.iter().zip(fields).enumerate() {
+                if i > 0 {
+                    cho.push(FIELD_SEP);
+                }
+                cho.push_str(form.as_deref().unwrap_or(field));
+            }
+        }
+        TrackIndex {
+            title,
+            artist,
+            album,
+            album_artist,
+            cho,
+        }
+    }
+
+    /// Normalised name the track is grouped under in artist views and the default order.
+    fn sort_artist(&self) -> &str {
+        if self.album_artist.is_empty() {
+            &self.artist
+        } else {
+            &self.album_artist
+        }
+    }
+
+    /// Heap bytes held by the strings (for the memory estimate).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.title.capacity()
+            + self.artist.capacity()
+            + self.album.capacity()
+            + self.album_artist.capacity()
+            + self.cho.capacity()
+    }
+}
+
+/// Concatenated records with their end offsets; record `i` is `data[ends[i-1]..ends[i]]`.
+#[derive(Default)]
+struct Blob {
+    data: String,
+    ends: Vec<u32>,
+}
+
+impl Blob {
+    fn end_record(&mut self) {
+        self.ends
+            .push(u32::try_from(self.data.len()).unwrap_or(u32::MAX));
+    }
+
+    fn record(&self, index: u32) -> &str {
+        let index = index as usize;
+        let Some(&end) = self.ends.get(index) else {
+            return "";
+        };
+        let start = if index == 0 { 0 } else { self.ends[index - 1] };
+        self.data.get(start as usize..end as usize).unwrap_or("")
+    }
+
+    /// Indices of all records containing `needle`, ascending. `needle` must not contain
+    /// [`FIELD_SEP`], which guarantees a match never spans two records.
+    fn records_containing(&self, needle: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut record = 0usize;
+        for (pos, _) in self.data.match_indices(needle) {
+            while record < self.ends.len() && self.ends[record] as usize <= pos {
+                record += 1;
+            }
+            if record >= self.ends.len() {
+                break;
+            }
+            if out.last() != Some(&(record as u32)) {
+                out.push(record as u32);
+            }
+        }
+        out
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.data.capacity() + self.ends.capacity() * size_of::<u32>()
+    }
+}
+
+/// Everything derived from the track list. Shared between snapshots that differ only in
+/// non-indexed fields (favourite, play count).
+struct Index {
+    by_id: HashMap<TrackId, u32>,
+    text: Blob,
+    cho: Blob,
+    title_rank: Vec<u32>,
+    artist_rank: Vec<u32>,
+    album_rank: Vec<u32>,
+    albums: Vec<Album>,
+    artists: Vec<Artist>,
+    album_by_key: HashMap<u64, u32>,
+    root_counts: HashMap<i64, usize>,
+    /// Per-track normalised text, parallel to `tracks` (kept for cheap rebuilds).
+    per_track: Vec<Arc<TrackIndex>>,
+}
+
+/// Immutable view of all tracks, in default order, with search and sort indexes.
+pub struct LibrarySnapshot {
+    /// All tracks sorted by album artist/artist, album, disc, track number, title.
+    pub tracks: Vec<Arc<Track>>,
+    index: Arc<Index>,
+}
+
+impl LibrarySnapshot {
+    /// A snapshot without tracks.
+    pub fn empty() -> Arc<LibrarySnapshot> {
+        Arc::new(Self::build(Vec::new()))
+    }
+
+    /// Builds a snapshot from plain tracks (used by tests and benchmarks; the library
+    /// itself reuses cached per-track index data).
+    pub fn from_tracks(tracks: Vec<Track>) -> LibrarySnapshot {
+        let entries = tracks
+            .into_iter()
+            .map(|track| {
+                let index = Arc::new(TrackIndex::new(&track));
+                (Arc::new(track), index)
+            })
+            .collect();
+        Self::build(entries)
+    }
+
+    pub(crate) fn build(entries: Vec<(Arc<Track>, Arc<TrackIndex>)>) -> LibrarySnapshot {
+        let n = entries.len();
+
+        // Dense ranks of the normalised strings; all later ordering is integer compares.
+        let title_rank = rank_strings(entries.iter().map(|e| e.1.title.as_str()));
+        let artist_rank = rank_strings(entries.iter().map(|e| e.1.artist.as_str()));
+        let album_rank = rank_strings(entries.iter().map(|e| e.1.album.as_str()));
+        let sort_artist_rank = rank_strings(entries.iter().map(|e| e.1.sort_artist()));
+
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        order.sort_by_cached_key(|&i| {
+            let i = i as usize;
+            let track = &entries[i].0;
+            (
+                sort_artist_rank[i],
+                album_rank[i],
+                track.album_key,
+                track.disc_no.unwrap_or(1),
+                track.track_no.unwrap_or(u32::MAX),
+                title_rank[i],
+                track.id,
+            )
+        });
+        let permute =
+            |ranks: &[u32]| -> Vec<u32> { order.iter().map(|&i| ranks[i as usize]).collect() };
+        let title_rank = permute(&title_rank);
+        let artist_rank = permute(&artist_rank);
+        let album_rank = permute(&album_rank);
+
+        let mut tracks = Vec::with_capacity(n);
+        let mut indexes = Vec::with_capacity(n);
+        for &i in &order {
+            let (track, index) = &entries[i as usize];
+            tracks.push(Arc::clone(track));
+            indexes.push(Arc::clone(index));
+        }
+        drop(entries);
+
+        let mut by_id = HashMap::with_capacity(n);
+        let mut root_counts: HashMap<i64, usize> = HashMap::new();
+        let mut text = Blob::default();
+        let mut cho = Blob::default();
+        text.ends.reserve_exact(n);
+        cho.ends.reserve_exact(n);
+        text.data.reserve_exact(
+            indexes
+                .iter()
+                .map(|ix| {
+                    ix.title.len() + ix.artist.len() + ix.album.len() + ix.album_artist.len() + 4
+                })
+                .sum(),
+        );
+        cho.data
+            .reserve_exact(indexes.iter().map(|ix| ix.cho.len() + 1).sum());
+        for (i, (track, ix)) in tracks.iter().zip(&indexes).enumerate() {
+            by_id.insert(track.id, i as u32);
+            if let Some(root) = track.root_id {
+                *root_counts.entry(root).or_default() += 1;
+            }
+            for field in [&ix.title, &ix.artist, &ix.album, &ix.album_artist] {
+                text.data.push_str(field);
+                text.data.push(FIELD_SEP);
+            }
+            text.end_record();
+            if !ix.cho.is_empty() {
+                cho.data.push_str(&ix.cho);
+                cho.data.push(FIELD_SEP);
+            }
+            cho.end_record();
+        }
+
+        let (albums, album_by_key, album_of_track) = build_albums(&tracks, &indexes, &title_rank);
+        let artists = build_artists(&tracks, &indexes, &album_of_track);
+
+        LibrarySnapshot {
+            tracks,
+            index: Arc::new(Index {
+                by_id,
+                text,
+                cho,
+                title_rank,
+                artist_rank,
+                album_rank,
+                albums,
+                artists,
+                album_by_key,
+                root_counts,
+                per_track: indexes,
+            }),
+        }
+    }
+
+    /// A snapshot in which the given tracks replace the ones with the same id. Only valid
+    /// for changes to fields that are not indexed (favourite, play statistics); tracks
+    /// that are not part of this snapshot are ignored.
+    pub(crate) fn with_replaced(&self, changed: &[Arc<Track>]) -> LibrarySnapshot {
+        let mut tracks = self.tracks.clone();
+        for track in changed {
+            if let Some(i) = self.index_of(track.id)
+                && let Some(slot) = tracks.get_mut(i as usize)
+            {
+                *slot = Arc::clone(track);
+            }
+        }
+        LibrarySnapshot {
+            tracks,
+            index: Arc::clone(&self.index),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.tracks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tracks.is_empty()
+    }
+
+    pub fn get(&self, id: TrackId) -> Option<&Arc<Track>> {
+        self.index_of(id).and_then(|i| self.tracks.get(i as usize))
+    }
+
+    /// Position of the track in `tracks`.
+    pub fn index_of(&self, id: TrackId) -> Option<u32> {
+        self.index.by_id.get(&id).copied()
+    }
+
+    /// Normalises and splits a query once so it can be matched against many tracks.
+    pub fn prepare_query(query: &str) -> PreparedQuery {
+        PreparedQuery::new(query)
+    }
+
+    /// True if the track at `index` matches every term of the query.
+    pub fn matches(&self, index: u32, q: &PreparedQuery) -> bool {
+        (index as usize) < self.tracks.len() && q.terms.iter().all(|t| self.term_matches(index, t))
+    }
+
+    fn term_matches(&self, index: u32, term: &Term) -> bool {
+        let blob = if term.choseong {
+            &self.index.cho
+        } else {
+            &self.index.text
+        };
+        blob.record(index).contains(term.text.as_str())
+    }
+
+    /// Indices of the tracks matching `query`, in snapshot order. An empty query matches
+    /// every track.
+    pub fn search(&self, query: &str) -> Vec<u32> {
+        self.search_prepared(&PreparedQuery::new(query))
+    }
+
+    /// Like [`LibrarySnapshot::search`] for an already prepared query.
+    pub fn search_prepared(&self, q: &PreparedQuery) -> Vec<u32> {
+        // Scan the whole blob once for the longest (most selective) term, then check the
+        // remaining terms only on those candidates.
+        let Some((first_pos, first)) = q
+            .terms
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, term)| term.text.len())
+        else {
+            return (0..self.tracks.len() as u32).collect();
+        };
+        let blob = if first.choseong {
+            &self.index.cho
+        } else {
+            &self.index.text
+        };
+        let mut hits = blob.records_containing(&first.text);
+        if q.terms.len() > 1 {
+            hits.retain(|&i| {
+                q.terms
+                    .iter()
+                    .enumerate()
+                    .all(|(pos, term)| pos == first_pos || self.term_matches(i, term))
+            });
+        }
+        hits
+    }
+
+    /// Stable sort of track indices by the given column. Text columns compare the
+    /// normalised strings (empty values last); equal keys keep their current order, so
+    /// sorting by several columns in turn gives a multi-level sort.
+    pub fn sort(&self, indices: &mut [u32], key: SortKey, ascending: bool) {
+        let ix = &*self.index;
+        let rank = |ranks: &[u32], i: u32| ranks.get(i as usize).copied().unwrap_or(u32::MAX);
+        match key {
+            SortKey::Default => {
+                if ascending {
+                    indices.sort();
+                } else {
+                    indices.sort_by_key(|&i| Reverse(i));
+                }
+            }
+            SortKey::Title => sort_keyed(indices, ascending, |i| rank(&ix.title_rank, i)),
+            SortKey::Artist => sort_keyed(indices, ascending, |i| rank(&ix.artist_rank, i)),
+            SortKey::Album => sort_keyed(indices, ascending, |i| rank(&ix.album_rank, i)),
+            SortKey::Duration => {
+                sort_keyed(indices, ascending, |i| self.field(i, |t| t.duration_ms))
+            }
+            SortKey::TrackNo => sort_keyed(indices, ascending, |i| {
+                self.field(i, |t| {
+                    (t.disc_no.unwrap_or(1), t.track_no.unwrap_or(u32::MAX))
+                })
+            }),
+            SortKey::Year => sort_keyed(indices, ascending, |i| {
+                self.field(i, |t| t.year.unwrap_or(i32::MAX))
+            }),
+            SortKey::DateAdded => sort_keyed(indices, ascending, |i| self.field(i, |t| t.added_at)),
+            SortKey::PlayCount => {
+                sort_keyed(indices, ascending, |i| self.field(i, |t| t.play_count))
+            }
+            SortKey::LastPlayed => sort_keyed(indices, ascending, |i| {
+                self.field(i, |t| t.last_played_at.unwrap_or(i64::MIN))
+            }),
+            SortKey::Format => sort_keyed(indices, ascending, |i| {
+                self.field(i, |t| {
+                    (
+                        codec_order(&t.codec),
+                        t.bit_depth.unwrap_or(0),
+                        t.sample_rate,
+                        t.bitrate_kbps.unwrap_or(0),
+                    )
+                })
+            }),
+        }
+    }
+
+    fn field<K>(&self, index: u32, f: impl Fn(&Track) -> K) -> Option<K> {
+        self.tracks.get(index as usize).map(|t| f(t))
+    }
+
+    /// Albums sorted by artist, then year, then title.
+    pub fn albums(&self) -> &[Album] {
+        &self.index.albums
+    }
+
+    /// Artists sorted by name.
+    pub fn artists(&self) -> &[Artist] {
+        &self.index.artists
+    }
+
+    /// Position of the album with the given key in [`LibrarySnapshot::albums`].
+    pub fn album_index(&self, key: u64) -> Option<u32> {
+        self.index.album_by_key.get(&key).copied()
+    }
+
+    /// Builds the snapshot again from its own tracks, reusing the cached normalised
+    /// text — the work the library does whenever tracks change (for the benchmark tool).
+    #[doc(hidden)]
+    pub fn rebuilt(&self) -> LibrarySnapshot {
+        let entries = self
+            .tracks
+            .iter()
+            .zip(&self.index.per_track)
+            .map(|(track, index)| (Arc::clone(track), Arc::clone(index)))
+            .collect();
+        Self::build(entries)
+    }
+
+    /// Number of tracks that belong to the given music folder.
+    pub(crate) fn root_track_count(&self, root_id: i64) -> usize {
+        self.index.root_counts.get(&root_id).copied().unwrap_or(0)
+    }
+
+    /// Rough heap size of the snapshot including the tracks it references (for the
+    /// benchmark tool; not exact).
+    #[doc(hidden)]
+    pub fn approx_memory_bytes(&self) -> usize {
+        let ix = &*self.index;
+        let tracks: usize = self
+            .tracks
+            .iter()
+            .map(|t| {
+                size_of::<Track>()
+                    + 16 // Arc counters
+                    + t.path.as_os_str().len()
+                    + t.title.capacity()
+                    + t.artist.capacity()
+                    + t.album_artist.capacity()
+                    + t.album.capacity()
+                    + t.genre.capacity()
+                    + t.codec.capacity()
+                    + t.container.capacity()
+                    + t.art_id.as_ref().map_or(0, |s| s.capacity())
+            })
+            .sum();
+        let albums: usize = ix
+            .albums
+            .iter()
+            .map(|a| {
+                size_of::<Album>()
+                    + a.title.capacity()
+                    + a.artist.capacity()
+                    + a.tracks.capacity() * 4
+            })
+            .sum();
+        let artists: usize = ix
+            .artists
+            .iter()
+            .map(|a| size_of::<Artist>() + a.name.capacity() + a.albums.capacity() * 4)
+            .sum();
+        tracks
+            + self.tracks.capacity() * size_of::<Arc<Track>>()
+            + ix.per_track
+                .iter()
+                .map(|t| size_of::<TrackIndex>() + 16 + t.heap_bytes())
+                .sum::<usize>()
+            + ix.per_track.capacity() * size_of::<Arc<TrackIndex>>()
+            + ix.text.heap_bytes()
+            + ix.cho.heap_bytes()
+            + (ix.title_rank.capacity() + ix.artist_rank.capacity() + ix.album_rank.capacity()) * 4
+            + ix.by_id.capacity() * (size_of::<TrackId>() + size_of::<u32>() + 8)
+            + ix.album_by_key.capacity() * 24
+            + albums
+            + artists
+    }
+}
+
+fn sort_keyed<K: Ord>(indices: &mut [u32], ascending: bool, key: impl Fn(u32) -> K) {
+    if ascending {
+        indices.sort_by_cached_key(|&i| key(i));
+    } else {
+        indices.sort_by_cached_key(|&i| Reverse(key(i)));
+    }
+}
+
+fn codec_order(codec: &str) -> u8 {
+    match codec {
+        "AAC" => 0,
+        "ALAC" => 1,
+        "FLAC" => 2,
+        "MP3" => 3,
+        "PCM" => 4,
+        "Vorbis" => 5,
+        _ => 6,
+    }
+}
+
+/// Text order used everywhere: empty values last, otherwise by code point of the
+/// normalised string.
+fn cmp_text(a: &str, b: &str) -> Ordering {
+    a.is_empty().cmp(&b.is_empty()).then_with(|| a.cmp(b))
+}
+
+/// Maps every string to its dense rank in [`cmp_text`] order (equal strings share a rank).
+fn rank_strings<'a>(values: impl Iterator<Item = &'a str>) -> Vec<u32> {
+    let mut ids: HashMap<&str, u32> = HashMap::new();
+    let mut unique: Vec<&str> = Vec::new();
+    let per_item: Vec<u32> = values
+        .map(|s| {
+            *ids.entry(s).or_insert_with(|| {
+                unique.push(s);
+                (unique.len() - 1) as u32
+            })
+        })
+        .collect();
+    let mut sorted: Vec<u32> = (0..unique.len() as u32).collect();
+    sorted.sort_unstable_by(|&a, &b| cmp_text(unique[a as usize], unique[b as usize]));
+    let mut rank_of = vec![0u32; unique.len()];
+    for (rank, &id) in sorted.iter().enumerate() {
+        rank_of[id as usize] = rank as u32;
+    }
+    per_item
+        .into_iter()
+        .map(|id| rank_of[id as usize])
+        .collect()
+}
+
+type AlbumTables = (Vec<Album>, HashMap<u64, u32>, Vec<u32>);
+
+/// Groups tracks into albums. Returns the albums in display order, the key → position
+/// map and the album position of every track.
+fn build_albums(
+    tracks: &[Arc<Track>],
+    indexes: &[Arc<TrackIndex>],
+    title_rank: &[u32],
+) -> AlbumTables {
+    let mut slot_by_key: HashMap<u64, usize> = HashMap::new();
+    let mut albums: Vec<Album> = Vec::new();
+    for (i, track) in tracks.iter().enumerate() {
+        let slot = *slot_by_key.entry(track.album_key).or_insert_with(|| {
+            albums.push(Album {
+                key: track.album_key,
+                title: track.album.clone(),
+                artist: String::new(),
+                year: None,
+                art_id: None,
+                tracks: Vec::new(),
+                duration_ms: 0,
+            });
+            albums.len() - 1
+        });
+        let album = &mut albums[slot];
+        album.tracks.push(i as u32);
+        album.duration_ms += track.duration_ms;
+        if album.year.is_none() {
+            album.year = track.year;
+        }
+        if album.art_id.is_none() {
+            album.art_id.clone_from(&track.art_id);
+        }
+    }
+
+    // Per album: order its tracks, pick the display artist, and remember the normalised
+    // artist/title for sorting the album list.
+    let mut keyed: Vec<(Album, String, String)> = albums
+        .into_iter()
+        .map(|mut album| {
+            album.tracks.sort_by_key(|&i| {
+                let t = &tracks[i as usize];
+                (
+                    t.disc_no.unwrap_or(1),
+                    t.track_no.unwrap_or(u32::MAX),
+                    title_rank[i as usize],
+                    i,
+                )
+            });
+            let first = album.tracks[0] as usize;
+            let tagged = album
+                .tracks
+                .iter()
+                .map(|&i| i as usize)
+                .find(|&i| !tracks[i].album_artist.is_empty());
+            let (artist, artist_norm) = if let Some(i) = tagged {
+                (
+                    tracks[i].album_artist.clone(),
+                    indexes[i].album_artist.clone(),
+                )
+            } else if album
+                .tracks
+                .iter()
+                .all(|&i| indexes[i as usize].artist == indexes[first].artist)
+            {
+                (tracks[first].artist.clone(), indexes[first].artist.clone())
+            } else {
+                ("Various Artists".to_string(), "various artists".to_string())
+            };
+            album.artist = artist;
+            let title_norm = indexes[first].album.clone();
+            (album, artist_norm, title_norm)
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        cmp_text(&a.1, &b.1)
+            .then_with(|| {
+                a.0.year
+                    .unwrap_or(i32::MAX)
+                    .cmp(&b.0.year.unwrap_or(i32::MAX))
+            })
+            .then_with(|| cmp_text(&a.2, &b.2))
+            .then_with(|| a.0.key.cmp(&b.0.key))
+    });
+
+    let albums: Vec<Album> = keyed.into_iter().map(|(album, _, _)| album).collect();
+    let mut by_key = HashMap::with_capacity(albums.len());
+    let mut album_of_track = vec![0u32; tracks.len()];
+    for (position, album) in albums.iter().enumerate() {
+        by_key.insert(album.key, position as u32);
+        for &i in &album.tracks {
+            album_of_track[i as usize] = position as u32;
+        }
+    }
+    (albums, by_key, album_of_track)
+}
+
+fn build_artists(
+    tracks: &[Arc<Track>],
+    indexes: &[Arc<TrackIndex>],
+    album_of_track: &[u32],
+) -> Vec<Artist> {
+    let mut slot_by_name: HashMap<&str, usize> = HashMap::new();
+    let mut artists: Vec<(Artist, &str)> = Vec::new();
+    for (i, track) in tracks.iter().enumerate() {
+        let norm = indexes[i].sort_artist();
+        let slot = *slot_by_name.entry(norm).or_insert_with(|| {
+            let name = if track.album_artist.is_empty() {
+                track.artist.clone()
+            } else {
+                track.album_artist.clone()
+            };
+            artists.push((
+                Artist {
+                    name,
+                    albums: Vec::new(),
+                    track_count: 0,
+                },
+                norm,
+            ));
+            artists.len() - 1
+        });
+        let artist = &mut artists[slot].0;
+        artist.track_count += 1;
+        let album = album_of_track[i];
+        if artist.albums.last() != Some(&album) {
+            artist.albums.push(album);
+        }
+    }
+    for (artist, _) in &mut artists {
+        artist.albums.sort_unstable();
+        artist.albums.dedup();
+    }
+    artists.sort_by(|a, b| cmp_text(a.1, b.1));
+    artists.into_iter().map(|(artist, _)| artist).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::ident::album_key;
+    use crate::model::ReplayGainTags;
+    use std::path::PathBuf;
+
+    fn track(id: TrackId, title: &str, artist: &str, album: &str) -> Track {
+        let path = PathBuf::from(format!("/music/{artist}/{album}/{id:03}.flac"));
+        Track {
+            id,
+            album_key: album_key(album, "", false, &path),
+            path,
+            root_id: Some(1),
+            available: true,
+            title: title.into(),
+            artist: artist.into(),
+            album_artist: String::new(),
+            album: album.into(),
+            disc_no: None,
+            track_no: Some(id as u32),
+            year: None,
+            genre: String::new(),
+            duration_ms: 180_000 + id as u64,
+            codec: "FLAC".into(),
+            container: "FLAC".into(),
+            sample_rate: 44_100,
+            channels: 2,
+            bit_depth: Some(16),
+            bitrate_kbps: Some(900),
+            file_size: 1,
+            mtime_ns: 1,
+            replaygain: ReplayGainTags::default(),
+            art_id: None,
+            favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            added_at: id,
+        }
+    }
+
+    fn sample() -> LibrarySnapshot {
+        LibrarySnapshot::from_tracks(vec![
+            track(1, "Hey Jude", "The Beatles", "1"),
+            track(2, "Let It Be", "The Beatles", "Let It Be"),
+            track(3, "밤편지", "아이유", "Palette"),
+            track(4, "좋은 날", "아이유", "Real"),
+            // NFD title and artist, as written by some taggers on macOS.
+            track(
+                5,
+                "\u{1107}\u{1173}\u{11AF}\u{1105}\u{1165}\u{1106}\u{1175}\u{11BC}", // 블러밍
+                "\u{110B}\u{1161}\u{110B}\u{1175}\u{110B}\u{1172}",                 // 아이유
+                "Love Poem",
+            ),
+            track(6, "Ｄｙｎａｍｉｔｅ", "방탄소년단", "BE"),
+            track(7, "Beautiful", "Crush", "도깨비 OST"),
+            track(8, "ㅋㅋㅋ", "Unknown", ""),
+        ])
+    }
+
+    fn titles(snapshot: &LibrarySnapshot, hits: &[u32]) -> Vec<String> {
+        let mut titles: Vec<String> = hits
+            .iter()
+            .map(|&i| normalize(&snapshot.tracks[i as usize].title))
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    #[test]
+    fn english_partial_case_insensitive() {
+        let s = sample();
+        assert_eq!(
+            titles(&s, &s.search("bea")),
+            ["beautiful", "hey jude", "let it be"]
+        );
+        assert_eq!(titles(&s, &s.search("BEATLES")), ["hey jude", "let it be"]);
+        assert_eq!(titles(&s, &s.search("JUDE")), ["hey jude"]);
+    }
+
+    #[test]
+    fn korean_partial() {
+        let s = sample();
+        assert_eq!(
+            titles(&s, &s.search("이유")),
+            ["밤편지", "블러밍", "좋은 날"]
+        );
+        assert_eq!(titles(&s, &s.search("편지")), ["밤편지"]);
+        assert_eq!(titles(&s, &s.search("소년")), ["dynamite"]);
+    }
+
+    #[test]
+    fn nfd_text_and_nfd_query() {
+        let s = sample();
+        // NFC query finds NFD-tagged text.
+        assert_eq!(titles(&s, &s.search("블러밍")), ["블러밍"]);
+        // NFD query finds NFC-tagged text.
+        let nfd_query = "\u{1107}\u{1161}\u{11B7}\u{1111}\u{1167}\u{11AB}"; // 밤편
+        assert_eq!(titles(&s, &s.search(nfd_query)), ["밤편지"]);
+    }
+
+    #[test]
+    fn full_width_latin() {
+        let s = sample();
+        assert_eq!(titles(&s, &s.search("dynamite")), ["dynamite"]);
+        assert_eq!(
+            titles(&s, &s.search("ＢＥＡＴＬＥＳ")),
+            ["hey jude", "let it be"]
+        );
+    }
+
+    #[test]
+    fn choseong_search() {
+        let s = sample();
+        assert_eq!(
+            titles(&s, &s.search("ㅇㅇㅇ")),
+            ["밤편지", "블러밍", "좋은 날"]
+        );
+        assert_eq!(titles(&s, &s.search("ㅂㅌㅅㄴㄷ")), ["dynamite"]);
+        assert_eq!(titles(&s, &s.search("ㅂㅍㅈ")), ["밤편지"]);
+        assert_eq!(titles(&s, &s.search("ㄷㄲㅂ")), ["beautiful"]);
+        // Literal consonants in a title are found too.
+        assert_eq!(titles(&s, &s.search("ㅋㅋ")), ["ㅋㅋㅋ"]);
+        // A choseong term never matches across fields.
+        assert!(s.search("ㅈㅇㅇ").is_empty());
+        assert!(s.search("ㅎㅎㅎ").is_empty());
+    }
+
+    #[test]
+    fn multi_term_and() {
+        let s = sample();
+        assert_eq!(titles(&s, &s.search("beatles jude")), ["hey jude"]);
+        assert_eq!(titles(&s, &s.search("jude beatles")), ["hey jude"]);
+        assert_eq!(titles(&s, &s.search("아이유 real")), ["좋은 날"]);
+        assert_eq!(titles(&s, &s.search("ㅇㅇㅇ palette")), ["밤편지"]);
+        assert_eq!(titles(&s, &s.search("ㅇㅇㅇ ㅂㅍㅈ")), ["밤편지"]);
+        assert!(s.search("beatles 아이유").is_empty());
+        // Terms may come from different fields but not span a field boundary.
+        assert!(s.search("judethe").is_empty());
+    }
+
+    #[test]
+    fn empty_query_matches_everything_in_snapshot_order() {
+        let s = sample();
+        let all: Vec<u32> = (0..s.len() as u32).collect();
+        assert_eq!(s.search(""), all);
+        assert_eq!(s.search("   "), all);
+        let q = LibrarySnapshot::prepare_query("");
+        assert!(q.is_empty());
+        assert!(s.matches(0, &q));
+    }
+
+    #[test]
+    fn matches_agrees_with_search() {
+        let s = sample();
+        for query in [
+            "bea",
+            "이유",
+            "ㅇㅇㅇ",
+            "the jude",
+            "zzz",
+            "ㅇㅇㅇ real",
+            "a",
+        ] {
+            let q = LibrarySnapshot::prepare_query(query);
+            let by_matches: Vec<u32> = (0..s.len() as u32).filter(|&i| s.matches(i, &q)).collect();
+            assert_eq!(s.search(query), by_matches, "query {query:?}");
+        }
+        let q = LibrarySnapshot::prepare_query("bea");
+        assert!(!s.matches(10_000, &q));
+    }
+
+    #[test]
+    fn default_order_and_lookup() {
+        let s = sample();
+        let order: Vec<&str> = s.tracks.iter().map(|t| t.artist.as_str()).collect();
+        // Code point order of the normalised artist: latin before hangul.
+        assert_eq!(
+            order,
+            [
+                "Crush",
+                "The Beatles",
+                "The Beatles",
+                "Unknown",
+                "방탄소년단",
+                // Albums in order: Love Poem (NFD-tagged artist), Palette, Real.
+                "\u{110B}\u{1161}\u{110B}\u{1175}\u{110B}\u{1172}",
+                "아이유",
+                "아이유"
+            ]
+        );
+        for (i, t) in s.tracks.iter().enumerate() {
+            assert_eq!(s.index_of(t.id), Some(i as u32));
+            assert_eq!(s.get(t.id).unwrap().id, t.id);
+        }
+        assert!(s.get(999).is_none());
+        assert_eq!(s.root_track_count(1), 8);
+        assert_eq!(s.root_track_count(2), 0);
+    }
+
+    #[test]
+    fn sorting_is_stable_and_reversible() {
+        let s = sample();
+        let mut idx: Vec<u32> = (0..s.len() as u32).collect();
+        s.sort(&mut idx, SortKey::Title, true);
+        let sorted: Vec<String> = idx
+            .iter()
+            .map(|&i| normalize(&s.tracks[i as usize].title))
+            .collect();
+        let mut expected = sorted.clone();
+        expected.sort();
+        assert_eq!(sorted, expected);
+
+        s.sort(&mut idx, SortKey::Title, false);
+        let reversed: Vec<String> = idx
+            .iter()
+            .map(|&i| normalize(&s.tracks[i as usize].title))
+            .collect();
+        expected.reverse();
+        assert_eq!(reversed, expected);
+
+        // Stable: sorting by artist keeps the previous (title descending) order per artist.
+        s.sort(&mut idx, SortKey::Artist, true);
+        let beatles: Vec<&str> = idx
+            .iter()
+            .map(|&i| &s.tracks[i as usize])
+            .filter(|t| t.artist == "The Beatles")
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(beatles, ["Let It Be", "Hey Jude"]);
+
+        s.sort(&mut idx, SortKey::Default, true);
+        assert_eq!(idx, (0..s.len() as u32).collect::<Vec<_>>());
+        s.sort(&mut idx, SortKey::Default, false);
+        assert_eq!(idx, (0..s.len() as u32).rev().collect::<Vec<_>>());
+
+        // Every key works on arbitrary (even out-of-range) indices without panicking.
+        for key in [
+            SortKey::Default,
+            SortKey::Title,
+            SortKey::Artist,
+            SortKey::Album,
+            SortKey::Duration,
+            SortKey::TrackNo,
+            SortKey::Year,
+            SortKey::DateAdded,
+            SortKey::PlayCount,
+            SortKey::LastPlayed,
+            SortKey::Format,
+        ] {
+            let mut odd = vec![3, 900, 0, 3, 7];
+            s.sort(&mut odd, key, true);
+            s.sort(&mut odd, key, false);
+            assert_eq!(odd.len(), 5);
+        }
+        let mut by_duration: Vec<u32> = (0..s.len() as u32).collect();
+        s.sort(&mut by_duration, SortKey::Duration, false);
+        let ids: Vec<TrackId> = by_duration
+            .iter()
+            .map(|&i| s.tracks[i as usize].id)
+            .collect();
+        assert_eq!(ids, [8, 7, 6, 5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn empty_text_sorts_last() {
+        let s = LibrarySnapshot::from_tracks(vec![
+            track(1, "b", "", "x"),
+            track(2, "a", "zed", "x"),
+            track(3, "c", "alpha", "x"),
+        ]);
+        let artists: Vec<&str> = s.tracks.iter().map(|t| t.artist.as_str()).collect();
+        assert_eq!(artists, ["alpha", "zed", ""]);
+    }
+
+    #[test]
+    fn albums_and_artists() {
+        let mut a1 = track(1, "One", "Queen", "Greatest Hits");
+        a1.year = Some(1981);
+        a1.art_id = Some("00112233aabbccdd".into());
+        a1.track_no = Some(5);
+        let mut a2 = track(2, "Two", "Queen", "Greatest Hits");
+        a2.disc_no = Some(1);
+        a2.track_no = Some(1);
+        let b1 = track(3, "Uno", "ABBA", "Greatest Hits");
+        // A compilation: same album artist, different track artists, different folders.
+        let mut c1 = track(4, "Song A", "Artist A", "Mix");
+        let mut c2 = track(5, "Song B", "Artist B", "Mix");
+        for c in [&mut c1, &mut c2] {
+            c.album_artist = "Various Artists".into();
+            c.album_key = album_key("Mix", "Various Artists", true, &c.path);
+        }
+        let s = LibrarySnapshot::from_tracks(vec![a1, a2, b1, c1, c2]);
+
+        let albums = s.albums();
+        let summary: Vec<(&str, &str, usize)> = albums
+            .iter()
+            .map(|a| (a.artist.as_str(), a.title.as_str(), a.tracks.len()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("ABBA", "Greatest Hits", 1),
+                ("Queen", "Greatest Hits", 2),
+                ("Various Artists", "Mix", 2),
+            ]
+        );
+        let queen = &albums[1];
+        assert_eq!(queen.year, Some(1981));
+        assert_eq!(queen.art_id.as_deref(), Some("00112233aabbccdd"));
+        assert_eq!(queen.duration_ms, 360_003);
+        // Track 2 has track number 1 and comes first within the album.
+        let ids: Vec<TrackId> = queen
+            .tracks
+            .iter()
+            .map(|&i| s.tracks[i as usize].id)
+            .collect();
+        assert_eq!(ids, [2, 1]);
+        for (i, album) in albums.iter().enumerate() {
+            assert_eq!(s.album_index(album.key), Some(i as u32));
+        }
+        assert_eq!(s.album_index(12345), None);
+
+        let artists: Vec<(&str, usize, usize)> = s
+            .artists()
+            .iter()
+            .map(|a| (a.name.as_str(), a.albums.len(), a.track_count))
+            .collect();
+        assert_eq!(
+            artists,
+            [("ABBA", 1, 1), ("Queen", 1, 2), ("Various Artists", 1, 2)]
+        );
+        assert_eq!(s.artists()[2].albums, [2]);
+    }
+
+    #[test]
+    fn replacing_unindexed_fields_keeps_index() {
+        let s = sample();
+        let id = s.tracks[2].id;
+        let mut changed = (*s.tracks[2]).clone();
+        changed.favorite = true;
+        changed.play_count = 9;
+        let ghost = Arc::new(track(777, "ghost", "nobody", "none"));
+        let patched = s.with_replaced(&[Arc::new(changed), ghost]);
+        assert_eq!(patched.len(), s.len());
+        assert!(patched.get(id).unwrap().favorite);
+        assert!(!s.get(id).unwrap().favorite);
+        assert!(patched.get(777).is_none());
+        assert_eq!(patched.search("beatles"), s.search("beatles"));
+        let mut idx: Vec<u32> = (0..patched.len() as u32).collect();
+        patched.sort(&mut idx, SortKey::PlayCount, false);
+        assert_eq!(patched.tracks[idx[0] as usize].id, id);
+    }
+
+    #[test]
+    fn empty_snapshot() {
+        let s = LibrarySnapshot::empty();
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
+        assert!(s.search("x").is_empty());
+        assert!(s.search("").is_empty());
+        assert!(s.albums().is_empty());
+        assert!(s.artists().is_empty());
+        let mut none: Vec<u32> = Vec::new();
+        s.sort(&mut none, SortKey::Title, true);
+    }
+}
