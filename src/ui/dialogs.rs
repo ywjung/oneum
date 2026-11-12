@@ -90,6 +90,10 @@ impl OneumApp {
                 }
             } else {
                 ui.label(body);
+                // Return confirms, as the emphasised button suggests; Escape cancels.
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    outcome = Outcome::Confirm;
+                }
             }
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

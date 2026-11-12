@@ -25,6 +25,14 @@ pub enum MenuAction {
     Rescan,
     ShowMainWindow,
     UserGuide,
+    ToggleMute,
+    /// The "Song" menu: these act on the rows selected in the window.
+    SongPlay,
+    SongPlayNext,
+    SongAddToQueue,
+    SongToggleFavorite,
+    SongShowInFinder,
+    SongInfo,
 }
 
 const ACTIONS: &[(&str, MenuAction)] = &[
@@ -47,6 +55,13 @@ const ACTIONS: &[(&str, MenuAction)] = &[
     ("rescan", MenuAction::Rescan),
     ("main_window", MenuAction::ShowMainWindow),
     ("user_guide", MenuAction::UserGuide),
+    ("toggle_mute", MenuAction::ToggleMute),
+    ("song_play", MenuAction::SongPlay),
+    ("song_play_next", MenuAction::SongPlayNext),
+    ("song_add_to_queue", MenuAction::SongAddToQueue),
+    ("song_toggle_favorite", MenuAction::SongToggleFavorite),
+    ("song_show_in_finder", MenuAction::SongShowInFinder),
+    ("song_info", MenuAction::SongInfo),
 ];
 
 fn id_of(action: MenuAction) -> &'static str {
@@ -84,6 +99,7 @@ impl AppMenu {
         let app_menu = Submenu::new(s.app_name, true);
         let file = Submenu::new(s.menu_file, true);
         let edit = Submenu::new(s.menu_edit, true);
+        let song = Submenu::new(s.menu_song, true);
         let controls = Submenu::new(s.menu_controls, true);
         let view = Submenu::new(s.menu_view, true);
         let window = Submenu::new(s.menu_window, true);
@@ -96,7 +112,9 @@ impl AppMenu {
         };
         let sep = PredefinedMenuItem::separator;
         let built = (|| -> muda::Result<()> {
-            menu.append_items(&[&app_menu, &file, &edit, &controls, &view, &window, &help])?;
+            menu.append_items(&[
+                &app_menu, &file, &edit, &song, &controls, &view, &window, &help,
+            ])?;
             app_menu.append_items(&[
                 &PredefinedMenuItem::about(Some(s.menu_about), Some(about)),
                 &sep(),
@@ -138,6 +156,37 @@ impl AppMenu {
                 &sep(),
                 &item(MenuAction::Find, s.menu_find, cmd(Code::KeyF)),
             ])?;
+            // Everything the right-click menu of a song offers, reachable from the keyboard
+            // and by VoiceOver. Return itself stays a list key (it must work in text fields).
+            song.append_items(&[
+                &item(MenuAction::SongPlay, s.menu_song_play, None),
+                &item(MenuAction::SongPlayNext, s.play_next, cmd(Code::Enter)),
+                &item(
+                    MenuAction::SongAddToQueue,
+                    s.add_to_queue,
+                    cmd_shift(Code::Enter),
+                ),
+                &sep(),
+                &item(
+                    MenuAction::SongToggleFavorite,
+                    s.menu_song_favorite,
+                    cmd(Code::KeyD),
+                ),
+                &sep(),
+                &item(
+                    MenuAction::SongShowInFinder,
+                    s.show_in_finder,
+                    cmd_shift(Code::KeyF),
+                ),
+                &item(
+                    MenuAction::SongInfo,
+                    s.song_info,
+                    Some(Accelerator::new(
+                        Modifiers::META | Modifiers::ALT,
+                        Code::KeyI,
+                    )),
+                ),
+            ])?;
             // Space is deliberately not a menu shortcut: it must stay typeable in text fields.
             controls.append_items(&[
                 &item(MenuAction::PlayPause, s.menu_play_pause, None),
@@ -150,6 +199,7 @@ impl AppMenu {
                     s.menu_volume_down,
                     cmd(Code::ArrowDown),
                 ),
+                &item(MenuAction::ToggleMute, s.menu_mute, cmd_shift(Code::KeyM)),
                 &sep(),
                 &item(
                     MenuAction::ToggleShuffle,

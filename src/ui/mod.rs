@@ -71,6 +71,8 @@ struct ListState {
     selection: HashSet<u64>,
     /// Row the keyboard cursor / shift-range starts from.
     anchor: Option<u64>,
+    /// Row the keyboard cursor is on; a shift-range spans from `anchor` to here.
+    cursor: Option<u64>,
     rows: Vec<Row>,
     /// Inputs `rows` was built from: library generation, playlists generation, query, sort.
     built: Option<RowsStamp>,
@@ -95,6 +97,15 @@ enum Action {
     Sort(SortKey),
 }
 
+/// Which list the list keys (arrows, Return, Delete, ⌘A) belong to: the one the user
+/// last clicked in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum KeyPane {
+    #[default]
+    List,
+    Queue,
+}
+
 /// A message shown in the strip above the player bar.
 struct Toast {
     text: String,
@@ -104,15 +115,18 @@ struct Toast {
     expires: Option<Instant>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ToastAction {
     RetryOutput,
     OpenPlaybackSettings,
+    /// Puts a playlist back the way it was before items were removed.
+    RestorePlaylist(i64, Vec<TrackId>),
 }
 
 /// Results of background work started by the UI.
 enum AppEvent {
     FilesImported(Vec<TrackId>),
+    PlaylistImported(Result<crate::library::M3uImport, LibraryError>),
 }
 
 /// Requests from the menu bar that need the window.
@@ -128,6 +142,13 @@ enum UiRequest {
     ToggleQueue,
     ToggleInfo,
     UserGuide,
+    ToggleMute,
+    SongPlay,
+    SongPlayNext,
+    SongAddToQueue,
+    SongToggleFavorite,
+    SongShowInFinder,
+    SongInfo,
 }
 
 /// Timings reported by verification dumps (cost: a few `Instant` reads per frame).
@@ -168,17 +189,39 @@ pub struct OneumApp {
     focus_search: bool,
     /// Whether the search field had keyboard focus at the end of the previous frame.
     search_had_focus: bool,
+    /// A text field had the keyboard when this frame began. Keys that end text entry
+    /// (Return, Escape) belong to that field for the whole frame, although the field
+    /// gives up focus while handling them.
+    typing: bool,
+    /// A button or other control has keyboard focus (Tab navigation): Space, Return and
+    /// the arrows are that control's, not the list's.
+    widget_focused: bool,
+    key_pane: KeyPane,
     info_track: Option<TrackId>,
     /// Queue panel selection (queue item ids) and drag state.
     queue_selection: HashSet<u64>,
     queue_anchor: Option<u64>,
+    /// Keyboard cursor in the queue (a shift-range spans from the anchor to here).
+    queue_cursor: Option<u64>,
+    /// Item to select once a removal has gone through.
+    queue_pending_selection: Option<u64>,
     queue_scroll_to_current: bool,
+    /// Scroll to the current item even while the pointer is over the queue (panel opened).
+    queue_scroll_forced: bool,
+    /// Scroll offset and visible height of the queue list in the previous frame.
+    queue_view: (f32, f32),
     seek_drag: Option<f64>,
-    volume_before_mute: f32,
+    /// A seek that was sent but is not yet reflected in the player snapshot:
+    /// `(target seconds, when)`. The thumb stays there instead of jumping back.
+    seek_pending: Option<(f64, Instant)>,
     last_settings_save: Instant,
 
     art: ArtCache,
+    /// Transient message.
     toast: Option<Toast>,
+    /// Message that stays until dismissed or resolved (lost device, …). A transient
+    /// message is shown in front of it for its few seconds and never replaces it.
+    alert: Option<Toast>,
     dialog: Option<Dialog>,
     renaming: Option<(i64, String, bool)>,
     settings_open: bool,
@@ -239,14 +282,22 @@ impl OneumApp {
             views: HashMap::new(),
             focus_search: false,
             search_had_focus: false,
+            typing: false,
+            widget_focused: false,
+            key_pane: KeyPane::List,
             info_track: None,
             queue_selection: HashSet::new(),
             queue_anchor: None,
+            queue_cursor: None,
+            queue_pending_selection: None,
             queue_scroll_to_current: true,
+            queue_scroll_forced: true,
+            queue_view: (0.0, 0.0),
             seek_drag: None,
-            volume_before_mute: 0.0,
+            seek_pending: None,
             last_settings_save: Instant::now(),
             toast: None,
+            alert: None,
             dialog: None,
             renaming: None,
             settings_open: false,
@@ -311,6 +362,13 @@ impl OneumApp {
                 MenuAction::ToggleQueue => UiRequest::ToggleQueue,
                 MenuAction::ToggleInfo => UiRequest::ToggleInfo,
                 MenuAction::UserGuide => UiRequest::UserGuide,
+                MenuAction::ToggleMute => UiRequest::ToggleMute,
+                MenuAction::SongPlay => UiRequest::SongPlay,
+                MenuAction::SongPlayNext => UiRequest::SongPlayNext,
+                MenuAction::SongAddToQueue => UiRequest::SongAddToQueue,
+                MenuAction::SongToggleFavorite => UiRequest::SongToggleFavorite,
+                MenuAction::SongShowInFinder => UiRequest::SongShowInFinder,
+                MenuAction::SongInfo => UiRequest::SongInfo,
             };
             if let Ok(mut queue) = requests.lock() {
                 queue.push(request);
@@ -322,8 +380,10 @@ impl OneumApp {
 
     // ----- state synchronisation ------------------------------------------------------
 
+    /// Everything that must keep working while the window is hidden or covered:
+    /// library and player state, results of background work, Finder and menu requests,
+    /// and the close button. Called for every pass, with or without a UI.
     fn sync(&mut self, ctx: &egui::Context) {
-        self.art.begin_frame(ctx);
         let generation = self.core.library.generation();
         if generation != self.lib_generation {
             self.lib_generation = generation;
@@ -352,15 +412,15 @@ impl OneumApp {
                 self.show_notice(&notice);
             }
         }
-        // A lost-device toast is obsolete once playback is running again.
+        // A lost-device message is obsolete once playback is running again.
         if !self.player.device_lost
             && self
-                .toast
+                .alert
                 .as_ref()
                 .is_some_and(|t| matches!(t.action, Some((_, ToastAction::RetryOutput))))
             && self.player.state == PlayState::Playing
         {
-            self.toast = None;
+            self.alert = None;
         }
 
         let scan = self.core.library.scan_status();
@@ -374,7 +434,7 @@ impl OneumApp {
                         .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
             });
             if denied {
-                self.toast = Some(Toast {
+                self.alert = Some(Toast {
                     text: self.s().notice_folder_permission.into(),
                     warning: true,
                     action: None,
@@ -423,12 +483,45 @@ impl OneumApp {
                         start_index: 0,
                     });
                 }
+                AppEvent::PlaylistImported(Ok(result)) => {
+                    self.info_toast(self.lang.playlist_import_result(
+                        &result.name,
+                        result.matched,
+                        result.missing.len(),
+                    ));
+                    self.playlists_generation = self.core.library.playlists_generation();
+                    self.playlists = self.core.library.playlists();
+                    self.go(Nav::Playlist(result.playlist_id));
+                }
+                AppEvent::PlaylistImported(Err(error)) => {
+                    tracing::warn!("playlist import failed: {error}");
+                    self.warn_toast(self.s().notice_import_failed);
+                }
             }
         }
         let opened = app_hooks::take_opened_paths();
         if !opened.is_empty() {
             self.open_paths(opened);
         }
+        let requests: Vec<UiRequest> = self
+            .ui_requests
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default();
+        for request in requests {
+            self.handle_request(request);
+        }
+        // Closing the window hides it; the app keeps running and playing (docs/UX.md).
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.persist_settings();
+            window::hide_main_window();
+        }
+    }
+
+    /// The part of the per-frame bookkeeping that needs a visible frame's input.
+    fn sync_frame(&mut self, ctx: &egui::Context) {
+        self.art.begin_frame(ctx);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -439,14 +532,6 @@ impl OneumApp {
         if !dropped.is_empty() {
             self.open_paths(dropped);
         }
-        let requests: Vec<UiRequest> = self
-            .ui_requests
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
-        for request in requests {
-            self.handle_request(request);
-        }
         if self
             .toast
             .as_ref()
@@ -454,12 +539,106 @@ impl OneumApp {
         {
             self.toast = None;
         }
+        if self.settings.right_panel != RightPanel::Queue {
+            self.key_pane = KeyPane::List;
+        }
+    }
 
-        // Closing the window hides it; the app keeps running and playing (docs/UX.md).
-        if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.persist_settings();
-            window::hide_main_window();
+    /// Tracks the menu's "Song" commands act on: the selection of the list that has the
+    /// keys, in display order, and the row the keyboard cursor is on.
+    fn selected_tracks(&self) -> (Vec<TrackId>, Option<TrackId>) {
+        if self.key_pane == KeyPane::Queue {
+            let tracks: Vec<TrackId> = self
+                .player
+                .queue
+                .iter()
+                .filter(|q| self.queue_selection.contains(&q.id))
+                .map(|q| q.track)
+                .collect();
+            let focus = self
+                .queue_anchor
+                .and_then(|a| self.player.queue.iter().find(|q| q.id == a))
+                .map(|q| q.track)
+                .or(tracks.first().copied());
+            return (tracks, focus);
+        }
+        if matches!(self.nav, Nav::Albums | Nav::Artists | Nav::Artist(_)) {
+            return (Vec::new(), None);
+        }
+        let Some(state) = self.views.get(&self.nav) else {
+            return (Vec::new(), None);
+        };
+        let id_of = |row: &Row| self.snapshot.tracks.get(row.idx as usize).map(|t| t.id);
+        let tracks: Vec<TrackId> = state
+            .rows
+            .iter()
+            .filter(|r| state.selection.contains(&r.key))
+            .filter_map(id_of)
+            .collect();
+        let focus = state
+            .cursor
+            .or(state.anchor)
+            .and_then(|key| state.rows.iter().find(|r| r.key == key))
+            .and_then(id_of)
+            .or(tracks.first().copied());
+        (tracks, focus)
+    }
+
+    /// A "Song" menu command. Without a selection it applies to the playing track.
+    fn song_command(&mut self, request: UiRequest) {
+        let (mut tracks, mut focus) = self.selected_tracks();
+        if tracks.is_empty()
+            && let Some(current) = self.player.current
+        {
+            tracks.push(current.track_id);
+            focus = Some(current.track_id);
+        }
+        let Some(focus) = focus.or(tracks.first().copied()) else {
+            return;
+        };
+        let action = match request {
+            UiRequest::SongPlay => Action::PlayTracks(tracks, 0),
+            UiRequest::SongPlayNext => Action::PlayNext(tracks),
+            UiRequest::SongAddToQueue => Action::Enqueue(tracks),
+            UiRequest::SongToggleFavorite => {
+                let favorite = self.snapshot.get(focus).is_some_and(|t| t.favorite);
+                Action::SetFavorite(tracks, !favorite)
+            }
+            UiRequest::SongShowInFinder => Action::Reveal(focus),
+            UiRequest::SongInfo => Action::ShowInfo(focus),
+            _ => return,
+        };
+        self.apply(action);
+    }
+
+    /// Undoes "remove from playlist": the playlist gets its previous contents back.
+    fn restore_playlist(&mut self, id: i64, tracks: &[TrackId]) {
+        let library = self.core.library.clone();
+        let current: Vec<i64> = library
+            .playlist_items(id)
+            .iter()
+            .map(|i| i.item_id)
+            .collect();
+        let result = library
+            .remove_playlist_items(id, &current)
+            .and_then(|()| library.add_to_playlist(id, tracks));
+        if let Err(error) = result {
+            self.library_error_toast(&error);
+        }
+    }
+
+    fn toggle_mute(&mut self) {
+        let volume = self.player.volume;
+        if volume > 0.001 {
+            self.settings.volume_before_mute = Some(volume);
+            self.core.player.send(Command::SetVolume(0.0));
+        } else {
+            let restore = self
+                .settings
+                .volume_before_mute
+                .filter(|v| v.is_finite() && *v > 0.001)
+                .unwrap_or(0.8);
+            self.core.player.send(Command::SetVolume(restore.min(1.0)));
         }
     }
 
@@ -484,6 +663,13 @@ impl OneumApp {
                     finder::reveal(&target);
                 }
             }
+            UiRequest::ToggleMute => self.toggle_mute(),
+            UiRequest::SongPlay
+            | UiRequest::SongPlayNext
+            | UiRequest::SongAddToQueue
+            | UiRequest::SongToggleFavorite
+            | UiRequest::SongShowInFinder
+            | UiRequest::SongInfo => self.song_command(request),
         }
     }
 
@@ -495,6 +681,7 @@ impl OneumApp {
         };
         if panel == RightPanel::Queue {
             self.queue_scroll_to_current = true;
+            self.queue_scroll_forced = true;
         }
     }
 
@@ -504,6 +691,8 @@ impl OneumApp {
         if nav == self.nav {
             return;
         }
+        self.key_pane = KeyPane::List;
+        self.info_track = None;
         let detail = matches!(nav, Nav::Album(_) | Nav::Artist(_));
         if detail {
             self.history.push(self.nav.clone());
@@ -531,6 +720,8 @@ impl OneumApp {
         state.built = None;
         state.selection = HashSet::from([current.track_id as u64]);
         state.anchor = Some(current.track_id as u64);
+        state.cursor = Some(current.track_id as u64);
+        self.key_pane = KeyPane::List;
         // The row index is resolved when the rows are rebuilt.
         state.scroll_to = Some(usize::MAX);
     }
@@ -572,7 +763,7 @@ impl OneumApp {
                 self.warn_toast(self.lang.skipped(&title, reason));
             }
             Notice::TooManyFailures => {
-                self.toast = Some(Toast {
+                self.alert = Some(Toast {
                     text: s.notice_too_many_failures.into(),
                     warning: true,
                     action: None,
@@ -580,7 +771,7 @@ impl OneumApp {
                 });
             }
             Notice::DeviceLost => {
-                self.toast = Some(Toast {
+                self.alert = Some(Toast {
                     text: s.notice_device_lost.into(),
                     warning: true,
                     action: Some((s.notice_device_lost_action.into(), ToastAction::RetryOutput)),
@@ -601,7 +792,7 @@ impl OneumApp {
                         (s.notice_retry, ToastAction::RetryOutput),
                     )
                 };
-                self.toast = Some(Toast {
+                self.alert = Some(Toast {
                     text: text.into(),
                     warning: true,
                     action: Some((action.0.into(), action.1)),
@@ -670,20 +861,21 @@ impl OneumApp {
         }
     }
 
+    /// Imports an M3U/M3U8 file as a playlist. Entries not yet in the library have their
+    /// tags read, which can take a while on a slow drive, so this runs off the UI thread;
+    /// the result arrives as an [`AppEvent`].
     fn import_playlist(&mut self, file: PathBuf) {
-        match self.core.library.import_m3u8(&file) {
-            Ok(result) => {
-                self.info_toast(self.lang.playlist_import_result(
-                    &result.name,
-                    result.matched,
-                    result.missing.len(),
-                ));
-                self.go(Nav::Playlist(result.playlist_id));
-            }
-            Err(error) => {
-                tracing::warn!("playlist import failed: {error}");
-                self.warn_toast(self.s().notice_import_failed);
-            }
+        let library = self.core.library.clone();
+        let tx = self.events_tx.clone();
+        let core = self.core.clone();
+        let spawned = std::thread::Builder::new()
+            .name("oneum-import".into())
+            .spawn(move || {
+                let _ = tx.send(AppEvent::PlaylistImported(library.import_m3u8(&file)));
+                core.request_repaint();
+            });
+        if spawned.is_err() {
+            self.warn_toast(self.s().notice_import_failed);
         }
     }
 
@@ -744,6 +936,8 @@ impl OneumApp {
     fn apply(&mut self, action: Action) {
         let library = self.core.library.clone();
         match action {
+            // "Play" on nothing (an empty playlist) must not stop what is playing.
+            Action::PlayTracks(tracks, _) if tracks.is_empty() => {}
             Action::PlayTracks(tracks, start_index) => {
                 self.core.player.send(Command::PlayTracks {
                     tracks,
@@ -771,8 +965,26 @@ impl OneumApp {
                 self.settings.right_panel = RightPanel::Info;
             }
             Action::RemoveFromPlaylist(id, items) => {
-                if let Err(error) = library.remove_playlist_items(id, &items) {
-                    self.library_error_toast(&error);
+                // Removing is a single key press, so it must be undoable.
+                let before: Vec<TrackId> = library
+                    .playlist_items(id)
+                    .into_iter()
+                    .map(|i| i.track_id)
+                    .collect();
+                match library.remove_playlist_items(id, &items) {
+                    Ok(()) => {
+                        let s = self.s();
+                        self.toast = Some(Toast {
+                            text: s.notice_removed_from_playlist.into(),
+                            warning: false,
+                            action: Some((s.undo.into(), ToastAction::RestorePlaylist(id, before))),
+                            expires: Some(Instant::now() + Duration::from_secs(8)),
+                        });
+                        if let Some(state) = self.views.get_mut(&Nav::Playlist(id)) {
+                            state.selection.clear();
+                        }
+                    }
+                    Err(error) => self.library_error_toast(&error),
                 }
             }
             Action::MovePlaylistItems(id, items, to_index) => {
@@ -847,6 +1059,8 @@ impl OneumApp {
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
         let typing = ctx.text_edit_focused();
         responder::set_text_input_active(typing);
+        self.typing = typing;
+        self.widget_focused = !typing && ctx.memory(|m| m.focused()).is_some();
         if self.dialog.is_some() {
             return;
         }
@@ -856,7 +1070,8 @@ impl OneumApp {
                 i.key_pressed(egui::Key::Escape),
             )
         });
-        if space && !typing {
+        // With a control focused, Space presses that control (egui does that itself).
+        if space && !typing && !self.widget_focused {
             self.core.player.send(Command::TogglePlayPause);
         }
         if escape {
@@ -945,6 +1160,24 @@ impl OneumApp {
                 automation::AppStep::InputSource(id) => {
                     crate::platform::macos::testing::select_input_source(&id);
                 }
+                automation::AppStep::Menu(id) => {
+                    let request = match id.as_str() {
+                        "song_play" => Some(UiRequest::SongPlay),
+                        "song_play_next" => Some(UiRequest::SongPlayNext),
+                        "song_add_to_queue" => Some(UiRequest::SongAddToQueue),
+                        "song_toggle_favorite" => Some(UiRequest::SongToggleFavorite),
+                        "song_info" => Some(UiRequest::SongInfo),
+                        "toggle_mute" => Some(UiRequest::ToggleMute),
+                        "toggle_queue" => Some(UiRequest::ToggleQueue),
+                        "toggle_info" => Some(UiRequest::ToggleInfo),
+                        "go_to_current" => Some(UiRequest::GoToCurrent),
+                        _ => None,
+                    };
+                    match request {
+                        Some(request) => self.handle_request(request),
+                        None => tracing::warn!("menu: unknown id"),
+                    }
+                }
                 automation::AppStep::Activate => window::show_main_window(),
                 automation::AppStep::Hide => window::hide_main_window(),
                 automation::AppStep::Resize(w, h) => {
@@ -997,7 +1230,7 @@ impl OneumApp {
             "output_rate": p.output_sample_rate,
             "source": p.source.as_ref().map(|s| format!("{} {}Hz {}ch", s.codec, s.sample_rate, s.channels)),
             "device_lost": p.device_lost,
-            "toast": self.toast.as_ref().map(|t| t.text.clone()),
+            "toast": self.toast.as_ref().or(self.alert.as_ref()).map(|t| t.text.clone()),
             "dialog_open": self.dialog.is_some(),
             "settings_open": self.settings_open,
             "right_panel": format!("{:?}", self.settings.right_panel),
@@ -1009,6 +1242,18 @@ impl OneumApp {
             "pixels_per_point": ctx.pixels_per_point(),
             "window_size": ctx.input(|i| i.viewport().inner_rect).map(|r| [r.width(), r.height()]),
         });
+        // Added piecewise: one big `json!` literal exceeds the macro recursion limit.
+        let shown = self.toast.as_ref().or(self.alert.as_ref());
+        state["toast_action"] = serde_json::json!(
+            shown
+                .and_then(|t| t.action.as_ref())
+                .map(|(label, _)| label.clone())
+        );
+        state["alert"] = serde_json::json!(self.alert.as_ref().map(|t| t.text.clone()));
+        state["key_pane"] = serde_json::json!(format!("{:?}", self.key_pane));
+        state["renaming"] =
+            serde_json::json!(self.renaming.as_ref().map(|(_, text, _)| text.clone()));
+        state["queue_selected"] = serde_json::json!(self.queue_selection.len());
         state["perf"] = serde_json::json!({
             "first_frame_ms": self.perf.first_frame_ms,
             "last_frame_ms": self.perf.last_frame_ms,
@@ -1035,7 +1280,7 @@ impl OneumApp {
 
 fn report_open_problems(app: &mut OneumApp, report: &OpenReport) {
     if report.recovered_corrupt_db.is_some() {
-        app.toast = Some(Toast {
+        app.alert = Some(Toast {
             text: app.s().notice_db_recovered.into(),
             warning: true,
             action: None,
@@ -1090,13 +1335,21 @@ impl eframe::App for OneumApp {
         }
     }
 
+    /// Runs for every pass, also while the window is hidden or fully covered (then
+    /// without a UI pass): the close button, Finder opens and menu commands must not
+    /// wait for the window to become visible again.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync(ctx);
+        self.run_automation(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         if self.perf.first_frame_ms.is_none() {
             self.perf.first_frame_ms = Some(crate::app::process_uptime().as_secs_f64() * 1000.0);
         }
         let ctx = ui.ctx().clone();
-        self.sync(&ctx);
+        self.sync_frame(&ctx);
         self.global_shortcuts(&ctx);
         let mut actions: Vec<Action> = Vec::new();
 
@@ -1122,7 +1375,8 @@ impl eframe::App for OneumApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         } else if self.core.library.scan_status().running {
             ctx.request_repaint_after(Duration::from_millis(500));
-        } else if let Some(expires) = self.toast.as_ref().and_then(|t| t.expires) {
+        }
+        if let Some(expires) = self.toast.as_ref().and_then(|t| t.expires) {
             ctx.request_repaint_after(
                 expires.saturating_duration_since(Instant::now()) + Duration::from_millis(50),
             );
@@ -1132,7 +1386,6 @@ impl eframe::App for OneumApp {
         self.perf.last_frame_ms = frame_ms;
         self.perf.max_frame_ms = self.perf.max_frame_ms.max(frame_ms);
         self.perf.frames += 1;
-        self.run_automation(&ctx);
     }
 
     fn on_exit(&mut self) {

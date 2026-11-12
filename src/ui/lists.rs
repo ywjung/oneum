@@ -1,6 +1,6 @@
 //! The central area: song tables, album grid, artist list and their detail views.
 use super::icons::Icon;
-use super::{Action, ListState, Nav, OneumApp, Row, theme, widgets};
+use super::{Action, KeyPane, ListState, Nav, OneumApp, Row, theme, widgets};
 use crate::i18n::format_time;
 use crate::library::{Album, Library, LibrarySnapshot, SortKey};
 use crate::model::TrackId;
@@ -21,6 +21,8 @@ struct TableOptions {
     playlist: Option<i64>,
     /// Keep the given order unless the user sorts by a column.
     natural_order: bool,
+    /// Row positions are playlist positions (false while a search filters the rows).
+    reorderable: bool,
 }
 
 fn build_rows(
@@ -178,12 +180,14 @@ fn click_select(
     state_rows: &[Row],
     selection: &mut HashSet<u64>,
     anchor: &mut Option<u64>,
+    cursor: &mut Option<u64>,
     index: usize,
     modifiers: egui::Modifiers,
 ) {
     let Some(row) = state_rows.get(index) else {
         return;
     };
+    *cursor = Some(row.key);
     if modifiers.command {
         if !selection.remove(&row.key) {
             selection.insert(row.key);
@@ -201,6 +205,14 @@ fn click_select(
         selection.insert(row.key);
         *anchor = Some(row.key);
     }
+}
+
+/// A cursor movement in a list.
+#[derive(Clone, Copy)]
+enum Step {
+    By(isize),
+    First,
+    Last,
 }
 
 impl OneumApp {
@@ -399,7 +411,11 @@ impl OneumApp {
         widgets::empty_state(ui, icon, title, body);
     }
 
-    /// Arrow keys, Return, ⌘A and Delete for the focused list.
+    /// Arrow keys, Home/End, Page Up/Down, Return, ⌘A and Delete for the song list.
+    ///
+    /// The keys only belong to the list when nothing else has a claim on them: no text
+    /// field (also not one that gives up focus with this very key press), no focused
+    /// control, no dialog, and the list — not the queue — was clicked last.
     fn list_keys(
         &self,
         ui: &Ui,
@@ -407,49 +423,80 @@ impl OneumApp {
         options: TableOptions,
         actions: &mut Vec<Action>,
     ) {
-        if ui.ctx().text_edit_focused()
+        if self.typing
+            || self.widget_focused
+            || ui.ctx().text_edit_focused()
+            || self.key_pane != KeyPane::List
             || self.dialog.is_some()
             || self.settings_open
             || state.rows.is_empty()
         {
             return;
         }
-        let (down, up, enter, select_all, delete, shift) = ui.input(|i| {
+        // Edit ▸ Select All arrives as a key event carrying its own modifiers, so the
+        // event is matched rather than the keyboard state.
+        let select_all = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A));
+        let (step, enter, delete, shift) = ui.input(|i| {
+            let plain = !i.modifiers.command && !i.modifiers.alt;
+            let page = 12isize;
+            let step = if !plain {
+                None
+            } else if i.key_pressed(egui::Key::ArrowDown) {
+                Some(Step::By(1))
+            } else if i.key_pressed(egui::Key::ArrowUp) {
+                Some(Step::By(-1))
+            } else if i.key_pressed(egui::Key::PageDown) {
+                Some(Step::By(page))
+            } else if i.key_pressed(egui::Key::PageUp) {
+                Some(Step::By(-page))
+            } else if i.key_pressed(egui::Key::Home) {
+                Some(Step::First)
+            } else if i.key_pressed(egui::Key::End) {
+                Some(Step::Last)
+            } else {
+                None
+            };
             (
-                i.key_pressed(egui::Key::ArrowDown) && !i.modifiers.command,
-                i.key_pressed(egui::Key::ArrowUp) && !i.modifiers.command,
-                i.key_pressed(egui::Key::Enter),
-                i.modifiers.command && i.key_pressed(egui::Key::A),
-                i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete),
+                step,
+                plain && i.key_pressed(egui::Key::Enter),
+                plain && (i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)),
                 i.modifiers.shift,
             )
         });
         if select_all {
             state.selection = state.rows.iter().map(|r| r.key).collect();
         }
-        if down || up {
-            let cursor = state
-                .anchor
-                .and_then(|a| state.rows.iter().position(|r| r.key == a));
-            let next = match (cursor, down) {
-                (Some(i), true) => (i + 1).min(state.rows.len() - 1),
-                (Some(i), false) => i.saturating_sub(1),
-                (None, true) => 0,
-                (None, false) => state.rows.len() - 1,
+        let position =
+            |rows: &[Row], key: Option<u64>| key.and_then(|k| rows.iter().position(|r| r.key == k));
+        if let Some(step) = step {
+            let last = state.rows.len() - 1;
+            let cursor = position(&state.rows, state.cursor.or(state.anchor));
+            let next = match (step, cursor) {
+                (Step::First, _) => 0,
+                (Step::Last, _) => last,
+                (Step::By(n), Some(i)) => i.saturating_add_signed(n).min(last),
+                (Step::By(n), None) if n > 0 => 0,
+                (Step::By(_), None) => last,
             };
             let key = state.rows[next].key;
-            if !shift {
+            if shift {
+                // The range always spans from where the selection started to the cursor,
+                // so it shrinks again when the cursor moves back.
+                let from = position(&state.rows, state.anchor).unwrap_or(next);
+                state.selection = state.rows[from.min(next)..=from.max(next)]
+                    .iter()
+                    .map(|r| r.key)
+                    .collect();
+                state.anchor.get_or_insert(key);
+            } else {
                 state.selection.clear();
+                state.selection.insert(key);
+                state.anchor = Some(key);
             }
-            state.selection.insert(key);
-            state.anchor = Some(key);
+            state.cursor = Some(key);
             state.scroll_to = Some(next);
         }
-        if enter
-            && let Some(index) = state
-                .anchor
-                .and_then(|a| state.rows.iter().position(|r| r.key == a))
-        {
+        if enter && let Some(index) = position(&state.rows, state.cursor.or(state.anchor)) {
             let tracks = state
                 .rows
                 .iter()
@@ -490,6 +537,12 @@ impl OneumApp {
         let show_format = this.settings.show_format_column;
         let scroll_to = state.scroll_to.take();
         let sort = state.sort;
+        // Positions in a filtered playlist are not positions in the playlist.
+        let menu_options = TableOptions {
+            reorderable: state.query.trim().is_empty(),
+            ..options
+        };
+        let mut row_clicked = false;
         let sortable = !options.natural_order || options.playlist.is_none();
         let accent = theme::accent(ui.visuals().dark_mode);
         let dim = theme::dim(ui);
@@ -518,6 +571,7 @@ impl OneumApp {
             rows,
             selection,
             anchor,
+            cursor,
             ..
         } = &mut state;
         let rows: &[Row] = rows;
@@ -542,7 +596,9 @@ impl OneumApp {
         let mut table = TableBuilder::new(ui)
             .id_salt(("tracks", nav.clone()))
             .striped(true)
-            .sense(Sense::click())
+            // Clickable, but not a tab stop per cell: a list of a few thousand cells
+            // would swallow the Tab key. Rows are reached with the arrow keys instead.
+            .sense(Sense::CLICK)
             .cell_layout(Layout::left_to_right(Align::Center))
             .min_scrolled_height(0.0)
             .column(Column::exact(26.0));
@@ -709,18 +765,27 @@ impl OneumApp {
                         actions.push(Action::PlayTracks(tracks, index));
                     } else if response.clicked() {
                         let modifiers = response.ctx.input(|i| i.modifiers);
-                        click_select(rows, selection, anchor, index, modifiers);
+                        click_select(rows, selection, anchor, cursor, index, modifiers);
+                    }
+                    if response.clicked() || response.secondary_clicked() {
+                        row_clicked = true;
                     }
                     if response.secondary_clicked() && !selection.contains(&key) {
                         selection.clear();
                         selection.insert(key);
                         *anchor = Some(key);
+                        *cursor = Some(key);
                     }
                     response.context_menu(|ui| {
-                        this.track_menu(ui, rows, selection, index, options, actions);
+                        this.track_menu(ui, rows, selection, index, menu_options, actions);
                     });
                 });
             });
+        if row_clicked {
+            // The list has the keys now, and the info panel follows the selection again.
+            self.key_pane = KeyPane::List;
+            self.info_track = None;
+        }
         self.views.insert(nav.clone(), state);
     }
 
@@ -734,6 +799,7 @@ impl OneumApp {
         options: TableOptions,
         actions: &mut Vec<Action>,
     ) {
+        let reorderable = options.reorderable;
         let s = self.s();
         let snap = &self.snapshot;
         let mut tracks = selected_tracks(snap, rows, selection);
@@ -803,7 +869,7 @@ impl OneumApp {
                 .unwrap_or(clicked);
             ui.separator();
             if ui
-                .add_enabled(first > 0, egui::Button::new(s.move_up))
+                .add_enabled(reorderable && first > 0, egui::Button::new(s.move_up))
                 .clicked()
             {
                 actions.push(Action::MovePlaylistItems(
@@ -815,7 +881,7 @@ impl OneumApp {
             }
             if ui
                 .add_enabled(
-                    first + items.len() < rows.len(),
+                    reorderable && first + items.len() < rows.len(),
                     egui::Button::new(s.move_down),
                 )
                 .clicked()
@@ -929,10 +995,42 @@ impl OneumApp {
                                     .map(|&i| snap.tracks[i as usize].id)
                                     .collect::<Vec<_>>()
                             };
-                            if response.double_clicked() {
-                                actions.push(Action::PlayTracks(album_tracks(), 0));
-                            } else if response.clicked() {
-                                actions.push(Action::Go(Nav::Album(album.key)));
+                            // A play button on the cover while pointing at the album:
+                            // one click plays it, a click anywhere else opens it.
+                            let play_rect = egui::Rect::from_min_size(
+                                art_rect.right_bottom() - egui::vec2(40.0, 40.0),
+                                egui::Vec2::splat(32.0),
+                            );
+                            let pointing = response.hovered() || response.has_focus();
+                            let over_play = pointing
+                                && ui
+                                    .ctx()
+                                    .pointer_hover_pos()
+                                    .is_some_and(|p| play_rect.contains(p));
+                            if pointing {
+                                let accent = theme::accent(ui.visuals().dark_mode);
+                                let fill = if over_play {
+                                    accent
+                                } else {
+                                    egui::Color32::from_black_alpha(150)
+                                };
+                                ui.painter().circle_filled(play_rect.center(), 16.0, fill);
+                                super::icons::paint(
+                                    ui.painter(),
+                                    play_rect.shrink(9.0),
+                                    Icon::Play,
+                                    egui::Color32::WHITE,
+                                );
+                            }
+                            if response.clicked() {
+                                if over_play {
+                                    actions.push(Action::PlayTracks(album_tracks(), 0));
+                                } else {
+                                    actions.push(Action::Go(Nav::Album(album.key)));
+                                }
+                            }
+                            if over_play {
+                                response.clone().on_hover_text(s.play_album_hint);
                             }
                             response.context_menu(|ui| {
                                 if ui.button(s.play_album).clicked() {
@@ -982,7 +1080,11 @@ impl OneumApp {
                 } else {
                     album.artist.as_str()
                 };
-                if ui.link(RichText::new(artist).size(15.0)).clicked() {
+                // "Various Artists" and the like have no artist page to go to.
+                let has_page = snap.artists().iter().any(|a| a.name == album.artist);
+                if !has_page {
+                    ui.label(RichText::new(artist).size(15.0));
+                } else if ui.link(RichText::new(artist).size(15.0)).clicked() {
                     actions.push(Action::Go(Nav::Artist(album.artist.clone())));
                 }
                 let mut meta = Vec::new();
@@ -1017,7 +1119,7 @@ impl OneumApp {
             track_no: true,
             hide_album: true,
             natural_order: true,
-            playlist: None,
+            ..Default::default()
         };
         self.track_list(ui, nav, options, actions);
     }

@@ -11,6 +11,8 @@ fn main() {
         Err(error) => {
             eprintln!("OnEum could not start: {error}");
             tracing::error!("startup failed: {error}");
+            // Launched from Finder nobody sees stderr: say it in a dialog.
+            startup_alert(&error.to_string());
             std::process::exit(1);
         }
     };
@@ -43,8 +45,30 @@ fn main() {
     );
     if let Err(error) = result {
         tracing::error!("event loop failed: {error}");
+        startup_alert(&error.to_string());
+        core.shutdown();
+        std::process::exit(1);
     }
     // Normally `on_exit` has already done this (⌘Q terminates the process from inside
     // the event loop); it is idempotent.
     core.shutdown();
+}
+
+/// Tells the user why the app is not coming up, in the system language.
+fn startup_alert(detail: &str) {
+    use oneum::i18n::Lang;
+    let lang = if oneum::platform::macos::locale::prefers_korean() {
+        Lang::Ko
+    } else {
+        Lang::En
+    };
+    let s = lang.strings();
+    let log = oneum::app::log_dir_hint();
+    oneum::platform::macos::fatal_alert(
+        s.startup_failed_title,
+        &format!(
+            "{}\n\n{detail}\n\n{}: {log}",
+            s.startup_failed_body, s.startup_failed_log
+        ),
+    );
 }

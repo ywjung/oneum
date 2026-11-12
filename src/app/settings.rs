@@ -32,6 +32,8 @@ pub struct Settings {
     pub right_panel: RightPanel,
     /// Inner size of the main window in points, restored at the next launch.
     pub window_size: Option<[f32; 2]>,
+    /// Volume to return to when un-muting.
+    pub volume_before_mute: Option<f32>,
 }
 
 impl Default for Settings {
@@ -44,6 +46,7 @@ impl Default for Settings {
             show_format_column: false,
             right_panel: RightPanel::Hidden,
             window_size: None,
+            volume_before_mute: None,
         }
     }
 }

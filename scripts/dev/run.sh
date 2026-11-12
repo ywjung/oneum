@@ -9,12 +9,12 @@ PROFILE=${1:?usage: run.sh <profile-dir>}
 shift
 MODE=--debug
 if [ "${1:-}" = "--release" ]; then MODE=""; shift; fi
-# shellcheck disable=SC2086
-scripts/package.sh $MODE >/dev/null
-# Run from a private copy so an OnEum the user is running from dist/ is left alone.
+# Build into a private copy so an OnEum the user is running from dist/ is left alone.
 pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true
 sleep 0.5
-rm -rf dist/dev && mkdir -p dist/dev && cp -R dist/OnEum.app dist/dev/OnEum.app
+mkdir -p dist/dev
+# shellcheck disable=SC2086
+ONEUM_APP_DIR=dist/dev scripts/package.sh $MODE >/dev/null
 mkdir -p "$PROFILE"
 : > "$PROFILE/script.txt"
 MEDIA_ENV="--env ONEUM_NO_MEDIA_SESSION=1"

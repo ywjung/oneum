@@ -154,6 +154,17 @@ pub fn process_uptime() -> std::time::Duration {
         .map_or(std::time::Duration::ZERO, |t| t.elapsed())
 }
 
+/// Where the log lives, in a form fit for an error dialog (no user name in the common case).
+pub fn log_dir_hint() -> String {
+    match std::env::var_os("ONEUM_DATA_DIR").filter(|v| !v.is_empty()) {
+        Some(root) => std::path::PathBuf::from(root)
+            .join("logs")
+            .display()
+            .to_string(),
+        None => "~/Library/Logs/OnEum".to_string(),
+    }
+}
+
 /// Opens the library, starts the player and the file watcher.
 pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let _ = PROCESS_START.set(std::time::Instant::now());

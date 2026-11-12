@@ -1,7 +1,7 @@
 //! Hiding and re-showing the main window (the app keeps running and playing while hidden).
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSWindow};
+use objc2_app_kit::{NSApplication, NSWindow, NSWindowStyleMask};
 
 fn main_window(mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
     let app = NSApplication::sharedApplication(mtm);
@@ -17,7 +17,14 @@ pub fn hide_main_window() {
     if let Some(mtm) = MainThreadMarker::new()
         && let Some(window) = main_window(mtm)
     {
-        window.orderOut(None);
+        if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
+            // Ordering a full-screen window out leaves the user on an empty black Space.
+            // Hiding the app takes them back to where they were; the Dock icon and
+            // "Show Main Window" bring the full-screen window back.
+            NSApplication::sharedApplication(mtm).hide(None);
+        } else {
+            window.orderOut(None);
+        }
         tracing::info!("main window hidden");
     }
 }
@@ -25,6 +32,10 @@ pub fn hide_main_window() {
 /// Shows the main window and activates the app. Main thread only (no-op elsewhere).
 pub fn show_main_window() {
     if let Some(mtm) = MainThreadMarker::new() {
+        let app = NSApplication::sharedApplication(mtm);
+        if app.isHidden() {
+            app.unhide(None);
+        }
         if let Some(window) = main_window(mtm) {
             if window.isMiniaturized() {
                 window.deminiaturize(None);
@@ -34,7 +45,7 @@ pub fn show_main_window() {
             }
             window.makeKeyAndOrderFront(None);
         }
-        NSApplication::sharedApplication(mtm).activate();
+        app.activate();
     }
 }
 

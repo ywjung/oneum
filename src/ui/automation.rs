@@ -9,7 +9,7 @@
 //!   scroll X Y DY · key NAME [cmd] [shift] [alt] · text STRING · wait MS
 //!   shot FILE.png · dump FILE.json · open PATH · volume V · quit
 //!   oskey KEYCODE [cmd] [shift] (real OS key event) · inputsource ID · activate · hide
-//!   resize W H
+//!   resize W H · menu ID (a menu-bar command: song_play_next, toggle_mute, …)
 use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, pos2};
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -28,6 +28,8 @@ pub(super) enum AppStep {
     Activate,
     Hide,
     Resize(f32, f32),
+    /// A menu-bar command by its id (stands in for choosing the menu item).
+    Menu(String),
 }
 
 enum Step {
@@ -242,6 +244,7 @@ impl Automation {
                     self.steps.push_back(Step::App(AppStep::Resize(w, h)));
                 }
             }
+            Some("menu") => self.steps.push_back(Step::App(AppStep::Menu(rest(1)))),
             Some("activate") => self.steps.push_back(Step::App(AppStep::Activate)),
             Some("hide") => self.steps.push_back(Step::App(AppStep::Hide)),
             _ => {}

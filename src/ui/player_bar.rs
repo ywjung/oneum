@@ -7,6 +7,7 @@ use super::{Nav, OneumApp, next_repeat, theme, widgets};
 use crate::i18n::format_time;
 use crate::playback::{Command, PlayState, RepeatMode};
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui, UiBuilder};
+use std::time::{Duration, Instant};
 
 const ART_SIZE: f32 = 52.0;
 
@@ -190,8 +191,21 @@ impl OneumApp {
         ui.horizontal(|ui| {
             let duration_s = current.map_or(0.0, |c| c.duration_ms as f64 / 1000.0);
             let live_s = self.player.position_now_ms() as f64 / 1000.0;
-            let mut shown = self.seek_drag.unwrap_or(live_s).min(duration_s.max(0.0));
-            let time_width = 40.0;
+            // After a seek the snapshot still shows the old position for a moment; keep
+            // the thumb where the user put it until the player has caught up.
+            if let Some((target, since)) = self.seek_pending
+                && ((live_s - target).abs() < 1.5 || since.elapsed() > Duration::from_millis(1500))
+            {
+                self.seek_pending = None;
+            }
+            let pending = self.seek_pending.map(|(target, _)| target);
+            let mut shown = self
+                .seek_drag
+                .or(pending)
+                .unwrap_or(live_s)
+                .min(duration_s.max(0.0));
+            // "1:02:03" needs more room than "4:05".
+            let time_width = if duration_s >= 3600.0 { 56.0 } else { 40.0 };
             ui.allocate_ui_with_layout(
                 egui::vec2(time_width, 18.0),
                 Layout::right_to_left(Align::Center),
@@ -215,6 +229,19 @@ impl OneumApp {
                 // Released after a drag, a click on the rail, or a keyboard step.
                 player.send(Command::SeekTo((shown * 1000.0) as u64));
                 self.seek_drag = None;
+                self.seek_pending = Some((shown, Instant::now()));
+            }
+            // Where a click would land, while pointing at the rail.
+            if enabled
+                && !response.dragged()
+                && let Some(pointer) = response.hover_pos()
+            {
+                let rail = response.rect;
+                let fraction = ((pointer.x - rail.left()) / rail.width().max(1.0)).clamp(0.0, 1.0);
+                let at = f64::from(fraction) * duration_s;
+                response
+                    .clone()
+                    .on_hover_text_at_pointer(format_time((at * 1000.0) as u64));
             }
             ui.allocate_ui_with_layout(
                 egui::vec2(time_width, 18.0),
@@ -241,24 +268,14 @@ impl OneumApp {
             player.send(Command::SetVolume(volume));
             self.player.volume = volume;
         }
-        let icon = if volume <= 0.001 {
-            Icon::VolumeMuted
+        let muted = volume <= 0.001;
+        let (icon, label) = if muted {
+            (Icon::VolumeMuted, s.unmute)
         } else {
-            Icon::Volume
+            (Icon::Volume, s.mute)
         };
-        if widgets::icon_button(ui, icon, s.volume, 26.0, false).clicked() {
-            // Toggle mute, remembering the previous level for un-muting.
-            if volume > 0.001 {
-                self.volume_before_mute = volume;
-                player.send(Command::SetVolume(0.0));
-            } else {
-                let restore = if self.volume_before_mute > 0.001 {
-                    self.volume_before_mute
-                } else {
-                    0.8
-                };
-                player.send(Command::SetVolume(restore));
-            }
+        if widgets::icon_button(ui, icon, &format!("{label} (⌘⇧M)"), 26.0, false).clicked() {
+            self.toggle_mute();
         }
     }
 }

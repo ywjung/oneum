@@ -1,7 +1,7 @@
 //! Top bar, sidebar, right panel (queue / song info) and the notice strip.
 use super::dialogs::Dialog;
 use super::icons::Icon;
-use super::{Action, Nav, OneumApp, ToastAction, theme, widgets};
+use super::{Action, KeyPane, Nav, OneumApp, ToastAction, theme, widgets};
 use crate::app::settings::RightPanel;
 use crate::i18n::{format_time, group_digits};
 use crate::playback::{Command, PlayState};
@@ -328,7 +328,10 @@ impl OneumApp {
                                 self.renaming = Some((id, name.clone(), true));
                             }
                             response.context_menu(|ui| {
-                                if ui.button(s.play_now).clicked() {
+                                if ui
+                                    .add_enabled(count > 0, egui::Button::new(s.play_now))
+                                    .clicked()
+                                {
                                     let tracks = self
                                         .core
                                         .library
@@ -360,7 +363,11 @@ impl OneumApp {
     }
 
     pub(super) fn toast_bar(&mut self, ui: &mut Ui) {
-        let Some(toast) = &self.toast else { return };
+        // A transient message is shown in front of a standing one for its few seconds.
+        let showing_transient = self.toast.is_some();
+        let Some(toast) = self.toast.as_ref().or(self.alert.as_ref()) else {
+            return;
+        };
         let s = self.s();
         let mut dismiss = false;
         let mut run: Option<ToastAction> = None;
@@ -395,7 +402,7 @@ impl OneumApp {
                         if let Some((label, action)) = &toast.action
                             && ui.button(label).clicked()
                         {
-                            run = Some(*action);
+                            run = Some(action.clone());
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                             ui.add(egui::Label::new(&toast.text).wrap());
@@ -410,11 +417,16 @@ impl OneumApp {
                     self.settings_open = true;
                     self.settings_tab = super::settings_window::Tab::Playback;
                 }
+                ToastAction::RestorePlaylist(id, tracks) => self.restore_playlist(id, &tracks),
             }
             dismiss = true;
         }
         if dismiss {
-            self.toast = None;
+            if showing_transient {
+                self.toast = None;
+            } else {
+                self.alert = None;
+            }
         }
     }
 
@@ -465,19 +477,40 @@ impl OneumApp {
         let is_playing = self.player.state == PlayState::Playing;
         let accent = theme::accent(ui.visuals().dark_mode);
         let dim = theme::dim(ui);
-        let scroll_to_current = std::mem::take(&mut self.queue_scroll_to_current);
         let drag_id = egui::Id::unique("queue-drag");
+        let dragging_now = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(drag_id).unwrap_or(false));
+        // Follow the playing track, but never pull the list away from under the pointer
+        // while the user is reading, dragging or using a menu in it.
+        let busy = dragging_now
+            || ui.rect_contains_pointer(ui.available_rect_before_wrap())
+            || egui::Popup::is_any_open(ui.ctx());
+        let forced = std::mem::take(&mut self.queue_scroll_forced);
+        let scroll_to_current =
+            std::mem::take(&mut self.queue_scroll_to_current) && (forced || !busy);
         let mut commands: Vec<Command> = Vec::new();
+        let key_row = self.queue_keys(ui, &queue, &mut commands);
 
         let mut area = egui::ScrollArea::vertical()
             .id_salt("queue")
             .auto_shrink([false, false]);
-        if scroll_to_current && let Some(index) = current_index {
+        if let Some(row) = key_row {
+            // Keep the keyboard cursor in view, moving the list as little as possible.
+            let (offset, height) = self.queue_view;
+            let top = row as f32 * QUEUE_ROW;
+            if top < offset {
+                area = area.vertical_scroll_offset(top);
+            } else if top + QUEUE_ROW > offset + height {
+                area = area.vertical_scroll_offset(top + QUEUE_ROW - height);
+            }
+        } else if scroll_to_current && let Some(index) = current_index {
             // Leave one earlier row visible for context.
             area = area.vertical_scroll_offset((index.saturating_sub(1)) as f32 * QUEUE_ROW);
         }
         ui.spacing_mut().item_spacing.y = 0.0;
-        area.show_rows(ui, QUEUE_ROW, queue.len(), |ui, range| {
+        let mut row_clicked = false;
+        let output = area.show_rows(ui, QUEUE_ROW, queue.len(), |ui, range| {
             for index in range {
                 let item = queue[index];
                 let track = snap.get(item.track);
@@ -559,9 +592,13 @@ impl OneumApp {
                 }
 
                 // Selection and activation.
+                if response.clicked() || response.secondary_clicked() || response.drag_started() {
+                    row_clicked = true;
+                }
                 if response.double_clicked() {
                     commands.push(Command::JumpTo(item.id));
                 } else if response.clicked() {
+                    self.queue_cursor = Some(item.id);
                     let modifiers = ui.input(|i| i.modifiers);
                     if modifiers.command {
                         if !self.queue_selection.remove(&item.id) {
@@ -590,6 +627,7 @@ impl OneumApp {
                     self.queue_selection.clear();
                     self.queue_selection.insert(item.id);
                     self.queue_anchor = Some(item.id);
+                    self.queue_cursor = Some(item.id);
                 }
 
                 // Drag to reorder: the dragged selection is dropped before or after the hovered row.
@@ -685,15 +723,138 @@ impl OneumApp {
                 });
             }
         });
+        self.queue_view = (output.state.clamped_offset().y, output.inner_rect.height());
+        if row_clicked {
+            self.key_pane = KeyPane::Queue;
+        }
         if ui.input(|i| i.pointer.any_released() || !i.pointer.any_down()) {
             ui.ctx().data_mut(|d| d.remove_temp::<bool>(drag_id));
         }
         for command in commands {
             if matches!(command, Command::RemoveItems(_)) {
                 self.queue_selection.clear();
+                if let Some(next) = self.queue_pending_selection.take() {
+                    self.queue_selection.insert(next);
+                    self.queue_anchor = Some(next);
+                    self.queue_cursor = Some(next);
+                }
             }
             self.core.player.send(command);
         }
+    }
+
+    /// Keyboard control of the queue while it has the keys: ↑/↓ (with ⇧ to extend),
+    /// Return plays, Delete removes, ⌥↑/⌥↓ moves the selection, ⌘A selects all.
+    /// Returns the row the cursor moved to, if it moved.
+    fn queue_keys(
+        &mut self,
+        ui: &Ui,
+        queue: &[crate::playback::QueueItem],
+        commands: &mut Vec<Command>,
+    ) -> Option<usize> {
+        if self.key_pane != KeyPane::Queue
+            || self.typing
+            || self.widget_focused
+            || ui.ctx().text_edit_focused()
+            || self.dialog.is_some()
+            || self.settings_open
+            || queue.is_empty()
+        {
+            return None;
+        }
+        let select_all = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A));
+        let (down, up, enter, delete, shift, alt) = ui.input(|i| {
+            let free = !i.modifiers.command;
+            (
+                free && i.key_pressed(egui::Key::ArrowDown),
+                free && i.key_pressed(egui::Key::ArrowUp),
+                free && i.key_pressed(egui::Key::Enter),
+                free && (i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)),
+                i.modifiers.shift,
+                i.modifiers.alt,
+            )
+        });
+        if select_all {
+            self.queue_selection = queue.iter().map(|q| q.id).collect();
+        }
+        let position = |id: Option<u64>| id.and_then(|id| queue.iter().position(|q| q.id == id));
+        let selected: Vec<u64> = queue
+            .iter()
+            .filter(|q| self.queue_selection.contains(&q.id))
+            .map(|q| q.id)
+            .collect();
+        let mut moved_to = None;
+        if (down || up) && alt {
+            // Move the selected items one place, keeping them together.
+            if let Some(first) = queue
+                .iter()
+                .position(|q| self.queue_selection.contains(&q.id))
+            {
+                let target = if up {
+                    first.checked_sub(1)
+                } else if first + selected.len() < queue.len() {
+                    Some(first + 1)
+                } else {
+                    None
+                };
+                if let Some(to_index) = target {
+                    commands.push(Command::MoveItems {
+                        ids: selected.clone(),
+                        to_index,
+                    });
+                    moved_to = Some(if up {
+                        to_index
+                    } else {
+                        to_index + selected.len() - 1
+                    });
+                }
+            }
+        } else if down || up {
+            let last = queue.len() - 1;
+            let cursor = position(self.queue_cursor.or(self.queue_anchor));
+            let next = match (cursor, down) {
+                (Some(i), true) => (i + 1).min(last),
+                (Some(i), false) => i.saturating_sub(1),
+                (None, true) => 0,
+                (None, false) => last,
+            };
+            let id = queue[next].id;
+            if shift {
+                let from = position(self.queue_anchor).unwrap_or(next);
+                self.queue_selection = queue[from.min(next)..=from.max(next)]
+                    .iter()
+                    .map(|q| q.id)
+                    .collect();
+                self.queue_anchor.get_or_insert(id);
+            } else {
+                self.queue_selection.clear();
+                self.queue_selection.insert(id);
+                self.queue_anchor = Some(id);
+            }
+            self.queue_cursor = Some(id);
+            moved_to = Some(next);
+        }
+        if enter && let Some(index) = position(self.queue_cursor.or(self.queue_anchor)) {
+            commands.push(Command::JumpTo(queue[index].id));
+        }
+        if delete && !selected.is_empty() {
+            // The row after the removed block becomes the selection, so that Delete can
+            // be pressed repeatedly.
+            let after = queue
+                .iter()
+                .skip_while(|q| !self.queue_selection.contains(&q.id))
+                .find(|q| !self.queue_selection.contains(&q.id))
+                .or_else(|| {
+                    queue
+                        .iter()
+                        .rev()
+                        .find(|q| !self.queue_selection.contains(&q.id))
+                })
+                .map(|q| q.id);
+            commands.push(Command::RemoveItems(selected));
+            self.queue_pending_selection = after;
+        }
+        moved_to
     }
 
     fn info_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -707,8 +868,9 @@ impl OneumApp {
                 _ => self.snapshot.tracks.get(row.idx as usize).map(|t| t.id),
             }
         });
-        let id = selected
-            .or(self.info_track)
+        let id = self
+            .info_track
+            .or(selected)
             .or(self.player.current.map(|c| c.track_id));
         ui.add_space(4.0);
         ui.label(
@@ -761,12 +923,11 @@ impl OneumApp {
                     rows.push((s.info_album_artist, track.album_artist.clone()));
                 }
                 if let Some(n) = track.track_no {
-                    let disc = track
-                        .disc_no
-                        .filter(|d| *d > 1)
-                        .map(|d| format!(" (CD {d})"))
-                        .unwrap_or_default();
-                    rows.push((s.info_track, format!("{n}{disc}")));
+                    let text = match track.disc_no.filter(|d| *d > 1) {
+                        Some(disc) => self.lang.track_on_disc(n, disc),
+                        None => n.to_string(),
+                    };
+                    rows.push((s.info_track, text));
                 }
                 if let Some(year) = track.year {
                     rows.push((s.info_year, year.to_string()));

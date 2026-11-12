@@ -75,6 +75,14 @@ strings! {
     repeat_all: "전체 반복", "Repeat All";
     repeat_one: "한 곡 반복", "Repeat One";
     volume: "볼륨", "Volume";
+    mute: "음소거", "Mute";
+    unmute: "음소거 해제", "Unmute";
+    play_album_hint: "앨범 재생", "Play Album";
+    undo: "실행 취소", "Undo";
+    notice_removed_from_playlist: "플레이리스트에서 제거했습니다.", "Removed from the playlist.";
+    startup_failed_title: "OnEum을 시작할 수 없습니다", "OnEum could not start";
+    startup_failed_body: "라이브러리를 열지 못했습니다. 디스크 공간과 폴더 권한을 확인한 뒤 다시 실행해 주세요.", "The library could not be opened. Check free disk space and folder permissions, then start OnEum again.";
+    startup_failed_log: "자세한 내용(로그)", "Details (log)";
     seek_bar: "재생 위치", "Playback position";
     nothing_playing: "재생 중인 곡 없음", "Not Playing";
     drop_hint: "여기에 놓아 음악 추가", "Drop to add music";
@@ -218,6 +226,10 @@ strings! {
     menu_file: "파일", "File";
     menu_edit: "편집", "Edit";
     menu_controls: "제어", "Controls";
+    menu_song: "곡", "Song";
+    menu_song_play: "선택한 곡 재생", "Play Selection";
+    menu_song_favorite: "즐겨찾기 전환", "Toggle Favorite";
+    menu_mute: "음소거 전환", "Toggle Mute";
     menu_view: "보기", "View";
     menu_window: "윈도우", "Window";
     menu_help: "도움말", "Help";
@@ -316,21 +328,28 @@ impl Lang {
 
     pub fn playlist_import_result(self, name: &str, matched: usize, missing: usize) -> String {
         match (self, missing) {
-            (Lang::Ko, 0) => format!("“{name}” 플레이리스트를 가져왔습니다 ({matched}곡)."),
-            (Lang::Ko, _) => format!(
-                "“{name}” 플레이리스트를 가져왔습니다 ({matched}곡, 찾지 못한 항목 {missing}개)."
+            (Lang::Ko, 0) => format!(
+                "“{name}” 플레이리스트를 가져왔습니다 ({}).",
+                self.song_count(matched)
             ),
-            (Lang::En, 0) => format!("Imported playlist “{name}” ({matched} songs)."),
+            (Lang::Ko, _) => format!(
+                "“{name}” 플레이리스트를 가져왔습니다 ({}, 찾지 못한 항목 {}개).",
+                self.song_count(matched),
+                group_digits(missing)
+            ),
+            (Lang::En, 0) => format!("Imported playlist “{name}” ({}).", self.song_count(matched)),
             (Lang::En, _) => format!(
-                "Imported playlist “{name}” ({matched} songs, {missing} entries not found)."
+                "Imported playlist “{name}” ({}, {} not found).",
+                self.song_count(matched),
+                en_count(missing, "entry", "entries")
             ),
         }
     }
 
     pub fn playlist_exported(self, count: usize) -> String {
         match self {
-            Lang::Ko => format!("플레이리스트를 내보냈습니다 ({count}곡)."),
-            Lang::En => format!("Playlist exported ({count} songs)."),
+            Lang::Ko => format!("플레이리스트를 내보냈습니다 ({}).", self.song_count(count)),
+            Lang::En => format!("Playlist exported ({}).", self.song_count(count)),
         }
     }
 
@@ -351,25 +370,55 @@ impl Lang {
     pub fn scan_finished(self, total: usize, unsupported: u64, errors: u64) -> String {
         let mut text = match self {
             Lang::Ko => format!("스캔 완료 · 라이브러리 {}곡", group_digits(total)),
-            Lang::En => format!("Scan finished · {} songs in library", group_digits(total)),
+            Lang::En => format!("Scan finished · {} in library", self.song_count(total)),
         };
         if unsupported > 0 {
             text += &match self {
-                Lang::Ko => format!(" · 지원하지 않는 파일 {unsupported}개 제외"),
-                Lang::En => format!(" · {unsupported} unsupported files skipped"),
+                Lang::Ko => format!(
+                    " · 지원하지 않는 파일 {}개 제외",
+                    group_digits(unsupported as usize)
+                ),
+                Lang::En => format!(
+                    " · {} skipped",
+                    en_count(
+                        unsupported as usize,
+                        "unsupported file",
+                        "unsupported files"
+                    )
+                ),
             };
         }
         if errors > 0 {
             text += &match self {
-                Lang::Ko => format!(" · 읽지 못한 파일 {errors}개"),
-                Lang::En => format!(" · {errors} unreadable files"),
+                Lang::Ko => format!(" · 읽지 못한 파일 {}개", group_digits(errors as usize)),
+                Lang::En => format!(
+                    " · {}",
+                    en_count(errors as usize, "unreadable file", "unreadable files")
+                ),
             };
         }
         text
     }
 
+    /// "3 (CD 2)": a track number with its disc, for multi-disc albums.
+    pub fn track_on_disc(self, track: u32, disc: u32) -> String {
+        match self {
+            Lang::Ko => format!("{track} (디스크 {disc})"),
+            Lang::En => format!("{track} (Disc {disc})"),
+        }
+    }
+
     pub fn artist_summary(self, albums: usize, songs: usize) -> String {
         format!("{} · {}", self.album_count(albums), self.song_count(songs))
+    }
+}
+
+/// English count with the right noun form: "1 entry", "2,000 entries".
+fn en_count(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{} {many}", group_digits(n))
     }
 }
 
@@ -424,6 +473,16 @@ mod tests {
         assert_eq!(Lang::Ko.total_time(3_900_000), "1시간 5분");
         assert_eq!(Lang::Ko.total_time(54_000), "54초");
         assert_eq!(Lang::En.total_time(600_000), "10 min");
+        assert_eq!(
+            Lang::En.playlist_import_result("Mix", 1, 1),
+            "Imported playlist “Mix” (1 song, 1 entry not found)."
+        );
+        assert_eq!(
+            Lang::En.scan_finished(1, 1, 2000),
+            "Scan finished · 1 song in library · 1 unsupported file skipped · 2,000 unreadable files"
+        );
+        assert_eq!(Lang::En.playlist_exported(1), "Playlist exported (1 song).");
+        assert_eq!(Lang::Ko.track_on_disc(3, 2), "3 (디스크 2)");
     }
 
     #[test]

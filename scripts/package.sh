@@ -25,16 +25,27 @@ done
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 ARCH=$(uname -m)
+# The bundle is declared and verified for Apple silicon only (assets/Info.plist.in).
+[ "$ARCH" = arm64 ] || { echo "only Apple silicon (arm64) builds are supported" >&2; exit 1; }
+# The bundle declares macOS 14 as its minimum (assets/Info.plist.in): build for it.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 if [ "$PROFILE" = release ]; then
   cargo build --release --locked --bin oneum
 else
   cargo build --locked --bin oneum
 fi
+# Honour CARGO_TARGET_DIR and build.target-dir instead of assuming ./target.
+TARGET_DIR=$(cargo metadata --format-version 1 --no-deps --locked \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+BIN="$TARGET_DIR/$PROFILE/oneum"
+[ -x "$BIN" ] || { echo "built binary not found at $BIN" >&2; exit 1; }
 
-APP=dist/OnEum.app
+# ONEUM_APP_DIR redirects the bundle (development runs use dist/dev so that an OnEum
+# the user is running from dist/ is never replaced underneath them).
+APP="${ONEUM_APP_DIR:-dist}/OnEum.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "target/$PROFILE/oneum" "$APP/Contents/MacOS/OnEum"
+cp "$BIN" "$APP/Contents/MacOS/OnEum"
 cp assets/OnEum.icns "$APP/Contents/Resources/OnEum.icns"
 sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" assets/Info.plist.in > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
@@ -64,6 +75,7 @@ echo "built $APP  (version $VERSION, build $BUILD, $ARCH, $PROFILE)"
 if [ "$MAKE_DMG" = 1 ]; then
   DMG="dist/OnEum-$VERSION-$ARCH.dmg"
   STAGE=$(mktemp -d)
+  trap 'rm -rf "$STAGE"' EXIT
   cp -R "$APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
   rm -f "$DMG"
