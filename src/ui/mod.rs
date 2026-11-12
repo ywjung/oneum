@@ -175,6 +175,8 @@ pub struct OneumApp {
 
     snapshot: Arc<LibrarySnapshot>,
     lib_generation: u64,
+    /// Bumped by the library when a cover it could not deliver has been regenerated.
+    art_generation: u64,
     playlists: Vec<PlaylistInfo>,
     playlists_generation: u64,
     player: PlayerSnapshot,
@@ -270,6 +272,7 @@ impl OneumApp {
             art: ArtCache::new(core.library.clone(), ctx.clone()),
             snapshot: core.library.snapshot(),
             lib_generation: core.library.generation(),
+            art_generation: core.library.art_generation(),
             playlists: core.library.playlists(),
             playlists_generation: core.library.playlists_generation(),
             last_notice_seq: player.notice_seq,
@@ -388,6 +391,12 @@ impl OneumApp {
         if generation != self.lib_generation {
             self.lib_generation = generation;
             self.snapshot = self.core.library.snapshot();
+            self.art.library_changed();
+        }
+        let art_generation = self.core.library.art_generation();
+        if art_generation != self.art_generation {
+            // Covers that were missing a moment ago exist again: ask for them once more.
+            self.art_generation = art_generation;
             self.art.library_changed();
         }
         let playlists_generation = self.core.library.playlists_generation();
