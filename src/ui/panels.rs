@@ -11,6 +11,22 @@ const SIDEBAR_ROW: f32 = 28.0;
 const QUEUE_ROW: f32 = 44.0;
 
 /// A full-width selectable row in the sidebar.
+/// How far to scroll per frame while something is dragged near the top or bottom edge of
+/// a list occupying `rect`; `None` away from the edges.
+fn edge_scroll_step(pointer_y: f32, rect: egui::Rect) -> Option<f32> {
+    const ZONE: f32 = 28.0;
+    const STEP: f32 = 9.0;
+    if rect.height() < ZONE * 3.0 {
+        None
+    } else if (rect.top() - ZONE..rect.top() + ZONE).contains(&pointer_y) {
+        Some(-STEP)
+    } else if (rect.bottom() - ZONE..rect.bottom() + ZONE).contains(&pointer_y) {
+        Some(STEP)
+    } else {
+        None
+    }
+}
+
 fn sidebar_row(
     ui: &mut Ui,
     selected: bool,
@@ -586,6 +602,15 @@ impl OneumApp {
             } else if top + QUEUE_ROW > offset + height {
                 area = area.vertical_scroll_offset(top + QUEUE_ROW - height);
             }
+        } else if dragging_now
+            && let Some(pointer) = ui.ctx().pointer_interact_pos()
+            && let Some(step) = edge_scroll_step(pointer.y, self.queue_rect)
+        {
+            // Dragging towards the top or bottom edge moves the list along, so an item
+            // can be dropped further away than what is visible.
+            let max = (queue.len() as f32 * QUEUE_ROW - self.queue_view.1).max(0.0);
+            area = area.vertical_scroll_offset((self.queue_view.0 + step).clamp(0.0, max));
+            ui.ctx().request_repaint();
         } else if scroll_to_current && let Some(index) = current_index {
             // Leave one earlier row visible for context.
             area = area.vertical_scroll_offset((index.saturating_sub(1)) as f32 * QUEUE_ROW);
@@ -806,6 +831,7 @@ impl OneumApp {
             }
         });
         self.queue_view = (output.state.clamped_offset().y, output.inner_rect.height());
+        self.queue_rect = output.inner_rect;
         if row_clicked {
             self.key_pane = KeyPane::Queue;
         }
@@ -1087,5 +1113,24 @@ impl OneumApp {
                 }
                 ui.add_space(8.0);
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_scroll_step;
+    use eframe::egui;
+
+    #[test]
+    fn dragging_near_an_edge_scrolls_towards_it() {
+        let list = egui::Rect::from_min_max(egui::pos2(0.0, 100.0), egui::pos2(300.0, 500.0));
+        assert!(edge_scroll_step(110.0, list).is_some_and(|step| step < 0.0));
+        assert!(edge_scroll_step(95.0, list).is_some_and(|step| step < 0.0));
+        assert!(edge_scroll_step(490.0, list).is_some_and(|step| step > 0.0));
+        assert_eq!(edge_scroll_step(300.0, list), None);
+        assert_eq!(edge_scroll_step(20.0, list), None);
+        // A list too short to have a middle never scrolls by itself.
+        let tiny = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 60.0));
+        assert_eq!(edge_scroll_step(5.0, tiny), None);
     }
 }

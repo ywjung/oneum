@@ -261,6 +261,10 @@ strings! {
     menu_file: "파일", "File";
     menu_edit: "편집", "Edit";
     menu_controls: "제어", "Controls";
+    menu_playlist_rename: "플레이리스트 이름 변경", "Rename Playlist";
+    menu_playlist_export: "플레이리스트 내보내기…", "Export Playlist…";
+    menu_playlist_delete: "플레이리스트 삭제…", "Delete Playlist…";
+    notice_open_playlist_first: "먼저 사이드바에서 플레이리스트를 여세요.", "Open a playlist in the sidebar first.";
     menu_song: "곡", "Song";
     menu_song_play: "선택한 곡 재생", "Play Selection";
     menu_song_favorite: "즐겨찾기 전환", "Toggle Favorite";

@@ -157,6 +157,9 @@ enum UiRequest {
     ToggleInfo,
     UserGuide,
     ToggleMute,
+    PlaylistRename,
+    PlaylistExport,
+    PlaylistDelete,
     SongPlay,
     SongPlayNext,
     SongAddToQueue,
@@ -226,6 +229,8 @@ pub struct OneumApp {
     queue_scroll_forced: bool,
     /// Scroll offset and visible height of the queue list in the previous frame.
     queue_view: (f32, f32),
+    /// Where the queue list was on screen in the previous frame.
+    queue_rect: egui::Rect,
     seek_drag: Option<f64>,
     /// A seek that was sent but is not yet reflected in the player snapshot:
     /// `(target seconds, when)`. The thumb stays there instead of jumping back.
@@ -312,6 +317,7 @@ impl OneumApp {
             queue_scroll_to_current: true,
             queue_scroll_forced: true,
             queue_view: (0.0, 0.0),
+            queue_rect: egui::Rect::NOTHING,
             seek_drag: None,
             seek_pending: None,
             last_settings_save: Instant::now(),
@@ -383,6 +389,9 @@ impl OneumApp {
                 MenuAction::ToggleInfo => UiRequest::ToggleInfo,
                 MenuAction::UserGuide => UiRequest::UserGuide,
                 MenuAction::ToggleMute => UiRequest::ToggleMute,
+                MenuAction::PlaylistRename => UiRequest::PlaylistRename,
+                MenuAction::PlaylistExport => UiRequest::PlaylistExport,
+                MenuAction::PlaylistDelete => UiRequest::PlaylistDelete,
                 MenuAction::SongPlay => UiRequest::SongPlay,
                 MenuAction::SongPlayNext => UiRequest::SongPlayNext,
                 MenuAction::SongAddToQueue => UiRequest::SongAddToQueue,
@@ -390,10 +399,23 @@ impl OneumApp {
                 MenuAction::SongShowInFinder => UiRequest::SongShowInFinder,
                 MenuAction::SongInfo => UiRequest::SongInfo,
             };
+            // Commands that act on songs or the volume do their work without the window;
+            // bringing a hidden window back for them would be an unwanted side effect.
+            let needs_window = !matches!(
+                request,
+                UiRequest::ToggleMute
+                    | UiRequest::SongPlay
+                    | UiRequest::SongPlayNext
+                    | UiRequest::SongAddToQueue
+                    | UiRequest::SongToggleFavorite
+                    | UiRequest::SongShowInFinder
+            );
             if let Ok(mut queue) = requests.lock() {
                 queue.push(request);
             }
-            window::show_main_window();
+            if needs_window {
+                window::show_main_window();
+            }
             ctx.request_repaint();
         });
     }
@@ -690,6 +712,29 @@ impl OneumApp {
                 }
             }
             UiRequest::ToggleMute => self.toggle_mute(),
+            UiRequest::PlaylistRename | UiRequest::PlaylistExport | UiRequest::PlaylistDelete => {
+                // The menu bar's way to what the playlist's right-click menu offers.
+                let open = match self.nav {
+                    Nav::Playlist(id) => self
+                        .playlists
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| (id, p.name.clone())),
+                    _ => None,
+                };
+                match (open, request) {
+                    (None, _) => self.info_toast(self.s().notice_open_playlist_first),
+                    (Some((id, name)), UiRequest::PlaylistRename) => {
+                        self.renaming = Some((id, name, true));
+                    }
+                    (Some((id, name)), UiRequest::PlaylistExport) => {
+                        self.export_playlist(id, &name);
+                    }
+                    (Some((id, name)), _) => {
+                        self.dialog = Some(Dialog::DeletePlaylist(id, name));
+                    }
+                }
+            }
             UiRequest::SongPlay
             | UiRequest::SongPlayNext
             | UiRequest::SongAddToQueue
@@ -1242,6 +1287,8 @@ impl OneumApp {
                         "song_toggle_favorite" => Some(UiRequest::SongToggleFavorite),
                         "song_info" => Some(UiRequest::SongInfo),
                         "toggle_mute" => Some(UiRequest::ToggleMute),
+                        "playlist_rename" => Some(UiRequest::PlaylistRename),
+                        "playlist_delete" => Some(UiRequest::PlaylistDelete),
                         "toggle_queue" => Some(UiRequest::ToggleQueue),
                         "toggle_info" => Some(UiRequest::ToggleInfo),
                         "go_to_current" => Some(UiRequest::GoToCurrent),

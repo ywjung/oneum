@@ -190,6 +190,18 @@ impl ArtCache {
     /// Deletes cache files no track refers to and trims the cache to its size limit.
     /// Returns early when `stop` is set.
     pub(crate) fn cleanup(&self, referenced: &HashSet<String>, stop: &AtomicBool) {
+        self.cleanup_to(referenced, stop, CACHE_LIMIT_BYTES, CACHE_TRIM_TARGET_BYTES);
+    }
+
+    /// [`ArtCache::cleanup`] with explicit sizes (so the trimming can be tested without
+    /// writing half a gigabyte).
+    fn cleanup_to(
+        &self,
+        referenced: &HashSet<String>,
+        stop: &AtomicBool,
+        limit_bytes: u64,
+        target_bytes: u64,
+    ) {
         struct Entry {
             path: PathBuf,
             size: u64,
@@ -236,10 +248,10 @@ impl ArtCache {
         }
 
         let mut total: u64 = kept.iter().map(|e| e.size).sum();
-        if total > CACHE_LIMIT_BYTES {
+        if total > limit_bytes {
             kept.sort_by_key(|e| e.modified);
             for entry in &kept {
-                if total <= CACHE_TRIM_TARGET_BYTES {
+                if total <= target_bytes {
                     break;
                 }
                 if fs::remove_file(&entry.path).is_ok() {
@@ -573,5 +585,41 @@ mod tests {
         assert!(cache.exists(&keep), "referenced file must stay");
         assert!(cache.exists(&fresh), "recent file must stay");
         assert!(!cache.exists(&stale), "old unreferenced file must go");
+    }
+
+    #[test]
+    fn an_oversized_cache_is_trimmed_oldest_first_down_to_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ArtCache::new(dir.path());
+        // Six covers in use, each a little older than the next.
+        let ids: Vec<String> = (0..6u32)
+            .map(|n| cache.store_embedded(&jpeg(40 + n, 40)).unwrap())
+            .collect();
+        let size_of = |id: &String| fs::metadata(cache.path_for(id)).unwrap().len();
+        for (age, id) in ids.iter().enumerate() {
+            let file = fs::File::options()
+                .write(true)
+                .open(cache.path_for(id))
+                .unwrap();
+            let modified = SystemTime::now() - Duration::from_secs(60 * (6 - age as u64));
+            file.set_modified(modified).unwrap();
+        }
+        let referenced: HashSet<String> = ids.iter().cloned().collect();
+        let total: u64 = ids.iter().map(size_of).sum();
+
+        // Under the limit: nothing happens, even though everything is "old".
+        cache.cleanup_to(&referenced, &AtomicBool::new(false), total, total / 2);
+        assert!(ids.iter().all(|id| cache.exists(id)));
+
+        // Over the limit: the oldest go first, and only until the target is reached.
+        let newest_two: u64 = ids[4..].iter().map(size_of).sum();
+        cache.cleanup_to(&referenced, &AtomicBool::new(false), total - 1, newest_two);
+        let left: Vec<bool> = ids.iter().map(|id| cache.exists(id)).collect();
+        assert_eq!(left, [false, false, false, false, true, true]);
+
+        // A cover that was trimmed although a track uses it is simply made again.
+        let again = cache.store_embedded(&jpeg(40, 40)).unwrap();
+        assert_eq!(again, ids[0]);
+        assert!(cache.exists(&ids[0]));
     }
 }
