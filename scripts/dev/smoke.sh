@@ -87,6 +87,70 @@ ui 'click 228 157' 'wait 300' 'click 60 189' 'wait 400' 'dump f1.json' 'click 60
 check f1.json 'd["nav"] == "Favorites" and d["rows"] == 1' "heart marks a favourite"
 check f2.json 'd["right_panel"] == "Queue"' "queue panel opens"
 
+same() { # same <dump-a> <dump-b> <keys,comma-separated> <description>
+  python3 - "$PROFILE/$1" "$PROFILE/$2" "$3" "$4" <<'PY'
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+keys = sys.argv[3].split(",")
+ok = all(a[k] == b[k] for k in keys)
+print(("  ok   " if ok else "  FAIL ") + sys.argv[4])
+if not ok:
+    print("       before:", {k: a[k] for k in keys}); print("       after: ", {k: b[k] for k in keys})
+    sys.exit(1)
+PY
+}
+delta() { # delta <dump-a> <dump-b> <key> <expected difference> <description>
+  python3 - "$PROFILE/$1" "$PROFILE/$2" "$3" "$4" "$5" <<'PY'
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+ok = b[sys.argv[3]] - a[sys.argv[3]] == int(sys.argv[4])
+print(("  ok   " if ok else "  FAIL ") + sys.argv[5])
+if not ok:
+    print("       ", sys.argv[3], a[sys.argv[3]], "->", b[sys.argv[3]])
+    sys.exit(1)
+PY
+}
+
+echo "== keyboard in the song list"
+ui 'click 400 93' 'wait 200' 'key ArrowDown' 'key ArrowDown shift' 'key ArrowDown shift' 'wait 200' 'dump k1.json' 'key ArrowUp shift' 'wait 200' 'dump k2.json' \
+   'click 200 20' 'wait 200' 'text 이유' 'wait 300' 'click 400 93' 'wait 300' 'dump k3.json' 'click 200 20' 'wait 200' 'key Enter' 'wait 700' 'dump k4.json' \
+   'key Escape' 'wait 200' 'click 200 20' 'wait 100' 'key Escape' 'wait 300'
+check k1.json 'd["selected"] == 3' "Shift+Down extends the selection"
+check k2.json 'd["selected"] == 2' "Shift+Up shrinks it again"
+same k3.json k4.json current,queue_len,queue_index "Return in the search field does not start the selected song"
+
+echo "== song menu and queue keys"
+ui 'click 400 93' 'wait 400' 'dump s0.json' 'menu song_play_next' 'wait 500' 'dump s1.json' 'menu toggle_queue' 'wait 500' 'click 1000 140' 'wait 200' 'key ArrowDown' 'wait 200' 'dump s2.json' \
+   'key Delete' 'wait 600' 'dump s3.json' 'menu toggle_queue' 'wait 300'
+delta s0.json s1.json queue_len 1 "Song ▸ Play Next queues the selected song"
+check s2.json 'd["key_pane"] == "Queue" and d["queue_selected"] == 1' "the queue takes the keys after a click in it"
+delta s1.json s3.json queue_len -1 "Delete removes the selected queue item"
+check s3.json 'd["rows"] == 20 and d["playlists"] == []' "…and nothing else"
+
+echo "== album play button"
+ui 'click 60 129' 'wait 500' 'move 300 150' 'wait 200' 'click 348 184' 'wait 1200' 'dump al.json' 'click 60 99' 'wait 400'
+check al.json 'd["nav"] == "Albums" and d["state"] == "Playing" and d["queue_len"] == 2' "the play button on a cover plays that album"
+
+echo "== playlist, remove and undo"
+ui 'click 400 93' 'wait 400' 'click 400 221 shift' 'wait 200' 'rclick 400 150' 'wait 400' 'click 460 270' 'wait 500' 'click 678 270' 'wait 500' 'key Enter' 'wait 700' 'dump pl1.json' \
+   'click 400 132' 'wait 400' 'key Delete' 'wait 500' 'dump pl2.json' 'click 1103 664' 'wait 600' 'dump pl3.json' 'click 60 99' 'wait 300'
+check pl1.json 'd["nav"].startswith("Playlist") and d["rows"] == 5 and d["playlists"][0][1] == 5' "a playlist is created from the selection"
+same al.json pl1.json current,queue_len "Return in the name dialog does not start playback"
+check pl2.json 'd["rows"] == 4 and d["toast_action"]' "Delete removes a row and offers Undo"
+check pl3.json 'd["rows"] == 5 and not d["toast_action"]' "Undo puts it back"
+same pl1.json pl3.json first_rows "…in the original order"
+
+echo "== mute"
+# 0.01 on the volume slider is far below audibility (cubic curve), so this stays silent.
+ui 'volume 0.01' 'wait 300' 'menu toggle_mute' 'wait 300' 'dump mu1.json' 'menu toggle_mute' 'wait 300' 'dump mu2.json' 'volume 0' 'wait 200'
+check mu1.json 'd["volume"] == 0' "mute"
+check mu2.json 'abs(d["volume"] - 0.01) < 1e-6' "un-mute returns to the previous level"
+
+echo "== hidden window"
+ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json'
+check h1.json 'not d["window_visible"] and d["state"] == "Playing" and d["queue_len"] == 1' "a file opened while the window is hidden plays"
+check h2.json 'd["window_visible"]' "the window comes back"
+
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'
 sleep 2
