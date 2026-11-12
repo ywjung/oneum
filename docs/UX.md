@@ -105,6 +105,8 @@
 - 쓸 수 없는 설정(음량 보정이 꺼졌을 때의 프리앰프 등)은 흐리게 보이되 자리는 지킨다.
 - 모든 조작부는 Tab으로 닿고 이름·역할(스위치, 라디오, 탭, 슬라이더)을 가진다.
 
+화면: [일반](images/settings-general.png) · [라이브러리](images/settings-library.png) · [재생](images/settings-playback.png) · [단축키](images/settings-shortcuts.png)
+
 ## 검색
 - 제목·아티스트·앨범·앨범 아티스트에서 찾는다. 공백으로 나눈 모든 단어가 포함되어야 한다(AND).
 - 부분 일치: `이유` → "아이유", `bea` → "The Beatles". 대소문자·전각/반각·NFC/NFD 차이는 무시한다.
