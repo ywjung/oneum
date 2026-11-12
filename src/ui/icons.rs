@@ -28,6 +28,9 @@ pub enum Icon {
     Person,
     Clock,
     Playlist,
+    Folder,
+    Trash,
+    Keyboard,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -208,6 +211,42 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
             painter.line_segment([p(0.5, 0.40), p(0.5, 0.62)], stroke);
             painter.circle_filled(p(0.5, 0.73), w * 0.8, color);
+        }
+        Icon::Folder => {
+            painter.add(Shape::closed_line(
+                vec![
+                    p(0.10, 0.24),
+                    p(0.38, 0.24),
+                    p(0.47, 0.35),
+                    p(0.90, 0.35),
+                    p(0.90, 0.80),
+                    p(0.10, 0.80),
+                ],
+                stroke,
+            ));
+        }
+        Icon::Keyboard => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.08, 0.24), p(0.92, 0.76)),
+                s * 0.10,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            for x in [0.28, 0.50, 0.72] {
+                painter.circle_filled(p(x, 0.42), w * 0.6, color);
+            }
+            painter.add(Shape::line(vec![p(0.32, 0.60), p(0.68, 0.60)], stroke));
+        }
+        Icon::Trash => {
+            painter.add(Shape::line(vec![p(0.16, 0.28), p(0.84, 0.28)], stroke));
+            painter.add(Shape::line(
+                vec![p(0.40, 0.28), p(0.40, 0.16), p(0.60, 0.16), p(0.60, 0.28)],
+                stroke,
+            ));
+            painter.add(Shape::line(
+                vec![p(0.25, 0.28), p(0.31, 0.86), p(0.69, 0.86), p(0.75, 0.28)],
+                stroke,
+            ));
         }
         Icon::Album => {
             painter.rect_stroke(

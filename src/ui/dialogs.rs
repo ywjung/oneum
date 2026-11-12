@@ -39,7 +39,7 @@ impl OneumApp {
         let s = self.s();
         let mut outcome = Outcome::Open;
         let modal = egui::Modal::new(egui::Id::unique("oneum-dialog")).show(ctx, |ui| {
-            ui.set_width(380.0);
+            ui.set_width(400.0);
             let (title, body, confirm) = match &dialog {
                 Dialog::RemoveFolder(_, path) => (
                     s.confirm_remove_folder_title,
@@ -97,16 +97,30 @@ impl OneumApp {
             }
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(
-                        can_confirm,
-                        egui::Button::new(RichText::new(confirm).strong()),
+                // The button that acts is filled: red when it takes something away.
+                let dark = ui.visuals().dark_mode;
+                let destructive = !matches!(dialog, Dialog::NewPlaylist { .. });
+                let (fill, ink) = if destructive {
+                    (
+                        egui::Color32::from_rgb(0xD6, 0x45, 0x45),
+                        egui::Color32::WHITE,
                     )
-                    .clicked()
-                {
+                } else if dark {
+                    (
+                        super::theme::accent(dark),
+                        egui::Color32::from_rgb(0x14, 0x14, 0x18),
+                    )
+                } else {
+                    (super::theme::accent(dark), egui::Color32::WHITE)
+                };
+                let confirm_button = egui::Button::new(RichText::new(confirm).strong().color(ink))
+                    .fill(fill)
+                    .min_size(egui::vec2(76.0, 28.0));
+                if ui.add_enabled(can_confirm, confirm_button).clicked() {
                     outcome = Outcome::Confirm;
                 }
-                if ui.button(s.cancel).clicked() {
+                let cancel_button = egui::Button::new(s.cancel).min_size(egui::vec2(76.0, 28.0));
+                if ui.add(cancel_button).clicked() {
                     outcome = Outcome::Cancel;
                 }
             });

@@ -219,6 +219,8 @@ pub struct OneumApp {
     last_settings_save: Instant,
 
     art: ArtCache,
+    /// The app icon shown in Settings ▸ About (decoded on first use).
+    about_icon: Option<egui::TextureHandle>,
     /// Transient message.
     toast: Option<Toast>,
     /// Message that stays until dismissed or resolved (lost device, …). A transient
@@ -299,6 +301,7 @@ impl OneumApp {
             seek_drag: None,
             seek_pending: None,
             last_settings_save: Instant::now(),
+            about_icon: None,
             toast: None,
             alert: None,
             dialog: None,
@@ -1188,6 +1191,8 @@ impl OneumApp {
                     }
                 }
                 automation::AppStep::Activate => window::show_main_window(),
+                automation::AppStep::Front => window::order_front_without_activating(),
+                automation::AppStep::Back => window::send_back(),
                 automation::AppStep::Hide => window::hide_main_window(),
                 automation::AppStep::Resize(w, h) => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
@@ -1263,6 +1268,15 @@ impl OneumApp {
         state["renaming"] =
             serde_json::json!(self.renaming.as_ref().map(|(_, text, _)| text.clone()));
         state["queue_selected"] = serde_json::json!(self.queue_selection.len());
+        state["settings_tab"] = serde_json::json!(format!("{:?}", self.settings_tab));
+        state["theme"] = serde_json::json!(format!("{:?}", self.settings.theme));
+        state["show_format_column"] = serde_json::json!(self.settings.show_format_column);
+        state["replaygain"] = serde_json::json!(format!(
+            "{:?} {:+.1} {}",
+            self.settings.replaygain.mode,
+            self.settings.replaygain.preamp_db,
+            self.settings.replaygain.prevent_clipping
+        ));
         state["perf"] = serde_json::json!({
             "first_frame_ms": self.perf.first_frame_ms,
             "last_frame_ms": self.perf.last_frame_ms,

@@ -137,6 +137,7 @@ strings! {
     language_system: "시스템 설정 따르기", "Follow System";
     theme: "화면 모드", "Appearance";
     theme_system: "시스템 설정 따르기", "Follow System";
+    theme_system_short: "시스템", "System";
     theme_light: "밝게", "Light";
     theme_dark: "어둡게", "Dark";
     music_folders: "음악 폴더", "Music Folders";
@@ -156,6 +157,38 @@ strings! {
     rg_prevent_clipping: "클리핑 방지", "Prevent clipping";
     rg_hint: "파일에 이미 들어 있는 ReplayGain 태그만 사용합니다. 태그가 없는 곡은 보정하지 않습니다.",
         "Uses ReplayGain tags already present in your files. Songs without tags are not adjusted.";
+    settings_section_display: "화면", "Display";
+    settings_section_output: "출력", "Output";
+    settings_shortcuts: "단축키", "Shortcuts";
+    shortcuts_group_window: "창과 앱", "Window and App";
+    shortcut_play_selected: "선택한 곡 재생", "Play the selected song";
+    shortcut_move_selection: "선택 이동 / 범위 선택", "Move the selection / extend it";
+    shortcut_remove: "플레이리스트·대기열에서 제거", "Remove from the playlist or queue";
+    shortcut_reorder_queue: "대기열에서 순서 바꾸기", "Reorder in the queue";
+    shortcut_clear_search: "검색어 지우기", "Clear the search";
+    shortcuts_note: "화살표·Return·Delete는 마지막으로 클릭한 목록(곡 목록 또는 대기열)에 적용됩니다.",
+        "Arrows, Return and Delete apply to the list you clicked last (songs or queue).";
+    settings_section_lists: "곡 목록", "Song Lists";
+    language_desc: "메뉴와 화면에 쓰는 언어입니다.", "The language of menus and the window.";
+    theme_desc: "밝은 화면과 어두운 화면을 고릅니다.", "Choose a light or a dark look.";
+    show_format_title: "포맷 열 표시", "Show Format Column";
+    show_format_desc: "곡 목록에 코덱(FLAC, MP3 등)을 함께 보여 줍니다.", "Adds the codec (FLAC, MP3, …) to song lists.";
+    music_folders_hint: "이 폴더들의 음악이 라이브러리에 나타납니다. 파일은 읽기만 하고 바꾸지 않습니다.",
+        "Music in these folders appears in your library. Files are only read, never changed.";
+    folder_never_scanned: "아직 스캔하지 않음", "Not scanned yet";
+    output_device_desc_idle: "재생을 시작하면 사용 중인 장치가 표시됩니다.", "The device in use is shown once playback starts.";
+    output_hint: "선택한 장치가 분리되면 다른 장치로 넘기지 않고 일시정지합니다.",
+        "If the device is disconnected, playback pauses instead of moving to another device.";
+    rg_mode: "기준", "Mode";
+    rg_mode_desc: "곡마다 다른 음량을 비슷하게 맞춥니다.", "Evens out loudness differences between songs.";
+    rg_preamp_desc: "보정한 곡의 음량을 더 올리거나 내립니다.", "Raises or lowers adjusted songs further.";
+    rg_clip_desc: "보정 때문에 소리가 깨지지 않게 이득을 제한합니다.", "Limits the gain so adjusted songs never distort.";
+    about_guide_desc: "기능과 단축키를 정리한 문서입니다.", "Features and shortcuts in one document.";
+    log_folder: "로그 폴더", "Log Folder";
+    log_folder_desc: "문제가 생겼을 때 확인하는 기록입니다.", "Records to look at when something goes wrong.";
+    data_folder: "데이터 폴더", "Data Folder";
+    data_folder_desc: "라이브러리 데이터베이스와 설정이 있는 곳입니다.", "Where the library database and settings live.";
+    close_settings: "설정 닫기", "Close Settings";
     about_body: "로컬 음악 파일을 위한 오프라인 플레이어.\n계정, 서버, 사용량 수집이 없습니다.",
         "An offline player for your local music files.\nNo accounts, no servers, no analytics.";
     version: "버전", "Version";
@@ -400,6 +433,45 @@ impl Lang {
         text
     }
 
+    pub fn artist_count(self, n: usize) -> String {
+        match self {
+            Lang::Ko => format!("아티스트 {}명", group_digits(n)),
+            Lang::En if n == 1 => "1 artist".to_string(),
+            Lang::En => format!("{} artists", group_digits(n)),
+        }
+    }
+
+    /// "지금: Mac mini 스피커 · 48,000 Hz" — the device playback is running on.
+    pub fn output_now(self, device: &str, rate: Option<u32>) -> String {
+        let rate = rate
+            .map(|r| format!(" · {} Hz", group_digits(r as usize)))
+            .unwrap_or_default();
+        match self {
+            Lang::Ko => format!("지금: {device}{rate}"),
+            Lang::En => format!("Now: {device}{rate}"),
+        }
+    }
+
+    /// How long ago a folder was last scanned.
+    pub fn scanned_ago(self, seconds: i64) -> String {
+        let seconds = seconds.max(0);
+        let (n, ko, en) = match seconds {
+            0..=59 => {
+                return match self {
+                    Lang::Ko => "방금 스캔함".to_string(),
+                    Lang::En => "Scanned just now".to_string(),
+                };
+            }
+            60..=3599 => (seconds / 60, "분", "min"),
+            3600..=86_399 => (seconds / 3600, "시간", "hr"),
+            _ => (seconds / 86_400, "일", "d"),
+        };
+        match self {
+            Lang::Ko => format!("{n}{ko} 전 스캔"),
+            Lang::En => format!("Scanned {n} {en} ago"),
+        }
+    }
+
     /// "3 (CD 2)": a track number with its disc, for multi-disc albums.
     pub fn track_on_disc(self, track: u32, disc: u32) -> String {
         match self {
@@ -483,6 +555,15 @@ mod tests {
         );
         assert_eq!(Lang::En.playlist_exported(1), "Playlist exported (1 song).");
         assert_eq!(Lang::Ko.track_on_disc(3, 2), "3 (디스크 2)");
+        assert_eq!(Lang::Ko.scanned_ago(30), "방금 스캔함");
+        assert_eq!(Lang::Ko.scanned_ago(125), "2분 전 스캔");
+        assert_eq!(Lang::En.scanned_ago(7300), "Scanned 2 hr ago");
+        assert_eq!(Lang::En.scanned_ago(200_000), "Scanned 2 d ago");
+        assert_eq!(
+            Lang::Ko.output_now("스피커", Some(48_000)),
+            "지금: 스피커 · 48,000 Hz"
+        );
+        assert_eq!(Lang::En.artist_count(1), "1 artist");
     }
 
     #[test]

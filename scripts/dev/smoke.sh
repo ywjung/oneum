@@ -36,7 +36,9 @@ PY
 SHUFFLE="508 710"; PREV="547 710"; PLAY="590 710"; NEXT="633 710"; REPEAT="672 710"
 
 echo "== first run"
-ui 'resize 1180 760' 'wait 400' 'volume 0' 'dump a.json'
+# 'front' keeps the window above others without taking keyboard focus: a fully covered
+# window is not painted and would not process the scripted input.
+ui 'front' 'resize 1180 760' 'wait 400' 'volume 0' 'dump a.json'
 check a.json 'd["library_tracks"] == 0 and d["state"] == "Idle"' "starts with an empty library, idle"
 
 echo "== add a folder (Finder open path)"
@@ -145,6 +147,19 @@ echo "== mute"
 ui 'volume 0.01' 'wait 300' 'menu toggle_mute' 'wait 300' 'dump mu1.json' 'menu toggle_mute' 'wait 300' 'dump mu2.json' 'volume 0' 'wait 200'
 check mu1.json 'd["volume"] == 0' "mute"
 check mu2.json 'abs(d["volume"] - 0.01) < 1e-6' "un-mute returns to the previous level"
+
+echo "== settings"
+# Tab and control centres for the 620-point settings window in a 1180x760 window (Korean).
+ui 'click 1081 20' 'wait 600' 'dump se1.json' 'click 510 176' 'wait 500' 'click 758 425' 'wait 500' 'dump se2.json' \
+   'click 712 425' 'wait 400' 'click 332 176' 'wait 500' 'click 845 448' 'wait 500' 'dump se3.json' 'click 845 448' 'wait 400' \
+   'click 590 176' 'wait 400' 'dump se4.json' 'key Escape' 'wait 400' 'dump se5.json' \
+   'click 1081 20' 'wait 500' 'click 100 600' 'wait 400' 'dump se6.json'
+check se1.json 'd["settings_open"]' "the gear opens Settings"
+check se2.json 'd["settings_tab"] == "Playback" and d["replaygain"].startswith("Track")' "Playback tab: volume leveling mode"
+check se3.json 'd["settings_tab"] == "General" and d["show_format_column"]' "General tab: the Format column switch"
+check se4.json 'd["settings_tab"] == "Shortcuts"' "Shortcuts tab"
+check se5.json 'not d["settings_open"]' "Escape closes Settings"
+check se6.json 'not d["settings_open"] and d["nav"] == "Songs"' "a click outside closes it without acting on what is behind"
 
 echo "== hidden window"
 ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json'
