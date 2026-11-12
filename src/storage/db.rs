@@ -22,7 +22,7 @@ const HISTORY_KEEP_ROWS: i64 = 20_000;
 
 /// Ordered migration list. Entry `i` upgrades the schema from version `i` to `i + 1`;
 /// the current version is stored in `PRAGMA user_version`.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE roots (
@@ -96,8 +96,22 @@ CREATE TABLE kv (
 ) WITHOUT ROWID;
 ";
 
+/// v2:
+/// - `tracks.art_from_folder` remembers whether a track's artwork came from an image
+///   file in its folder (rather than from the audio file itself), so that adding,
+///   replacing or removing that image can update the track without re-reading the
+///   audio file.
+/// - `roots.unconfirmed_after` is set while a folder's path exists but none of its known
+///   files were found there (a stale mount point, a recreated directory). It holds the
+///   highest track id from before that was noticed: only tracks up to that id can later
+///   prove that the path leads to the known folder again.
+const SCHEMA_V2: &str = "
+ALTER TABLE tracks ADD COLUMN art_from_folder INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE roots ADD COLUMN unconfirmed_after INTEGER;
+";
+
 /// Columns filled from the file on disk (re-written on every rescan of a changed file).
-const SCAN_COLS: [&str; 26] = [
+const SCAN_COLS: [&str; 27] = [
     "root_id",
     "available",
     "title",
@@ -124,6 +138,7 @@ const SCAN_COLS: [&str; 26] = [
     "rg_album_gain",
     "rg_album_peak",
     "art_id",
+    "art_from_folder",
 ];
 
 /// Columns owned by the user's activity; only set when a row is first inserted.
@@ -243,6 +258,8 @@ pub struct RootRow {
     pub id: i64,
     pub path: PathBuf,
     pub last_scan_at: Option<i64>,
+    /// See `SCHEMA_V2`: set while the folder's identity is in doubt.
+    pub unconfirmed_after: Option<TrackId>,
 }
 
 /// A track row: the shared model type plus columns that are not part of it.
@@ -252,6 +269,9 @@ pub struct StoredTrack {
     /// The file's compilation flag (input of the album identity; kept so album keys can be
     /// recomputed without re-reading files).
     pub compilation: bool,
+    /// `track.art_id` refers to an image file in the track's folder, not to a picture
+    /// embedded in the audio file.
+    pub art_from_folder: bool,
 }
 
 /// Result of [`Db::open`].
@@ -289,12 +309,15 @@ impl Db {
         let mut conn = if path.exists() {
             match open_checked(path) {
                 Ok(conn) => conn,
-                Err(err) if is_busy(&err) => return Err(DbError::Sqlite(err)),
-                Err(err) => {
-                    tracing::warn!(error = %err, "library database is unusable; moving it aside");
+                // Only a file that SQLite itself calls damaged is replaced. Anything else
+                // (disk full, I/O error, permissions, a lock) says nothing about the
+                // data: the file is left exactly as it is and the error is reported.
+                Err(err) if is_corruption(&err) => {
+                    tracing::warn!(error = %err, "library database is corrupt; moving it aside");
                     recovered_corrupt_db = Some(move_aside(path)?);
                     open_checked(path)?
                 }
+                Err(err) => return Err(DbError::Sqlite(err)),
             }
         } else {
             open_checked(path)?
@@ -381,12 +404,13 @@ impl Db {
     pub fn roots(&self) -> SqlResult<Vec<RootRow>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, path, last_scan_at FROM roots ORDER BY id")?;
+            .prepare("SELECT id, path, last_scan_at, unconfirmed_after FROM roots ORDER BY id")?;
         let rows = stmt.query_map([], |row| {
             Ok(RootRow {
                 id: row.get(0)?,
                 path: blob_to_path(row.get(1)?),
                 last_scan_at: row.get(2)?,
+                unconfirmed_after: row.get(3)?,
             })
         })?;
         rows.collect()
@@ -406,6 +430,14 @@ impl Db {
             .conn
             .execute("DELETE FROM roots WHERE id = ?1", params![id])?;
         Ok(n > 0)
+    }
+
+    pub fn set_root_unconfirmed(&self, id: i64, after: Option<TrackId>) -> SqlResult<()> {
+        self.conn.execute(
+            "UPDATE roots SET unconfirmed_after = ?2 WHERE id = ?1",
+            params![id, after],
+        )?;
+        Ok(())
     }
 
     pub fn set_root_scanned(&self, id: i64, unix_secs: i64) -> SqlResult<()> {
@@ -470,6 +502,7 @@ impl Db {
                         t.replaygain.album_gain_db.map(f64::from),
                         t.replaygain.album_peak.map(f64::from),
                         t.art_id,
+                        row.art_from_folder,
                         t.favorite,
                         t.play_count,
                         t.last_played_at,
@@ -564,9 +597,40 @@ impl Db {
         tx.commit()
     }
 
+    /// Changes the stored path (and the album identity that depends on it) of a track
+    /// whose file is the same, e.g. when an individually registered file turns out to
+    /// live under a music folder that spells the path differently. Returns false if the
+    /// track does not exist or another row already has that path.
+    pub fn move_track(&self, id: TrackId, path: &Path, album_key: u64) -> SqlResult<bool> {
+        let n = self.conn.execute(
+            "UPDATE OR IGNORE tracks SET path = ?2, album_key = ?3 WHERE id = ?1",
+            params![id, path_to_blob(path), album_key.cast_signed()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Sets the artwork of tracks: `(track id, artwork id, artwork is a folder image)`.
+    pub fn set_tracks_art(&mut self, changes: &[(TrackId, Option<String>, bool)]) -> SqlResult<()> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE tracks SET art_id = ?2, art_from_folder = ?3 WHERE id = ?1",
+            )?;
+            for (id, art_id, from_folder) in changes {
+                stmt.execute(params![id, art_id, from_folder])?;
+            }
+        }
+        tx.commit()
+    }
+
     /// Makes row `keep` point at the file described by row `take` (path and every
     /// file-derived column) and deletes row `take`. Id, favourite, play counts, history
-    /// and playlist membership of `keep` are preserved. Returns the updated row.
+    /// and playlist membership of `keep` are preserved, and the playlist entries, queue
+    /// entries and history of `take` are moved over to `keep` instead of being lost with
+    /// it. Returns the updated row.
     pub fn relink_track(&mut self, keep: TrackId, take: TrackId) -> SqlResult<Option<StoredTrack>> {
         let Some(source) = self.get_track(take)? else {
             return Ok(None);
@@ -575,6 +639,12 @@ impl Db {
             return Ok(None);
         };
         let tx = self.conn.transaction()?;
+        for table in ["playlist_items", "queue", "history"] {
+            tx.execute(
+                &format!("UPDATE {table} SET track_id = ?1 WHERE track_id = ?2"),
+                params![keep, take],
+            )?;
+        }
         tx.execute("DELETE FROM tracks WHERE id = ?1", params![take])?;
         let s = &source.track;
         tx.execute(
@@ -608,14 +678,23 @@ impl Db {
                 s.replaygain.album_gain_db.map(f64::from),
                 s.replaygain.album_peak.map(f64::from),
                 s.art_id,
+                source.art_from_folder,
             ],
         )?;
-        if source.track.favorite && !target.track.favorite {
-            tx.execute(
-                "UPDATE tracks SET favorite = 1 WHERE id = ?1",
-                params![keep],
-            )?;
-        }
+        // Whatever the user did with the short-lived row carries over.
+        let last_played = match (target.track.last_played_at, s.last_played_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        tx.execute(
+            "UPDATE tracks SET favorite = ?2, play_count = ?3, last_played_at = ?4 WHERE id = ?1",
+            params![
+                keep,
+                target.track.favorite || s.favorite,
+                target.track.play_count.saturating_add(s.play_count),
+                last_played,
+            ],
+        )?;
         tx.commit()?;
         self.get_track(keep)
     }
@@ -725,27 +804,28 @@ impl Db {
     /// not exist are skipped. Returns the number of items added.
     pub fn append_playlist_items(&mut self, id: i64, tracks: &[TrackId]) -> SqlResult<usize> {
         let tx = self.conn.transaction()?;
-        let mut position: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_items WHERE playlist_id = ?1",
-            params![id],
-            |r| r.get(0),
-        )?;
-        let mut added = 0;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO playlist_items (playlist_id, track_id, position) \
-                 SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?2)",
-            )?;
-            for track in tracks {
-                let n = stmt.execute(params![id, track, position])?;
-                if n > 0 {
-                    position += 1;
-                    added += 1;
-                }
-            }
-        }
+        let added = append_items(&tx, id, tracks)?;
         tx.commit()?;
         Ok(added)
+    }
+
+    /// Creates a playlist and fills it in one transaction, so a failure cannot leave an
+    /// empty playlist behind. Returns `(playlist id, items added)`.
+    pub fn create_playlist_with_items(
+        &mut self,
+        name: &str,
+        unix_secs: i64,
+        tracks: &[TrackId],
+    ) -> SqlResult<(i64, usize)> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO playlists (name, created_at) VALUES (?1, ?2)",
+            params![name, unix_secs],
+        )?;
+        let id = tx.last_insert_rowid();
+        let added = append_items(&tx, id, tracks)?;
+        tx.commit()?;
+        Ok((id, added))
     }
 
     pub fn remove_playlist_items(&mut self, id: i64, item_ids: &[i64]) -> SqlResult<()> {
@@ -822,6 +902,26 @@ impl Db {
     }
 }
 
+fn append_items(tx: &rusqlite::Transaction<'_>, id: i64, tracks: &[TrackId]) -> SqlResult<usize> {
+    let mut position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_items WHERE playlist_id = ?1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    let mut added = 0;
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO playlist_items (playlist_id, track_id, position) \
+         SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?2)",
+    )?;
+    for track in tracks {
+        if stmt.execute(params![id, track, position])? > 0 {
+            position += 1;
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
 /// Opens a connection, verifies the file and applies the connection settings.
 fn open_checked(path: &Path) -> SqlResult<Connection> {
     let conn = Connection::open(path)?;
@@ -839,11 +939,13 @@ fn open_checked(path: &Path) -> SqlResult<Connection> {
     Ok(conn)
 }
 
-fn is_busy(err: &rusqlite::Error) -> bool {
+/// True for SQLITE_CORRUPT and SQLITE_NOTADB (and a failed `quick_check`, which
+/// `open_checked` reports as SQLITE_CORRUPT).
+fn is_corruption(err: &rusqlite::Error) -> bool {
     matches!(
         err,
         rusqlite::Error::SqliteFailure(e, _)
-            if e.code == ErrorCode::DatabaseBusy || e.code == ErrorCode::DatabaseLocked
+            if e.code == ErrorCode::DatabaseCorrupt || e.code == ErrorCode::NotADatabase
     )
 }
 
@@ -962,12 +1064,13 @@ fn row_to_track(row: &Row<'_>) -> SqlResult<StoredTrack> {
                 album_peak: gain(26)?,
             },
             art_id: row.get(27)?,
-            favorite: row.get(28)?,
-            play_count: clamp_u32(row.get(29)?),
-            last_played_at: row.get(30)?,
-            added_at: row.get(31)?,
+            favorite: row.get(29)?,
+            play_count: clamp_u32(row.get(30)?),
+            last_played_at: row.get(31)?,
+            added_at: row.get(32)?,
         },
         compilation: row.get(9)?,
+        art_from_folder: row.get(28)?,
     })
 }
 
@@ -1013,7 +1116,15 @@ mod tests {
                 added_at: 1_700_000_000,
             },
             compilation: true,
+            art_from_folder: false,
         }
+    }
+
+    /// The current migration list plus one more step, to simulate a future upgrade.
+    fn with_next(next: &'static str) -> Vec<&'static str> {
+        let mut list = MIGRATIONS.to_vec();
+        list.push(next);
+        list
     }
 
     fn db_path(dir: &tempfile::TempDir) -> PathBuf {
@@ -1125,24 +1236,25 @@ mod tests {
     fn migration_makes_backup_and_reports_old_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
+        let current = MIGRATIONS.len() as u32;
         {
-            let mut db = Db::open_with_migrations(&path, &[SCHEMA_V1]).unwrap().db;
+            let mut db = Db::open(&path).unwrap().db;
             db.upsert_tracks(&[sample_track("/m/a.flac", None)])
                 .unwrap();
         }
-        let v2 = "ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;";
-        let opened = Db::open_with_migrations(&path, &[SCHEMA_V1, v2]).unwrap();
-        assert_eq!(opened.migrated_from, Some(1));
-        assert_eq!(opened.db.schema_version().unwrap(), 2);
+        let next = "ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;";
+        let opened = Db::open_with_migrations(&path, &with_next(next)).unwrap();
+        assert_eq!(opened.migrated_from, Some(current));
+        assert_eq!(opened.db.schema_version().unwrap(), current + 1);
         assert_eq!(opened.db.load_tracks().unwrap().len(), 1);
-        let backup = sibling(&path, ".bak-v1");
+        let backup = sibling(&path, &format!(".bak-v{current}"));
         assert!(backup.exists());
-        // The backup is a complete v1 database.
+        // The backup is a complete database of the old version.
         let old = Connection::open(&backup).unwrap();
         let v: u32 = old
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, current);
         let n: i64 = old
             .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
             .unwrap();
@@ -1150,11 +1262,76 @@ mod tests {
     }
 
     #[test]
-    fn failing_migration_restores_backup() {
+    fn v1_database_is_upgraded_in_place() {
+        // A database as written by the first release: schema v1, rows inserted with
+        // plain SQL (the current code cannot write that shape any more).
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
         {
-            let mut db = Db::open_with_migrations(&path, &[SCHEMA_V1]).unwrap().db;
+            let old = Db::open_with_migrations(&path, &[SCHEMA_V1]).unwrap().db;
+            old.conn
+                .execute_batch(
+                    "INSERT INTO roots (path) VALUES (x'2f4d75736963');
+                     INSERT INTO tracks (path, root_id, title, artist, album_artist, album,
+                         album_key, genre, duration_ms, codec, container, sample_rate,
+                         channels, file_size, mtime_ns, art_id, favorite, play_count, added_at)
+                     VALUES (x'2f4d757369632f612e666c6163', 1, '밤편지', '아이유', '', 'Palette',
+                         -42, 'K-Pop', 253000, 'FLAC', 'FLAC', 44100, 2, 1234, 5678,
+                         '0123456789abcdef', 1, 7, 1700000000);
+                     INSERT INTO playlists (name, created_at) VALUES ('mix', 1);
+                     INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (1, 1, 0);
+                     INSERT INTO kv (key, value) VALUES ('volume', '0.5');",
+                )
+                .unwrap();
+            assert_eq!(old.schema_version().unwrap(), 1);
+        }
+
+        let opened = Db::open(&path).unwrap();
+        assert_eq!(opened.migrated_from, Some(1));
+        assert!(opened.recovered_corrupt_db.is_none());
+        assert!(sibling(&path, ".bak-v1").exists());
+        let mut db = opened.db;
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        let tracks = db.load_tracks().unwrap();
+        assert_eq!(tracks.len(), 1);
+        let t = &tracks[0];
+        assert_eq!(t.track.path, PathBuf::from("/Music/a.flac"));
+        assert_eq!(t.track.title, "밤편지");
+        assert_eq!(t.track.album_key, (-42i64).cast_unsigned());
+        assert_eq!(t.track.art_id.as_deref(), Some("0123456789abcdef"));
+        assert!(t.track.favorite);
+        assert_eq!(t.track.play_count, 7);
+        assert!(
+            !t.art_from_folder,
+            "old rows start as 'not known to be folder art'"
+        );
+        assert_eq!(db.all_playlist_items().unwrap(), vec![(1, 1, 1)]);
+        assert_eq!(db.kv_get("volume").unwrap().as_deref(), Some("0.5"));
+        let roots = db.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].path, PathBuf::from("/Music"));
+        assert_eq!(roots[0].unconfirmed_after, None);
+        db.set_root_unconfirmed(roots[0].id, Some(41)).unwrap();
+        assert_eq!(db.roots().unwrap()[0].unconfirmed_after, Some(41));
+        db.set_root_unconfirmed(roots[0].id, None).unwrap();
+        assert_eq!(db.roots().unwrap()[0].unconfirmed_after, None);
+        // The upgraded database takes current writes.
+        let mut row = sample_track("/Music/b.flac", Some(1));
+        row.art_from_folder = true;
+        let id = db.upsert_tracks(&[row]).unwrap()[0];
+        assert!(db.get_track(id).unwrap().unwrap().art_from_folder);
+        // Opening again does not migrate again.
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().migrated_from, None);
+    }
+
+    #[test]
+    fn failing_migration_restores_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let current = MIGRATIONS.len() as u32;
+        {
+            let mut db = Db::open(&path).unwrap().db;
             db.upsert_tracks(&[sample_track("/m/a.flac", None)])
                 .unwrap();
             db.kv_set("marker", "before").unwrap();
@@ -1162,7 +1339,7 @@ mod tests {
         // The first statement succeeds, the second fails: the whole step must roll back.
         let broken = "ALTER TABLE tracks ADD COLUMN rating INTEGER; \
                       INSERT INTO table_that_does_not_exist VALUES (1);";
-        let err = match Db::open_with_migrations(&path, &[SCHEMA_V1, broken]) {
+        let err = match Db::open_with_migrations(&path, &with_next(broken)) {
             Ok(_) => panic!("migration must fail"),
             Err(err) => err,
         };
@@ -1170,18 +1347,18 @@ mod tests {
             DbError::MigrationFailed {
                 from, to, restored, ..
             } => {
-                assert_eq!((from, to), (1, 2));
+                assert_eq!((from, to), (current, current + 1));
                 assert!(restored);
             }
             other => panic!("unexpected error: {other}"),
         }
-        assert!(sibling(&path, ".bak-v1").exists());
+        assert!(sibling(&path, &format!(".bak-v{current}")).exists());
 
-        // The original database is intact and opens with the old migration list.
-        let opened = Db::open_with_migrations(&path, &[SCHEMA_V1]).unwrap();
+        // The original database is intact and opens with the current migration list.
+        let opened = Db::open(&path).unwrap();
         assert!(opened.recovered_corrupt_db.is_none());
         assert!(opened.migrated_from.is_none());
-        assert_eq!(opened.db.schema_version().unwrap(), 1);
+        assert_eq!(opened.db.schema_version().unwrap(), current);
         assert_eq!(opened.db.load_tracks().unwrap().len(), 1);
         assert_eq!(
             opened.db.kv_get("marker").unwrap().as_deref(),
@@ -1190,22 +1367,89 @@ mod tests {
     }
 
     #[test]
+    fn unopenable_but_healthy_database_is_left_alone() {
+        // A healthy database that cannot be opened for a reason other than corruption:
+        // a directory sits where SQLite needs to create its write-ahead log.
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        {
+            let mut db = Db::open(&path).unwrap().db;
+            db.upsert_tracks(&[sample_track("/m/a.flac", None)])
+                .unwrap();
+            db.kv_set("marker", "precious").unwrap();
+        }
+        let healthy = fs::read(&path).unwrap();
+        let wal = sibling(&path, "-wal");
+        let _ = fs::remove_file(&wal);
+        fs::create_dir(&wal).unwrap();
+
+        match Db::open(&path) {
+            Err(DbError::Sqlite(err)) => assert!(!is_corruption(&err), "{err}"),
+            Err(other) => panic!("unexpected error kind: {other}"),
+            Ok(_) => panic!("the database cannot be opened in this state"),
+        }
+        // Nothing was renamed or rewritten.
+        assert_eq!(fs::read(&path).unwrap(), healthy);
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.contains("corrupt")),
+            "nothing may be moved aside: {names:?}"
+        );
+
+        // Once the obstacle is gone the data is all there.
+        fs::remove_dir(&wal).unwrap();
+        let opened = Db::open(&path).unwrap();
+        assert!(opened.recovered_corrupt_db.is_none());
+        assert_eq!(opened.db.load_tracks().unwrap().len(), 1);
+        assert_eq!(
+            opened.db.kv_get("marker").unwrap().as_deref(),
+            Some("precious")
+        );
+    }
+
+    #[test]
+    fn only_corruption_codes_count_as_corruption() {
+        let failure = |code: std::ffi::c_int| {
+            rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
+        };
+        assert!(is_corruption(&failure(rusqlite::ffi::SQLITE_CORRUPT)));
+        assert!(is_corruption(&failure(rusqlite::ffi::SQLITE_NOTADB)));
+        for code in [
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_READONLY,
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_LOCKED,
+            rusqlite::ffi::SQLITE_PERM,
+            rusqlite::ffi::SQLITE_NOMEM,
+        ] {
+            assert!(!is_corruption(&failure(code)), "code {code}");
+        }
+        assert!(!is_corruption(&rusqlite::Error::QueryReturnedNoRows));
+    }
+
+    #[test]
     fn newer_schema_is_refused_and_left_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
         {
-            let v2 = "CREATE TABLE future (x INTEGER);";
-            Db::open_with_migrations(&path, &[SCHEMA_V1, v2]).unwrap();
+            let next = "CREATE TABLE future (x INTEGER);";
+            Db::open_with_migrations(&path, &with_next(next)).unwrap();
         }
-        match Db::open_with_migrations(&path, &[SCHEMA_V1]) {
+        let current = MIGRATIONS.len() as u32;
+        match Db::open(&path) {
             Err(DbError::NewerSchema { found, supported }) => {
-                assert_eq!((found, supported), (2, 1));
+                assert_eq!((found, supported), (current + 1, current));
             }
             Err(other) => panic!("unexpected error: {other}"),
             Ok(_) => panic!("must refuse a newer schema"),
         }
         assert!(path.exists());
-        assert!(Db::open_with_migrations(&path, &[SCHEMA_V1, "SELECT 1;"]).is_ok());
+        assert!(Db::open_with_migrations(&path, &with_next("SELECT 1;")).is_ok());
     }
 
     #[test]
@@ -1302,6 +1546,141 @@ mod tests {
         assert_eq!(relinked.play_count, 1);
         assert!(db.get_track(new).unwrap().is_none());
         assert_eq!(db.load_tracks().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn relink_keeps_what_was_attached_to_the_new_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        let old = db
+            .upsert_tracks(&[sample_track("/m/old.flac", None)])
+            .unwrap()[0];
+        let other = db
+            .upsert_tracks(&[sample_track("/m/other.flac", None)])
+            .unwrap()[0];
+        let mut moved = sample_track("/m/new.flac", None);
+        moved.art_from_folder = true;
+        let new = db.upsert_tracks(&[moved]).unwrap()[0];
+
+        let playlist = db.create_playlist("p", 1).unwrap();
+        db.append_playlist_items(playlist, &[old, new, other, new])
+            .unwrap();
+        db.save_queue(&[(1, new), (2, other), (3, old)]).unwrap();
+        db.record_play(old, 100).unwrap();
+        db.record_play(new, 200).unwrap();
+        db.record_play(new, 300).unwrap();
+        db.set_favorite(&[new], true).unwrap();
+
+        let row = db.relink_track(old, new).unwrap().unwrap();
+        assert_eq!(row.track.id, old);
+        assert_eq!(row.track.path, PathBuf::from("/m/new.flac"));
+        assert!(row.art_from_folder);
+        assert!(row.track.favorite, "a favourite set on the new row is kept");
+        assert_eq!(row.track.play_count, 3);
+        assert_eq!(row.track.last_played_at, Some(300));
+        assert!(db.get_track(new).unwrap().is_none());
+
+        // Playlist entries, queue entries and history of the new row now belong to the
+        // kept row, in their original places.
+        let items: Vec<TrackId> = db
+            .all_playlist_items()
+            .unwrap()
+            .into_iter()
+            .map(|(_, _, track)| track)
+            .collect();
+        assert_eq!(items, vec![old, old, other, old]);
+        assert_eq!(
+            db.load_queue().unwrap(),
+            vec![(1, old), (2, other), (3, old)]
+        );
+        assert_eq!(db.recent_plays(10).unwrap(), vec![old]);
+        let plays: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM history WHERE track_id = ?1",
+                params![old],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(plays, 3);
+    }
+
+    #[test]
+    fn playlist_with_items_is_created_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        let ids = db
+            .upsert_tracks(&[
+                sample_track("/m/a.flac", None),
+                sample_track("/m/b.flac", None),
+            ])
+            .unwrap();
+        let (playlist, added) = db
+            .create_playlist_with_items("가져온 목록", 5, &[ids[1], 999, ids[0], ids[1]])
+            .unwrap();
+        assert_eq!(added, 3);
+        assert_eq!(
+            db.playlists().unwrap(),
+            vec![(playlist, "가져온 목록".to_string())]
+        );
+        let items: Vec<TrackId> = db
+            .all_playlist_items()
+            .unwrap()
+            .into_iter()
+            .map(|(_, _, track)| track)
+            .collect();
+        assert_eq!(items, vec![ids[1], ids[0], ids[1]]);
+
+        // If filling the playlist fails, the playlist itself is not left behind.
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER refuse_items BEFORE INSERT ON playlist_items
+                 BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;",
+            )
+            .unwrap();
+        assert!(db.create_playlist_with_items("실패", 6, &ids).is_err());
+        assert_eq!(db.playlists().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn moving_a_track_changes_path_and_album_key_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        let ids = db
+            .upsert_tracks(&[
+                sample_track("/private/var/m/a.flac", None),
+                sample_track("/var/m/taken.flac", None),
+            ])
+            .unwrap();
+        db.set_favorite(&[ids[0]], true).unwrap();
+        assert!(
+            db.move_track(ids[0], Path::new("/var/m/a.flac"), 99)
+                .unwrap()
+        );
+        let row = db.get_track(ids[0]).unwrap().unwrap().track;
+        assert_eq!(row.path, PathBuf::from("/var/m/a.flac"));
+        assert_eq!(row.album_key, 99);
+        assert!(row.favorite);
+        // A path that another row already has is refused, and nothing changes.
+        assert!(
+            !db.move_track(ids[0], Path::new("/var/m/taken.flac"), 1)
+                .unwrap()
+        );
+        assert_eq!(
+            db.get_track(ids[0]).unwrap().unwrap().track.path,
+            PathBuf::from("/var/m/a.flac")
+        );
+        assert!(!db.move_track(4242, Path::new("/var/m/x.flac"), 1).unwrap());
+
+        db.set_tracks_art(&[
+            (ids[0], Some("00000000000000aa".into()), true),
+            (ids[1], None, false),
+        ])
+        .unwrap();
+        let a = db.get_track(ids[0]).unwrap().unwrap();
+        assert_eq!(a.track.art_id.as_deref(), Some("00000000000000aa"));
+        assert!(a.art_from_folder);
+        assert_eq!(db.get_track(ids[1]).unwrap().unwrap().track.art_id, None);
     }
 
     #[test]

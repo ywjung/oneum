@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Larger inputs are ignored (the track simply has no artwork).
@@ -51,6 +51,25 @@ pub(crate) struct ArtCache {
     dir: PathBuf,
     /// Ids currently being written by some thread.
     busy: Mutex<HashSet<String>>,
+    /// Signalled whenever an id leaves `busy`.
+    idle: Condvar,
+    /// Ids whose source turned out not to be a usable image (this session), so that the
+    /// same broken picture is not decoded again for every track and every scan.
+    unusable: Mutex<HashSet<String>>,
+}
+
+/// Marks an id as "being written" for as long as it lives; waiters are woken when it is
+/// dropped, also if the writer panics.
+struct BusyGuard<'a> {
+    cache: &'a ArtCache,
+    id: &'a str,
+}
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.cache.busy).remove(self.id);
+        self.cache.idle.notify_all();
+    }
 }
 
 impl ArtCache {
@@ -58,6 +77,8 @@ impl ArtCache {
         ArtCache {
             dir: cache_dir.join("art"),
             busy: Mutex::new(HashSet::new()),
+            idle: Condvar::new(),
+            unusable: Mutex::new(HashSet::new()),
         }
     }
 
@@ -118,18 +139,29 @@ impl ArtCache {
         if path.is_file() {
             return true;
         }
+        if lock(&self.unusable).contains(id) {
+            return false;
+        }
         {
             let mut busy = lock(&self.busy);
-            if !busy.insert(id.to_string()) {
-                // Another thread is writing this very image; it will be there shortly.
-                return true;
+            if busy.contains(id) {
+                // Another thread is producing this very image. Wait for it and report
+                // what it achieved: if it failed, this caller must not hand out an id
+                // without a file either (it can then fall back to a folder image).
+                while busy.contains(id) {
+                    busy = self.idle.wait(busy).unwrap_or_else(|e| e.into_inner());
+                }
+                drop(busy);
+                return path.is_file();
             }
+            busy.insert(id.to_string());
         }
-        let written = source()
-            .and_then(|bytes| make_cover_jpeg(&bytes))
-            .is_some_and(|jpeg| write_cache_file(&path, &jpeg).is_ok());
-        lock(&self.busy).remove(id);
-        written
+        let _guard = BusyGuard { cache: self, id };
+        let Some(jpeg) = source().and_then(|bytes| make_cover_jpeg(&bytes)) else {
+            lock(&self.unusable).insert(id.to_string());
+            return false;
+        };
+        write_cache_file(&path, &jpeg).is_ok()
     }
 
     /// Decodes the cached cover and scales it down so its longest edge is at most
@@ -222,26 +254,28 @@ impl ArtCache {
     }
 }
 
+/// If the file name is one of `cover|folder|front|album.(jpg|jpeg|png)` (ignoring case),
+/// its rank among them (lower is preferred).
+pub(crate) fn cover_priority(path: &Path) -> Option<usize> {
+    let stem = path.file_stem()?.to_str()?;
+    let ext = path.extension()?.to_str()?;
+    if !FOLDER_IMAGE_EXTENSIONS
+        .iter()
+        .any(|known| ext.eq_ignore_ascii_case(known))
+    {
+        return None;
+    }
+    FOLDER_IMAGE_STEMS
+        .iter()
+        .position(|known| stem.eq_ignore_ascii_case(known))
+}
+
 /// Finds `cover|folder|front|album.(jpg|jpeg|png)` in `dir`, ignoring case.
 pub(crate) fn find_folder_image(dir: &Path) -> Option<PathBuf> {
     let mut best: Option<(usize, PathBuf)> = None;
     for entry in fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
-        let stem = path.file_stem().and_then(|s| s.to_str());
-        let ext = path.extension().and_then(|s| s.to_str());
-        let (Some(stem), Some(ext)) = (stem, ext) else {
-            continue;
-        };
-        if !FOLDER_IMAGE_EXTENSIONS
-            .iter()
-            .any(|known| ext.eq_ignore_ascii_case(known))
-        {
-            continue;
-        }
-        let Some(priority) = FOLDER_IMAGE_STEMS
-            .iter()
-            .position(|known| stem.eq_ignore_ascii_case(known))
-        else {
+        let Some(priority) = cover_priority(&path) else {
             continue;
         };
         if best.as_ref().is_none_or(|(p, _)| priority < *p) && path.is_file() {
@@ -408,6 +442,36 @@ mod tests {
         let thumb = cache.load_rgba(&id, 64).unwrap();
         assert_eq!((thumb.width, thumb.height), (64, 43));
         assert_eq!(thumb.rgba.len(), 64 * 43 * 4);
+    }
+
+    #[test]
+    fn concurrent_requests_for_one_image_agree_on_the_outcome() {
+        use std::sync::Barrier;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ArtCache::new(dir.path());
+        // A picture that decodes, and one that has a valid header but no pixel data:
+        // every thread must see the same result as the one that did the work.
+        for (bytes, expect_art) in [(png(700, 500), true), (png_header_only(700, 500), false)] {
+            let barrier = Barrier::new(8);
+            let results: Vec<Option<String>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            cache.store_embedded(&bytes)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for result in &results {
+                assert_eq!(result.is_some(), expect_art, "{results:?}");
+                if let Some(id) = result {
+                    assert!(cache.exists(id), "an id is only handed out with its file");
+                }
+            }
+            assert!(lock(&cache.busy).is_empty());
+        }
     }
 
     #[test]

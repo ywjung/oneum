@@ -974,6 +974,21 @@ fn artwork_is_cached_and_regenerated() {
     // Unknown ids are harmless.
     assert!(library.load_art_rgba("ffffffffffffffff", 96).is_none());
     assert!(library.load_art_rgba("../../../etc/passwd", 96).is_none());
+
+    // A cover image that later appears next to files with embedded pictures does not
+    // replace their artwork, and does not cause them to be read again.
+    let reads = library.debug_tag_reads();
+    write_png(&music.join("album/cover.png"), 50, 50);
+    rescan(&library);
+    assert_eq!(
+        by_title(&library, "Embedded FLAC").art_id.as_deref(),
+        Some(art_id.as_str())
+    );
+    assert_eq!(
+        by_title(&library, "Embedded MP3").art_id.as_deref(),
+        Some(art_id.as_str())
+    );
+    assert_eq!(library.debug_tag_reads(), reads);
 }
 
 #[test]
@@ -1349,4 +1364,590 @@ fn files_on_disk_are_never_modified() {
     library.remove_folder(root).unwrap();
     library.shutdown();
     assert_eq!(snapshot_of(&music), before);
+}
+
+// ---- regression tests for the data-safety review ------------------------------------
+
+/// Restores directory permissions when dropped, so that a failing test still lets the
+/// temporary directory be cleaned up.
+struct RestorePermissions(Vec<std::path::PathBuf>);
+
+impl Drop for RestorePermissions {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in &self.0 {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+#[test]
+fn unreadable_directories_make_a_scan_incomplete_not_destructive() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("open/free.wav"), 300, "Free", "A", "B");
+    write_tagged_wav(&music.join("open/doomed.wav"), 310, "Doomed", "A", "B");
+    write_tagged_wav(&music.join("locked/inside.wav"), 320, "Inside", "A", "B");
+    // A directory outside the folder, reached through a symbolic link.
+    let external = env.dir.path().join("external");
+    write_tagged_wav(&external.join("album/linked.wav"), 330, "Linked", "A", "B");
+    symlink(&external, music.join("link")).unwrap();
+
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["Doomed", "Free", "Inside", "Linked"]);
+    let first_scan = library.roots()[0].last_scan_at;
+    assert!(first_scan.is_some());
+    let ids: Vec<i64> = library.snapshot().tracks.iter().map(|t| t.id).collect();
+
+    // Both directories become unreadable (as with a permission or privacy restriction).
+    let locked = vec![music.join("locked"), external.clone()];
+    let restore = RestorePermissions(locked.clone());
+    for dir in &locked {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if fs::read_dir(&locked[0]).is_ok() {
+        eprintln!("note: test skipped: this user can read directories without permission");
+        return;
+    }
+    // Meanwhile one file elsewhere really is deleted and one is added.
+    fs::remove_file(music.join("open/doomed.wav")).unwrap();
+    write_tagged_wav(&music.join("open/new.wav"), 340, "New", "A", "B");
+    std::thread::sleep(Duration::from_millis(1100)); // scan times have 1 s resolution
+    rescan(&library);
+
+    // Nothing was removed and nothing marked missing — not the tracks behind the
+    // unreadable directories, and (because the scan could not see everything) not the
+    // deleted file either. The new file was still taken in.
+    assert_eq!(
+        titles(&library),
+        ["Doomed", "Free", "Inside", "Linked", "New"]
+    );
+    for id in &ids {
+        assert!(
+            library.track(*id).is_some_and(|t| t.available),
+            "track {id}"
+        );
+    }
+    assert_eq!(
+        library.roots()[0].last_scan_at,
+        first_scan,
+        "an incomplete scan must not be recorded as a completed one"
+    );
+    // The same holds when the individually registered files are checked.
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 5);
+
+    // With the permissions back, a scan completes and applies the normal policy.
+    drop(restore);
+    rescan(&library);
+    assert_eq!(titles(&library), ["Free", "Inside", "Linked", "New"]);
+    assert!(library.snapshot().tracks.iter().all(|t| t.available));
+    assert!(library.roots()[0].last_scan_at > first_scan);
+}
+
+#[test]
+fn unreadable_individually_added_file_is_not_treated_as_deleted() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = TestEnv::new();
+    let dir = env.dir.path().join("downloads");
+    write_tagged_wav(&dir.join("private/kept.wav"), 300, "Kept", "A", "B");
+    write_tagged_wav(&dir.join("gone.wav"), 310, "Gone", "A", "B");
+    let library = env.open();
+    let ids = library.import_files(&[dir.join("private/kept.wav"), dir.join("gone.wav")]);
+    assert_eq!(ids.len(), 2);
+
+    let locked = vec![dir.join("private")];
+    let _restore = RestorePermissions(locked.clone());
+    fs::set_permissions(&locked[0], fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked[0]).is_ok() {
+        eprintln!("note: test skipped: this user can read directories without permission");
+        return;
+    }
+    fs::remove_file(dir.join("gone.wav")).unwrap();
+    rescan(&library);
+    // "Permission denied" is not "deleted": the track stays exactly as it was.
+    assert!(library.track(ids[0]).is_some_and(|t| t.available));
+    // "Not found" in a folder that still exists is.
+    assert!(library.track(ids[1]).is_none());
+}
+
+#[test]
+fn folder_replaced_by_unrelated_content_does_not_wipe_its_tracks() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("a/one.wav"), 300, "One", "A", "B");
+    write_tagged_wav(&music.join("a/two.wav"), 310, "Two", "A", "B");
+    write_tagged_wav(&music.join("b/three.wav"), 320, "Three", "A", "B");
+    let (library, _) = env.open_scanned();
+    let ids: Vec<i64> = library.snapshot().tracks.iter().map(|t| t.id).collect();
+    assert_eq!(ids.len(), 3);
+    let scanned_at = library.roots()[0].last_scan_at;
+
+    // The folder's path now leads somewhere else: a non-empty directory with none of
+    // the known files (a stale mount point with leftovers, a recreated folder).
+    let real = env.dir.path().join("music-real");
+    fs::rename(&music, &real).unwrap();
+    fs::create_dir_all(music.join("other")).unwrap();
+    fs::write(music.join(".DS_Store"), b"finder").unwrap();
+    fs::write(
+        music.join("readme.txt"),
+        b"not the music you are looking for",
+    )
+    .unwrap();
+    write_tagged_wav(&music.join("other/else.wav"), 400, "Else", "X", "Y");
+    std::thread::sleep(Duration::from_millis(1100));
+    rescan(&library);
+
+    // None of the unreferenced tracks was removed; they are unavailable. What is in
+    // the folder now is taken in.
+    assert_eq!(titles(&library), ["Else", "One", "Three", "Two"]);
+    for id in &ids {
+        assert!(
+            library.track(*id).is_some_and(|t| !t.available),
+            "track {id}"
+        );
+    }
+    assert!(by_title(&library, "Else").available);
+    assert_eq!(
+        library.roots()[0].last_scan_at,
+        scanned_at,
+        "a folder without any of its known files is not recorded as scanned"
+    );
+    // Still nothing is removed on the next scan (and the next start).
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 4);
+    drop(library);
+    let library = env.open();
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 4);
+
+    // The original content returns: the same rows are available again, without being
+    // read again, and the leftover of the impostor folder is handled normally.
+    fs::remove_dir_all(&music).unwrap();
+    fs::rename(&real, &music).unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Three", "Two"]);
+    for id in &ids {
+        assert!(
+            library.track(*id).is_some_and(|t| t.available),
+            "track {id}"
+        );
+    }
+    assert_eq!(library.debug_tag_reads(), 0);
+}
+
+#[test]
+fn deleting_every_file_of_a_watched_subfolder_still_removes_its_tracks() {
+    // The guard against wiped folders must not get in the way of an ordinary deletion:
+    // other tracks of the folder are still there, so the folder is alive.
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("keep/stay.wav"), 300, "Stay", "A", "B");
+    write_tagged_wav(&music.join("album/one.wav"), 310, "One", "A", "B");
+    write_tagged_wav(&music.join("album/two.wav"), 320, "Two", "A", "B");
+    let (library, _) = env.open_scanned();
+    fs::remove_dir_all(music.join("album")).unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Stay"]);
+}
+
+#[test]
+fn importing_another_spelling_of_a_known_file_reuses_its_row() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Album/Song.wav"), 300, "Song", "A", "B");
+    let (library, root) = env.open_scanned();
+    let song = by_title(&library, "Song");
+    assert_eq!(library.debug_tag_reads(), 1);
+
+    // Through a symbolic link to the folder.
+    let alias = env.dir.path().join("alias");
+    symlink(music.join("Album"), &alias).unwrap();
+    assert_eq!(library.import_files(&[alias.join("Song.wav")]), [song.id]);
+    // Through the fully resolved path (differs from the folder's spelling wherever a
+    // parent directory is a symbolic link, as the temporary directory is on macOS).
+    let resolved = fs::canonicalize(music.join("Album/Song.wav")).unwrap();
+    assert_eq!(library.import_files(&[resolved]), [song.id]);
+    // Through a different letter case, where the volume ignores case.
+    let shouting = music.join("ALBUM/SONG.WAV");
+    if shouting.exists() {
+        assert_eq!(library.import_files(&[shouting]), [song.id]);
+    } else {
+        eprintln!("note: letter-case part skipped: the volume is case-sensitive");
+    }
+    assert_eq!(
+        library.snapshot().len(),
+        1,
+        "no second row for the same file"
+    );
+    assert_eq!(
+        library.debug_tag_reads(),
+        1,
+        "and the file was not read again"
+    );
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 1);
+    assert!(library.track(song.id).unwrap().available);
+
+    // A file that is new to the library, named through the alias: it is stored under
+    // the folder's own spelling, so the scan recognises it instead of adding it again.
+    write_tagged_wav(&music.join("Album/Second.wav"), 310, "Second", "A", "B");
+    let ids = library.import_files(&[alias.join("Second.wav")]);
+    assert_eq!(ids.len(), 1);
+    let second = library.track(ids[0]).unwrap();
+    assert_eq!(second.path, music.join("Album/Second.wav"));
+    assert_eq!(second.root_id, Some(root));
+    let reads = library.debug_tag_reads();
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 2);
+    assert_eq!(library.debug_tag_reads(), reads);
+    assert!(library.track(ids[0]).unwrap().available);
+
+    // A file the scanner reached through a link inside the folder, imported by its
+    // real location.
+    let external = env.dir.path().join("external");
+    write_tagged_wav(&external.join("far.wav"), 320, "Far", "A", "B");
+    symlink(&external, music.join("ext")).unwrap();
+    rescan(&library);
+    let far = by_title(&library, "Far");
+    assert_eq!(far.path, music.join("ext/far.wav"));
+    assert_eq!(library.import_files(&[external.join("far.wav")]), [far.id]);
+    assert_eq!(library.snapshot().len(), 3);
+}
+
+#[test]
+fn file_in_a_hidden_directory_of_a_music_folder_stays_an_individual_file() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("visible.wav"), 300, "Visible", "A", "B");
+    write_tagged_wav(&music.join(".stash/hidden.wav"), 310, "Hidden", "A", "B");
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["Visible"]);
+
+    // The scan skips hidden directories, so a file imported from one must not be tied
+    // to the folder — the scan could never confirm it.
+    let ids = library.import_files(&[music.join(".stash/hidden.wav")]);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(library.track(ids[0]).unwrap().root_id, None);
+    let playlist = library.create_playlist("p").unwrap();
+    library.add_to_playlist(playlist, &ids).unwrap();
+    rescan(&library);
+    rescan(&library);
+    let hidden = library.track(ids[0]).unwrap();
+    assert!(hidden.available, "the entry must not grey out after a scan");
+    assert_eq!(hidden.root_id, None);
+    assert_eq!(library.snapshot().len(), 2);
+
+    // It is still looked after: when the file goes, the playlist entry is kept as
+    // unavailable.
+    fs::remove_file(music.join(".stash/hidden.wav")).unwrap();
+    rescan(&library);
+    assert!(!library.track(ids[0]).unwrap().available);
+}
+
+#[test]
+fn file_moved_between_music_folders_keeps_its_row() {
+    let env = TestEnv::new();
+    let first = env.music();
+    let second = env.dir.path().join("second");
+    write_tagged_wav(&first.join("a/song.wav"), 300, "Song", "Artist", "Album");
+    write_tagged_wav(&first.join("a/stay.wav"), 310, "Stay", "Artist", "Album");
+    write_tagged_wav(&second.join("keep.wav"), 320, "Keep", "Artist", "Album");
+    write_tagged_wav(&second.join("plain.wav"), 330, "Plain", "Artist", "Album");
+    let library = env.open();
+    let root1 = library.add_folder(&first).unwrap();
+    let root2 = library.add_folder(&second).unwrap();
+    wait_scan(&library);
+    assert_eq!(library.snapshot().len(), 4);
+
+    let song = by_title(&library, "Song");
+    let plain = by_title(&library, "Plain");
+    library.set_favorite(&[song.id], true);
+    library.record_play(song.id);
+    library.record_play(plain.id);
+    let playlist = library.create_playlist("mix").unwrap();
+    library.add_to_playlist(playlist, &[song.id]).unwrap();
+
+    // First folder -> second folder. The first folder is scanned first: the track is
+    // found missing there (and kept, being a favourite) before the file turns up.
+    fs::create_dir_all(second.join("moved")).unwrap();
+    fs::rename(first.join("a/song.wav"), second.join("moved/song.wav")).unwrap();
+    rescan(&library);
+    let moved = library.track(song.id).expect("the row follows the file");
+    assert_eq!(moved.path, second.join("moved/song.wav"));
+    assert_eq!(moved.root_id, Some(root2));
+    assert!(moved.available && moved.favorite);
+    assert_eq!(moved.play_count, 1);
+    assert_eq!(
+        library.snapshot().len(),
+        4,
+        "no second row for the moved file"
+    );
+    assert_eq!(library.playlist_items(playlist)[0].track_id, song.id);
+
+    // Second folder -> first folder. Now the file turns up (first folder) before it is
+    // found missing (second folder).
+    fs::create_dir_all(first.join("b")).unwrap();
+    fs::rename(second.join("moved/song.wav"), first.join("b/song.wav")).unwrap();
+    rescan(&library);
+    let back = library
+        .track(song.id)
+        .expect("the row follows the file back");
+    assert_eq!(back.path, first.join("b/song.wav"));
+    assert_eq!(back.root_id, Some(root1));
+    assert!(back.available && back.favorite);
+    assert_eq!(library.snapshot().len(), 4);
+    assert_eq!(library.playlist_items(playlist)[0].track_id, song.id);
+    assert_eq!(library.playlist_items(playlist).len(), 1);
+
+    // In that order even a track nothing refers to keeps its row and play count.
+    fs::rename(second.join("plain.wav"), first.join("b/plain.wav")).unwrap();
+    rescan(&library);
+    let plain_moved = library
+        .track(plain.id)
+        .expect("unreferenced row follows too");
+    assert_eq!(plain_moved.path, first.join("b/plain.wav"));
+    assert_eq!(plain_moved.play_count, 1);
+    assert_eq!(library.snapshot().len(), 4);
+}
+
+#[test]
+fn file_missing_in_one_scan_and_found_in_a_later_one_is_relinked() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("a/song.wav"), 300, "Song", "Artist", "Album");
+    write_tagged_wav(&music.join("a/stay.wav"), 310, "Stay", "Artist", "Album");
+    let (library, _) = env.open_scanned();
+    let song = by_title(&library, "Song");
+    let playlist = library.create_playlist("mix").unwrap();
+    library
+        .add_to_playlist(playlist, &[song.id, song.id])
+        .unwrap();
+    library.save_queue(&[(1, song.id)]);
+
+    // The file leaves the library's sight for a while …
+    let limbo = env.dir.path().join("limbo");
+    fs::create_dir_all(&limbo).unwrap();
+    fs::rename(music.join("a/song.wav"), limbo.join("song.wav")).unwrap();
+    rescan(&library);
+    assert!(!library.track(song.id).unwrap().available);
+    assert_eq!(library.snapshot().len(), 2);
+
+    // … and comes back somewhere else, under another name, in a later scan (and after
+    // a restart, so nothing but the database remembers the missing track).
+    drop(library);
+    let library = env.open();
+    fs::create_dir_all(music.join("c")).unwrap();
+    fs::rename(limbo.join("song.wav"), music.join("c/song renamed.wav")).unwrap();
+    rescan(&library);
+    let found = library
+        .track(song.id)
+        .expect("the unavailable row is reused");
+    assert_eq!(found.path, music.join("c/song renamed.wav"));
+    assert!(found.available);
+    assert_eq!(library.snapshot().len(), 2);
+    let items: Vec<i64> = library
+        .playlist_items(playlist)
+        .iter()
+        .map(|item| item.track_id)
+        .collect();
+    assert_eq!(items, [song.id, song.id]);
+    assert_eq!(library.load_queue(), [(1, song.id)]);
+}
+
+#[test]
+fn folder_cover_changes_reach_unchanged_tracks() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("album/one.wav"), 300, "One", "Artist", "Album");
+    write_tagged_wav(&music.join("album/two.wav"), 310, "Two", "Artist", "Album");
+    write_tagged_wav(
+        &music.join("other/else.wav"),
+        320,
+        "Else",
+        "Artist",
+        "Other",
+    );
+    let (library, _) = env.open_scanned();
+    let one = by_title(&library, "One");
+    assert_eq!(one.art_id, None);
+    let art_of = |title: &str| by_title(&library, title).art_id.clone();
+
+    // A cover image appears after the first scan.
+    let cover = music.join("album/cover.png");
+    write_png(&cover, 300, 300);
+    rescan(&library);
+    let first = art_of("One").expect("the new cover is picked up");
+    assert_eq!(art_of("Two").as_deref(), Some(first.as_str()));
+    assert_eq!(art_of("Else"), None);
+    assert_eq!(
+        library.debug_tag_reads(),
+        3,
+        "no audio file is read again for this"
+    );
+    assert_eq!(by_title(&library, "One").id, one.id);
+    let image = library.load_art_rgba(&first, 600).unwrap();
+    assert_eq!((image.width, image.height), (300, 300));
+    let snapshot = library.snapshot();
+    let album = &snapshot.albums()[snapshot.album_index(one.album_key).unwrap() as usize];
+    assert_eq!(album.art_id.as_deref(), Some(first.as_str()));
+    drop(snapshot);
+
+    // Nothing changes while the cover stays the same.
+    let generation = library.generation();
+    rescan(&library);
+    assert_eq!(library.generation(), generation);
+
+    // The cover is replaced.
+    write_png(&cover, 240, 160);
+    rescan(&library);
+    let second = art_of("One").expect("the replaced cover is picked up");
+    assert_ne!(second, first);
+    assert_eq!(art_of("Two").as_deref(), Some(second.as_str()));
+    let image = library.load_art_rgba(&second, 600).unwrap();
+    assert_eq!((image.width, image.height), (240, 160));
+
+    // A replacement that is not an image means no artwork, not stale artwork.
+    fs::write(&cover, noise(3_000, 4)).unwrap();
+    rescan(&library);
+    assert_eq!(art_of("One"), None);
+
+    // A good cover again, then it is removed.
+    write_png(&cover, 200, 200);
+    rescan(&library);
+    let third = art_of("One").expect("cover is back");
+    fs::remove_file(&cover).unwrap();
+    rescan(&library);
+    assert_eq!(art_of("One"), None);
+    assert_eq!(art_of("Two"), None);
+    assert_eq!(library.debug_tag_reads(), 3);
+
+    // Rows written before the source of the artwork was recorded (schema v1) are
+    // recognised as folder artwork on the next scan and then follow changes too.
+    write_png(&cover, 200, 200);
+    rescan(&library);
+    assert!(art_of("One").is_some());
+    drop(library);
+    {
+        let db = rusqlite::Connection::open(env.paths().data_dir.join("library.db")).unwrap();
+        let changed = db
+            .execute("UPDATE tracks SET art_from_folder = 0", [])
+            .unwrap();
+        assert_eq!(changed, 3);
+    }
+    let library = env.open();
+    rescan(&library);
+    let before = by_title(&library, "One").art_id.clone().unwrap();
+    let _ = third;
+    write_png(&cover, 180, 120);
+    rescan(&library);
+    let after = by_title(&library, "One").art_id.clone().unwrap();
+    assert_ne!(after, before);
+    assert_eq!(library.debug_tag_reads(), 0);
+}
+
+#[test]
+fn evicted_covers_are_regenerated_through_one_queue() {
+    let env = TestEnv::new();
+    let music = env.music();
+    const ALBUMS: usize = 12;
+    for i in 0..ALBUMS {
+        let dir = music.join(format!("album {i}"));
+        write_tagged_wav(
+            &dir.join("track.wav"),
+            300,
+            &format!("T{i:02}"),
+            "A",
+            &format!("Album {i}"),
+        );
+        write_png(&dir.join("cover.png"), 40 + i as u32 * 4, 40);
+    }
+    let (library, _) = env.open_scanned();
+    let ids: Vec<String> = library
+        .snapshot()
+        .tracks
+        .iter()
+        .map(|t| t.art_id.clone().expect("every album has a cover"))
+        .collect();
+    let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(distinct.len(), ALBUMS);
+    let generation = library.art_generation();
+    assert!(ids.iter().all(|id| library.load_art_rgba(id, 64).is_some()));
+    assert_eq!(
+        library.art_generation(),
+        generation,
+        "plain loads do not count"
+    );
+
+    // The whole cache is evicted; the UI asks for every cover, repeatedly.
+    for id in &ids {
+        fs::remove_file(library.art_path(id)).unwrap();
+    }
+    for _ in 0..3 {
+        for id in &ids {
+            assert!(library.load_art_rgba(id, 64).is_none());
+        }
+    }
+    // Each cover is regenerated exactly once and announced through the counter.
+    wait_until("covers to be regenerated", TIMEOUT, || {
+        library.art_generation() >= generation + ALBUMS as u64
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(library.art_generation(), generation + ALBUMS as u64);
+    assert!(ids.iter().all(|id| library.load_art_rgba(id, 64).is_some()));
+
+    // An id no track uses cannot be regenerated and does not count.
+    assert!(library.load_art_rgba("00000000deadbeef", 64).is_none());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(library.art_generation(), generation + ALBUMS as u64);
+    library.shutdown();
+}
+
+#[test]
+fn concurrent_favourites_and_plays_end_up_published() {
+    let env = TestEnv::new();
+    let music = env.music();
+    for i in 0..4 {
+        write_tagged_wav(
+            &music.join(format!("t{i}.wav")),
+            300 + i * 10,
+            &format!("T{i}"),
+            "A",
+            "B",
+        );
+    }
+    let (library, _) = env.open_scanned();
+    let ids: Vec<i64> = library.snapshot().tracks.iter().map(|t| t.id).collect();
+    std::thread::scope(|scope| {
+        for worker in 0..4usize {
+            let library = &library;
+            let ids = &ids;
+            scope.spawn(move || {
+                for round in 0..150usize {
+                    let id = ids[(worker + round) % ids.len()];
+                    if worker % 2 == 0 {
+                        library.set_favorite(&[id], (worker + round) % 3 == 0);
+                    } else {
+                        library.record_play(id);
+                    }
+                }
+            });
+        }
+    });
+    // Whatever the interleaving was, the published snapshot shows the final state.
+    let snapshot = library.snapshot();
+    let mut plays = 0;
+    for id in &ids {
+        let published = snapshot.get(*id).unwrap();
+        let current = library.track(*id).unwrap();
+        assert_eq!(published.favorite, current.favorite, "track {id}");
+        assert_eq!(published.play_count, current.play_count, "track {id}");
+        assert_eq!(
+            published.last_played_at, current.last_played_at,
+            "track {id}"
+        );
+        plays += current.play_count;
+    }
+    assert_eq!(plays, 300);
 }

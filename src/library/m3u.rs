@@ -19,17 +19,48 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
     text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
 }
 
-/// Parses playlist text. Relative paths are resolved against `base_dir`; blank lines and
-/// `#` directives/comments are skipped; CRLF line ends and `file://` URLs are accepted.
+/// Largest playlist file that is read. Real playlists are a few kilobytes; this keeps a
+/// mistaken selection (a huge file, an HLS stream manifest dump) from being loaded whole.
+pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Parses playlist text. Relative paths are resolved against `base_dir`; CRLF line ends
+/// and `file://` URLs are accepted. Skipped: blank lines, `#EXT…` directives, and other
+/// `#` lines unless they name an existing file (`#1 Hits/01.mp3` is a legal path).
+///
+/// File names may begin or end with spaces, so a line is first taken without its
+/// surrounding whitespace and, if no such file exists but the line as written does,
+/// as written.
 pub(crate) fn parse(text: &str, base_dir: &Path) -> Vec<M3uEntry> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| M3uEntry {
-            raw: line.to_string(),
-            path: resolve(line, base_dir),
-        })
-        .collect()
+    let exists = |path: &Option<PathBuf>| path.as_deref().is_some_and(Path::exists);
+    let mut entries = Vec::new();
+    for raw in text.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_directive(trimmed) {
+            continue;
+        }
+        let mut path = resolve(trimmed, base_dir);
+        if line != trimmed && !exists(&path) {
+            let as_written = resolve(line, base_dir);
+            if exists(&as_written) {
+                path = as_written;
+            }
+        }
+        if trimmed.starts_with('#') && !exists(&path) {
+            continue; // a comment
+        }
+        entries.push(M3uEntry {
+            raw: trimmed.to_string(),
+            path,
+        });
+    }
+    entries
+}
+
+/// True for extended-M3U directives such as `#EXTM3U`, `#EXTINF:…`, `#EXT-X-…`.
+fn is_directive(line: &str) -> bool {
+    line.get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("#EXT"))
 }
 
 fn resolve(line: &str, base_dir: &Path) -> Option<PathBuf> {
@@ -185,6 +216,51 @@ mod tests {
         );
         assert_eq!(entries[1].raw, "sub/track 02.mp3");
         assert_eq!(entries[6].raw, "http://example.com/stream.mp3");
+    }
+
+    #[test]
+    fn hash_names_and_padded_names_are_found_when_they_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::create_dir_all(base.join("#1 Hits")).unwrap();
+        std::fs::write(base.join("#1 Hits/01.mp3"), b"x").unwrap();
+        std::fs::write(base.join(" padded .mp3"), b"x").unwrap();
+        std::fs::write(base.join("plain.mp3"), b"x").unwrap();
+        let text = "#EXTM3U\n\
+                    #EXTINF:1,x\n\
+                    #1 Hits/01.mp3\n\
+                    # not a file, just a remark\n\
+                    #2 Hits/missing.mp3\n\
+                    \x20padded .mp3\n\
+                    \x20\x20plain.mp3\x20\r\n\
+                    \x20gone .mp3\n";
+        let entries = parse(text, base);
+        let paths: Vec<PathBuf> = entries.iter().filter_map(|e| e.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                base.join("#1 Hits/01.mp3"),
+                // The name really has the spaces: taken as written.
+                base.join(" padded .mp3"),
+                // Stray whitespace around a normal name is ignored.
+                base.join("plain.mp3"),
+                // Neither form exists: reported with the trimmed form.
+                base.join("gone .mp3"),
+            ]
+        );
+        assert_eq!(entries[3].raw, "gone .mp3");
+    }
+
+    #[test]
+    fn undecodable_entries_are_kept_as_entries() {
+        // A CP949-encoded name is not valid UTF-8. It cannot be resolved, but it must
+        // still come out as an entry so the caller can report it as missing.
+        let bytes = b"#EXTM3U\n/music/\xb9\xe3\xc6\xed\xc1\xf6.mp3\n/music/ok.mp3\n";
+        let entries = parse(&decode(bytes), Path::new("/lists"));
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].raw.contains('\u{fffd}'));
+        assert!(entries[0].path.as_ref().is_some_and(|p| !p.exists()));
+        assert_eq!(entries[1].path.as_deref(), Some(Path::new("/music/ok.mp3")));
     }
 
     #[test]

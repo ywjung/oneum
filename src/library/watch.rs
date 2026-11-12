@@ -6,7 +6,7 @@
 //! thread also checks whether folders appeared or disappeared (external drives).
 use super::{Inner, lock, tags};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -50,6 +50,8 @@ pub(crate) fn run_watch_thread(inner: Arc<Inner>, rx: Receiver<WatchMsg>, tx: Se
         }
     };
     let mut watched: HashMap<i64, Watched> = HashMap::new();
+    // Folders whose watch could not be established (logged once, retried every check).
+    let mut unwatchable: HashSet<i64> = HashSet::new();
     let mut dirty: HashMap<i64, Dirty> = HashMap::new();
     let mut dirty_since: Option<Instant> = None;
     let mut last_check: Option<Instant> = None;
@@ -74,7 +76,7 @@ pub(crate) fn run_watch_thread(inner: Arc<Inner>, rx: Receiver<WatchMsg>, tx: Se
         }
 
         if reconcile_now || last_check.is_none_or(|at| at.elapsed() >= ONLINE_CHECK_INTERVAL) {
-            reconcile(&inner, watcher.as_mut(), &mut watched);
+            reconcile(&inner, watcher.as_mut(), &mut watched, &mut unwatchable);
             last_check = Some(Instant::now());
         }
 
@@ -95,6 +97,7 @@ fn reconcile(
     inner: &Inner,
     mut watcher: Option<&mut RecommendedWatcher>,
     watched: &mut HashMap<i64, Watched>,
+    unwatchable: &mut HashSet<i64>,
 ) {
     let roots: Vec<(i64, PathBuf, bool)> = lock(&inner.state)
         .roots
@@ -108,6 +111,7 @@ fn reconcile(
         .copied()
         .filter(|id| !roots.iter().any(|(root_id, _, _)| root_id == id))
         .collect();
+    unwatchable.retain(|id| roots.iter().any(|(root_id, _, _)| root_id == id));
     for id in stale {
         if let Some(entry) = watched.remove(&id)
             && let Some(watcher) = watcher.as_deref_mut()
@@ -119,15 +123,25 @@ fn reconcile(
     for (id, path, was_online) in roots {
         let online = path.is_dir();
         if online && !watched.contains_key(&id) {
-            if let Some(watcher) = watcher.as_deref_mut()
-                && let Err(err) = watcher.watch(&path, RecursiveMode::Recursive)
-            {
-                // The error text contains the folder path: keep that to debug level.
-                tracing::warn!(kind = ?err.kind, "could not watch a music folder");
-                tracing::debug!(%err, "watch error detail");
+            // Only a watch that was really established is recorded; a failed one is
+            // tried again at the next check.
+            if let Some(watcher) = watcher.as_deref_mut() {
+                match watcher.watch(&path, RecursiveMode::Recursive) {
+                    Ok(()) => {
+                        unwatchable.remove(&id);
+                        let canonical =
+                            std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                        watched.insert(id, Watched { path, canonical });
+                    }
+                    Err(err) => {
+                        if unwatchable.insert(id) {
+                            // The error text contains the folder path: debug level only.
+                            tracing::warn!(kind = ?err.kind, "could not watch a music folder; will keep trying");
+                        }
+                        tracing::debug!(%err, "watch error detail");
+                    }
+                }
             }
-            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            watched.insert(id, Watched { path, canonical });
         } else if !online
             && let Some(entry) = watched.remove(&id)
             && let Some(watcher) = watcher.as_deref_mut()
@@ -274,6 +288,58 @@ mod tests {
         let mut dirty = HashMap::new();
         assert!(note_event(&event, &watched, &mut dirty));
         assert!(dirty[&7].full);
+    }
+
+    #[test]
+    fn a_watch_that_was_not_established_is_not_recorded() {
+        use crate::library::{Library, LibraryPaths};
+        let temp = tempfile::tempdir().unwrap();
+        let music = temp.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let (library, _) = Library::open(LibraryPaths {
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+        })
+        .unwrap();
+        let root = library.add_folder(&music).unwrap();
+        assert!(library.wait_for_scan(Duration::from_secs(30)));
+
+        // Without a working watcher nothing may be remembered as "watched": that would
+        // stop every later attempt to establish the watch.
+        let mut watched = HashMap::new();
+        let mut unwatchable = HashSet::new();
+        reconcile(&library.inner, None, &mut watched, &mut unwatchable);
+        assert!(watched.is_empty());
+
+        // With one, the folder is recorded once the watch stands.
+        let mut watcher = notify::recommended_watcher(|_| {}).unwrap();
+        reconcile(
+            &library.inner,
+            Some(&mut watcher),
+            &mut watched,
+            &mut unwatchable,
+        );
+        assert!(watched.contains_key(&root));
+        assert!(unwatchable.is_empty());
+        // When the folder disappears the record goes with it, so that the watch is set
+        // up again when it returns.
+        std::fs::remove_dir_all(&music).unwrap();
+        reconcile(
+            &library.inner,
+            Some(&mut watcher),
+            &mut watched,
+            &mut unwatchable,
+        );
+        assert!(watched.is_empty());
+        std::fs::create_dir_all(&music).unwrap();
+        reconcile(
+            &library.inner,
+            Some(&mut watcher),
+            &mut watched,
+            &mut unwatchable,
+        );
+        assert!(watched.contains_key(&root));
+        library.shutdown();
     }
 
     #[test]
