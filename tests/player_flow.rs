@@ -1109,3 +1109,29 @@ fn track_boundaries_do_not_rewrite_the_queue() {
         "only the initial queue is written"
     );
 }
+
+#[test]
+fn the_published_queue_follows_a_shuffled_wrap() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(Command::SetShuffle(true));
+    rig.send(Command::SetRepeat(RepeatMode::All));
+    rig.send(play(&[A, B, MONO, FLAC_A], 0));
+    // Every wrap reshuffles the queue. What is published must always be the order that
+    // is being played: the current index points at the current item.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut orders = std::collections::HashSet::new();
+    while rig.host.plays().len() < 26 {
+        assert!(Instant::now() < deadline, "playback stalled");
+        let s = rig.player.snapshot();
+        if let (Some(index), Some(current)) = (s.queue_index, s.current) {
+            assert_eq!(
+                s.queue.get(index).map(|q| q.id),
+                Some(current.item_id),
+                "published queue is stale: {s:?}"
+            );
+            orders.insert(s.queue.iter().map(|q| q.id).collect::<Vec<_>>());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(orders.len() > 1, "the order changed across passes");
+}

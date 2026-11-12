@@ -388,6 +388,8 @@ struct Player<H: PlayerHost> {
     queue: Queue,
     queue_revision: u64,
     queue_arc: Arc<Vec<QueueItem>>,
+    /// `Queue::revision` that `queue_arc` was copied at.
+    copied_queue_revision: u64,
     state: PlayState,
     /// What the user asked for; the engine follows once audio is available.
     want_playing: bool,
@@ -409,6 +411,8 @@ struct Player<H: PlayerHost> {
     stall_timeout: Duration,
     /// Since when playback is wanted but no audio is coming.
     starved_since: Option<Instant>,
+    /// Ticks in a row that saw no audio moving.
+    starved_ticks: u32,
     /// Renderer position at the previous tick, to tell whether audio is moving.
     last_render_position: (u16, u64),
     /// Since when a feed exists although playback is paused.
@@ -445,6 +449,7 @@ impl<H: PlayerHost> Player<H> {
             PlayState::Idle
         };
         let queue_arc = Arc::new(queue.items().to_vec());
+        let copied_queue_revision = queue.revision();
         Self {
             host,
             engine,
@@ -453,6 +458,7 @@ impl<H: PlayerHost> Player<H> {
             queue,
             queue_revision: 1,
             queue_arc,
+            copied_queue_revision,
             state,
             want_playing: false, // never start making sound on launch
             chain: None,
@@ -469,6 +475,7 @@ impl<H: PlayerHost> Player<H> {
             listen: Listen::default(),
             stall_timeout: config.stall_timeout,
             starved_since: None,
+            starved_ticks: 0,
             last_render_position: (0, 0),
             paused_since: None,
             last_session_save: Instant::now(),
@@ -518,10 +525,21 @@ impl<H: PlayerHost> Player<H> {
     // ----- helpers ---------------------------------------------------------------------
 
     fn mark_queue_changed(&mut self) {
+        self.sync_queue_copy();
+        self.dirty = true;
+    }
+
+    /// Brings the published copy of the queue in line with the queue. The queue also
+    /// changes on its own (it is reshuffled when a shuffled "repeat all" pass wraps), so
+    /// this is checked before every publish rather than trusted to each command.
+    fn sync_queue_copy(&mut self) {
+        if self.queue.revision() == self.copied_queue_revision {
+            return;
+        }
+        self.copied_queue_revision = self.queue.revision();
         self.queue_revision += 1;
         self.queue_arc = Arc::new(self.queue.items().to_vec());
         self.queue_dirty_since.get_or_insert_with(Instant::now);
-        self.dirty = true;
     }
 
     fn set_notice(&mut self, notice: Notice) {
@@ -1241,6 +1259,7 @@ impl<H: PlayerHost> Player<H> {
     fn watch_for_stall(&mut self) {
         let Some(chain) = &self.chain else {
             self.starved_since = None;
+            self.starved_ticks = 0;
             return;
         };
         let position = self.engine.shared().position();
@@ -1254,13 +1273,21 @@ impl<H: PlayerHost> Player<H> {
             };
         if !starved {
             self.starved_since = None;
+            self.starved_ticks = 0;
             return;
         }
         let since = *self.starved_since.get_or_insert_with(Instant::now);
-        if since.elapsed() < self.stall_timeout {
+        self.starved_ticks += 1;
+        // The clock alone is not proof: if this process was suspended (debugger, a
+        // stalled system), a long time passes between two ticks without anything being
+        // wrong. Silence must also have been *observed* over a fair share of the ticks.
+        let needed_ticks =
+            (self.stall_timeout.as_millis() / TICK_ACTIVE.as_millis().max(1) / 4).max(3) as u32;
+        if since.elapsed() < self.stall_timeout || self.starved_ticks < needed_ticks {
             return;
         }
         self.starved_since = None;
+        self.starved_ticks = 0;
         if self.engine.feed_has_audio(chain.epoch) {
             // Audio is waiting; the device is not taking it.
             let position = self.position_ms();
@@ -1311,6 +1338,7 @@ impl<H: PlayerHost> Player<H> {
         {
             return;
         }
+        self.sync_queue_copy();
         let notify = self.dirty;
         self.dirty = false;
         self.last_position_publish = Instant::now();

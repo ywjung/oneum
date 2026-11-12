@@ -54,6 +54,10 @@ pub struct Queue {
     unshuffled: Vec<ItemId>,
     next_id: ItemId,
     rng: fastrand::Rng,
+    /// Counts every change to `items` (content or order), so that whoever mirrors the
+    /// queue can tell when its copy is stale — also for changes that happen as a side
+    /// effect of moving on, like the reshuffle at a "repeat all" wrap.
+    revision: u64,
 }
 
 impl Default for Queue {
@@ -81,6 +85,7 @@ impl Queue {
             unshuffled: Vec::new(),
             next_id: 1,
             rng,
+            revision: 0,
         }
     }
 
@@ -111,6 +116,10 @@ impl Queue {
 
     pub fn items(&self) -> &[QueueItem] {
         &self.items
+    }
+    /// Changes whenever the items or their order change.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
     pub fn len(&self) -> usize {
         self.items.len()
@@ -159,6 +168,7 @@ impl Queue {
     /// Replaces the queue with `tracks` and makes `start_index` current. With shuffle on,
     /// the chosen track is played first and the rest follow in random order.
     pub fn replace(&mut self, tracks: &[TrackId], start_index: usize) -> Option<QueueItem> {
+        self.revision += 1;
         self.items = self.make_items(tracks);
         self.unshuffled.clear();
         if self.items.is_empty() {
@@ -184,6 +194,7 @@ impl Queue {
         if new.is_empty() {
             return new;
         }
+        self.revision += 1;
         let at = self.current.map_or(0, |c| c + 1);
         if self.shuffle {
             // In the original order they follow the current item as well.
@@ -203,6 +214,7 @@ impl Queue {
     /// Appends `tracks` at the very end of the play order ("대기열 끝에 추가"), also when shuffled.
     pub fn append(&mut self, tracks: &[TrackId]) -> Vec<QueueItem> {
         let new = self.make_items(tracks);
+        self.revision += 1;
         if self.shuffle {
             self.unshuffled.extend(new.iter().map(|i| i.id));
         }
@@ -231,6 +243,7 @@ impl Queue {
         } else {
             current_id
         };
+        self.revision += 1;
         self.items.retain(|i| !ids.contains(&i.id));
         self.unshuffled.retain(|id| !ids.contains(id));
         self.current = successor.and_then(|id| self.index_of(id));
@@ -253,6 +266,7 @@ impl Queue {
     }
 
     pub fn clear(&mut self) {
+        self.revision += 1;
         self.items.clear();
         self.unshuffled.clear();
         self.current = None;
@@ -272,6 +286,7 @@ impl Queue {
         if moved.is_empty() {
             return;
         }
+        self.revision += 1;
         self.items.retain(|i| !ids.contains(&i.id));
         let at = to_index.min(self.items.len());
         self.items.splice(at..at, moved);
@@ -292,6 +307,7 @@ impl Queue {
             return;
         }
         self.shuffle = on;
+        self.revision += 1;
         let current_id = self.current().map(|c| c.id);
         if on {
             self.unshuffled = self.items.iter().map(|i| i.id).collect();
@@ -322,6 +338,7 @@ impl Queue {
     /// and since "previous" from the first item wraps to the last one, going back still
     /// leads to the track that was actually heard before.
     fn reshuffle_for_wrap(&mut self) {
+        self.revision += 1;
         let last = self.current().map(|c| c.id);
         self.shuffle_tail(0);
         if let Some(at) = last.and_then(|id| self.index_of(id)) {
@@ -801,5 +818,41 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn revision_follows_every_change_of_the_items() {
+        let mut q = Queue::with_seed(5);
+        let mut last = q.revision();
+        let mut changed = |q: &Queue, what: &str| {
+            assert_ne!(q.revision(), last, "{what}");
+            last = q.revision();
+        };
+        q.replace(&[1, 2, 3], 0);
+        changed(&q, "replace");
+        q.append(&[4]);
+        changed(&q, "append");
+        q.play_next(&[5]);
+        changed(&q, "play next");
+        let first = q.items()[0].id;
+        q.move_items(&[first], 2);
+        changed(&q, "move");
+        q.remove(&[first]);
+        changed(&q, "remove");
+        q.set_shuffle(true);
+        changed(&q, "shuffle on");
+        q.set_repeat(RepeatMode::All);
+        while q.current_index() != Some(q.len() - 1) {
+            q.advance_auto();
+        }
+        let before = q.revision();
+        q.advance_auto();
+        assert_ne!(q.revision(), before, "the wrap reshuffles the items");
+        // Moving within the order changes nothing about the items.
+        let before = q.revision();
+        q.advance_auto();
+        q.previous_manual(0);
+        q.jump_to(q.items()[0].id);
+        assert_eq!(q.revision(), before);
     }
 }
