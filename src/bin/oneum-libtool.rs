@@ -615,7 +615,11 @@ fn gen_db(n: usize, data_dir: &Path) -> Result<(), String> {
         .map(|mut track| {
             track.root_id = Some(root_id);
             let compilation = track.album_artist == "Various Artists";
-            StoredTrack { track, compilation }
+            StoredTrack {
+                track,
+                compilation,
+                art_from_folder: false,
+            }
         })
         .collect();
     let mut ids = Vec::with_capacity(n);

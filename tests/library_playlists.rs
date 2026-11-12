@@ -461,3 +461,94 @@ fn m3u8_import_matches_paths_across_unicode_normal_forms() {
         "no duplicate row for the same file"
     );
 }
+
+#[test]
+fn m3u8_import_handles_awkward_names_duplicates_and_many_new_files() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let lists = env.dir.path().join("lists");
+    // Names that a careless parser gets wrong: a leading '#', and surrounding spaces.
+    write_tagged_wav(&lists.join("#1 Hits/01.wav"), 300, "Hash", "A", "B");
+    write_tagged_wav(&lists.join(" padded .wav"), 310, "Padded", "A", "B");
+    // Enough new files to need more than one database batch.
+    const NEW: usize = 230;
+    for i in 0..NEW {
+        write_wav(&lists.join(format!("new/n{i:03}.wav")), 100, &[]);
+    }
+
+    let mut text: Vec<u8> = Vec::new();
+    text.extend_from_slice(b"#EXTM3U\n");
+    text.extend_from_slice(b"#1 Hits/01.wav\n");
+    text.extend_from_slice(b"# just a remark\n");
+    text.extend_from_slice(b" padded .wav\n");
+    for i in 0..NEW {
+        text.extend_from_slice(format!("#EXTINF:0,n{i}\nnew/n{i:03}.wav\n").as_bytes());
+    }
+    // The same new file again, and a library track through another spelling of its path.
+    text.extend_from_slice(b"new/n000.wav\n");
+    let known = library.track(ids[0]).unwrap().path.clone();
+    let resolved = fs::canonicalize(&known).unwrap();
+    text.extend_from_slice(resolved.to_str().unwrap().as_bytes());
+    text.push(b'\n');
+    // A name in a legacy encoding (CP949): not valid UTF-8, cannot be resolved.
+    text.extend_from_slice(b"new/\xb9\xe3\xc6\xed\xc1\xf6.wav\n");
+    let list = lists.join("awkward.m3u");
+    fs::write(&list, &text).unwrap();
+
+    let before = library.snapshot().len();
+    let imported = library.import_m3u8(&list).unwrap();
+    assert_eq!(imported.matched, 2 + NEW + 2);
+    assert_eq!(imported.missing.len(), 1, "{:?}", imported.missing);
+    assert!(imported.missing[0].starts_with("new/"));
+    assert!(imported.missing[0].contains('\u{fffd}'));
+
+    let items = track_ids(&library, imported.playlist_id);
+    assert_eq!(items.len(), 2 + NEW + 2);
+    let title = |id: TrackId| library.track(id).unwrap().title.clone();
+    assert_eq!(title(items[0]), "Hash");
+    assert_eq!(title(items[1]), "Padded");
+    assert_eq!(title(items[2]), "n000");
+    assert_eq!(title(items[2 + NEW - 1]), format!("n{:03}", NEW - 1));
+    assert_eq!(items[2 + NEW], items[2], "a file listed twice is one track");
+    assert_eq!(
+        items[2 + NEW + 1],
+        ids[0],
+        "known under another spelling of its path"
+    );
+    assert_eq!(library.snapshot().len(), before + 2 + NEW);
+    // The spaces belong to the name.
+    assert!(
+        library
+            .track(items[1])
+            .unwrap()
+            .path
+            .ends_with(" padded .wav")
+    );
+}
+
+#[test]
+fn m3u8_import_refuses_files_too_large_to_be_playlists() {
+    let env = TestEnv::new();
+    let (library, _) = library_with_tracks(&env);
+    let huge = env.dir.path().join("huge.m3u8");
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&huge).unwrap();
+        let line = [b'x'; 1024];
+        for _ in 0..(17 * 1024) {
+            file.write_all(&line).unwrap();
+        }
+    }
+    let playlists = library.playlists().len();
+    match library.import_m3u8(&huge) {
+        Err(LibraryError::Io(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        }
+        other => panic!("unexpected: {:?}", other.map(|i| i.matched)),
+    }
+    assert_eq!(
+        library.playlists().len(),
+        playlists,
+        "no playlist is left behind"
+    );
+}

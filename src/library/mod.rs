@@ -33,7 +33,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use unicode_normalization::UnicodeNormalization;
@@ -191,13 +191,32 @@ struct PlaylistData {
 pub(crate) struct Entry {
     pub(crate) track: Arc<Track>,
     pub(crate) index: Arc<TrackIndex>,
+    /// The track's artwork is an image file in its folder (not embedded in the file).
+    pub(crate) folder_art: bool,
 }
 
 pub(crate) struct RootState {
     pub(crate) id: i64,
+    /// The folder as the user added it; track paths start with this.
     pub(crate) path: PathBuf,
+    /// `path` with symbolic links resolved and in its on-disk spelling (equal to `path`
+    /// while the folder is offline and cannot be resolved).
+    pub(crate) canonical: PathBuf,
     pub(crate) online: bool,
     pub(crate) last_scan_at: Option<i64>,
+    /// Set while the folder's path exists but its known files were not found there:
+    /// the highest track id from before that was noticed. Until a track up to that id
+    /// is seen again, missing tracks of the folder are kept, not removed.
+    pub(crate) unconfirmed_after: Option<TrackId>,
+}
+
+/// A symbolic link to a directory that a scan followed inside a music folder.
+pub(crate) struct FollowedLink {
+    pub(crate) root_id: i64,
+    /// Path of the link itself, in library spelling.
+    pub(crate) link: PathBuf,
+    /// Resolved directory the link points to.
+    pub(crate) target: PathBuf,
 }
 
 /// In-memory mirror of the `roots` and `tracks` tables.
@@ -206,6 +225,9 @@ pub(crate) struct State {
     pub(crate) tracks: HashMap<TrackId, Entry>,
     by_path: HashMap<PathBuf, TrackId>,
     pub(crate) roots: Vec<RootState>,
+    /// Directory links seen by scans (this session); lets a resolved path be mapped
+    /// back to the spelling under which the scanner stored the file.
+    pub(crate) links: Vec<FollowedLink>,
     /// Bumped by every change to `tracks`; lets `publish` skip redundant rebuilds.
     revision: u64,
 }
@@ -224,8 +246,39 @@ impl State {
         self.roots.iter().find(|root| path.starts_with(&root.path))
     }
 
+    pub(crate) fn id_of_path(&self, path: &Path) -> Option<TrackId> {
+        self.by_path.get(path).copied()
+    }
+
+    /// Maps a resolved (canonical) file path to the spelling the library uses for it and
+    /// the music folder it belongs to: a file under a music folder is spelled through
+    /// that folder's path as the user added it, and a file reached by a scan through a
+    /// directory link is spelled through that link. Other paths are returned unchanged.
+    pub(crate) fn library_path(&self, canonical: &Path) -> (PathBuf, Option<i64>) {
+        for root in &self.roots {
+            if let Ok(relative) = canonical.strip_prefix(&root.canonical) {
+                return (root.path.join(relative), Some(root.id));
+            }
+            if canonical.starts_with(&root.path) {
+                return (canonical.to_path_buf(), Some(root.id));
+            }
+        }
+        // The most specific link wins when links are nested.
+        let link = self
+            .links
+            .iter()
+            .filter(|link| canonical.starts_with(&link.target))
+            .max_by_key(|link| link.target.as_os_str().len());
+        if let Some(link) = link
+            && let Ok(relative) = canonical.strip_prefix(&link.target)
+        {
+            return (link.link.join(relative), Some(link.root_id));
+        }
+        (canonical.to_path_buf(), None)
+    }
+
     /// Adds a track or replaces the one with the same id.
-    pub(crate) fn insert(&mut self, track: Track) -> Arc<Track> {
+    pub(crate) fn insert(&mut self, track: Track, folder_art: bool) -> Arc<Track> {
         let reused_index = match self.tracks.get(&track.id) {
             Some(old) => {
                 if old.track.path != track.path {
@@ -247,6 +300,7 @@ impl State {
             Entry {
                 track: Arc::clone(&track),
                 index,
+                folder_art,
             },
         );
         self.revision += 1;
@@ -276,7 +330,30 @@ impl State {
         self.revision += 1;
         Some(Arc::clone(&entry.track))
     }
+
+    /// Sets a track's artwork and where it comes from.
+    pub(crate) fn set_art(&mut self, id: TrackId, art_id: Option<String>, folder_art: bool) {
+        if let Some(entry) = self.tracks.get_mut(&id) {
+            entry.folder_art = folder_art;
+        }
+        self.update(id, |t| t.art_id = art_id);
+    }
 }
+
+/// Artwork cache files waiting to be regenerated.
+#[derive(Default)]
+struct ArtJobs {
+    /// Requested ids, oldest first. The newest request is served first: it is what the
+    /// user is looking at now.
+    pending: std::collections::VecDeque<String>,
+    /// Ids in `pending` or being worked on.
+    active: HashSet<String>,
+    /// Ids that could not be regenerated; not retried until the next scan finishes.
+    failed: HashSet<String>,
+}
+
+/// Upper bound of queued artwork regenerations; older requests are dropped beyond it.
+const ART_QUEUE_LIMIT: usize = 64;
 
 type Notifier = Arc<dyn Fn() + Send + Sync>;
 
@@ -291,13 +368,23 @@ pub(crate) struct Inner {
     playlists_generation: AtomicU64,
     notifier: RwLock<Option<Notifier>>,
     art: ArtCache,
-    /// Artwork ids being regenerated, or that could not be regenerated this session.
-    art_regen: Mutex<HashSet<String>>,
+    art_jobs: Mutex<ArtJobs>,
+    art_wake: Condvar,
+    /// Bumped whenever a regenerated cover becomes available.
+    art_generation: AtomicU64,
     scan: ScanQueue,
     counters: Counters,
     /// Files that could not be added, by path, with the size and mtime they had. Lets
     /// later scans count them again without reading them again (not persisted).
     skipped: Mutex<HashMap<PathBuf, scan::Skipped>>,
+    /// Tracks that scans added recently, with the time they were added. A file that was
+    /// moved shows up as "new" and as "missing" in two different scans when it changes
+    /// music folder or when the watcher reports the move in two parts; this lets the
+    /// later scan still connect the two.
+    recently_added: Mutex<std::collections::VecDeque<(TrackId, std::time::Instant)>>,
+    /// Makes the next folder scan panic (tests of the scan thread's containment).
+    #[cfg(test)]
+    panic_in_next_scan: AtomicBool,
     /// Minimum time between snapshot rebuilds during a scan, in milliseconds.
     publish_interval_ms: AtomicU64,
     tag_reads: AtomicU64,
@@ -321,7 +408,37 @@ pub(crate) fn unix_now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-fn to_stored(file: ScannedFile, root_id: Option<i64>, now: i64) -> StoredTrack {
+/// `path` with symbolic links resolved and in its on-disk spelling; `path` itself if it
+/// cannot be resolved (e.g. the folder is offline).
+pub(crate) fn resolve_dir(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Reads a playlist file, refusing files that are implausibly large.
+fn read_playlist_file(path: &Path) -> Result<Vec<u8>, LibraryError> {
+    use std::io::Read;
+    let too_large = || {
+        LibraryError::Io(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            "the playlist file is too large to be a playlist",
+        ))
+    };
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > m3u::MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    // The size is checked again while reading: it may not be known up front (pipes)
+    // and the file may grow.
+    let mut bytes = Vec::new();
+    file.take(m3u::MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > m3u::MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
+fn to_stored(file: ScannedFile, now: i64) -> StoredTrack {
+    let root_id = file.root_id;
     let tags = file.tags;
     let album_key = album_key(
         &tags.album,
@@ -361,6 +478,7 @@ fn to_stored(file: ScannedFile, root_id: Option<i64>, now: i64) -> StoredTrack {
             added_at: now,
         },
         compilation: tags.compilation,
+        art_from_folder: file.art_from_folder,
     }
 }
 
@@ -411,16 +529,50 @@ impl Inner {
         self.notify();
     }
 
-    /// Publishes a change to fields that are not indexed (favourite, play statistics)
-    /// without rebuilding the index.
-    fn publish_patch(&self, changed: &[Arc<Track>]) {
-        if changed.is_empty() {
+    /// Publishes changes to a track's play statistics and favourite flag without
+    /// rebuilding the index.
+    ///
+    /// The values are read from the state here, under the publish lock, so that
+    /// concurrent callers cannot publish in the wrong order. Only those three fields are
+    /// copied onto the track as it is currently published: if a scan has changed the
+    /// track's tags in the meantime, the published track keeps matching its (old) index
+    /// entries until the scan's own full publish replaces both together.
+    fn publish_patch(&self, ids: &[TrackId]) {
+        if ids.is_empty() {
             return;
         }
         {
             let _published = lock(&self.publish_lock);
-            let patched = self.snapshot().with_replaced(changed);
-            self.replace_snapshot(patched);
+            let snapshot = self.snapshot();
+            let patched: Vec<Arc<Track>> = {
+                let state = lock(&self.state);
+                ids.iter()
+                    .filter_map(|id| {
+                        let current = &state.tracks.get(id)?.track;
+                        let published = snapshot.get(*id)?;
+                        if published.favorite == current.favorite
+                            && published.play_count == current.play_count
+                            && published.last_played_at == current.last_played_at
+                        {
+                            return None;
+                        }
+                        let mut track = (**published).clone();
+                        track.favorite = current.favorite;
+                        track.play_count = current.play_count;
+                        track.last_played_at = current.last_played_at;
+                        // Share the state's allocation when nothing else differs.
+                        Some(if track == **current {
+                            Arc::clone(current)
+                        } else {
+                            Arc::new(track)
+                        })
+                    })
+                    .collect()
+            };
+            if patched.is_empty() {
+                return;
+            }
+            self.replace_snapshot(snapshot.with_replaced(&patched));
         }
         self.notify();
     }
@@ -463,28 +615,38 @@ impl Inner {
         true
     }
 
-    /// Writes scanned files to the database and the in-memory state. Returns
-    /// `(track id, newly added)` per file, in order. Nothing is written once `cancel` is
-    /// set (checked under the database lock, see `Library::remove_folder`).
+    /// Writes scanned files to the database and the in-memory state, in one transaction.
+    /// Returns `(track id, newly added)` per file, in order (empty if nothing was
+    /// written). `touches` are unchanged files to mark as present and assign to
+    /// `touch_root`. Nothing is written once `cancel` is set (checked under the database
+    /// lock, see `Library::remove_folder`).
     fn commit_scanned(
         &self,
-        root_id: Option<i64>,
         files: Vec<ScannedFile>,
         touches: &[TrackId],
+        touch_root: Option<i64>,
         cancel: Option<&AtomicBool>,
     ) -> Vec<(TrackId, bool)> {
         if files.is_empty() && touches.is_empty() {
             return Vec::new();
         }
         let now = unix_now();
-        let rows: Vec<StoredTrack> = files
-            .into_iter()
-            .map(|file| to_stored(file, root_id, now))
-            .collect();
+        let mut rows: Vec<StoredTrack> =
+            files.into_iter().map(|file| to_stored(file, now)).collect();
 
         let mut db = lock(&self.db);
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Vec::new();
+        }
+        {
+            // A folder may have been removed since the file was read; such a file is
+            // kept as an individually registered one instead of failing the batch.
+            let state = lock(&self.state);
+            for row in &mut rows {
+                if row.track.root_id.is_some_and(|id| state.root(id).is_none()) {
+                    row.track.root_id = None;
+                }
+            }
         }
         let ids = match db.upsert_tracks(&rows) {
             Ok(ids) => ids,
@@ -496,7 +658,7 @@ impl Inner {
                 return Vec::new();
             }
         };
-        let touched = match db.adopt_tracks(touches, root_id) {
+        let touched = match db.adopt_tracks(touches, touch_root) {
             Ok(()) => true,
             Err(err) => {
                 tracing::warn!(%err, "could not update unchanged tracks");
@@ -519,18 +681,35 @@ impl Inner {
                 }
                 None => true,
             };
-            state.insert(track);
+            state.insert(track, row.art_from_folder);
             committed.push((id, is_new));
         }
         if touched {
             for &id in touches {
                 state.update(id, |t| {
                     t.available = true;
-                    t.root_id = root_id;
+                    t.root_id = touch_root;
                 });
             }
         }
         committed
+    }
+
+    /// Marks tracks whose files are back as available.
+    fn revive(&self, ids: &[TrackId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut db = lock(&self.db);
+        match db.set_tracks_available(ids, true) {
+            Ok(()) => {
+                let mut state = lock(&self.state);
+                for &id in ids {
+                    state.update(id, |t| t.available = true);
+                }
+            }
+            Err(err) => tracing::warn!(%err, "could not mark tracks available"),
+        }
     }
 
     /// Applies the missing-file policy to tracks whose files are gone. Each candidate
@@ -605,6 +784,69 @@ impl Inner {
         (unavailable, removed)
     }
 
+    /// Brings individually registered files under a music folder in line with the
+    /// spelling the folder's scan uses. Such a file is stored under its resolved path;
+    /// if the folder was added through a symbolic link (or any path that resolves
+    /// differently), the scan would not recognise the row and add the file a second
+    /// time. Also refreshes the folder's resolved path.
+    fn adopt_respelled(&self, root_id: i64, root_path: &Path, cancel: &AtomicBool) {
+        let canonical = resolve_dir(root_path);
+        let moves: Vec<(TrackId, PathBuf)> = {
+            let mut state = lock(&self.state);
+            if let Some(root) = state.root_mut(root_id) {
+                root.canonical.clone_from(&canonical);
+            }
+            if canonical == root_path {
+                return;
+            }
+            state
+                .tracks
+                .values()
+                .map(|entry| &entry.track)
+                .filter(|t| t.root_id.is_none() && scan::is_walkable(&canonical, &t.path))
+                .filter_map(|t| {
+                    let relative = t.path.strip_prefix(&canonical).ok()?;
+                    let respelled = root_path.join(relative);
+                    state
+                        .id_of_path(&respelled)
+                        .is_none()
+                        .then_some((t.id, respelled))
+                })
+                .collect()
+        };
+        for (id, path) in moves {
+            let db = lock(&self.db);
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let row = match db.get_track(id) {
+                Ok(Some(row)) => row,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, "could not read a track to adopt");
+                    continue;
+                }
+            };
+            // The album identity of an album without album artist depends on the path.
+            let key = album_key(
+                &row.track.album,
+                &row.track.album_artist,
+                row.compilation,
+                &path,
+            );
+            match db.move_track(id, &path, key) {
+                Ok(true) => {
+                    let mut track = row.track;
+                    track.path = path;
+                    track.album_key = key;
+                    lock(&self.state).insert(track, row.art_from_folder);
+                }
+                Ok(false) => {}
+                Err(err) => tracing::warn!(%err, "could not adopt a track"),
+            }
+        }
+    }
+
     /// Marks a folder as offline and its tracks as unavailable (they are kept).
     fn set_root_offline(&self, root_id: i64) {
         let changed = {
@@ -666,41 +908,85 @@ impl Inner {
         }
     }
 
-    /// Recreates a missing artwork cache file from any track that uses it.
-    fn regenerate_art(self: &Arc<Self>, art_id: &str) {
-        if self.shutdown.load(Ordering::Relaxed)
-            || !lock(&self.art_regen).insert(art_id.to_string())
-        {
+    /// Queues the regeneration of a missing artwork cache file. One worker thread
+    /// serves the queue, so scrolling through many missing covers cannot start an
+    /// unbounded number of threads; duplicate requests are ignored.
+    fn request_art(&self, art_id: &str) {
+        if self.shutdown.load(Ordering::Relaxed) {
             return;
         }
+        let mut jobs = lock(&self.art_jobs);
+        if jobs.active.contains(art_id) || jobs.failed.contains(art_id) {
+            return;
+        }
+        if jobs.pending.len() >= ART_QUEUE_LIMIT
+            && let Some(dropped) = jobs.pending.pop_front()
+        {
+            // The oldest request was scrolled past long ago; it can be asked for again.
+            jobs.active.remove(&dropped);
+        }
+        jobs.pending.push_back(art_id.to_string());
+        jobs.active.insert(art_id.to_string());
+        drop(jobs);
+        self.art_wake.notify_one();
+    }
+
+    /// Recreates one artwork cache file from any track that uses it.
+    fn regenerate_art(&self, art_id: &str) -> bool {
         let source = lock(&self.state)
             .tracks
             .values()
             .find(|e| e.track.available && e.track.art_id.as_deref() == Some(art_id))
             .map(|e| e.track.path.clone());
         let Some(source) = source else {
-            lock(&self.art_regen).remove(art_id);
-            return;
+            return false;
         };
-        let art_id = art_id.to_string();
-        self.spawn("oneum-art", move |inner| {
-            let produced = tags::read_picture(&source)
-                .and_then(|bytes| inner.art.store_embedded(&bytes))
-                .or_else(|| {
-                    source
-                        .parent()
-                        .and_then(art::find_folder_image)
-                        .and_then(|image| inner.art.store_folder_image(&image))
-                });
-            if produced.as_deref() == Some(art_id.as_str()) {
-                lock(&inner.art_regen).remove(&art_id);
-                inner.notify();
-            } else {
-                // The file's artwork changed or is unreadable; the next rescan fixes the
-                // reference. Keeping the id in the set prevents retrying on every frame.
-                tracing::debug!("artwork could not be regenerated from its track");
+        let produced = tags::read_picture(&source)
+            .and_then(|bytes| self.art.store_embedded(&bytes))
+            .or_else(|| {
+                source
+                    .parent()
+                    .and_then(art::find_folder_image)
+                    .and_then(|image| self.art.store_folder_image(&image))
+            });
+        // If the file's artwork changed the id differs; the next rescan fixes the
+        // track's reference.
+        produced.as_deref() == Some(art_id)
+    }
+}
+
+/// Body of the artwork worker thread.
+fn run_art_worker(inner: Arc<Inner>) {
+    loop {
+        let art_id = {
+            let mut jobs = lock(&inner.art_jobs);
+            loop {
+                if inner.shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Some(id) = jobs.pending.pop_back() {
+                    break id;
+                }
+                jobs = inner.art_wake.wait(jobs).unwrap_or_else(|e| e.into_inner());
             }
-        });
+        };
+        let regenerated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.regenerate_art(&art_id)
+        }))
+        .unwrap_or(false);
+        {
+            let mut jobs = lock(&inner.art_jobs);
+            jobs.active.remove(&art_id);
+            if !regenerated {
+                jobs.failed.insert(art_id);
+            }
+        }
+        if regenerated {
+            inner.art_generation.fetch_add(1, Ordering::Release);
+            inner.notify();
+        } else {
+            tracing::debug!("artwork could not be regenerated from its track");
+        }
     }
 }
 
@@ -730,11 +1016,14 @@ impl Library {
         let mut state = State::default();
         for root in db.roots()? {
             let online = root.path.is_dir();
+            let canonical = resolve_dir(&root.path);
             state.roots.push(RootState {
                 id: root.id,
                 path: root.path,
+                canonical,
                 online,
                 last_scan_at: root.last_scan_at,
+                unconfirmed_after: root.unconfirmed_after,
             });
         }
         let offline: HashSet<i64> = state
@@ -753,7 +1042,7 @@ impl Library {
                 track.available = false;
                 stale_offline.insert(root_id);
             }
-            state.insert(track);
+            state.insert(track, stored.art_from_folder);
         }
         for root_id in stale_offline {
             db.set_root_available(root_id, false)?;
@@ -769,10 +1058,15 @@ impl Library {
             playlists_generation: AtomicU64::new(0),
             notifier: RwLock::new(None),
             art: ArtCache::new(&paths.cache_dir),
-            art_regen: Mutex::new(HashSet::new()),
+            art_jobs: Mutex::new(ArtJobs::default()),
+            art_wake: Condvar::new(),
+            art_generation: AtomicU64::new(0),
             scan: ScanQueue::default(),
             counters: Counters::default(),
             skipped: Mutex::new(HashMap::new()),
+            recently_added: Mutex::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            panic_in_next_scan: AtomicBool::new(false),
             publish_interval_ms: AtomicU64::new(scan::PUBLISH_INTERVAL.as_millis() as u64),
             tag_reads: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
@@ -788,6 +1082,7 @@ impl Library {
         );
 
         inner.spawn("oneum-scan", scan::run_scan_thread);
+        inner.spawn("oneum-art", run_art_worker);
         inner.spawn("oneum-art-cleanup", |inner| {
             let referenced: HashSet<String> = lock(&inner.state)
                 .tracks
@@ -849,18 +1144,18 @@ impl Library {
             return Err(LibraryError::NotADirectory);
         }
         // Compare resolved paths so that a folder cannot be added twice through a
-        // symbolic link; the path is stored as the user gave it.
-        let resolve = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let resolved = resolve(&path);
+        // symbolic link; the path is stored as the user gave it. Paths are resolved
+        // here, before any lock is taken (the existing folders carry theirs).
+        let resolved = resolve_dir(&path);
         let id = {
             let db = lock(&self.inner.db);
             let mut state = lock(&self.inner.state);
             for root in &state.roots {
-                let existing = resolve(&root.path);
-                if existing == resolved || root.path == path {
+                let existing = &root.canonical;
+                if *existing == resolved || root.path == path {
                     return Err(LibraryError::AlreadyAdded);
                 }
-                if resolved.starts_with(&existing) || path.starts_with(&root.path) {
+                if resolved.starts_with(existing) || path.starts_with(&root.path) {
                     return Err(LibraryError::InsideExistingFolder(root.path.clone()));
                 }
                 if existing.starts_with(&resolved) || root.path.starts_with(&path) {
@@ -871,8 +1166,10 @@ impl Library {
             state.roots.push(RootState {
                 id,
                 path,
+                canonical: resolved,
                 online: true,
                 last_scan_at: None,
+                unconfirmed_after: None,
             });
             id
         };
@@ -896,6 +1193,7 @@ impl Library {
                 return Err(LibraryError::NotFound);
             }
             state.roots.retain(|root| root.id != root_id);
+            state.links.retain(|link| link.root_id != root_id);
         }
         self.inner.scan.cancel_root(root_id);
 
@@ -995,6 +1293,10 @@ impl Library {
         if let Some(tx) = lock(&self.inner.watch_tx).take() {
             let _ = tx.send(WatchMsg::Stop);
         }
+        // Taking the lock first makes sure the worker is either before its check of the
+        // shutdown flag or already waiting, so the wake-up cannot be missed.
+        drop(lock(&self.inner.art_jobs));
+        self.inner.art_wake.notify_all();
         let handles = std::mem::take(&mut *lock(&self.inner.threads));
         let current = std::thread::current().id();
         for handle in handles {
@@ -1011,57 +1313,109 @@ impl Library {
 
     /// Registers individual audio files (not tied to a music folder) and returns their
     /// ids in input order, skipping files that are unreadable or unsupported. Files the
-    /// library already knows are reused. Blocking: reads the files.
+    /// library already knows are reused, also when they are named through a symbolic
+    /// link, in different letter case on a case-insensitive volume, or in another
+    /// Unicode form: a path is resolved to its on-disk spelling before it is compared
+    /// or stored. Blocking: reads the files.
     pub fn import_files(&self, paths: &[PathBuf]) -> Vec<TrackId> {
         self.import_paths(paths).into_iter().flatten().collect()
     }
 
     fn import_paths(&self, paths: &[PathBuf]) -> Vec<Option<TrackId>> {
-        let folder_art: FolderArt = Mutex::new(HashMap::new());
-        let mut changed = false;
-        let ids = paths
-            .iter()
-            .map(|path| {
-                let path = m3u::lexical_normalize(&std::path::absolute(path).ok()?);
-                let existing = {
-                    let state = lock(&self.inner.state);
-                    state
-                        .by_path
-                        .get(&path)
-                        .and_then(|id| state.tracks.get(id))
-                        .map(|e| (e.track.id, e.track.available, e.track.root_id))
-                };
-                if let Some((id, available, root_id)) = existing {
-                    if !available && path.is_file() {
-                        self.inner.commit_scanned(root_id, Vec::new(), &[id], None);
-                        changed = true;
-                    }
-                    return Some(id);
+        /// Files per database transaction.
+        const BATCH: usize = 200;
+        let inner = &self.inner;
+        let lookup = |path: &Path| -> Option<(TrackId, bool)> {
+            let state = lock(&inner.state);
+            let id = state.id_of_path(path)?;
+            state.tracks.get(&id).map(|e| (id, e.track.available))
+        };
+
+        // Pass 1: find out which paths the library already has. A path that is not
+        // known as written is resolved to its on-disk spelling (symbolic links, letter
+        // case on a case-insensitive volume, Unicode form) and looked up again under
+        // the spelling the library uses for that location. No lock is held while the
+        // file system is asked.
+        let mut results: Vec<Option<TrackId>> = vec![None; paths.len()];
+        let mut revive: Vec<TrackId> = Vec::new();
+        // New files: library path -> (folder it belongs to, result slots waiting for it).
+        let mut fresh: Vec<(PathBuf, Option<i64>, Vec<usize>)> = Vec::new();
+        let mut fresh_index: HashMap<PathBuf, usize> = HashMap::new();
+        for (slot, path) in paths.iter().enumerate() {
+            let Ok(absolute) = std::path::absolute(path) else {
+                continue;
+            };
+            let absolute = m3u::lexical_normalize(&absolute);
+            let mut known = lookup(&absolute);
+            let mut location = None;
+            if known.is_none()
+                && let Ok(canonical) = fs::canonicalize(&absolute)
+            {
+                let (library_path, root_id) = lock(&inner.state).library_path(&canonical);
+                known = lookup(&library_path);
+                location = Some((library_path, root_id));
+            }
+            if let Some((id, available)) = known {
+                results[slot] = Some(id);
+                if !available && absolute.is_file() && !revive.contains(&id) {
+                    revive.push(id);
                 }
-                if !tags::has_audio_extension(&path) {
-                    return None;
+                continue;
+            }
+            let Some((library_path, root_id)) = location else {
+                continue; // the file does not exist
+            };
+            if !tags::has_audio_extension(&library_path) {
+                continue;
+            }
+            match fresh_index.get(&library_path) {
+                Some(&index) => fresh[index].2.push(slot),
+                None => {
+                    fresh_index.insert(library_path.clone(), fresh.len());
+                    fresh.push((library_path, root_id, vec![slot]));
                 }
-                let meta = fs::metadata(&path).ok().filter(|m| m.is_file())?;
-                let file = scan::read_file(
-                    &self.inner,
-                    &path,
-                    meta.len(),
-                    scan::mtime_ns(&meta),
-                    &folder_art,
-                )
-                .ok()?;
-                let root_id = lock(&self.inner.state)
-                    .root_containing(&path)
-                    .map(|root| root.id);
-                let committed = self.inner.commit_scanned(root_id, vec![file], &[], None);
-                changed = true;
-                committed.first().map(|(id, _)| *id)
-            })
-            .collect();
-        if changed {
-            self.inner.publish();
+            }
         }
-        ids
+
+        // Pass 2: read the new files and store them, one transaction per batch.
+        let folder_art: FolderArt = Mutex::new(HashMap::new());
+        let mut changed = !revive.is_empty();
+        inner.revive(&revive);
+        for batch in fresh.chunks(BATCH) {
+            let mut files = Vec::with_capacity(batch.len());
+            let mut slots: Vec<&[usize]> = Vec::with_capacity(batch.len());
+            for (path, root_id, waiting) in batch {
+                let Some(meta) = fs::metadata(path).ok().filter(|m| m.is_file()) else {
+                    continue;
+                };
+                let Ok(mut file) =
+                    scan::read_file(inner, path, meta.len(), scan::mtime_ns(&meta), &folder_art)
+                else {
+                    continue;
+                };
+                // A file the folder scan would not visit (inside a hidden directory)
+                // stays an individually registered file; otherwise the scanner would
+                // never confirm it.
+                file.root_id = root_id.filter(|id| {
+                    lock(&inner.state)
+                        .root(*id)
+                        .is_some_and(|root| scan::is_walkable(&root.path, path))
+                });
+                files.push(file);
+                slots.push(waiting);
+            }
+            let committed = inner.commit_scanned(files, &[], None, None);
+            for ((id, _), waiting) in committed.iter().zip(slots) {
+                for &slot in waiting {
+                    results[slot] = Some(*id);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            inner.publish();
+        }
+        results
     }
 
     /// Removes tracks from the library (database only; files are not touched).
@@ -1093,7 +1447,7 @@ impl Library {
     }
 
     pub fn set_favorite(&self, ids: &[TrackId], favorite: bool) {
-        let changed: Vec<Arc<Track>> = {
+        let changed: Vec<TrackId> = {
             let mut db = lock(&self.inner.db);
             let ids: Vec<TrackId> = {
                 let state = lock(&self.inner.state);
@@ -1112,9 +1466,10 @@ impl Library {
                 return;
             }
             let mut state = lock(&self.inner.state);
-            ids.iter()
-                .filter_map(|&id| state.update(id, |t| t.favorite = favorite))
-                .collect()
+            for &id in &ids {
+                state.update(id, |t| t.favorite = favorite);
+            }
+            ids
         };
         self.inner.publish_patch(&changed);
     }
@@ -1123,7 +1478,7 @@ impl Library {
     /// and last-played time.
     pub fn record_play(&self, id: TrackId) {
         let now = unix_now();
-        let changed = {
+        {
             let mut db = lock(&self.inner.db);
             match db.record_play(id, now) {
                 Ok(true) => {}
@@ -1136,11 +1491,9 @@ impl Library {
             lock(&self.inner.state).update(id, |t| {
                 t.play_count = t.play_count.saturating_add(1);
                 t.last_played_at = Some(now);
-            })
-        };
-        if let Some(track) = changed {
-            self.inner.publish_patch(&[track]);
+            });
         }
+        self.inner.publish_patch(&[id]);
     }
 
     /// Recently played tracks, most recent first, each track once.
@@ -1297,7 +1650,7 @@ impl Library {
     /// on disk but are not in the library are imported like [`Library::import_files`];
     /// entries that cannot be found are reported in `missing`. Blocking.
     pub fn import_m3u8(&self, src: &Path) -> Result<M3uImport, LibraryError> {
-        let bytes = fs::read(src)?;
+        let bytes = read_playlist_file(src)?;
         let src = std::path::absolute(src)?;
         let base = src.parent().unwrap_or(Path::new("/"));
         let entries = m3u::parse(&m3u::decode(&bytes), base);
@@ -1316,7 +1669,7 @@ impl Library {
                 .iter()
                 .map(|entry| {
                     let path = entry.path.as_ref()?;
-                    if let Some(&id) = state.by_path.get(path) {
+                    if let Some(id) = state.id_of_path(path) {
                         return Some(id);
                     }
                     let by_nfc = by_nfc.get_or_insert_with(|| {
@@ -1331,7 +1684,8 @@ impl Library {
                 })
                 .collect()
         };
-        // Second pass: read files that exist but are new to the library.
+        // Second pass: entries known under another spelling of their path, and files
+        // that exist but are new to the library (read and stored in batches).
         let unknown: Vec<(usize, PathBuf)> = entries
             .iter()
             .enumerate()
@@ -1351,12 +1705,9 @@ impl Library {
             .map(|(entry, _)| entry.raw.clone())
             .collect();
 
-        let (playlist_id, added) = {
-            let mut db = lock(&self.inner.db);
-            let playlist_id = db.create_playlist(&name, unix_now())?;
-            let added = db.append_playlist_items(playlist_id, &matched)?;
-            (playlist_id, added)
-        };
+        // The playlist and its entries are written together or not at all.
+        let (playlist_id, added) =
+            lock(&self.inner.db).create_playlist_with_items(&name, unix_now(), &matched)?;
         self.playlists_changed();
         tracing::info!(
             matched = added,
@@ -1410,8 +1761,8 @@ impl Library {
 
     /// Decodes the cached cover and scales it down to at most `max_px` on its longest
     /// edge. Blocking; call from a worker thread. Returns `None` if there is no usable
-    /// cache file — if it was evicted it is regenerated in the background and the
-    /// notifier is called when it is available again.
+    /// cache file — if it was evicted it is regenerated in the background; when it is
+    /// available again [`Library::art_generation`] increases and the notifier is called.
     pub fn load_art_rgba(&self, art_id: &str, max_px: u32) -> Option<ArtImage> {
         if let Some(image) = self.inner.art.load_rgba(art_id, max_px) {
             return Some(image);
@@ -1420,8 +1771,14 @@ impl Library {
             // Present but undecodable: discard it so it can be rebuilt.
             let _ = fs::remove_file(self.inner.art.path_for(art_id));
         }
-        self.inner.regenerate_art(art_id);
+        self.inner.request_art(art_id);
         None
+    }
+
+    /// Increases whenever a cover that [`Library::load_art_rgba`] could not deliver has
+    /// been regenerated. A caller that got `None` can retry after this changed.
+    pub fn art_generation(&self) -> u64 {
+        self.inner.art_generation.load(Ordering::Acquire)
     }
 
     /// Changes how often the snapshot is rebuilt while a scan is running (default
@@ -1451,6 +1808,230 @@ impl Drop for Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ReplayGainTags;
+
+    /// A library in a temporary directory with one scanned, untagged WAV file named
+    /// `old name.wav`.
+    fn library_with_one_track() -> (tempfile::TempDir, Arc<Library>, TrackId) {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        fs::create_dir_all(&music).unwrap();
+        write_wav(&music.join("old name.wav"));
+        let (library, _) = Library::open(LibraryPaths {
+            data_dir: dir.path().join("data"),
+            cache_dir: dir.path().join("cache"),
+        })
+        .unwrap();
+        library.add_folder(&music).unwrap();
+        assert!(library.wait_for_scan(Duration::from_secs(30)));
+        let id = library.snapshot().tracks[0].id;
+        (dir, library, id)
+    }
+
+    /// Minimal 16-bit mono PCM WAV, a quarter of a second long.
+    fn write_wav(path: &Path) {
+        let data = vec![0u8; 4000];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8000u32.to_le_bytes());
+        bytes.extend_from_slice(&16000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&data);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn stats_patch_never_publishes_unindexed_tag_changes() {
+        let (_dir, library, id) = library_with_one_track();
+        let inner = &library.inner;
+        let track = library.track(id).unwrap();
+        assert_eq!(track.title, "old name");
+
+        // A scan batch has been committed but not published yet: the file was retagged.
+        let retagged = ScannedFile {
+            path: track.path.clone(),
+            root_id: track.root_id,
+            size: track.file_size + 1,
+            mtime_ns: track.mtime_ns + 1,
+            tags: tags::FileTags {
+                title: "new name".into(),
+                artist: "someone".into(),
+                album_artist: String::new(),
+                album: String::new(),
+                compilation: false,
+                disc_no: None,
+                track_no: None,
+                year: None,
+                genre: String::new(),
+                duration_ms: track.duration_ms,
+                codec: "PCM",
+                container: "WAV",
+                sample_rate: track.sample_rate,
+                channels: track.channels,
+                bit_depth: track.bit_depth,
+                bitrate_kbps: track.bitrate_kbps,
+                replaygain: ReplayGainTags::default(),
+                picture: None,
+            },
+            art_id: None,
+            art_from_folder: false,
+        };
+        assert_eq!(
+            inner.commit_scanned(vec![retagged], &[], None, None),
+            [(id, false)]
+        );
+        assert_eq!(library.track(id).unwrap().title, "new name");
+        assert_eq!(library.snapshot().get(id).unwrap().title, "old name");
+
+        // The user marks the track as a favourite and plays it in that window. The
+        // snapshot shows both, but its track still agrees with its search index.
+        library.set_favorite(&[id], true);
+        library.record_play(id);
+        let snapshot = library.snapshot();
+        let published = snapshot.get(id).unwrap();
+        assert!(published.favorite);
+        assert_eq!(published.play_count, 1);
+        assert_eq!(published.title, "old name");
+        assert_eq!(snapshot.search("old").len(), 1);
+        assert!(snapshot.search("new").is_empty());
+
+        // The scan's own publish then brings the new tags and their index together,
+        // with the statistics intact.
+        inner.publish();
+        let snapshot = library.snapshot();
+        let published = snapshot.get(id).unwrap();
+        assert_eq!(published.title, "new name");
+        assert!(published.favorite);
+        assert_eq!(published.play_count, 1);
+        assert_eq!(snapshot.search("new").len(), 1);
+        assert!(snapshot.search("old").is_empty());
+    }
+
+    #[test]
+    fn stats_patch_reads_the_latest_state_whatever_the_caller_saw() {
+        let (_dir, library, id) = library_with_one_track();
+        let inner = &library.inner;
+        // Two changes land in the state before either caller gets to publish.
+        {
+            let mut db = lock(&inner.db);
+            db.set_favorite(&[id], true).unwrap();
+            assert!(db.record_play(id, 77).unwrap());
+            let mut state = lock(&inner.state);
+            state.update(id, |t| t.favorite = true);
+            state.update(id, |t| {
+                t.play_count = 1;
+                t.last_played_at = Some(77);
+            });
+        }
+        // Whichever publishes first (or last) publishes everything.
+        inner.publish_patch(&[id]);
+        let after_first = library.snapshot();
+        let published = after_first.get(id).unwrap();
+        assert!(published.favorite);
+        assert_eq!(
+            (published.play_count, published.last_played_at),
+            (1, Some(77))
+        );
+        let generation = library.generation();
+        inner.publish_patch(&[id]);
+        assert_eq!(library.generation(), generation, "nothing left to publish");
+        // Unknown ids are ignored.
+        inner.publish_patch(&[id + 1000]);
+        assert_eq!(library.generation(), generation);
+    }
+
+    #[test]
+    fn a_panicking_scan_does_not_leave_the_scanner_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        fs::create_dir_all(&music).unwrap();
+        write_wav(&music.join("a.wav"));
+        let (library, _) = Library::open(LibraryPaths {
+            data_dir: dir.path().join("data"),
+            cache_dir: dir.path().join("cache"),
+        })
+        .unwrap();
+        library
+            .inner
+            .panic_in_next_scan
+            .store(true, Ordering::Relaxed);
+        library.add_folder(&music).unwrap();
+        assert!(
+            library.wait_for_scan(Duration::from_secs(30)),
+            "the scanner must come to rest after a failed scan"
+        );
+        let status = library.scan_status();
+        assert!(!status.running);
+        assert_eq!(status.errors, 1);
+        assert_eq!(status.current_root, None);
+        assert!(library.snapshot().is_empty());
+
+        // The scan thread survived and the next scan works.
+        library.rescan();
+        assert!(library.wait_for_scan(Duration::from_secs(30)));
+        assert_eq!(library.snapshot().len(), 1);
+        assert_eq!(library.scan_status().errors, 0);
+    }
+
+    #[test]
+    fn resolved_paths_map_back_to_the_library_spelling() {
+        let mut state = State::default();
+        state.roots.push(RootState {
+            id: 3,
+            path: PathBuf::from("/Volumes/Link/Music"),
+            canonical: PathBuf::from("/Volumes/Disk/Real Music"),
+            online: true,
+            last_scan_at: None,
+            unconfirmed_after: None,
+        });
+        state.links.push(FollowedLink {
+            root_id: 3,
+            link: PathBuf::from("/Volumes/Link/Music/more"),
+            target: PathBuf::from("/Volumes/Other"),
+        });
+        state.links.push(FollowedLink {
+            root_id: 3,
+            link: PathBuf::from("/Volumes/Link/Music/more/deep"),
+            target: PathBuf::from("/Volumes/Other/Deep"),
+        });
+        let map = |path: &str| state.library_path(Path::new(path));
+        assert_eq!(
+            map("/Volumes/Disk/Real Music/a/b.flac"),
+            (PathBuf::from("/Volumes/Link/Music/a/b.flac"), Some(3))
+        );
+        assert_eq!(
+            map("/Volumes/Link/Music/a/b.flac"),
+            (PathBuf::from("/Volumes/Link/Music/a/b.flac"), Some(3))
+        );
+        assert_eq!(
+            map("/Volumes/Other/x.flac"),
+            (PathBuf::from("/Volumes/Link/Music/more/x.flac"), Some(3))
+        );
+        assert_eq!(
+            map("/Volumes/Other/Deep/y.flac"),
+            (
+                PathBuf::from("/Volumes/Link/Music/more/deep/y.flac"),
+                Some(3)
+            )
+        );
+        assert_eq!(
+            map("/Users/me/Downloads/z.flac"),
+            (PathBuf::from("/Users/me/Downloads/z.flac"), None)
+        );
+        // A sibling whose name merely starts the same is not inside the folder.
+        assert_eq!(
+            map("/Volumes/Disk/Real Music 2/z.flac"),
+            (PathBuf::from("/Volumes/Disk/Real Music 2/z.flac"), None)
+        );
+    }
 
     #[test]
     fn shared_types_are_send_and_sync() {
