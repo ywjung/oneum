@@ -205,7 +205,9 @@ impl OneumApp {
                 .unwrap_or(live_s)
                 .min(duration_s.max(0.0));
             // "1:02:03" needs more room than "4:05".
-            let time_width = if duration_s >= 3600.0 { 56.0 } else { 40.0 };
+            let remaining = self.settings.show_remaining_time;
+            let time_width =
+                if duration_s >= 3600.0 { 56.0 } else { 40.0 } + if remaining { 6.0 } else { 0.0 };
             ui.allocate_ui_with_layout(
                 egui::vec2(time_width, 18.0),
                 Layout::right_to_left(Align::Center),
@@ -247,11 +249,24 @@ impl OneumApp {
                 egui::vec2(time_width, 18.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    ui.label(
-                        RichText::new(format_time(current.map_or(0, |c| c.duration_ms)))
-                            .small()
-                            .color(dim),
-                    );
+                    // Click to switch between the total length and the time left.
+                    let total_ms = current.map_or(0, |c| c.duration_ms);
+                    let text = if remaining && total_ms > 0 {
+                        let left = total_ms.saturating_sub((shown * 1000.0) as u64);
+                        format!("-{}", format_time(left))
+                    } else {
+                        format_time(total_ms)
+                    };
+                    let hint = if remaining {
+                        s.time_total_hint
+                    } else {
+                        s.time_remaining_hint
+                    };
+                    let label = egui::Label::new(RichText::new(text).small().color(dim))
+                        .sense(Sense::click());
+                    if ui.add(label).on_hover_text(hint).clicked() {
+                        self.settings.show_remaining_time = !remaining;
+                    }
                 },
             );
         });

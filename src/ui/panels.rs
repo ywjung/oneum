@@ -1,7 +1,7 @@
 //! Top bar, sidebar, right panel (queue / song info) and the notice strip.
 use super::dialogs::Dialog;
 use super::icons::Icon;
-use super::{Action, KeyPane, Nav, OneumApp, ToastAction, theme, widgets};
+use super::{Action, DragTracks, KeyPane, Nav, OneumApp, ToastAction, theme, widgets};
 use crate::app::settings::RightPanel;
 use crate::i18n::{format_time, group_digits};
 use crate::playback::{Command, PlayState};
@@ -177,16 +177,31 @@ impl OneumApp {
                         {
                             self.toggle_right_panel(RightPanel::Info);
                         }
-                        if widgets::icon_button(
+                        let queue_button = widgets::icon_button(
                             ui,
                             Icon::Queue,
                             s.show_queue,
                             28.0,
                             panel == RightPanel::Queue,
-                        )
-                        .clicked()
-                        {
+                        );
+                        if queue_button.clicked() {
                             self.toggle_right_panel(RightPanel::Queue);
+                        }
+                        // The button is a drop target too, so songs can be queued by
+                        // dragging while the panel is closed.
+                        if queue_button.dnd_hover_payload::<DragTracks>().is_some() {
+                            ui.painter().rect_stroke(
+                                queue_button.rect,
+                                6.0,
+                                egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if let Some(payload) = queue_button.dnd_release_payload::<DragTracks>() {
+                            self.core
+                                .player
+                                .send(Command::Enqueue(payload.tracks.clone()));
+                            self.info_toast(self.lang.added_to_queue(payload.tracks.len()));
                         }
                         if widgets::icon_button(
                             ui,
@@ -261,23 +276,47 @@ impl OneumApp {
                 }
 
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(s.playlists)
-                            .small()
-                            .strong()
-                            .color(theme::dim(ui)),
+                let header = ui
+                    .horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(s.playlists)
+                                .small()
+                                .strong()
+                                .color(theme::dim(ui)),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if widgets::icon_button(ui, Icon::Plus, s.new_playlist, 22.0, false)
+                                .clicked()
+                            {
+                                self.dialog =
+                                    Some(Dialog::new_playlist(s.untitled_playlist, Vec::new()));
+                            }
+                        });
+                    })
+                    .response;
+                // Songs dropped on the heading become a new playlist.
+                if header.dnd_hover_payload::<DragTracks>().is_some() {
+                    ui.painter().rect_stroke(
+                        header.rect.expand(2.0),
+                        6.0,
+                        egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode)),
+                        egui::StrokeKind::Inside,
                     );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::icon_button(ui, Icon::Plus, s.new_playlist, 22.0, false)
-                            .clicked()
-                        {
-                            self.dialog =
-                                Some(Dialog::new_playlist(s.untitled_playlist, Vec::new()));
-                        }
-                    });
-                });
+                    ui.painter().text(
+                        header.rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "＋",
+                        egui::FontId::proportional(13.0),
+                        theme::accent(ui.visuals().dark_mode),
+                    );
+                }
+                if let Some(payload) = header.dnd_release_payload::<DragTracks>() {
+                    self.dialog = Some(Dialog::new_playlist(
+                        s.untitled_playlist,
+                        payload.tracks.clone(),
+                    ));
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("playlists")
                     .auto_shrink([false, false])
@@ -326,6 +365,30 @@ impl OneumApp {
                             }
                             if response.double_clicked() {
                                 self.renaming = Some((id, name.clone(), true));
+                            }
+                            // Songs dragged here are added to this playlist (dragging a
+                            // playlist's own rows onto itself does nothing).
+                            let from_other_list = |payload: &DragTracks| {
+                                payload
+                                    .playlist_items
+                                    .as_ref()
+                                    .is_none_or(|(from, _)| *from != id)
+                            };
+                            if response
+                                .dnd_hover_payload::<DragTracks>()
+                                .is_some_and(|p| from_other_list(&p))
+                            {
+                                ui.painter().rect_stroke(
+                                    response.rect,
+                                    6.0,
+                                    egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            if let Some(payload) = response.dnd_release_payload::<DragTracks>()
+                                && from_other_list(&payload)
+                            {
+                                actions.push(Action::AddToPlaylist(id, payload.tracks.clone()));
                             }
                             response.context_menu(|ui| {
                                 if ui
@@ -448,6 +511,25 @@ impl OneumApp {
     fn queue_panel(&mut self, ui: &mut Ui) {
         let s = self.s();
         let queue = self.player.queue.clone();
+        // Songs dragged from a list and dropped anywhere on the panel join the queue.
+        let panel_rect = ui.max_rect();
+        if let Some(payload) = egui::DragAndDrop::payload::<DragTracks>(ui.ctx())
+            && ui.rect_contains_pointer(panel_rect)
+        {
+            ui.painter().rect_stroke(
+                panel_rect.shrink(2.0),
+                6.0,
+                egui::Stroke::new(2.0, theme::accent(ui.visuals().dark_mode)),
+                egui::StrokeKind::Inside,
+            );
+            if ui.input(|i| i.pointer.any_released()) {
+                egui::DragAndDrop::clear_payload(ui.ctx());
+                self.core
+                    .player
+                    .send(Command::Enqueue(payload.tracks.clone()));
+                self.info_toast(self.lang.added_to_queue(payload.tracks.len()));
+            }
+        }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(

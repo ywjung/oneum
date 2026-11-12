@@ -63,6 +63,7 @@ fn mods(words: &[&str]) -> Modifiers {
                 m.command = true;
                 m.mac_cmd = true;
             }
+            "ctrl" => m.ctrl = true,
             "shift" => m.shift = true,
             "alt" => m.alt = true,
             _ => {}

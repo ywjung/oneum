@@ -34,6 +34,8 @@ pub struct Settings {
     pub window_size: Option<[f32; 2]>,
     /// Volume to return to when un-muting.
     pub volume_before_mute: Option<f32>,
+    /// Show the time left instead of the total length next to the seek bar.
+    pub show_remaining_time: bool,
 }
 
 impl Default for Settings {
@@ -47,6 +49,7 @@ impl Default for Settings {
             right_panel: RightPanel::Hidden,
             window_size: None,
             volume_before_mute: None,
+            show_remaining_time: false,
         }
     }
 }

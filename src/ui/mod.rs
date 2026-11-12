@@ -78,6 +78,9 @@ struct ListState {
     built: Option<RowsStamp>,
     scroll_to: Option<usize>,
     total_ms: u64,
+    /// Letters typed to jump to a song, and when the last one arrived.
+    typeahead: String,
+    typeahead_at: Option<Instant>,
 }
 
 /// Things decided while drawing that are carried out after the frame's borrows end.
@@ -96,6 +99,17 @@ enum Action {
     Go(Nav),
     Sort(SortKey),
 }
+
+/// What is being dragged out of a list: songs, and — when they come from a playlist view
+/// — which playlist items they are, so that dropping inside the same list reorders it.
+#[derive(Clone)]
+struct DragTracks {
+    tracks: Vec<TrackId>,
+    playlist_items: Option<(i64, Vec<i64>)>,
+}
+
+/// Typing letters jumps to a song; the letters typed so far are forgotten after this.
+const TYPEAHEAD_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Which list the list keys (arrows, Return, Delete, ⌘A) belong to: the one the user
 /// last clicked in.
@@ -958,11 +972,18 @@ impl OneumApp {
             }
             Action::PlayNext(tracks) => self.core.player.send(Command::PlayNext(tracks)),
             Action::Enqueue(tracks) => self.core.player.send(Command::Enqueue(tracks)),
-            Action::AddToPlaylist(id, tracks) => {
-                if let Err(error) = library.add_to_playlist(id, &tracks) {
-                    self.library_error_toast(&error);
+            Action::AddToPlaylist(id, tracks) => match library.add_to_playlist(id, &tracks) {
+                Ok(()) => {
+                    let name = self
+                        .playlists
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+                    self.info_toast(self.lang.added_to_playlist(tracks.len(), &name));
                 }
-            }
+                Err(error) => self.library_error_toast(&error),
+            },
             Action::NewPlaylistWith(tracks) => {
                 self.dialog = Some(Dialog::new_playlist(self.s().untitled_playlist, tracks));
             }
@@ -1082,8 +1103,17 @@ impl OneumApp {
                 i.key_pressed(egui::Key::Escape),
             )
         });
+        // While letters are being typed to find a song, Space belongs to that title
+        // ("come together"), not to play/pause.
+        let finding = self.key_pane == KeyPane::List
+            && self.views.get(&self.nav).is_some_and(|state| {
+                !state.typeahead.is_empty()
+                    && state
+                        .typeahead_at
+                        .is_some_and(|at| at.elapsed() < TYPEAHEAD_TIMEOUT)
+            });
         // With a control focused, Space presses that control (egui does that itself).
-        if space && !typing && !self.widget_focused {
+        if space && !typing && !self.widget_focused && !finding {
             self.core.player.send(Command::TogglePlayPause);
         }
         if escape {
@@ -1097,6 +1127,38 @@ impl OneumApp {
                 state.query.clear();
             }
         }
+    }
+
+    /// A small badge following the pointer while songs are being dragged.
+    fn drag_preview(&self, ctx: &egui::Context) {
+        let Some(payload) = egui::DragAndDrop::payload::<DragTracks>(ctx) else {
+            return;
+        };
+        let Some(pointer) = ctx.pointer_interact_pos() else {
+            return;
+        };
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        let dark = ctx.global_style().visuals.dark_mode;
+        let ink = if dark {
+            egui::Color32::from_rgb(0x14, 0x14, 0x18)
+        } else {
+            egui::Color32::WHITE
+        };
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::unique("drag-preview"),
+        ));
+        let galley = painter.layout_no_wrap(
+            self.lang.song_count(payload.tracks.len()),
+            theme::semibold(12.0),
+            ink,
+        );
+        let rect = egui::Rect::from_min_size(
+            pointer + egui::vec2(14.0, 12.0),
+            galley.size() + egui::vec2(16.0, 8.0),
+        );
+        painter.rect_filled(rect, 10.0, theme::accent(dark));
+        painter.galley(rect.min + egui::vec2(8.0, 4.0), galley, ink);
     }
 
     /// While files are dragged over the window, shows where they will go.
@@ -1269,6 +1331,22 @@ impl OneumApp {
             serde_json::json!(self.renaming.as_ref().map(|(_, text, _)| text.clone()));
         state["queue_selected"] = serde_json::json!(self.queue_selection.len());
         state["settings_tab"] = serde_json::json!(format!("{:?}", self.settings_tab));
+        state["show_remaining_time"] = serde_json::json!(self.settings.show_remaining_time);
+        state["selected_titles"] = serde_json::json!(
+            self.views
+                .get(&self.nav)
+                .map(|state| {
+                    state
+                        .rows
+                        .iter()
+                        .filter(|r| state.selection.contains(&r.key))
+                        .filter_map(|r| self.snapshot.tracks.get(r.idx as usize))
+                        .map(|t| t.title.clone())
+                        .take(5)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        );
         state["theme"] = serde_json::json!(format!("{:?}", self.settings.theme));
         state["show_format_column"] = serde_json::json!(self.settings.show_format_column);
         state["replaygain"] = serde_json::json!(format!(
@@ -1331,6 +1409,19 @@ impl eframe::App for OneumApp {
         if let Some(automation) = self.automation.as_mut() {
             automation.step(raw);
         }
+        // Control-click is a secondary click on a Mac; the window system delivers it as a
+        // primary click with Control held.
+        for event in &mut raw.events {
+            if let egui::Event::PointerButton {
+                button, modifiers, ..
+            } = event
+                && *button == egui::PointerButton::Primary
+                && modifiers.ctrl
+                && !modifiers.mac_cmd
+            {
+                *button = egui::PointerButton::Secondary;
+            }
+        }
         // Edit-menu actions arrive through the responder chain (see platform::macos::responder).
         for action in responder::drain() {
             let key = |key, shift| egui::Event::Key {
@@ -1384,6 +1475,7 @@ impl eframe::App for OneumApp {
         egui::CentralPanel::default().show(ui, |ui| self.central(ui, &mut actions));
 
         self.drop_overlay(&ctx);
+        self.drag_preview(&ctx);
         self.settings_window(&ctx);
         self.dialogs(&ctx);
         for action in actions {

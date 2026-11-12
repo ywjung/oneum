@@ -148,6 +148,31 @@ ui 'volume 0.01' 'wait 300' 'menu toggle_mute' 'wait 300' 'dump mu1.json' 'menu 
 check mu1.json 'd["volume"] == 0' "mute"
 check mu2.json 'abs(d["volume"] - 0.01) < 1e-6' "un-mute returns to the previous level"
 
+check2() { # check2 <dump-a> <dump-b> <python expression over a and b> <description>
+  python3 - "$PROFILE/$1" "$PROFILE/$2" "$3" "$4" <<'PY'
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+ok = bool(eval(sys.argv[3], {"a": a, "b": b}))
+print(("  ok   " if ok else "  FAIL ") + sys.argv[4])
+if not ok:
+    keys = ("nav", "first_rows", "playlists", "queue_len", "selected_titles")
+    print("       before:", {k: a[k] for k in keys}); print("       after: ", {k: b[k] for k in keys})
+    sys.exit(1)
+PY
+}
+
+echo "== type-ahead, remaining time, drag and drop"
+ui 'click 60 99' 'wait 400' 'click 400 93' 'wait 300' 'text here' 'wait 300' 'dump ta.json' 'wait 1200' \
+   'click 810 743' 'wait 400' 'dump rt1.json' 'click 810 743' 'wait 400' 'dump rt2.json' \
+   'dump dd0.json' 'drag 400 125 100 281' 'wait 700' 'dump dd1.json' 'drag 400 157 1118 20' 'wait 600' 'dump dd2.json' \
+   'click 100 281' 'wait 500' 'dump dd3.json' 'drag 400 132 400 175' 'wait 700' 'dump dd4.json' 'click 60 99' 'wait 300'
+check ta.json 'd["selected_titles"] == ["Here Comes the Sun"]' "typing letters jumps to the song"
+check rt1.json 'd["show_remaining_time"]' "clicking the time label shows the time left"
+check rt2.json 'not d["show_remaining_time"]' "…and back"
+check2 dd0.json dd1.json 'b["playlists"][0][1] == a["playlists"][0][1] + 1 and "toast" in b and b["toast"]' "a song dragged onto a playlist is added to it"
+check2 dd1.json dd2.json 'b["queue_len"] == a["queue_len"] + 1' "a song dragged onto the queue button is queued"
+check2 dd3.json dd4.json 'b["first_rows"][:2] == a["first_rows"][1::-1] and b["first_rows"][2:] == a["first_rows"][2:]' "dragging a row inside a playlist reorders it"
+
 echo "== settings"
 # Tab and control centres for the 620-point settings window in a 1180x760 window (Korean).
 ui 'click 1081 20' 'wait 600' 'dump se1.json' 'click 510 176' 'wait 500' 'click 758 425' 'wait 500' 'dump se2.json' \

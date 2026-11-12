@@ -75,6 +75,8 @@ strings! {
     repeat_all: "전체 반복", "Repeat All";
     repeat_one: "한 곡 반복", "Repeat One";
     volume: "볼륨", "Volume";
+    time_remaining_hint: "남은 시간으로 보기", "Show time remaining";
+    time_total_hint: "전체 길이로 보기", "Show total time";
     mute: "음소거", "Mute";
     unmute: "음소거 해제", "Unmute";
     play_album_hint: "앨범 재생", "Play Album";
@@ -431,6 +433,20 @@ impl Lang {
             };
         }
         text
+    }
+
+    pub fn added_to_queue(self, n: usize) -> String {
+        match self {
+            Lang::Ko => format!("대기열 끝에 {}을 추가했습니다.", self.song_count(n)),
+            Lang::En => format!("Added {} to the end of the queue.", self.song_count(n)),
+        }
+    }
+
+    pub fn added_to_playlist(self, n: usize, name: &str) -> String {
+        match self {
+            Lang::Ko => format!("“{name}”에 {}을 추가했습니다.", self.song_count(n)),
+            Lang::En => format!("Added {} to “{name}”.", self.song_count(n)),
+        }
     }
 
     pub fn artist_count(self, n: usize) -> String {

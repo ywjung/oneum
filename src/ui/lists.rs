@@ -1,6 +1,8 @@
 //! The central area: song tables, album grid, artist list and their detail views.
 use super::icons::Icon;
-use super::{Action, KeyPane, ListState, Nav, OneumApp, Row, theme, widgets};
+use super::{
+    Action, DragTracks, KeyPane, ListState, Nav, OneumApp, Row, TYPEAHEAD_TIMEOUT, theme, widgets,
+};
 use crate::i18n::format_time;
 use crate::library::{Album, Library, LibrarySnapshot, SortKey};
 use crate::model::TrackId;
@@ -466,6 +468,7 @@ impl OneumApp {
         if select_all {
             state.selection = state.rows.iter().map(|r| r.key).collect();
         }
+        self.typeahead(ui, state);
         let position =
             |rows: &[Row], key: Option<u64>| key.and_then(|k| rows.iter().position(|r| r.key == k));
         if let Some(step) = step {
@@ -512,6 +515,62 @@ impl OneumApp {
                 playlist,
                 state.selection.iter().map(|k| *k as i64).collect(),
             ));
+        }
+    }
+
+    /// Typing letters selects the first song whose title starts with them (or, failing
+    /// that, contains them). The letters accumulate while typing continues.
+    fn typeahead(&self, ui: &Ui, state: &mut ListState) {
+        let typed: String = ui.input(|i| {
+            if i.modifiers.command || i.modifiers.ctrl || i.modifiers.alt {
+                return String::new();
+            }
+            i.events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        });
+        let now = std::time::Instant::now();
+        let fresh = state
+            .typeahead_at
+            .is_some_and(|at| now.duration_since(at) < TYPEAHEAD_TIMEOUT);
+        if !fresh {
+            state.typeahead.clear();
+        }
+        // A leading space is play/pause, not the start of a title.
+        let typed = if state.typeahead.is_empty() {
+            typed.trim_start()
+        } else {
+            typed.as_str()
+        };
+        if typed.is_empty() {
+            return;
+        }
+        state.typeahead.push_str(typed);
+        state.typeahead_at = Some(now);
+        ui.ctx().request_repaint_after(TYPEAHEAD_TIMEOUT);
+        let needle = state.typeahead.to_lowercase();
+        let title_of = |row: &Row| self.snapshot.tracks[row.idx as usize].title.to_lowercase();
+        let found = state
+            .rows
+            .iter()
+            .position(|row| title_of(row).starts_with(&needle))
+            .or_else(|| {
+                state
+                    .rows
+                    .iter()
+                    .position(|row| title_of(row).contains(&needle))
+            });
+        if let Some(index) = found {
+            let key = state.rows[index].key;
+            state.selection.clear();
+            state.selection.insert(key);
+            state.anchor = Some(key);
+            state.cursor = Some(key);
+            state.scroll_to = Some(index);
         }
     }
 
@@ -598,7 +657,8 @@ impl OneumApp {
             .striped(true)
             // Clickable, but not a tab stop per cell: a list of a few thousand cells
             // would swallow the Tab key. Rows are reached with the arrow keys instead.
-            .sense(Sense::CLICK)
+            // Rows can be dragged to a playlist or the queue, and within a playlist.
+            .sense(Sense::CLICK | Sense::DRAG)
             .cell_layout(Layout::left_to_right(Align::Center))
             .min_scrolled_height(0.0)
             .column(Column::exact(26.0));
@@ -769,6 +829,61 @@ impl OneumApp {
                     }
                     if response.clicked() || response.secondary_clicked() {
                         row_clicked = true;
+                    }
+                    if response.drag_started() {
+                        // Dragging a row that is not selected drags just that row.
+                        if !selection.contains(&key) {
+                            selection.clear();
+                            selection.insert(key);
+                            *anchor = Some(key);
+                            *cursor = Some(key);
+                        }
+                        let playlist_items = options.playlist.map(|id| {
+                            let items = rows
+                                .iter()
+                                .filter(|r| selection.contains(&r.key))
+                                .map(|r| r.key as i64)
+                                .collect();
+                            (id, items)
+                        });
+                        egui::DragAndDrop::set_payload(
+                            &response.ctx,
+                            DragTracks {
+                                tracks: selected_tracks(&snap, rows, selection),
+                                playlist_items,
+                            },
+                        );
+                        row_clicked = true;
+                    }
+                    // Dropping rows of this playlist between two of its rows reorders it.
+                    if let Some(playlist) = options.playlist.filter(|_| menu_options.reorderable)
+                        && let Some(payload) = response.dnd_hover_payload::<DragTracks>()
+                        && let Some((from, items)) = &payload.playlist_items
+                        && *from == playlist
+                        && let Some(pointer) = response.ctx.pointer_interact_pos()
+                    {
+                        let rect = response.rect;
+                        let after = pointer.y > rect.center().y;
+                        let y = if after { rect.bottom() } else { rect.top() };
+                        response.ctx.layer_painter(response.layer_id).hline(
+                            rect.x_range(),
+                            y,
+                            egui::Stroke::new(2.0, accent),
+                        );
+                        if response.ctx.input(|i| i.pointer.any_released()) {
+                            // Index in the list with the moved items taken out.
+                            let target = (index + usize::from(after)).min(rows.len());
+                            let removed_before = rows[..target]
+                                .iter()
+                                .filter(|r| items.contains(&(r.key as i64)))
+                                .count();
+                            actions.push(Action::MovePlaylistItems(
+                                playlist,
+                                items.clone(),
+                                target - removed_before,
+                            ));
+                            egui::DragAndDrop::clear_payload(&response.ctx);
+                        }
                     }
                     if response.secondary_clicked() && !selection.contains(&key) {
                         selection.clear();
@@ -942,7 +1057,7 @@ impl OneumApp {
                             };
                             let (cell, response) = ui.allocate_exact_size(
                                 egui::vec2(GRID_CELL, GRID_ROW),
-                                Sense::click(),
+                                Sense::click_and_drag(),
                             );
                             let title = album_title(album, &snap, s.unknown_album);
                             let artist = if album.artist.is_empty() {
@@ -1020,6 +1135,16 @@ impl OneumApp {
                                     play_rect.shrink(9.0),
                                     Icon::Play,
                                     egui::Color32::WHITE,
+                                );
+                            }
+                            // An album can be dragged to a playlist or the queue as well.
+                            if response.drag_started() {
+                                egui::DragAndDrop::set_payload(
+                                    ui.ctx(),
+                                    DragTracks {
+                                        tracks: album_tracks(),
+                                        playlist_items: None,
+                                    },
                                 );
                             }
                             if response.clicked() {
