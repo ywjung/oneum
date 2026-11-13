@@ -361,6 +361,25 @@ pub(crate) fn mtime_ns(meta: &fs::Metadata) -> i64 {
         .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }
 
+/// True for a link inside a music folder that would take the scan out into far more
+/// than music: one that leads to the folder itself or above it, to the home folder or
+/// above it, or to the top of the disk. Such a link (they come in archives: `extras ->
+/// /`) is not followed. Links to other folders, the usual way to keep part of a
+/// collection on another drive, are.
+pub(crate) fn link_leads_too_far(target: &Path, root: &Path, home: Option<&Path>) -> bool {
+    target.parent().is_none()
+        || root.starts_with(target)
+        || home.is_some_and(|home| home.starts_with(target))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .and_then(|home| fs::canonicalize(home).ok())
+}
+
 fn is_hidden(name: &std::ffi::OsStr) -> bool {
     name.as_encoded_bytes().first() == Some(&b'.')
 }
@@ -398,8 +417,13 @@ pub(crate) fn read_file(
         let mut tags = match tags::read_tags(path, true) {
             Ok(tags) => tags,
             // An oversized or damaged embedded picture must not cost us the track:
-            // try again without reading pictures.
-            Err(ReadError::Failed(_)) => tags::read_tags(path, false)?,
+            // try again without reading pictures, and if it is the tags themselves
+            // that cannot be read, without them (the audio may be perfectly fine).
+            Err(ReadError::Failed(_)) => match tags::read_tags(path, false) {
+                Ok(tags) => tags,
+                Err(ReadError::Failed(_)) => tags::read_without_tags(path)?,
+                Err(unsupported) => return Err(unsupported),
+            },
             Err(unsupported) => return Err(unsupported),
         };
         let embedded = tags
@@ -672,10 +696,29 @@ fn walk(
                 continue;
             }
         }
+        let home = home_dir();
+        let canonical_root = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         let entries = WalkDir::new(dir)
             .follow_links(true)
             .into_iter()
-            .filter_entry(|entry| entry.depth() == 0 || !is_hidden(entry.file_name()));
+            .filter_entry(|entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
+                if is_hidden(entry.file_name()) {
+                    return false;
+                }
+                // A link out of the folder is followed, but not just anywhere.
+                let too_far = entry.path_is_symlink()
+                    && entry.file_type().is_dir()
+                    && fs::canonicalize(entry.path()).is_ok_and(|target| {
+                        link_leads_too_far(&target, &canonical_root, home.as_deref())
+                    });
+                if too_far {
+                    tracing::info!("a link that leads out of the music folder to a parent folder was not followed");
+                }
+                !too_far
+            });
         for entry in entries {
             if cancel.load(Ordering::Relaxed) {
                 return result;
@@ -1301,6 +1344,52 @@ fn scan_loose(inner: &Inner, cancel: &AtomicBool) {
 mod tests {
     use super::*;
     use crate::model::ReplayGainTags;
+
+    #[test]
+    fn which_links_lead_too_far() {
+        let root = Path::new("/Users/me/Music/Library");
+        let home = Some(Path::new("/Users/me"));
+        // Up and out: the folder itself, anything above it, the home folder and
+        // above, the top of the disk.
+        for target in [
+            "/",
+            "/Users",
+            "/Users/me",
+            "/Users/me/Music",
+            "/Users/me/Music/Library",
+        ] {
+            assert!(
+                link_leads_too_far(Path::new(target), root, home),
+                "{target}"
+            );
+        }
+        // Somewhere else: another folder, another drive, a folder beside it.
+        for target in [
+            "/Volumes/NAS/Music",
+            "/Users/me/Music/Other",
+            "/Users/me/Downloads/album",
+            "/Users/me/Music/Library/sub",
+            "/Users/other/Music",
+        ] {
+            assert!(
+                !link_leads_too_far(Path::new(target), root, home),
+                "{target}"
+            );
+        }
+        // A music folder outside the home folder, and no home folder known.
+        let external = Path::new("/Volumes/Disk/Music");
+        assert!(link_leads_too_far(
+            Path::new("/Volumes/Disk"),
+            external,
+            None
+        ));
+        assert!(!link_leads_too_far(
+            Path::new("/Users/me/Music"),
+            external,
+            home
+        ));
+        assert!(link_leads_too_far(Path::new("/Users"), external, home));
+    }
 
     fn track(id: TrackId, path: &str, title: &str, size: u64, duration_ms: u64) -> Arc<Track> {
         Arc::new(Track {

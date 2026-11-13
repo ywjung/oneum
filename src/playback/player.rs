@@ -6,16 +6,19 @@
 //! directly; the outside world is reached through [`PlayerHost`].
 use super::queue::{ItemId, Previous, Queue, QueueItem, QueueState, RepeatMode};
 use crate::audio::decoder::SourceInfo;
+use crate::audio::dsp::replaygain_factor;
 use crate::audio::{
-    Engine, EngineEvent, NextSlot, NextTrack, OutputError, PlaybackErrorKind, ReplayGainSettings,
+    Crossfeed, Engine, EngineEvent, EqSettings, LevelMeter, Levels, NextSlot, NextTrack,
+    OutputError, OutputSettings, OutputStatus, PlaybackErrorKind, ReplayGainSettings, Scope,
     TrackRequest,
 };
 use crate::model::{ReplayGainTags, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const TICK_ACTIVE: Duration = Duration::from_millis(20);
@@ -30,6 +33,11 @@ const PLAY_CREDIT_MS: u64 = 240_000;
 /// A paused feed is released after this long: the decode thread ends and the file is
 /// closed, so the drive it is on can be ejected. Playback resumes from the same position.
 const PAUSE_RELEASE: Duration = Duration::from_secs(30);
+/// How long audio decoded before a setting was switched off can still be on its way to
+/// the device: the ring's second, the equalizer's fade and settling, and a margin.
+const PROCESSED_TAIL: Duration = Duration::from_secs(2);
+/// Radio: how many songs are added when the queue is about to run out.
+const RADIO_BATCH: usize = 5;
 
 /// What the player needs to know about a track in order to play it.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +47,11 @@ pub struct PlayableTrack {
     pub duration_ms: u64,
     /// False when the library already knows the file is missing or its drive is offline.
     pub available: bool,
+    /// Sample rate as the library read it from the file; 0 when unknown. Used to set the
+    /// output device up before the file is opened (rate matching).
+    pub sample_rate: u32,
+    /// Bits per sample of a lossless file, when the library knows it.
+    pub bit_depth: Option<u8>,
 }
 
 /// Persisted across restarts.
@@ -54,6 +67,11 @@ pub trait PlayerHost: Send + Sync + 'static {
     fn track(&self, id: TrackId) -> Option<PlayableTrack>;
     /// A track was listened to (see `PLAY_CREDIT_MS`).
     fn record_play(&self, id: TrackId);
+    /// Radio: up to `count` tracks to follow `seed` when the queue has run out, none of
+    /// them in `exclude`. A host without a library to pick from has none.
+    fn radio_picks(&self, _seed: TrackId, _exclude: &[TrackId], _count: usize) -> Vec<TrackId> {
+        Vec::new()
+    }
     fn load_session(&self) -> Option<Session>;
     /// `queue_changed` is false when only the position or volume differ from the last save.
     fn save_session(&self, session: &Session, queue_changed: bool);
@@ -90,8 +108,14 @@ pub enum Command {
     SetShuffle(bool),
     SetRepeat(RepeatMode),
     SetReplayGain(ReplayGainSettings),
+    SetEq(EqSettings),
+    SetCrossfeed(Crossfeed),
+    /// Radio on or off: when the queue runs out, go on with songs like the last one.
+    SetRadio(bool),
     /// `None` follows the system default device.
     SetOutputDevice(Option<String>),
+    /// Rate matching, exclusive access, memory playback.
+    SetOutput(OutputSettings),
     /// After a lost device: open the preferred (or default) device again and continue.
     RetryOutput,
     SystemWillSleep,
@@ -165,6 +189,20 @@ pub struct PlayerSnapshot {
     /// Format of the track being decoded (for the info panel).
     pub source: Option<SourceInfo>,
     pub output_sample_rate: Option<u32>,
+    /// The open output stream: device, rate, hardware format, exclusive access.
+    pub output: Option<OutputStatus>,
+    pub output_settings: OutputSettings,
+    /// Width of the device's integer format while dither is being added for it.
+    pub dither_bits: Option<u32>,
+    /// The equalizer as it is set.
+    pub eq: EqSettings,
+    /// The headphone crossfeed as it is set.
+    pub crossfeed: Crossfeed,
+    /// Radio is on (see `Command::SetRadio`).
+    pub radio: bool,
+    /// Frames of the current track, as far as it has been decoded, that would have
+    /// exceeded full scale and had their gain turned down instead of being clipped.
+    pub peak_limited_frames: u64,
     /// Time from the most recent start request (play a track, seek) until its audio
     /// reached the output callback, in milliseconds.
     pub last_start_latency_ms: Option<u32>,
@@ -192,6 +230,13 @@ impl PlayerSnapshot {
             underruns: 0,
             source: None,
             output_sample_rate: None,
+            output: None,
+            output_settings: OutputSettings::default(),
+            dither_bits: None,
+            eq: EqSettings::default(),
+            crossfeed: Crossfeed::Off,
+            radio: false,
+            peak_limited_frames: 0,
             last_start_latency_ms: None,
         }
     }
@@ -213,7 +258,11 @@ impl PlayerSnapshot {
 pub struct PlayerConfig {
     pub default_volume: f32,
     pub replaygain: ReplayGainSettings,
+    pub eq: EqSettings,
+    pub crossfeed: Crossfeed,
+    pub radio: bool,
     pub device_pref: Option<String>,
+    pub output: OutputSettings,
     /// Playback that is wanted but produces no audio for this long is treated as a
     /// failure (a read stuck on a dead drive, a device that stopped asking for audio).
     pub stall_timeout: Duration,
@@ -224,7 +273,11 @@ impl Default for PlayerConfig {
         Self {
             default_volume: 0.8,
             replaygain: ReplayGainSettings::default(),
+            eq: EqSettings::default(),
+            crossfeed: Crossfeed::Off,
+            radio: false,
             device_pref: None,
+            output: OutputSettings::default(),
             stall_timeout: Duration::from_secs(15),
         }
     }
@@ -235,6 +288,38 @@ impl Default for PlayerConfig {
 pub struct PlayerHandle {
     tx: Sender<Command>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
+    /// The engine's level meter (the engine is built on the player thread).
+    meter: Arc<OnceLock<Arc<LevelMeter>>>,
+    /// The engine's sample scope, likewise.
+    scope: Arc<OnceLock<Arc<Scope>>>,
+    /// When the player thread last went round its loop.
+    pulse: Arc<Pulse>,
+}
+
+/// The player thread's sign of life: it notes the time every time it goes round its
+/// loop (at least five times a second). A thread stuck inside a call that never returns,
+/// which is what an output device driver that has hung looks like from here, stops
+/// doing so, and that is all anybody can know about it.
+struct Pulse {
+    since: Instant,
+    last_beat_ms: AtomicU64,
+}
+
+impl Pulse {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            last_beat_ms: AtomicU64::new(0),
+        }
+    }
+    fn beat(&self) {
+        self.last_beat_ms
+            .store(self.since.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+    fn silent_for(&self) -> Duration {
+        let last = Duration::from_millis(self.last_beat_ms.load(Ordering::Relaxed));
+        self.since.elapsed().saturating_sub(last)
+    }
 }
 
 impl PlayerHandle {
@@ -248,6 +333,29 @@ impl PlayerHandle {
             Err(poisoned) => poisoned.into_inner().clone(),
         }
     }
+
+    /// Signal level of what is playing right now (for the VU meter). Silence until the
+    /// engine exists. Reading takes the peaks: one reader only.
+    pub fn levels(&self) -> Levels {
+        self.meter.get().map(|m| m.read()).unwrap_or_default()
+    }
+
+    /// How long the player thread has not been heard from. Normally well under half a
+    /// second; switching an output device's format can take a few seconds. Much longer
+    /// means the thread is stuck in a call that does not return (a hung device driver),
+    /// and no command will be acted on until it does.
+    pub fn unresponsive_for(&self) -> Duration {
+        self.pulse.silent_for()
+    }
+
+    /// The most recent samples of what is playing (for the spectrum display), oldest
+    /// first; silence until the engine exists.
+    pub fn scope_samples(&self, out: &mut [f32]) {
+        match self.scope.get() {
+            Some(scope) => scope.latest(out),
+            None => out.fill(0.0),
+        }
+    }
 }
 
 /// Starts the player thread with a real output device.
@@ -257,7 +365,9 @@ pub fn spawn<H: PlayerHost>(
 ) -> (PlayerHandle, std::thread::JoinHandle<()>) {
     let cfg = config.clone();
     spawn_with_engine(host, config, move |volume| {
-        Engine::new(cfg.device_pref.clone(), volume, cfg.replaygain)
+        let mut engine = Engine::new(cfg.device_pref.clone(), volume, cfg.replaygain);
+        engine.set_output_settings(cfg.output);
+        engine
     })
 }
 
@@ -274,6 +384,12 @@ pub fn spawn_with_engine<H: PlayerHost>(
         config.replaygain,
     )));
     let shared = snapshot.clone();
+    let meter = Arc::new(OnceLock::new());
+    let meter_slot = meter.clone();
+    let scope = Arc::new(OnceLock::new());
+    let scope_slot = scope.clone();
+    let pulse = Arc::new(Pulse::new());
+    let thread_pulse = pulse.clone();
     let thread = std::thread::Builder::new()
         .name("oneum-player".into())
         .spawn(move || {
@@ -283,14 +399,27 @@ pub fn spawn_with_engine<H: PlayerHost>(
                 .map_or(config.default_volume, |s| s.volume)
                 .clamp(0.0, 1.0);
             let engine = make_engine(volume);
-            Player::new(host, engine, rx, shared, config, session, volume).run();
+            engine.set_eq(config.eq);
+            engine.set_crossfeed(config.crossfeed);
+            let _ = meter_slot.set(engine.shared().meter().clone());
+            let _ = scope_slot.set(engine.shared().scope().clone());
+            Player::new(host, engine, rx, shared, config, session, volume).run(&thread_pulse);
         })
         .unwrap_or_else(|e| {
             // Without a player thread the app cannot play anything; commands are dropped.
             tracing::error!("cannot start player thread: {e}");
             std::thread::spawn(|| {})
         });
-    (PlayerHandle { tx, snapshot }, thread)
+    (
+        PlayerHandle {
+            tx,
+            snapshot,
+            meter,
+            scope,
+            pulse,
+        },
+        thread,
+    )
 }
 
 /// A track the decode thread has started writing into the current feed.
@@ -302,6 +431,11 @@ struct Segment {
     start_ms: u64,
     duration_ms: u64,
     info: SourceInfo,
+    /// The samples of this track are not the file's own by the time they reach the
+    /// device (see `Player::source_is_processed`).
+    processed: bool,
+    /// What the engine's count of peak-limited frames stood at when this track began.
+    limited_before: u64,
 }
 
 /// How much of the current playthrough of a queue item has really been heard.
@@ -364,6 +498,10 @@ struct Chain {
     epoch: u16,
     slot: Arc<NextSlot>,
     rate: u32,
+    /// Rate the device was asked to run at for this feed (rate matching); `None` when
+    /// the device was left alone. A following track that asks for another rate cannot
+    /// continue this feed.
+    target_rate: Option<u32>,
     first_item: QueueItem,
     /// Decoded tracks, oldest first. The front one is what is heard once the renderer
     /// has switched to this feed.
@@ -398,6 +536,12 @@ struct Player<H: PlayerHost> {
     resume_ms: u64,
     volume: f32,
     replaygain: ReplayGainSettings,
+    eq: EqSettings,
+    crossfeed: Crossfeed,
+    radio: bool,
+    /// While set: audio decoded with processing that has since been switched off is
+    /// still being played (see `review_processed`).
+    processed_until: Option<Instant>,
     notice: Option<Notice>,
     notice_seq: u64,
     device_lost: bool,
@@ -465,6 +609,10 @@ impl<H: PlayerHost> Player<H> {
             resume_ms,
             volume,
             replaygain: config.replaygain,
+            eq: config.eq.sanitized(),
+            crossfeed: config.crossfeed,
+            radio: config.radio,
+            processed_until: None,
             notice: None,
             notice_seq: 0,
             device_lost: false,
@@ -486,9 +634,10 @@ impl<H: PlayerHost> Player<H> {
         }
     }
 
-    fn run(mut self) {
+    fn run(mut self, pulse: &Pulse) {
         let mut events = Vec::new();
         while self.running {
+            pulse.beat();
             let busy = self.chain.is_some()
                 && (self.want_playing
                     || matches!(self.state, PlayState::Loading | PlayState::Seeking));
@@ -514,6 +663,14 @@ impl<H: PlayerHost> Player<H> {
             self.follow_playback();
             self.watch_for_stall();
             self.release_paused_feed();
+            if self
+                .processed_until
+                .is_some_and(|until| Instant::now() >= until)
+            {
+                self.processed_until = None;
+                self.sync_processed();
+                self.dirty = true;
+            }
             self.publish_if_needed();
             self.save_session_if_due();
         }
@@ -587,17 +744,160 @@ impl<H: PlayerHost> Player<H> {
         }
     }
 
+    /// Radio: when `item_id` is the last thing the queue has to play, adds songs that
+    /// go with it to the end of the queue. Called when that item starts being decoded,
+    /// so what is added follows without a gap like anything else in the queue.
+    /// Returns true if the queue grew.
+    fn extend_with_radio(&mut self, item_id: ItemId) -> bool {
+        // Repeat is a way of not ending already (and with shuffle its next round is
+        // only decided at the wrap, so "nothing follows" does not mean the end).
+        if !self.radio
+            || self.queue.repeat() != RepeatMode::Off
+            || self.queue.peek_after(item_id).is_some()
+        {
+            return false;
+        }
+        let Some(seed) = self.queue.items().iter().find(|i| i.id == item_id) else {
+            return false;
+        };
+        let in_queue: Vec<TrackId> = self.queue.items().iter().map(|i| i.track).collect();
+        let picks = self.host.radio_picks(seed.track, &in_queue, RADIO_BATCH);
+        if picks.is_empty() {
+            return false;
+        }
+        self.queue.append(&picks);
+        self.mark_queue_changed();
+        true
+    }
+
     /// Tells the decode thread what follows `item_id`.
     fn announce_next_after(&self, item_id: ItemId) {
         let Some(chain) = &self.chain else { return };
         let next = match self.queue.peek_after(item_id) {
             // An unplayable next track ends the feed; it is skipped when we get there.
-            Some(next) => self
+            // So does one the device should run at another rate for: the feed ends at
+            // the boundary and the next track starts a new one on the reconfigured device.
+            Some(next) if self.same_device_rate(chain, next.track) => self
                 .request_for(next)
                 .map_or(NextTrack::End, NextTrack::Track),
-            None => NextTrack::End,
+            _ => NextTrack::End,
         };
         chain.slot.set(next);
+    }
+
+    /// Sample rate of a track as the library knows it.
+    fn rate_hint(&self, track: TrackId) -> Option<u32> {
+        self.host
+            .track(track)
+            .map(|t| t.sample_rate)
+            .filter(|r| *r > 0)
+    }
+
+    /// Whether `track` can follow in `chain` without the device changing its rate.
+    /// Always true unless rate matching is on.
+    fn same_device_rate(&self, chain: &Chain, track: TrackId) -> bool {
+        match self.engine.preferred_rate(self.rate_hint(track)) {
+            Some(rate) => rate == chain.target_rate.unwrap_or(chain.rate),
+            None => true,
+        }
+    }
+
+    /// Whether what is decoded from this track is no longer the file's own samples by
+    /// the time it reaches the device: decoded from a lossy codec, resampled, mapped to
+    /// stereo, scaled by ReplayGain, equalized, or wider than the device's sample format. Such
+    /// audio is dithered when the device takes integers (see `Renderer`).
+    fn source_is_processed(&self, info: &SourceInfo, track_id: TrackId) -> bool {
+        let track = self.host.track(track_id);
+        let integer_pcm = info.codec == "flac"
+            || info.codec == "alac"
+            || info.codec.starts_with("pcm_s")
+            || info.codec.starts_with("pcm_u");
+        let device_bits = self.engine.hardware_bits().map(|(bits, _)| bits);
+        // Unknown widths count as "does not fit": dither is harmless, truncation is not.
+        let fits = match (track.as_ref().and_then(|t| t.bit_depth), device_bits) {
+            (Some(source), Some(device)) => u32::from(source) <= device,
+            _ => false,
+        };
+        let gain = track.map_or(1.0, |t| replaygain_factor(&t.replaygain, &self.replaygain));
+        self.eq.is_active()
+            || self.crossfeed != Crossfeed::Off
+            || !integer_pcm
+            || !fits
+            || info.channels != 2
+            || Some(info.sample_rate) != self.engine.sample_rate()
+            || gain != 1.0
+    }
+
+    /// Tells the output whether to dither (on an integer device): while any track that
+    /// is in the feed, audible or decoded ahead, is not the file's own samples. The
+    /// boundary between two tracks is not followed to the sample: for up to the second
+    /// the feed is ahead, an untouched track next to a processed one is dithered too,
+    /// which is harmless; the other way round would leave rounding undithered.
+    fn sync_processed(&mut self) {
+        let processed = self.processed_until.is_some()
+            || self
+                .chain
+                .as_ref()
+                .is_some_and(|c| c.segments.iter().any(|s| s.processed));
+        self.engine.set_processed(processed);
+    }
+
+    /// A setting changed that decides whether the tracks in the feed are still the
+    /// files' own samples: looks at each of them again.
+    fn review_processed(&mut self) {
+        let was_processed = self
+            .chain
+            .as_ref()
+            .is_some_and(|c| c.segments.iter().any(|s| s.processed));
+        let verdicts: Vec<bool> = self.chain.as_ref().map_or_else(Vec::new, |c| {
+            c.segments
+                .iter()
+                .map(|s| self.source_is_processed(&s.info, s.track_id))
+                .collect()
+        });
+        if let Some(chain) = self.chain.as_mut() {
+            for (segment, processed) in chain.segments.iter_mut().zip(verdicts) {
+                segment.processed = processed;
+            }
+        }
+        let is_processed = self
+            .chain
+            .as_ref()
+            .is_some_and(|c| c.segments.iter().any(|s| s.processed));
+        if was_processed && !is_processed {
+            // What was decoded with the old settings is still on its way out (up to
+            // a second in the ring, and the equalizer takes half a second more to
+            // fade away): it keeps its dither until it has been played.
+            self.processed_until = Some(Instant::now() + PROCESSED_TAIL);
+        }
+        self.sync_processed();
+        self.dirty = true;
+    }
+
+    /// See `PlayerSnapshot::peak_limited_frames`.
+    fn peak_limited_frames(&self) -> u64 {
+        let Some(chain) = self.chain.as_ref() else {
+            return 0;
+        };
+        let mut segments = chain.segments.iter();
+        let Some(current) = segments.next() else {
+            return 0;
+        };
+        // The count runs on with the track that is decoded ahead: up to where that
+        // one began, it is this track's.
+        let end = segments
+            .next()
+            .map_or_else(|| self.engine.limited_frames(), |next| next.limited_before);
+        end.saturating_sub(current.limited_before)
+    }
+
+    /// Gives the output device back (exclusive access, changed sample rate) when
+    /// nothing is going to be played on it for now.
+    fn release_device(&mut self) {
+        if self.engine.holds_device() {
+            self.engine.close_output();
+            self.dirty = true;
+        }
     }
 
     fn drop_chain(&mut self) {
@@ -612,6 +912,7 @@ impl<H: PlayerHost> Player<H> {
         self.resume_ms = 0;
         self.state = PlayState::Idle;
         self.dirty = true;
+        self.release_device();
     }
 
     fn end_of_queue(&mut self) {
@@ -621,6 +922,7 @@ impl<H: PlayerHost> Player<H> {
         self.resume_ms = 0;
         self.state = PlayState::Ended;
         self.dirty = true;
+        self.release_device();
         self.save_session(false);
     }
 
@@ -637,6 +939,7 @@ impl<H: PlayerHost> Player<H> {
         self.resume_ms = 0;
         self.state = PlayState::Error;
         self.set_notice(Notice::TooManyFailures);
+        self.release_device();
     }
 
     fn output_failed(&mut self, error: OutputError) {
@@ -660,7 +963,11 @@ impl<H: PlayerHost> Player<H> {
         is_seek: bool,
     ) -> Result<(), StartError> {
         let request = self.request_for(item).map_err(StartError::Track)?;
-        self.engine.open_output().map_err(StartError::Output)?;
+        let source_rate = self.rate_hint(item.track);
+        self.engine
+            .open_output_for(source_rate)
+            .map_err(StartError::Output)?;
+        let target_rate = self.engine.preferred_rate(source_rate);
         self.device_lost = false;
         let slot = NextSlot::new();
         let epoch = self
@@ -672,6 +979,7 @@ impl<H: PlayerHost> Player<H> {
             epoch,
             slot,
             rate,
+            target_rate,
             first_item: item,
             segments: VecDeque::new(),
             pending_start_ms: start_ms,
@@ -703,6 +1011,10 @@ impl<H: PlayerHost> Player<H> {
                 return;
             }
             self.chain = None;
+            // Radio: if this is the last song the queue has, what follows is decided
+            // now, so that the decode thread knows it from the start (a very short
+            // last song is decoded to its end before its start is even reported).
+            self.extend_with_radio(item.id);
             match self.try_start(item, start_ms, is_seek) {
                 Ok(()) => {
                     self.state = if is_seek {
@@ -753,6 +1065,8 @@ impl<H: PlayerHost> Player<H> {
             }
         }
         if consistent {
+            // The change may have left the song that is playing as the last one.
+            self.extend_with_radio(last);
             self.announce_next_after(last);
         } else {
             let position = self.position_ms();
@@ -819,6 +1133,7 @@ impl<H: PlayerHost> Player<H> {
                     self.state = PlayState::Paused;
                     self.listen.reset();
                     self.dirty = true;
+                    self.release_device();
                 }
             }
             Command::Next => {
@@ -874,7 +1189,34 @@ impl<H: PlayerHost> Player<H> {
             Command::SetReplayGain(settings) => {
                 self.replaygain = settings;
                 self.engine.set_replaygain(settings);
+                // The gain of what is in the feed may have changed with it.
+                self.review_processed();
+            }
+            Command::SetCrossfeed(setting) => {
+                self.crossfeed = setting;
+                self.engine.set_crossfeed(setting);
+                self.review_processed();
+            }
+            Command::SetRadio(on) => {
+                self.radio = on;
                 self.dirty = true;
+                // Switched on while the last song of the queue is on: it applies to
+                // this very queue.
+                let last = self
+                    .chain
+                    .as_ref()
+                    .and_then(|c| c.segments.back().map(|s| s.item_id));
+                if on
+                    && let Some(last) = last
+                    && self.extend_with_radio(last)
+                {
+                    self.sync_next();
+                }
+            }
+            Command::SetEq(settings) => {
+                self.eq = settings.sanitized();
+                self.engine.set_eq(self.eq);
+                self.review_processed();
             }
             Command::SetOutputDevice(pref) => {
                 let position = self.position_ms();
@@ -883,6 +1225,23 @@ impl<H: PlayerHost> Player<H> {
                 self.engine.close_output();
                 self.device_lost = false;
                 self.start_current(position, true);
+            }
+            Command::SetOutput(settings) => {
+                let before = self.engine.output_settings();
+                self.engine.set_output_settings(settings);
+                self.dirty = true;
+                // Memory playback applies from the next feed on its own. How the device
+                // is used changes now: reopen the output and continue where we were.
+                if (before.match_sample_rate, before.exclusive)
+                    != (settings.match_sample_rate, settings.exclusive)
+                {
+                    let playing_from = self.chain.is_some().then(|| self.position_ms());
+                    self.chain = None;
+                    self.engine.close_output();
+                    if let Some(position) = playing_from {
+                        self.start_current(position, true);
+                    }
+                }
             }
             Command::RetryOutput => {
                 self.device_lost = false;
@@ -1011,6 +1370,7 @@ impl<H: PlayerHost> Player<H> {
                 at_frame,
                 start_ms,
                 info,
+                limited_before,
             } => {
                 let Some(chain) = self.chain.as_mut().filter(|c| c.epoch == epoch) else {
                     return;
@@ -1031,8 +1391,11 @@ impl<H: PlayerHost> Player<H> {
                 let duration_ms = from_info
                     .or_else(|| self.host.track(track_id).map(|t| t.duration_ms))
                     .unwrap_or(0);
+                let processed = self.source_is_processed(&info, track_id);
                 if let Some(chain) = self.chain.as_mut() {
                     chain.segments.push_back(Segment {
+                        processed,
+                        limited_before,
                         item_id,
                         track_id,
                         at_frame,
@@ -1041,6 +1404,8 @@ impl<H: PlayerHost> Player<H> {
                         info,
                     });
                 }
+                self.sync_processed();
+                self.extend_with_radio(item_id);
                 self.announce_next_after(item_id);
                 self.dirty = true;
             }
@@ -1143,6 +1508,10 @@ impl<H: PlayerHost> Player<H> {
         self.listen.reset();
         self.meta_dirty_since.get_or_insert_with(Instant::now);
         let current = self.queue.current().map(|c| c.id);
+        // Radio's last chance: the feed ended without anything having been lined up.
+        if let Some(current) = current {
+            self.extend_with_radio(current);
+        }
         let next = match failed {
             Some(item_id) if current == Some(item_id) => self.advance_past_failure(),
             Some(item_id) => {
@@ -1183,8 +1552,10 @@ impl<H: PlayerHost> Player<H> {
         let Some(chain) = self.chain.as_mut() else {
             return;
         };
+        let mut boundary_passed = false;
         if played_epoch == chain.epoch {
             while chain.segments.len() > 1 && frames >= chain.segments[1].at_frame {
+                boundary_passed = true;
                 let boundary = chain.segments[1].at_frame;
                 let Some(finished) = chain.segments.pop_front() else {
                     break;
@@ -1252,6 +1623,10 @@ impl<H: PlayerHost> Player<H> {
                 self.consecutive_failures = 0;
             }
         }
+        if boundary_passed {
+            // The track that ended has left the feed: it no longer asks for dither.
+            self.sync_processed();
+        }
     }
 
     /// Playback is wanted but nothing is coming: a read stuck on a dead drive, or a device
@@ -1313,17 +1688,21 @@ impl<H: PlayerHost> Player<H> {
         self.skip_failed_current();
     }
 
-    /// Lets go of the file (and the decode thread) after a long pause.
+    /// Lets go of the file (and the decode thread) after a long pause, and of the output
+    /// device if it is claimed: other apps get it back, at the rate it had.
     fn release_paused_feed(&mut self) {
-        if self.chain.is_none() || self.want_playing {
+        if self.want_playing || (self.chain.is_none() && !self.engine.holds_device()) {
             self.paused_since = None;
             return;
         }
         let since = *self.paused_since.get_or_insert_with(Instant::now);
         if since.elapsed() >= PAUSE_RELEASE {
-            let position = self.position_ms();
-            self.drop_chain();
-            self.resume_ms = position;
+            if self.chain.is_some() {
+                let position = self.position_ms();
+                self.drop_chain();
+                self.resume_ms = position;
+            }
+            self.release_device();
             self.paused_since = None;
             self.dirty = true;
         }
@@ -1374,6 +1753,13 @@ impl<H: PlayerHost> Player<H> {
                 .and_then(|c| c.segments.front())
                 .map(|s| s.info.clone()),
             output_sample_rate: self.engine.sample_rate(),
+            output: self.engine.output_status(),
+            output_settings: self.engine.output_settings(),
+            dither_bits: self.engine.dither_bits(),
+            eq: self.eq,
+            crossfeed: self.crossfeed,
+            radio: self.radio,
+            peak_limited_frames: self.peak_limited_frames(),
             last_start_latency_ms: self.last_start_latency_ms,
         };
         match self.shared.lock() {

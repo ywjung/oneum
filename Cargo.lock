@@ -1768,12 +1768,9 @@ dependencies = [
 [[package]]
 name = "lofty"
 version = "0.25.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35d45c446382e04663705aa8e786157f64ef1fa85755d410121ffbf08f54b0db"
 dependencies = [
  "byteorder",
  "data-encoding",
- "flate2",
  "lofty_attr",
  "log",
  "ogg_pager",
@@ -2566,6 +2563,9 @@ dependencies = [
  "notify",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-media-player",
@@ -2573,6 +2573,7 @@ dependencies = [
  "rtrb",
  "rubato",
  "rusqlite",
+ "rustfft",
  "serde",
  "serde_json",
  "symphonia",

@@ -40,11 +40,17 @@ impl PlayerHost for LibraryHost {
             replaygain: t.replaygain,
             duration_ms: t.duration_ms,
             available: t.available,
+            sample_rate: t.sample_rate,
+            bit_depth: t.bit_depth,
         })
     }
 
     fn record_play(&self, id: TrackId) {
         self.library.record_play(id);
+    }
+
+    fn radio_picks(&self, seed: TrackId, exclude: &[TrackId], count: usize) -> Vec<TrackId> {
+        self.library.radio_picks(seed, exclude, count)
     }
 
     fn load_session(&self) -> Option<Session> {

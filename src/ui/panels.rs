@@ -1,11 +1,311 @@
-//! Top bar, sidebar, right panel (queue / song info) and the notice strip.
+//! Top bar, sidebar, right panel (queue / song info), the VU meter deck and the notice strip.
 use super::dialogs::Dialog;
 use super::icons::Icon;
-use super::{Action, DragTracks, KeyPane, Nav, OneumApp, ToastAction, theme, widgets};
+use super::{
+    Action, DragTracks, KeyPane, Nav, OneumApp, ToastAction, meter, spectrum, theme, widgets,
+};
 use crate::app::settings::RightPanel;
+use crate::audio::dsp::replaygain_factor;
 use crate::i18n::{format_time, group_digits};
 use crate::playback::{Command, PlayState};
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
+
+/// The path of the playing track through the app, in words (see `OneumApp::signal_path`).
+struct SignalPath {
+    track_id: crate::model::TrackId,
+    /// Codec of the file ("FLAC", "MP3", …).
+    codec: String,
+    /// Sample rate and bit depth of the file.
+    source_format: String,
+    /// Name of the output device.
+    device: String,
+    /// Rate, hardware sample format and exclusive access of the output.
+    format: String,
+    /// What the app does to the samples on their way, in the order it does it (empty
+    /// when it does nothing).
+    stages: Vec<Stage>,
+    /// The file is played from memory.
+    in_memory: bool,
+}
+
+/// Why a stage of the signal path is there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageKind {
+    /// Needed to get the file to this device: rate conversion, channel mapping, dither.
+    Conversion,
+    /// Asked for by the user: volume leveling, the equalizer, the app volume.
+    Adjustment,
+    /// Peak protection stepped in.
+    Protection,
+}
+
+/// One thing the app does to the samples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stage {
+    kind: StageKind,
+    name: String,
+    /// What exactly ("44,100 → 48,000 Hz", "−6.0 dB"); may be empty.
+    detail: String,
+}
+
+/// The signal path in a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathSummary {
+    /// The app passes the decoded samples on as they are.
+    Untouched,
+    /// Only what the user asked for (and what follows from it).
+    Adjusted,
+    /// Only what the device needs.
+    Converted,
+    ConvertedAndAdjusted,
+}
+
+fn path_summary(stages: &[Stage]) -> PathSummary {
+    let has = |kind| stages.iter().any(|stage| stage.kind == kind);
+    match (has(StageKind::Conversion), has(StageKind::Adjustment)) {
+        (false, false) if stages.is_empty() => PathSummary::Untouched,
+        // Peak protection alone only happens to audio that came out of the decoder
+        // above full scale: nobody asked for it, the device needs it.
+        (false, false) => PathSummary::Converted,
+        (true, false) => PathSummary::Converted,
+        (false, true) => PathSummary::Adjusted,
+        (true, true) => PathSummary::ConvertedAndAdjusted,
+    }
+}
+
+/// What decides the stages of the signal path (see [`path_stages`]).
+struct PathInputs<'a> {
+    s: &'a crate::i18n::Strings,
+    source_rate: u32,
+    out_rate: u32,
+    channels: usize,
+    /// Linear gain of volume leveling (1.0 = none).
+    leveling: f32,
+    /// Name of the equalizer setting while the equalizer is changing the sound.
+    equalizer: Option<String>,
+    /// Strength of the headphone crossfeed while it is on.
+    crossfeed: Option<&'a str>,
+    peak_protection: bool,
+    /// The volume slider, 0..=1.
+    volume: f32,
+    dither_bits: Option<u32>,
+}
+
+fn decibels(gain: f32) -> String {
+    let db = 20.0 * gain.max(1e-6).log10();
+    if db < 0.0 {
+        format!("−{:.1} dB", -db)
+    } else {
+        format!("+{db:.1} dB")
+    }
+}
+
+/// The stages in the order the audio passes them: channel mapping and volume leveling
+/// at the file's rate, then the rate conversion, the equalizer and peak protection in
+/// the decode thread, the app volume and dither in the output callback.
+fn path_stages(input: &PathInputs) -> Vec<Stage> {
+    let s = input.s;
+    let mut stages = Vec::new();
+    let mut add = |kind, name: &str, detail: String| {
+        stages.push(Stage {
+            kind,
+            name: name.to_string(),
+            detail,
+        });
+    };
+    if input.channels != 2 {
+        add(
+            StageKind::Conversion,
+            s.info_proc_channels,
+            format!("{} → 2 {}", input.channels, s.path_channels_unit),
+        );
+    }
+    if input.leveling != 1.0 {
+        add(
+            StageKind::Adjustment,
+            s.info_proc_replaygain,
+            decibels(input.leveling),
+        );
+    }
+    if input.source_rate != input.out_rate {
+        add(
+            StageKind::Conversion,
+            s.info_proc_resample,
+            format!(
+                "{} → {} Hz",
+                group_digits(input.source_rate as usize),
+                group_digits(input.out_rate as usize)
+            ),
+        );
+    }
+    if let Some(setting) = &input.equalizer {
+        add(StageKind::Adjustment, s.info_proc_eq, setting.clone());
+    }
+    if let Some(strength) = input.crossfeed {
+        add(
+            StageKind::Adjustment,
+            s.info_proc_crossfeed,
+            strength.to_string(),
+        );
+    }
+    if input.peak_protection {
+        add(StageKind::Protection, s.info_proc_limiter, String::new());
+    }
+    if input.volume < 1.0 {
+        let detail = if input.volume <= 0.0 {
+            s.path_muted.to_string()
+        } else {
+            decibels(crate::audio::dsp::volume_to_gain(input.volume))
+        };
+        add(StageKind::Adjustment, s.info_proc_volume, detail);
+    }
+    if let Some(bits) = input.dither_bits {
+        add(
+            StageKind::Conversion,
+            s.info_proc_dither,
+            format!("{bits} bit"),
+        );
+    }
+    stages
+}
+
+/// The lines of the meter deck's "processing" readout: the steps two to a line (three
+/// when there are more than four), the first line led by `label`.
+fn processing_lines(label: &str, none: &str, steps: &[String]) -> Vec<String> {
+    if steps.is_empty() {
+        return vec![format!("{label}: {none}")];
+    }
+    let per_line = if steps.len() > 4 { 3 } else { 2 };
+    steps
+        .chunks(per_line)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let line = chunk.join(" · ");
+            if i == 0 {
+                format!("{label}: {line}")
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// Lyrics of one song, read on a thread of their own: a file on a drive that has gone
+/// to sleep must not hold up the window.
+pub(super) struct Lyrics {
+    track: crate::model::TrackId,
+    /// The file's modification time when it was read: an edited file is read again.
+    mtime_ns: i64,
+    /// Whether the file was there: one that has come back is read then.
+    available: bool,
+    /// Still being read while this is there.
+    pending: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    pub(super) text: Option<std::sync::Arc<str>>,
+}
+
+/// Colour of a stage's dot in the signal path.
+fn stage_color(ui: &Ui, kind: StageKind) -> egui::Color32 {
+    let dark = ui.visuals().dark_mode;
+    match (kind, dark) {
+        (StageKind::Adjustment, _) => theme::accent(dark),
+        (StageKind::Conversion, true) => egui::Color32::from_rgb(0x5C, 0xC8, 0xB4),
+        (StageKind::Conversion, false) => egui::Color32::from_rgb(0x1F, 0x8F, 0x7C),
+        (StageKind::Protection, true) => egui::Color32::from_rgb(0xE6, 0xB4, 0x5A),
+        (StageKind::Protection, false) => egui::Color32::from_rgb(0xB0, 0x78, 0x10),
+    }
+}
+
+/// The signal path of the track that is playing, drawn as a chain from the file down
+/// to the device: every stage the audio passes, in order, with what it does.
+fn signal_path_block(ui: &mut Ui, s: &crate::i18n::Strings, path: &SignalPath) {
+    let dim = theme::dim(ui);
+    let strong = ui.visuals().strong_text_color();
+    let summary = path_summary(&path.stages);
+    let (word, hint, color) = match summary {
+        PathSummary::Untouched => (s.path_untouched, s.path_untouched_hint, strong),
+        PathSummary::Adjusted => (
+            s.path_adjusted,
+            s.path_adjusted_hint,
+            stage_color(ui, StageKind::Adjustment),
+        ),
+        PathSummary::Converted => (
+            s.path_converted,
+            s.path_converted_hint,
+            stage_color(ui, StageKind::Conversion),
+        ),
+        PathSummary::ConvertedAndAdjusted => (
+            s.path_converted_adjusted,
+            s.path_converted_hint,
+            stage_color(ui, StageKind::Conversion),
+        ),
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(s.info_signal_path).small().color(dim));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(word).small().color(color))
+                .on_hover_text(hint);
+        });
+    });
+    ui.add_space(4.0);
+
+    // The file at the top, the device at the bottom, the stages in between.
+    let mut source = format!("{} · {}", path.codec, path.source_format);
+    if path.in_memory {
+        source = format!("{source} · {}", s.info_memory);
+    }
+    let mut nodes: Vec<(Option<StageKind>, &str, String)> = vec![(None, s.info_source, source)];
+    for stage in &path.stages {
+        nodes.push((Some(stage.kind), &stage.name, stage.detail.clone()));
+    }
+    nodes.push((
+        None,
+        s.info_output,
+        format!("{} · {}", path.device, path.format),
+    ));
+
+    const GUTTER: f32 = 20.0;
+    let mut dots: Vec<(egui::Pos2, Option<StageKind>)> = Vec::new();
+    for (kind, name, detail) in &nodes {
+        let top = ui.cursor().top();
+        ui.horizontal_top(|ui| {
+            ui.add_space(GUTTER);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                let title = RichText::new(*name)
+                    .font(theme::semibold(12.5))
+                    .color(strong);
+                ui.add(egui::Label::new(title).truncate());
+                if !detail.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(detail).small().color(dim)).wrap());
+                }
+            });
+        });
+        dots.push((egui::pos2(ui.min_rect().left() + 7.0, top + 9.0), *kind));
+        ui.add_space(7.0);
+    }
+    let painter = ui.painter();
+    let line = egui::Stroke::new(1.5, widgets::divider_color(ui));
+    for pair in dots.windows(2) {
+        painter.line_segment(
+            [
+                pair[0].0 + egui::vec2(0.0, 6.0),
+                pair[1].0 - egui::vec2(0.0, 6.0),
+            ],
+            line,
+        );
+    }
+    for (center, kind) in dots {
+        match kind {
+            // The two ends are rings, what happens in between is a filled dot.
+            None => {
+                painter.circle_stroke(center, 4.0, egui::Stroke::new(1.5, strong));
+            }
+            Some(kind) => {
+                painter.circle_filled(center, 4.0, stage_color(ui, kind));
+            }
+        }
+    }
+}
 
 const SIDEBAR_ROW: f32 = 28.0;
 const QUEUE_ROW: f32 = 44.0;
@@ -228,7 +528,34 @@ impl OneumApp {
                         )
                         .clicked()
                         {
-                            self.settings_open = !self.settings_open;
+                            if self.settings_open {
+                                self.settings_open = false;
+                            } else {
+                                self.open_settings();
+                            }
+                        }
+                        if widgets::icon_button(
+                            ui,
+                            Icon::Meter,
+                            s.show_meter,
+                            28.0,
+                            self.settings.show_meter,
+                        )
+                        .clicked()
+                        {
+                            self.settings.show_meter = !self.settings.show_meter;
+                        }
+                        // Lit while the equalizer is changing the sound.
+                        if widgets::icon_button(
+                            ui,
+                            Icon::Equalizer,
+                            s.equalizer,
+                            28.0,
+                            self.settings.eq.is_active(),
+                        )
+                        .clicked()
+                        {
+                            self.handle_request(super::UiRequest::Equalizer);
                         }
                         let scan = self.core.library.scan_status();
                         if scan.running {
@@ -493,7 +820,7 @@ impl OneumApp {
             match action {
                 ToastAction::RetryOutput => self.core.player.send(Command::RetryOutput),
                 ToastAction::OpenPlaybackSettings => {
-                    self.settings_open = true;
+                    self.open_settings();
                     self.settings_tab = super::settings_window::Tab::Playback;
                 }
                 ToastAction::RestorePlaylist(id, tracks) => self.restore_playlist(id, &tracks),
@@ -507,6 +834,266 @@ impl OneumApp {
                 self.alert = None;
             }
         }
+    }
+
+    /// The lyrics of `track`, once they have been read (see [`Lyrics`]). `None` while
+    /// they are being read and when the song has none.
+    fn lyrics_of(&mut self, track: &crate::model::Track) -> Option<std::sync::Arc<str>> {
+        // Collect a read that has finished, whichever song it was for.
+        if let Some(lyrics) = self.lyrics.as_mut()
+            && let Some(pending) = &lyrics.pending
+        {
+            match pending.try_recv() {
+                Ok(text) => {
+                    lyrics.text = text.map(std::sync::Arc::from);
+                    lyrics.pending = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => lyrics.pending = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let known = self.lyrics.as_ref().is_some_and(|l| {
+            l.track == track.id && l.mtime_ns == track.mtime_ns && l.available == track.available
+        });
+        if known {
+            return self.lyrics.as_ref().and_then(|l| l.text.clone());
+        }
+        // Another song. One read at a time: stepping through a list on a drive that is
+        // slow to answer must not start a thread for every row passed. While a read
+        // for an earlier song is still out, this one waits (the thread wakes the
+        // window when it is done, and the question is asked again).
+        if self.lyrics.as_ref().is_some_and(|l| l.pending.is_some()) {
+            return None;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = track.path.clone();
+        let core = self.core.clone();
+        let started = track.available
+            && std::thread::Builder::new()
+                .name("oneum-lyrics".into())
+                .spawn(move || {
+                    let _ = tx.send(crate::library::lyrics::read(&path));
+                    core.request_repaint();
+                })
+                .is_ok();
+        self.lyrics = Some(Lyrics {
+            track: track.id,
+            mtime_ns: track.mtime_ns,
+            available: track.available,
+            pending: started.then_some(rx),
+            text: None,
+        });
+        None
+    }
+
+    /// What is happening to the track that is playing: where it comes from, where it
+    /// goes and what the app does to it in between. `None` while nothing is playing.
+    fn signal_path(&self) -> Option<SignalPath> {
+        let s = self.s();
+        let current = self.player.current?;
+        let source = self.player.source.as_ref()?;
+        let out_rate = self.player.output_sample_rate?;
+        let track = self.track(current.track_id)?;
+        let hz = |rate: u32| format!("{} Hz", group_digits(rate as usize));
+
+        let mut source_format = hz(source.sample_rate);
+        if let Some(bits) = track.bit_depth {
+            source_format = format!("{source_format} · {bits} bit");
+        }
+        let status = self.player.output.as_ref();
+        let mut format = hz(out_rate);
+        if let Some((bits, float)) = status.and_then(|o| o.hardware_bits) {
+            let kind = if float { " float" } else { "" };
+            format = format!("{format} · {bits} bit{kind}");
+        }
+        if status.is_some_and(|o| o.exclusive) {
+            format = format!("{format} · {}", s.info_exclusive);
+        }
+        // Everything the app does to the samples on their way out.
+        let equalizer = self.player.eq.is_active().then(|| {
+            use super::equalizer::{PresetRef, builtin_name, matching_preset};
+            match matching_preset(&self.player.eq, &self.settings.eq_presets) {
+                Some(PresetRef::Builtin(i)) => {
+                    builtin_name(s, crate::audio::eq::BUILTIN_PRESETS[i].id).to_string()
+                }
+                Some(PresetRef::User(i)) => self.settings.eq_presets[i].name.clone(),
+                None => s.eq_custom.to_string(),
+            }
+        });
+        let stages = path_stages(&PathInputs {
+            s,
+            source_rate: source.sample_rate,
+            out_rate,
+            channels: source.channels,
+            leveling: replaygain_factor(&track.replaygain, &self.player.replaygain),
+            equalizer,
+            crossfeed: match self.player.crossfeed {
+                crate::audio::Crossfeed::Off => None,
+                crate::audio::Crossfeed::Light => Some(s.crossfeed_light),
+                crate::audio::Crossfeed::Medium => Some(s.crossfeed_medium),
+                crate::audio::Crossfeed::Strong => Some(s.crossfeed_strong),
+            },
+            peak_protection: self.player.peak_limited_frames > 0,
+            volume: self.player.volume,
+            dither_bits: self.player.dither_bits,
+        });
+        Some(SignalPath {
+            track_id: current.track_id,
+            codec: track.codec.clone(),
+            source_format,
+            device: self.player.output_device.clone().unwrap_or_default(),
+            format,
+            stages,
+            in_memory: source.in_memory,
+        })
+    }
+
+    /// One side of the meter deck: a small heading, a main line and a detail line,
+    /// aligned towards the meters.
+    fn deck_readout(
+        ui: &mut Ui,
+        rect: egui::Rect,
+        towards_right: bool,
+        heading: &str,
+        main: &str,
+        details: &[String],
+    ) {
+        let align = if towards_right {
+            Align::Max
+        } else {
+            Align::Min
+        };
+        let dim = theme::dim(ui);
+        // Lines of about 18 points each, centred on the deck.
+        let height = 26.0 + 18.0 * (details.len() + 1) as f32;
+        let rect = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), height));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(align)),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.add(egui::Label::new(RichText::new(heading).small().color(dim)).truncate());
+                ui.add(
+                    egui::Label::new(RichText::new(main).font(theme::semibold(14.0))).truncate(),
+                );
+                for detail in details {
+                    ui.add(egui::Label::new(RichText::new(detail).small().color(dim)).truncate());
+                }
+            },
+        );
+    }
+
+    /// The VU meter deck: the left and right channel side by side in a strip above the
+    /// player bar, like the meters on the front of an amplifier. Drag its top edge to
+    /// make the meters larger or smaller.
+    pub(super) fn meter_deck(&mut self, ui: &mut Ui) {
+        if !self.settings.show_meter {
+            self.meter.suspend();
+            self.spectrum.suspend();
+            return;
+        }
+        let s = self.s();
+        let frame = egui::Frame::new()
+            .fill(meter::deck_fill(ui.visuals().dark_mode))
+            .inner_margin(egui::Margin::symmetric(16, 12));
+        egui::Panel::bottom("meter-deck")
+            .frame(frame)
+            .resizable(true)
+            .default_size(meter::DECK_DEFAULT_HEIGHT)
+            .size_range(meter::DECK_HEIGHT_RANGE)
+            .show(ui, |ui| {
+                // The needles follow the music only while it is actually sounding; in
+                // every other state they fall back to rest.
+                let levels =
+                    (self.player.state == PlayState::Playing).then(|| self.core.player.levels());
+                let busy = self.meter.update(levels, std::time::Instant::now());
+                let (area, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                let channels = [s.meter_left_name, s.meter_right_name];
+                let labels = [s.meter_left, s.meter_right];
+                let layout = meter::deck_layout(area);
+                let dials = layout.dials;
+                // The spectrum display follows the same rule as the needles.
+                let mut busy = busy;
+                match layout.spectrum {
+                    Some(rect) => {
+                        let levels = (self.player.state == PlayState::Playing).then(|| {
+                            let mut samples = [0f32; spectrum::MAX_SAMPLES];
+                            self.core.player.scope_samples(&mut samples);
+                            let rate = self.player.output_sample_rate.unwrap_or(0);
+                            self.spectrum.analyse(&samples, rate)
+                        });
+                        busy |= self.spectrum.update(levels, std::time::Instant::now());
+                        let response =
+                            ui.interact(rect, ui.scope_id().with("spectrum"), Sense::hover());
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Meter, true, s.spectrum_name)
+                        });
+                        if ui.is_rect_visible(rect) {
+                            spectrum::draw(
+                                ui.painter(),
+                                rect,
+                                &self.spectrum.bars,
+                                &self.spectrum.caps,
+                            );
+                        }
+                    }
+                    None => self.spectrum.suspend(),
+                }
+                // Beside the meters, when there is room: what goes in on the left, what
+                // comes out on the right.
+                let side = dials[0].left() - area.left() - meter::DECK_READOUT_GAP;
+                if side >= meter::DECK_READOUT_MIN_WIDTH
+                    && let Some(path) = self.signal_path()
+                {
+                    let left = egui::Rect::from_min_max(
+                        area.left_top(),
+                        egui::pos2(dials[0].left() - meter::DECK_READOUT_GAP, area.bottom()),
+                    );
+                    let right = egui::Rect::from_min_max(
+                        egui::pos2(dials[1].right() + meter::DECK_READOUT_GAP, area.top()),
+                        area.right_bottom(),
+                    );
+                    let mut from = vec![path.source_format.clone()];
+                    if path.in_memory {
+                        from.push(s.info_memory.to_string());
+                    }
+                    Self::deck_readout(ui, left, true, s.info_source, &path.codec, &from);
+                    let mut details = vec![path.format.clone()];
+                    let steps: Vec<String> =
+                        path.stages.iter().map(|stage| stage.name.clone()).collect();
+                    details.extend(processing_lines(
+                        s.info_processing,
+                        s.info_proc_none,
+                        &steps,
+                    ));
+                    Self::deck_readout(ui, right, false, s.info_output, &path.device, &details);
+                }
+                for (ch, rect) in dials.into_iter().enumerate() {
+                    let response =
+                        ui.interact(rect, ui.scope_id().with(("vu-dial", ch)), Sense::hover());
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Meter, true, channels[ch])
+                    });
+                    response.on_hover_text(s.meter_note);
+                    if ui.is_rect_visible(rect) {
+                        meter::dial(
+                            ui.painter(),
+                            rect,
+                            self.meter.needles[ch].position,
+                            self.meter.peak_lit(ch),
+                            labels[ch],
+                            // Channel letters sit in the outer corners.
+                            ch == 1,
+                        );
+                    }
+                }
+                if busy {
+                    // Only while something moves: an idle window is not redrawn.
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(16));
+                }
+            });
     }
 
     pub(super) fn right_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -865,7 +1452,7 @@ impl OneumApp {
             || self.widget_focused
             || ui.ctx().text_edit_focused()
             || self.dialog.is_some()
-            || self.settings_open
+            || self.sheet_open()
             || queue.is_empty()
         {
             return None;
@@ -992,6 +1579,7 @@ impl OneumApp {
             return;
         };
         let dim = theme::dim(ui);
+        let lyrics = self.lyrics_of(&track);
         egui::ScrollArea::vertical()
             .id_salt("info")
             .auto_shrink([false, false])
@@ -1076,20 +1664,6 @@ impl OneumApp {
                 };
                 rows.push((s.info_replaygain, gain));
                 rows.push((s.info_plays, track.play_count.to_string()));
-                // What the engine is doing with the track that is playing right now.
-                if self.player.current.is_some_and(|c| c.track_id == track.id)
-                    && let (Some(source), Some(out_rate)) =
-                        (&self.player.source, self.player.output_sample_rate)
-                {
-                    let mut text = format!("{} Hz", group_digits(out_rate as usize));
-                    if source.sample_rate != out_rate {
-                        text = format!("{text} ({})", s.info_resampled);
-                    }
-                    if let Some(device) = &self.player.output_device {
-                        text = format!("{device} · {text}");
-                    }
-                    rows.push((s.info_output, text));
-                }
                 egui::Grid::new("info-grid")
                     .num_columns(2)
                     .spacing([10.0, 5.0])
@@ -1100,7 +1674,23 @@ impl OneumApp {
                             ui.end_row();
                         }
                     });
-                ui.add_space(8.0);
+                // What the engine is doing with the track that is playing right now.
+                if let Some(path) = self.signal_path().filter(|p| p.track_id == track.id) {
+                    ui.add_space(12.0);
+                    signal_path_block(ui, s, &path);
+                }
+                // The words, when the file (or a text file next to it) has them.
+                if let Some(lyrics) = &lyrics {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(s.info_lyrics).small().color(dim));
+                    ui.add_space(2.0);
+                    ui.add(
+                        egui::Label::new(RichText::new(&**lyrics).size(12.5))
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+                ui.add_space(10.0);
                 ui.label(RichText::new(s.info_file).small().color(dim));
                 ui.add(
                     egui::Label::new(RichText::new(track.path.display().to_string()).small())
@@ -1118,8 +1708,132 @@ impl OneumApp {
 
 #[cfg(test)]
 mod tests {
-    use super::edge_scroll_step;
+    use super::{
+        PathInputs, PathSummary, StageKind, edge_scroll_step, path_stages, path_summary,
+        processing_lines,
+    };
+    use crate::i18n::KO;
     use eframe::egui;
+
+    fn plain_path() -> PathInputs<'static> {
+        PathInputs {
+            s: &KO,
+            source_rate: 44_100,
+            out_rate: 44_100,
+            channels: 2,
+            leveling: 1.0,
+            equalizer: None,
+            crossfeed: None,
+            peak_protection: false,
+            volume: 1.0,
+            dither_bits: None,
+        }
+    }
+
+    #[test]
+    fn the_signal_path_lists_what_is_done_in_the_order_it_is_done() {
+        // Nothing done: no stages, "unchanged".
+        let untouched = path_stages(&plain_path());
+        assert!(untouched.is_empty());
+        assert_eq!(path_summary(&untouched), PathSummary::Untouched);
+
+        // Everything at once, in the order the audio passes it.
+        let all = path_stages(&PathInputs {
+            source_rate: 96_000,
+            channels: 1,
+            leveling: 0.5,
+            equalizer: Some("록".into()),
+            crossfeed: Some("보통"),
+            peak_protection: true,
+            volume: 0.5,
+            dither_bits: Some(16),
+            ..plain_path()
+        });
+        let names: Vec<&str> = all.iter().map(|stage| stage.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                KO.info_proc_channels,
+                KO.info_proc_replaygain,
+                KO.info_proc_resample,
+                KO.info_proc_eq,
+                KO.info_proc_crossfeed,
+                KO.info_proc_limiter,
+                KO.info_proc_volume,
+                KO.info_proc_dither
+            ]
+        );
+        let details: Vec<&str> = all.iter().map(|stage| stage.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            [
+                "1 → 2 채널",
+                "−6.0 dB",
+                "96,000 → 44,100 Hz",
+                "록",
+                "보통",
+                "",
+                "−18.1 dB",
+                "16 bit"
+            ]
+        );
+        assert_eq!(path_summary(&all), PathSummary::ConvertedAndAdjusted);
+    }
+
+    #[test]
+    fn the_signal_path_is_summed_up_by_why_it_is_changed() {
+        // What the device needs.
+        let converted = path_stages(&PathInputs {
+            out_rate: 48_000,
+            ..plain_path()
+        });
+        assert_eq!(converted[0].kind, StageKind::Conversion);
+        assert_eq!(path_summary(&converted), PathSummary::Converted);
+        // What the user asked for; dither that follows from it does not make it
+        // "unchanged", and the summary names both reasons.
+        let adjusted = path_stages(&PathInputs {
+            equalizer: Some("사용자 설정".into()),
+            ..plain_path()
+        });
+        assert_eq!(path_summary(&adjusted), PathSummary::Adjusted);
+        let muted = path_stages(&PathInputs {
+            volume: 0.0,
+            dither_bits: Some(24),
+            ..plain_path()
+        });
+        assert_eq!(muted[0].detail, KO.path_muted);
+        assert_eq!(path_summary(&muted), PathSummary::ConvertedAndAdjusted);
+        // Peak protection alone (a lossy file that decodes above full scale).
+        let protected = path_stages(&PathInputs {
+            peak_protection: true,
+            ..plain_path()
+        });
+        assert_eq!(protected[0].kind, StageKind::Protection);
+        assert_eq!(path_summary(&protected), PathSummary::Converted);
+    }
+
+    #[test]
+    fn the_decks_processing_readout_fits_its_steps_into_short_lines() {
+        let steps = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(processing_lines("처리", "없음", &[]), ["처리: 없음"]);
+        assert_eq!(
+            processing_lines("처리", "없음", &steps(&["리샘플링"])),
+            ["처리: 리샘플링"]
+        );
+        assert_eq!(
+            processing_lines("처리", "없음", &steps(&["a", "b", "c"])),
+            ["처리: a · b", "c"]
+        );
+        assert_eq!(
+            processing_lines("처리", "없음", &steps(&["a", "b", "c", "d"])),
+            ["처리: a · b", "c · d"]
+        );
+        // All six there can be: still two lines.
+        assert_eq!(
+            processing_lines("처리", "없음", &steps(&["a", "b", "c", "d", "e", "f"])),
+            ["처리: a · b · c", "d · e · f"]
+        );
+    }
 
     #[test]
     fn dragging_near_an_edge_scrolls_towards_it() {

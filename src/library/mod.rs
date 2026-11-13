@@ -9,7 +9,9 @@
 //! [`Library::rescan`] and [`Library::start_watching`].
 mod art;
 mod ident;
+pub mod lyrics;
 mod m3u;
+pub mod radio;
 mod scan;
 mod search;
 mod snapshot;
@@ -1439,6 +1441,31 @@ impl Library {
     }
 
     /// The current data of a track (may be newer than the published snapshot).
+    /// Up to `count` songs to play after `seed` when the queue has run out (see
+    /// [`radio::picks`]), none of them in `exclude`.
+    pub fn radio_picks(&self, seed: TrackId, exclude: &[TrackId], count: usize) -> Vec<TrackId> {
+        let Some(seed) = self.track(seed) else {
+            return Vec::new();
+        };
+        let snapshot = self.snapshot();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        // A different roll every time: the clock's nanoseconds and the seed.
+        let dice = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| u64::from(d.subsec_nanos()))
+            ^ (seed.id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        radio::picks(
+            &snapshot.tracks,
+            &seed,
+            &exclude.iter().copied().collect(),
+            count,
+            now,
+            dice,
+        )
+    }
+
     pub fn track(&self, id: TrackId) -> Option<Arc<Track>> {
         lock(&self.inner.state)
             .tracks

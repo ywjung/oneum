@@ -28,6 +28,7 @@ ok = bool(eval(sys.argv[2], {"d": d}))
 print(("  ok   " if ok else "  FAIL ") + sys.argv[3])
 if not ok:
     print("       state:", {k: d[k] for k in ("nav", "rows", "query", "state", "current", "position_ms", "queue_len", "queue_index", "shuffle", "repeat", "library_tracks", "toast")})
+    print("       audio:", {k: d.get(k) for k in ("volume", "meter", "spectrum_peak_hz", "output_rate", "replaygain_mode", "peak_limited_frames", "underruns")})
     sys.exit(1)
 PY
 }
@@ -180,21 +181,69 @@ check pm3.json 'not d["dialog_open"] and len(d["playlists"]) == 1' "…and Escap
 
 echo "== settings"
 # Tab and control centres for the 620-point settings window in a 1180x760 window (Korean).
-ui 'click 1081 20' 'wait 600' 'dump se1.json' 'click 510 176' 'wait 500' 'click 758 425' 'wait 500' 'dump se2.json' \
-   'click 712 425' 'wait 400' 'click 332 176' 'wait 500' 'click 845 448' 'wait 500' 'dump se3.json' 'click 845 448' 'wait 400' \
+# On the Playback tab only the memory playback switch is flipped: the other two output
+# options reconfigure the real output device. Volume leveling is below the fold.
+ui 'click 1081 20' 'wait 600' 'dump se1.json' 'click 510 176' 'wait 500' 'click 846 535' 'wait 400' 'dump se2a.json' \
+   'click 846 535' 'wait 400' 'dump se2b.json' 'scroll 590 400 -264' 'wait 500' 'click 758 419' 'wait 500' 'dump se2.json' \
+   'click 703 419' 'wait 400' 'click 332 176' 'wait 500' 'click 845 448' 'wait 500' 'dump se3.json' 'click 845 448' 'wait 400' \
    'click 590 176' 'wait 400' 'dump se4.json' 'key Escape' 'wait 400' 'dump se5.json' \
+   'menu user_guide' 'wait 500' 'dump se7.json' 'key Escape' 'wait 400' 'dump se8.json' \
    'click 1081 20' 'wait 500' 'click 100 600' 'wait 400' 'dump se6.json'
 check se1.json 'd["settings_open"]' "the gear opens Settings"
+check se2a.json 'd["settings_tab"] == "Playback" and d["output_options"] == {"match_sample_rate": False, "exclusive": False, "memory_playback": True}' "Playback tab: the memory playback switch"
+check se2b.json 'not d["output_options"]["memory_playback"]' "…and off again"
 check se2.json 'd["settings_tab"] == "Playback" and d["replaygain"].startswith("Track")' "Playback tab: volume leveling mode"
 check se3.json 'd["settings_tab"] == "General" and d["show_format_column"]' "General tab: the Format column switch"
 check se4.json 'd["settings_tab"] == "Shortcuts"' "Shortcuts tab"
 check se5.json 'not d["settings_open"]' "Escape closes Settings"
+check se7.json 'd["guide_open"] and not d["settings_open"]' "Help ▸ User Guide opens the guide inside the app"
+check se8.json 'not d["guide_open"] and d["nav"] == "Songs"' "Escape closes the guide"
 check se6.json 'not d["settings_open"] and d["nav"] == "Songs"' "a click outside closes it without acting on what is behind"
 
+echo "== equalizer, crossfeed, radio"
+# The Playback tab scrolled to its end: equalizer row, crossfeed strengths, radio switch.
+# Then the equalizer sheet: preset list, on/off switch, reset.
+ui 'click 1081 20' 'wait 600' 'click 510 176' 'wait 500' 'scroll 590 400 -2000' 'wait 500' \
+   'click 779 379' 'wait 400' 'dump sh1.json' 'click 671 379' 'wait 300' 'click 846 526' 'wait 400' 'dump sh2.json' \
+   'click 846 526' 'wait 400' 'dump sh3.json' 'click 843 267' 'wait 600' 'dump sh4.json' \
+   'click 435 183' 'wait 500' 'click 342 435' 'wait 500' 'dump sh5.json' 'click 855 133' 'wait 400' 'dump sh6.json' \
+   'click 883 183' 'wait 400' 'dump sh7.json' 'key Escape' 'wait 400' 'dump sh8.json'
+check sh1.json 'd["crossfeed"] == "Medium"' "Playback tab: headphone crossfeed strength"
+check sh2.json 'd["crossfeed"] == "Off" and d["radio"]' "…off again; the radio switch"
+check sh3.json 'not d["radio"]' "…and off again"
+check sh4.json 'd["eq_open"] and not d["settings_open"]' "the equalizer row opens the equalizer"
+check sh5.json 'd["eq"]["preset"] == "rock" and d["eq"]["active"] and d["eq"]["player_gains_db"][0] == 4.5' "choosing a preset sets the bands and switches the equalizer on"
+check sh6.json 'not d["eq"]["active"] and d["eq"]["preset"] == "rock"' "the switch turns it off and keeps the values"
+check sh7.json 'd["eq"]["preset"] == "flat" and not d["eq"]["active"]' "Reset returns every band to 0 dB"
+check sh8.json 'not d["eq_open"] and d["nav"] == "Songs"' "Escape closes the equalizer"
+
 echo "== hidden window"
-ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json'
+ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json' \
+   'wait 700' 'dump h3.json'
 check h1.json 'not d["window_visible"] and d["state"] == "Playing" and d["queue_len"] == 1' "a file opened while the window is hidden plays"
 check h2.json 'd["window_visible"]' "the window comes back"
+# macOS does not report a window as visible again while the screen is locked, and a window
+# that is not visible is not painted: everything after this point needs an unlocked screen.
+python3 - "$PROFILE/h2.json" "$PROFILE/h3.json" <<'PY'
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+ok = b["perf"]["frames"] > a["perf"]["frames"]
+print(("  ok   " if ok else "  FAIL ") + "…and is painted again")
+if not ok:
+    print("       no frame was drawn after the window came back: is the screen locked or asleep?")
+    sys.exit(1)
+PY
+
+echo "== VU meter"
+# tone_48k.flac is a sine peaking at -15 dBFS (ffmpeg's mono-to-stereo up-mix takes 3 dB off
+# the -12 dBFS tone), i.e. -7 VU. The app volume is 0 all along: the meter shows the music,
+# not the volume.
+ui 'menu toggle_meter' 'wait 1500' 'dump m1.json' 'key Space' 'wait 1500' 'dump m2.json' \
+   'key Space' 'wait 500' 'menu toggle_meter' 'wait 300' 'dump m3.json'
+check m1.json 'd["meter_visible"] and d["volume"] == 0 and all(v is not None and abs(v + 7.0) < 0.5 for v in d["meter"]["vu"])' "the VU meter reads -7 VU for a -15 dBFS tone, at volume 0"
+check m1.json 'd["spectrum_peak_hz"] is not None and 0.8 < d["spectrum_peak_hz"] / 880.0 < 1.25' "the spectrum display peaks at the tone's 880 Hz"
+check m2.json 'd["state"] == "Paused" and max(d["meter"]["position"]) < 0.01' "paused: the needles fall back to rest"
+check m3.json 'not d["meter_visible"] and d["state"] == "Playing"' "the meter deck closes again"
 
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'

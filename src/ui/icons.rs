@@ -31,6 +31,8 @@ pub enum Icon {
     Folder,
     Trash,
     Keyboard,
+    Meter,
+    Equalizer,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -224,6 +226,31 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 ],
                 stroke,
             ));
+        }
+        Icon::Meter => {
+            // A dial: an arc of scale with a needle leaning to the right.
+            let pivot = p(0.5, 0.80);
+            let radius = s * 0.50;
+            let arc: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let a = (-56.0 + 112.0 * i as f32 / 12.0).to_radians();
+                    pivot + vec2(a.sin(), -a.cos()) * radius
+                })
+                .collect();
+            painter.add(Shape::line(arc, stroke));
+            let a = 26f32.to_radians();
+            painter.line_segment(
+                [pivot, pivot + vec2(a.sin(), -a.cos()) * radius * 0.86],
+                stroke,
+            );
+            painter.circle_filled(pivot, w * 1.3, color);
+        }
+        Icon::Equalizer => {
+            // Three sliders, their knobs at different heights.
+            for (x, knob) in [(0.22, 0.62), (0.5, 0.34), (0.78, 0.54)] {
+                painter.line_segment([p(x, 0.12), p(x, 0.88)], stroke);
+                painter.circle_filled(p(x, knob), w * 1.9, color);
+            }
         }
         Icon::Keyboard => {
             painter.rect_stroke(

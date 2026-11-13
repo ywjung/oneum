@@ -1,5 +1,6 @@
 //! macOS integration through objc2 bindings. All `unsafe` in the app lives in this module.
 pub mod app_hooks;
+pub mod coreaudio;
 pub mod finder;
 pub mod locale;
 pub mod menu;
@@ -24,6 +25,25 @@ pub fn run_on_main(f: impl FnOnce() + Send + 'static) {
     // SAFETY: the block is copied by the queue and run once on the main thread; the
     // closure it wraps is `Send`.
     unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&block) };
+}
+
+/// Hands a web address (already checked by the caller) to the default browser.
+pub(super) fn open_in_browser(address: &str) -> bool {
+    std::process::Command::new("/usr/bin/open")
+        .arg(address)
+        .spawn()
+        .is_ok()
+}
+
+/// Runs the main thread's run loop for `duration`. The app has a run loop of its own;
+/// command-line tools that open audio streams need this, because CoreAudio serves some
+/// requests and all its notifications through the main run loop and calls made while
+/// that loop is not running can wait for ever. Main thread only.
+pub fn pump_main_loop(duration: std::time::Duration) {
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+    // SAFETY: the constant is initialised by CoreFoundation before any code of ours runs.
+    let mode = unsafe { kCFRunLoopDefaultMode };
+    CFRunLoop::run_in_mode(mode, duration.as_secs_f64(), false);
 }
 
 /// Shows a blocking error alert. Works before the event loop exists (start-up failures):

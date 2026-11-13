@@ -1,4 +1,5 @@
 //! Demuxing and decoding of one audio file with Symphonia.
+use super::source::FileInMemory;
 use super::{PlaybackError, PlaybackErrorKind};
 use std::path::Path;
 use symphonia::core::codecs::CodecParameters;
@@ -6,7 +7,7 @@ use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, TimeBase};
 
@@ -27,6 +28,8 @@ pub struct SourceInfo {
     pub codec: String,
     /// True when the container carried encoder delay/padding information that is trimmed.
     pub has_gapless_info: bool,
+    /// True when the file is played from memory (see `source.rs`).
+    pub in_memory: bool,
 }
 
 pub struct TrackDecoder {
@@ -61,25 +64,53 @@ fn map_open_error(e: SymError) -> PlaybackError {
     }
 }
 
-/// Replaces non-finite samples with silence.
+/// The largest sample value let into the pipeline: 36 dB above full scale. No music is
+/// stored that far over (float files keep a few dB of headroom at most); what is, is
+/// damage, and numbers like 1e38 overflow in the rate converter and the filters.
+pub(crate) const MAX_SAMPLE: f32 = 64.0;
+
+/// Makes samples safe to compute with: what is not a number becomes silence, what is
+/// absurdly large is brought down to [`MAX_SAMPLE`].
 pub(crate) fn sanitize(samples: &mut [f32]) {
     for s in samples {
         if !s.is_finite() {
             *s = 0.0;
+        } else if s.abs() > MAX_SAMPLE {
+            *s = MAX_SAMPLE.copysign(*s);
         }
     }
 }
 
+/// Why a file could not be opened.
+pub(crate) fn map_file_error(e: &std::io::Error) -> PlaybackError {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => err(PlaybackErrorKind::FileMissing, "file not found"),
+        kind => err(
+            PlaybackErrorKind::FileUnreadable,
+            format!("open failed: {kind}"),
+        ),
+    }
+}
+
 impl TrackDecoder {
+    /// Opens `path`, reading from the file as decoding goes.
     pub fn open(path: &Path) -> Result<Self, PlaybackError> {
-        let file = std::fs::File::open(path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => err(PlaybackErrorKind::FileMissing, "file not found"),
-            kind => err(
-                PlaybackErrorKind::FileUnreadable,
-                format!("open failed: {kind}"),
-            ),
-        })?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let file = std::fs::File::open(path).map_err(|e| map_file_error(&e))?;
+        Self::from_source(path, Box::new(file), false)
+    }
+
+    /// Opens a file that is being loaded into memory (memory playback).
+    pub fn open_in_memory(file: FileInMemory) -> Result<Self, PlaybackError> {
+        let path = file.path().to_path_buf();
+        Self::from_source(&path, Box::new(file.into_source()), true)
+    }
+
+    fn from_source(
+        path: &Path,
+        source: Box<dyn MediaSource>,
+        in_memory: bool,
+    ) -> Result<Self, PlaybackError> {
+        let mss = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
@@ -136,6 +167,7 @@ impl TrackDecoder {
                 total_frames,
                 codec,
                 has_gapless_info,
+                in_memory,
             },
             drop_until: None,
             consecutive_errors: 0,
@@ -282,5 +314,10 @@ mod tests {
         let mut samples = [0.25, f32::NAN, -0.5, f32::INFINITY, f32::NEG_INFINITY, 1.0];
         sanitize(&mut samples);
         assert_eq!(samples, [0.25, 0.0, -0.5, 0.0, 0.0, 1.0]);
+        // Far outside the range but still a number: brought down, sign kept. A float
+        // file's few dB of headroom are left alone.
+        let mut wild = [3.0e38, -3.0e38, 2.5, -63.9, 64.0];
+        sanitize(&mut wild);
+        assert_eq!(wild, [64.0, -64.0, 2.5, -63.9, 64.0]);
     }
 }

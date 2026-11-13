@@ -29,7 +29,7 @@ impl LanguageChoice {
 }
 
 macro_rules! strings {
-    ($( $name:ident : $ko:literal, $en:literal; )*) => {
+    ($( $name:ident : $ko:expr, $en:expr; )*) => {
         /// All fixed UI strings.
         pub struct Strings { $( pub $name: &'static str, )* }
         pub static KO: Strings = Strings { $( $name: $ko, )* };
@@ -45,7 +45,13 @@ strings! {
     albums: "앨범", "Albums";
     artists: "아티스트", "Artists";
     favorites: "즐겨찾기", "Favorites";
-    recently_played: "최근 재생", "Recently Played";
+    recently_played: "다시 듣기", "Listen Again";
+    rediscover_played: "최근 재생", "Recently Played";
+    rediscover_added: "최근 추가", "Recently Added";
+    rediscover_most: "많이 들은 곡", "Most Played";
+    rediscover_forgotten: "오래 안 들은 곡", "Not Heard Lately";
+    empty_forgotten: "오래 안 들은 곡이 아직 없습니다", "Nothing has gone unheard for long yet";
+    empty_forgotten_hint: "들은 지 30일이 지난 곡이 여기에 모입니다.", "Songs you have not played for 30 days gather here.";
     playlists: "플레이리스트", "Playlists";
     new_playlist: "새 플레이리스트", "New Playlist";
     // Columns
@@ -62,6 +68,14 @@ strings! {
     clear_search: "검색어 지우기", "Clear search";
     show_queue: "재생 대기열", "Up Next";
     show_info: "곡 정보", "Song Info";
+    show_meter: "VU 미터", "VU Meter";
+    meter_left: "L", "L";
+    meter_right: "R", "R";
+    meter_left_name: "VU 미터, 왼쪽 채널", "VU meter, left channel";
+    meter_right_name: "VU 미터, 오른쪽 채널", "VU meter, right channel";
+    spectrum_name: "스펙트럼 표시", "Spectrum display";
+    meter_note: "0 VU = −11 dBFS (RMS). 앱 볼륨과 상관없이 음악 자체의 레벨을 보여 줍니다.",
+        "0 VU = −11 dBFS (RMS). Shows the level of the music itself, whatever the app volume.";
     settings: "설정", "Settings";
     back: "뒤로", "Back";
     // Transport
@@ -95,7 +109,8 @@ strings! {
     add_to_playlist: "플레이리스트에 추가", "Add to Playlist";
     add_favorite: "즐겨찾기에 추가", "Add to Favorites";
     remove_favorite: "즐겨찾기에서 제거", "Remove from Favorites";
-    show_in_finder: "Finder에서 보기", "Show in Finder";
+    show_in_finder: if cfg!(windows) { "탐색기에서 보기" } else { "Finder에서 보기" },
+        if cfg!(windows) { "Show in Explorer" } else { "Show in Finder" };
     remove_from_playlist: "플레이리스트에서 제거", "Remove from Playlist";
     remove_from_library: "라이브러리에서 제거", "Remove from Library";
     song_info: "곡 정보", "Song Info";
@@ -181,20 +196,38 @@ strings! {
     output_device_desc_idle: "재생을 시작하면 사용 중인 장치가 표시됩니다.", "The device in use is shown once playback starts.";
     output_hint: "선택한 장치가 분리되면 다른 장치로 넘기지 않고 일시정지합니다.",
         "If the device is disconnected, playback pauses instead of moving to another device.";
+    settings_section_quality: "출력 품질", "Output Quality";
+    out_match_rate: "곡의 샘플레이트로 출력", "Match the Song's Sample Rate";
+    out_match_rate_desc: "장치를 곡의 샘플레이트에 맞춰 리샘플링 없이 내보냅니다.",
+        "Runs the device at each song's own rate, so nothing is resampled.";
+    out_exclusive: "독점 출력", "Exclusive Access";
+    out_exclusive_desc: "재생하는 동안 이 앱만 장치를 씁니다. 다른 앱의 소리는 이 장치로 나오지 않습니다.",
+        "Only OnEum uses the device while it plays. Other apps cannot play through it.";
+    out_memory: "메모리 재생", "Memory Playback";
+    out_memory_desc: "재생할 파일을 미리 메모리에 올려 디스크 상태와 상관없이 이어 재생합니다.",
+        "Loads each file into memory ahead of time, so playback does not depend on the disk.";
+    out_macos_only: "macOS에서만 쓸 수 있습니다.", "Available on macOS only.";
+    out_quality_hint: "장치 설정을 바꿨다면 재생이 끝나거나 30초 넘게 멈춰 있을 때 원래대로 되돌립니다. 샘플레이트가 다른 곡으로 넘어갈 때는 장치를 바꾸는 동안 잠깐 끊깁니다.",
+        "Changed device settings are put back when playback ends or stays paused for 30 seconds. Moving to a song with another sample rate pauses briefly while the device switches.";
     rg_mode: "기준", "Mode";
     rg_mode_desc: "곡마다 다른 음량을 비슷하게 맞춥니다.", "Evens out loudness differences between songs.";
     rg_preamp_desc: "보정한 곡의 음량을 더 올리거나 내립니다.", "Raises or lowers adjusted songs further.";
     rg_clip_desc: "보정 때문에 소리가 깨지지 않게 이득을 제한합니다.", "Limits the gain so adjusted songs never distort.";
-    about_guide_desc: "기능과 단축키를 정리한 문서입니다.", "Features and shortcuts in one document.";
+    about_guide_desc: "기능과 단축키를 앱 안에서 바로 봅니다.", "Features and shortcuts, right here in the app.";
     log_folder: "로그 폴더", "Log Folder";
     log_folder_desc: "문제가 생겼을 때 확인하는 기록입니다.", "Records to look at when something goes wrong.";
     data_folder: "데이터 폴더", "Data Folder";
     data_folder_desc: "라이브러리 데이터베이스와 설정이 있는 곳입니다.", "Where the library database and settings live.";
     close_settings: "설정 닫기", "Close Settings";
+    close_guide: "사용 안내 닫기", "Close the User Guide";
+    open_guide: "열기", "Open";
     about_body: "로컬 음악 파일을 위한 오프라인 플레이어.\n계정, 서버, 사용량 수집이 없습니다.",
         "An offline player for your local music files.\nNo accounts, no servers, no analytics.";
     version: "버전", "Version";
     licenses: "오픈 소스 라이선스", "Open Source Licenses";
+    licenses_desc: "OnEum을 이루는 오픈 소스 구성 요소와 그 라이선스입니다.", "The open source components OnEum is built from, and their licenses.";
+    licenses_show: "보기", "Show";
+    licenses_hide: "접기", "Hide";
     close: "닫기", "Close";
     // Dialogs
     cancel: "취소", "Cancel";
@@ -225,11 +258,88 @@ strings! {
     info_album_artist: "앨범 아티스트", "Album artist";
     info_replaygain: "ReplayGain", "ReplayGain";
     info_none: "없음", "None";
+    info_source: "소스", "Source";
     info_output: "출력", "Output";
-    info_resampled: "리샘플링됨", "resampled";
+    info_exclusive: "독점", "exclusive";
+    info_processing: "처리", "Processing";
+    info_proc_none: "없음", "None";
+    info_proc_resample: "리샘플링", "Resampling";
+    info_proc_replaygain: "음량 보정", "Volume leveling";
+    info_proc_volume: "앱 볼륨", "App volume";
+    info_proc_channels: "채널 변환", "Channel mapping";
+    info_proc_dither: "디더", "Dither";
+    info_proc_limiter: "피크 보호", "Peak protection";
+    info_proc_eq: "이퀄라이저", "Equalizer";
+    info_signal_path: "신호 경로", "Signal Path";
+    info_lyrics: "가사", "Lyrics";
+    path_untouched: "원본 그대로", "Unchanged";
+    path_adjusted: "사용자 조정", "Adjusted";
+    path_converted: "변환", "Converted";
+    path_converted_adjusted: "변환 · 사용자 조정", "Converted · Adjusted";
+    path_untouched_hint: "앱은 파일에서 읽은 샘플을 바꾸지 않고 출력 장치로 보냅니다. 그 뒤의 구간(운영체제, 드라이버, DAC)은 앱이 확인할 수 없습니다.",
+        "The app passes the samples read from the file to the output device unchanged. What happens after that (the system, the driver, the DAC) the app cannot see.";
+    path_adjusted_hint: "사용자가 켠 기능(음량 보정, 이퀄라이저, 앱 볼륨)이 소리를 바꾸고 있습니다. 끄면 원본 그대로 나갑니다.",
+        "Features you switched on (volume leveling, the equalizer, the app volume) are changing the sound. Without them it goes out unchanged.";
+    path_converted_hint: "이 장치로 내보내기 위해 변환하고 있습니다(샘플레이트, 채널, 비트 깊이). 설정 → 재생의 \"곡의 샘플레이트로 출력\"을 켜면 샘플레이트 변환을 피할 수 있습니다.",
+        "The audio is being converted for this device (sample rate, channels, bit depth). \"Match the song's sample rate\" in Settings → Playback avoids the rate conversion.";
+    path_channels_unit: "채널", "ch";
+    path_muted: "음소거", "muted";
+    // Crossfeed
+    crossfeed: "헤드폰", "Headphones";
+    crossfeed_row: "크로스피드", "Crossfeed";
+    crossfeed_desc: "한쪽 채널의 저음을 반대쪽에도 조금 섞어, 스피커로 듣는 것처럼 만듭니다.", "Mixes a little of each channel's low end into the other, as speakers do.";
+    crossfeed_light: "약하게", "Light";
+    crossfeed_medium: "보통", "Medium";
+    crossfeed_strong: "강하게", "Strong";
+    crossfeed_hint: "악기가 한쪽 귀에만 몰린 옛 녹음을 헤드폰으로 들을 때 피로를 줄여 줍니다. 스피커로 들을 때는 꺼 두세요. 켜면 가운데 소리의 고음이 최대 2dB 낮아집니다.",
+        "Eases listening on headphones to older recordings with instruments hard on one side. Leave it off for speakers. While on, the highs of what is in the centre are up to 2 dB lower.";
+    info_proc_crossfeed: "크로스피드", "Crossfeed";
+    // Radio
+    radio: "라디오", "Radio";
+    radio_row: "대기열이 끝나면 이어서 재생", "Keep Playing When the Queue Ends";
+    radio_desc: "마지막 곡과 어울리는 곡을 라이브러리에서 골라 대기열에 더합니다.", "Adds songs from your library that go with the last one.";
+    radio_hint: "장르·아티스트·연도가 가까운 곡을 고르고, 방금 들은 곡과 같은 아티스트의 연속은 피합니다. 인터넷을 쓰지 않으며, 반복 재생이 켜져 있으면 동작하지 않습니다.",
+        "Picks songs close in genre, artist and year, and avoids what was just heard and long runs of one artist. Nothing goes online. Does nothing while Repeat is on.";
+    // Equalizer
+    equalizer: "이퀄라이저", "Equalizer";
+    menu_equalizer: "이퀄라이저…", "Equalizer…";
+    eq_on: "켬", "On";
+    eq_off: "끔", "Off";
+    eq_preset: "프리셋", "Preset";
+    eq_custom: "사용자 설정", "Custom";
+    eq_my_presets: "내 프리셋", "My Presets";
+    eq_reset: "초기화", "Reset";
+    eq_preamp: "프리앰프", "Pre-amp";
+    eq_name_hint: "프리셋 이름", "Preset name";
+    eq_save: "내 프리셋으로 저장", "Save as My Preset";
+    eq_delete: "이 프리셋 삭제", "Delete This Preset";
+    eq_saved: "프리셋을 저장했습니다.", "Preset saved.";
+    eq_replaced: "같은 이름의 프리셋을 지금 값으로 바꿨습니다.", "The preset of that name now has the current values.";
+    eq_full: "프리셋은 40개까지 저장할 수 있습니다. 하나를 삭제한 뒤 다시 저장하세요.", "Up to 40 presets can be saved. Delete one, then save again.";
+    eq_deleted: "프리셋을 삭제했습니다. 슬라이더의 값은 그대로입니다.", "Preset deleted. The sliders keep their values.";
+    eq_note: "조절한 소리는 1초 안에 들립니다. 슬라이더를 더블클릭하면 0 dB로 돌아갑니다. 대역을 올린 만큼 프리앰프를 내려 두면 소리가 최대 음량을 넘지 않습니다(기본 프리셋은 그렇게 맞춰져 있습니다). 그래도 넘는 순간은 잘리지 않고 피크 보호가 눌러 줍니다.",
+        "Changes are heard within a second. Double-click a slider to return it to 0 dB. Lowering the pre-amp by as much as the highest band is raised keeps the sound within full scale (the built-in presets are set that way). What still goes over is not clipped: peak protection brings it down.";
+    eq_row_on: "켜져 있음", "On";
+    eq_row_off: "꺼져 있음", "Off";
+    eq_row_desc: "10개 대역으로 음색을 조절합니다. 프리셋을 고르거나 직접 만들어 저장할 수 있습니다.", "Shape the tone with ten bands. Pick a preset or make and save your own.";
+    eq_preset_flat: "플랫 (조절 없음)", "Flat";
+    eq_preset_bass_boost: "저음 강화", "Bass Boost";
+    eq_preset_bass_cut: "저음 줄이기", "Bass Reducer";
+    eq_preset_treble_boost: "고음 강화", "Treble Boost";
+    eq_preset_vocal: "보컬", "Vocal";
+    eq_preset_loudness: "라우드니스 (작은 음량용)", "Loudness (for low volume)";
+    eq_preset_pop: "팝", "Pop";
+    eq_preset_rock: "록", "Rock";
+    eq_preset_jazz: "재즈", "Jazz";
+    eq_preset_classical: "클래식", "Classical";
+    eq_preset_electronic: "일렉트로닉", "Electronic";
+    eq_preset_acoustic: "어쿠스틱", "Acoustic";
+    info_memory: "메모리에서 재생", "from memory";
     info_missing: "파일을 찾을 수 없습니다", "File not found";
     // Notices
     notice_device_lost: "출력 장치 연결이 끊겨 일시정지했습니다.", "The output device was disconnected. Playback is paused.";
+    notice_player_stuck: "출력 장치가 응답하지 않아 재생을 제어할 수 없습니다. 장치 연결을 확인하고, 계속되면 OnEum을 다시 시작하세요.",
+        "The output device is not responding, so playback cannot be controlled. Check the device; if this goes on, restart OnEum.";
     notice_device_lost_action: "기본 장치로 재생", "Play on Default Device";
     notice_no_output: "소리를 낼 출력 장치를 열 수 없습니다.", "Could not open an audio output device.";
     notice_selected_device_missing: "선택한 출력 장치가 연결되어 있지 않습니다.", "The selected output device is not connected.";
@@ -246,8 +356,16 @@ strings! {
     notice_not_a_folder: "폴더가 아닙니다.", "That is not a folder.";
     notice_folder_permission: "이 폴더를 읽을 권한이 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더에서 OnEum을 허용한 뒤 설정 → 라이브러리에서 다시 스캔하세요.",
         "OnEum is not allowed to read this folder. Allow it in System Settings → Privacy & Security → Files and Folders, then rescan in Settings → Library.";
-    scan_waiting_permission: "폴더 접근 허용을 기다리는 중일 수 있습니다. macOS 승인 창을 확인하세요.",
-        "Possibly waiting for permission. Check for a macOS prompt asking to allow access to the folder.";
+    scan_waiting_permission: if cfg!(windows) {
+            "폴더를 읽는 데 시간이 걸리고 있습니다. 폴더에 접근할 수 있는지 확인하세요."
+        } else {
+            "폴더 접근 허용을 기다리는 중일 수 있습니다. macOS 승인 창을 확인하세요."
+        },
+        if cfg!(windows) {
+            "Reading the folder is taking a while. Check that the folder can be accessed."
+        } else {
+            "Possibly waiting for permission. Check for a macOS prompt asking to allow access to the folder."
+        };
     notice_generic_error: "작업을 완료하지 못했습니다.", "The operation could not be completed.";
     notice_export_failed: "플레이리스트를 내보내지 못했습니다. 저장 위치를 확인하세요.", "Could not export the playlist. Check the destination.";
     notice_import_failed: "플레이리스트 파일을 읽지 못했습니다.", "Could not read the playlist file.";
@@ -299,6 +417,7 @@ strings! {
     menu_go_to_current: "재생 중인 곡으로 이동", "Go to Current Song";
     menu_show_queue: "재생 대기열 보기/가리기", "Show/Hide Up Next";
     menu_show_info: "곡 정보 보기/가리기", "Show/Hide Song Info";
+    menu_show_meter: "VU 미터 보기/가리기", "Show/Hide VU Meter";
     menu_rescan: "라이브러리 다시 스캔", "Rescan Library";
     menu_minimize: "최소화", "Minimize";
     menu_zoom: "확대/축소", "Zoom";

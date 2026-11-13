@@ -56,3 +56,38 @@ pub struct Track {
     /// Unix seconds.
     pub added_at: i64,
 }
+
+/// A track with plausible values everywhere, for tests that only care about a few.
+#[cfg(test)]
+pub(crate) fn test_track(id: TrackId) -> Track {
+    Track {
+        id,
+        path: PathBuf::from(format!("/music/{id:03}.flac")),
+        root_id: Some(1),
+        available: true,
+        title: format!("Song {id}"),
+        artist: "Artist".into(),
+        album_artist: String::new(),
+        album: "Album".into(),
+        album_key: 1,
+        disc_no: None,
+        track_no: Some(id as u32),
+        year: None,
+        genre: String::new(),
+        duration_ms: 180_000,
+        codec: "FLAC".into(),
+        container: "FLAC".into(),
+        sample_rate: 44_100,
+        channels: 2,
+        bit_depth: Some(16),
+        bitrate_kbps: Some(900),
+        file_size: 1,
+        mtime_ns: 1,
+        replaygain: ReplayGainTags::default(),
+        art_id: None,
+        favorite: false,
+        play_count: 0,
+        last_played_at: None,
+        added_at: 0,
+    }
+}

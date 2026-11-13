@@ -3,7 +3,7 @@
 use oneum::audio::decoder::TrackDecoder;
 use oneum::audio::render::Renderer;
 use oneum::audio::{
-    Engine, EngineEvent, NextSlot, NextTrack, PlaybackErrorKind, ReplayGainMode,
+    Engine, EngineEvent, NextSlot, NextTrack, OutputSettings, PlaybackErrorKind, ReplayGainMode,
     ReplayGainSettings, TrackRequest,
 };
 use oneum::model::ReplayGainTags;
@@ -44,6 +44,8 @@ struct Played {
     pcm: Vec<f32>,
     events: Vec<EngineEvent>,
     underruns: u64,
+    /// Frames the peak limiter turned down.
+    limited: u64,
 }
 
 impl Played {
@@ -132,6 +134,7 @@ fn pump(
         pcm,
         events,
         underruns: engine.underruns(),
+        limited: engine.limited_frames(),
     }
 }
 
@@ -151,6 +154,32 @@ fn play_at(
             replaygain: tags,
             ..request(i as u64 + 1, n)
         })
+        .collect();
+    let slot = NextSlot::new();
+    slot.set(
+        queue
+            .get(1)
+            .cloned()
+            .map_or(NextTrack::End, NextTrack::Track),
+    );
+    engine
+        .start_feed(queue[0].clone(), start_ms, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    pump(&mut engine, &mut renderer, &queue, &slot)
+}
+
+/// Like [`play_at`] with defaults, but with memory playback switched on.
+fn play_from_memory(names: &[&str], rate: u32, start_ms: u64) -> Played {
+    let (mut engine, mut renderer) = Engine::new_offline(rate, 1.0, ReplayGainSettings::default());
+    engine.set_output_settings(OutputSettings {
+        memory_playback: true,
+        ..OutputSettings::default()
+    });
+    let queue: Vec<TrackRequest> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| request(i as u64 + 1, n))
         .collect();
     let slot = NextSlot::new();
     slot.set(
@@ -289,6 +318,7 @@ fn report_boundary_behaviour_of_other_lossy_formats() {
     for (first, second) in [
         ("gap_a.aac.m4a", "gap_b.aac.m4a"),
         ("gap_a.ogg", "gap_b.ogg"),
+        ("gap_a.mp2", "gap_b.mp2"),
     ] {
         let played = play(&[first, second], 44_100);
         assert_eq!(played.underruns, 0);
@@ -763,4 +793,485 @@ fn real_flac_files_decode_and_join_exactly() {
         expected.len() / 2,
         first.2.len() / 2
     );
+}
+
+/// Memory playback changes where the bytes come from and nothing else: every format
+/// renders the very same samples as when it is streamed from the file, across a track
+/// boundary and after a seek.
+#[test]
+fn memory_playback_renders_the_same_samples_as_streaming() {
+    for ext in [
+        "wav", "flac", "aiff", "alac.m4a", "mp3", "mp2", "aac.m4a", "ogg",
+    ] {
+        let (a, b) = (format!("gap_a.{ext}"), format!("gap_b.{ext}"));
+        let names = [a.as_str(), b.as_str()];
+        for (rate, start_ms) in [(44_100, 0), (44_100, 400), (48_000, 0)] {
+            let streamed = play_at(
+                &names,
+                rate,
+                start_ms,
+                ReplayGainSettings::default(),
+                ReplayGainTags::default(),
+                1.0,
+            );
+            let memory = play_from_memory(&names, rate, start_ms);
+            assert_eq!(
+                memory.pcm.len(),
+                streamed.pcm.len(),
+                "{ext} at {rate} Hz from {start_ms} ms: length"
+            );
+            assert_eq!(
+                max_abs_diff(&memory.pcm, &streamed.pcm),
+                0.0,
+                "{ext} at {rate} Hz from {start_ms} ms: samples"
+            );
+            assert_eq!(memory.underruns, 0);
+            let in_memory: Vec<bool> = memory
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    EngineEvent::TrackStarted { info, .. } => Some(info.in_memory),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                in_memory,
+                vec![true, true],
+                "{ext}: both tracks from memory"
+            );
+            assert!(streamed.events.iter().all(|e| !matches!(
+                e,
+                EngineEvent::TrackStarted { info, .. } if info.in_memory
+            )));
+        }
+    }
+}
+
+/// MPEG Layer II decodes to the tone that was encoded: right length (give or take the
+/// codec's padding), right pitch, right level.
+#[test]
+fn mpeg_layer_2_plays() {
+    let (rate, channels, pcm) = decode_all("gap_a.mp2");
+    assert_eq!((rate, channels), (44_100, 2));
+    let frames = pcm.len() / 2;
+    assert!((44_100..=47_000).contains(&frames), "{frames} frames");
+    let left: Vec<f32> = pcm.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
+    // Away from the codec's start-up: the 441 Hz tone at its level.
+    let middle = &left[8_820..39_690];
+    assert!((rms(middle) - TONE_RMS).abs() < 0.01, "rms {}", rms(middle));
+    let crossings = middle
+        .windows(2)
+        .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+        .count();
+    let hz = crossings as f32 / (middle.len() as f32 / 44_100.0);
+    assert!((hz - 441.0).abs() < 3.0, "{hz} Hz");
+    let played = play(&["gap_a.mp2", "gap_b.mp2"], 48_000);
+    assert_eq!(played.underruns, 0);
+    assert!(played.failures().is_empty(), "{:?}", played.failures());
+}
+
+/// Writes a 16-bit stereo WAV with the same samples on both channels.
+fn write_wav(path: &std::path::Path, rate: u32, samples: &[i16]) {
+    let data_len = (samples.len() * 4) as u32;
+    let mut bytes = Vec::with_capacity(44 + data_len as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        bytes.extend_from_slice(&s.to_le_bytes());
+        bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, bytes).expect("wav written");
+}
+
+/// Plays one file given by path at `rate`.
+fn play_file(path: &std::path::Path, rate: u32) -> Played {
+    let (mut engine, mut renderer) = Engine::new_offline(rate, 1.0, ReplayGainSettings::default());
+    let queue = [TrackRequest {
+        item_id: 1,
+        track_id: 1,
+        path: path.to_path_buf(),
+        replaygain: ReplayGainTags::default(),
+    }];
+    let slot = NextSlot::new();
+    slot.set(NextTrack::End);
+    engine
+        .start_feed(queue[0].clone(), 0, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    pump(&mut engine, &mut renderer, &queue, &slot)
+}
+
+/// Everything in `signal` that is not the sine of `freq` Hz, relative to that sine, in dB.
+fn distortion_db(signal: &[f32], rate: u32, freq: f64) -> f64 {
+    let w = freq * std::f64::consts::TAU / f64::from(rate);
+    let (mut ss, mut cc, mut sc, mut xs, mut xc) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (k, &v) in signal.iter().enumerate() {
+        let (s, c) = (k as f64 * w).sin_cos();
+        ss += s * s;
+        cc += c * c;
+        sc += s * c;
+        xs += f64::from(v) * s;
+        xc += f64::from(v) * c;
+    }
+    let det = ss * cc - sc * sc;
+    let a = (xs * cc - xc * sc) / det;
+    let b = (xc * ss - xs * sc) / det;
+    let rest: f64 = signal
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| {
+            let (s, c) = (k as f64 * w).sin_cos();
+            (f64::from(v) - a * s - b * c).powi(2)
+        })
+        .sum();
+    10.0 * (rest / signal.len() as f64 / ((a * a + b * b) / 2.0)).log10()
+}
+
+#[test]
+fn peaks_between_the_samples_are_not_clipped_when_the_rate_is_converted() {
+    // The textbook inter-sample over: a tone at a quarter of the sample rate whose
+    // samples all sit at full scale, 45° away from its crests. The file never exceeds
+    // full scale; the wave it describes does, by 3 dB.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("intersample.wav");
+    let pattern = [i16::MAX, i16::MAX, -i16::MAX, -i16::MAX];
+    let samples: Vec<i16> = pattern.iter().copied().cycle().take(2 * 44_100).collect();
+    write_wav(&path, 44_100, &samples);
+
+    // At its own rate the file goes out untouched: nothing to protect, bit for bit.
+    let own = play_file(&path, 44_100);
+    assert_eq!(own.limited, 0);
+    assert_eq!(own.frames(), samples.len());
+    let expected: Vec<f32> = samples.iter().map(|s| f32::from(*s) / 32_768.0).collect();
+    assert_eq!(
+        max_abs_diff(&own.left()[FADE_GUARD..], &expected[FADE_GUARD..]),
+        0.0
+    );
+
+    // Converted to 48 kHz the crests come out. They are brought down to full scale
+    // instead of being cut off: what is heard is still the tone.
+    let converted = play_file(&path, 48_000);
+    assert_eq!(converted.frames(), 2 * 48_000);
+    assert_eq!(converted.underruns, 0);
+    assert!(converted.limited > 48_000, "limited {}", converted.limited);
+    let left = converted.left();
+    let peak = left.iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= 1.0 && peak > 0.99, "peak {peak}");
+    let settled = &left[48_000..2 * 48_000 - 4_800];
+    let limited_db = distortion_db(settled, 48_000, 11_025.0);
+    assert!(limited_db < -50.0, "distortion {limited_db:.1} dB");
+    // What a device does with the same samples when nothing protects them.
+    let unprotected: Vec<f32> = settled
+        .iter()
+        .map(|s| (s * std::f32::consts::SQRT_2).clamp(-1.0, 1.0))
+        .collect();
+    let clipped_db = distortion_db(&unprotected, 48_000, 11_025.0);
+    assert!(
+        clipped_db > limited_db + 25.0,
+        "clipped {clipped_db:.1} dB, limited {limited_db:.1} dB"
+    );
+}
+
+#[test]
+fn gain_above_full_scale_is_limited_not_clipped() {
+    // ReplayGain asks for +12 dB and clipping prevention is switched off: the tone
+    // would peak at 1.41.
+    let tags = ReplayGainTags {
+        track_gain_db: Some(12.0),
+        track_peak: Some(AMP),
+        ..Default::default()
+    };
+    let rg = ReplayGainSettings {
+        mode: ReplayGainMode::Track,
+        preamp_db: 0.0,
+        prevent_clipping: false,
+    };
+    let played = play_at(&["gap_a.wav"], 44_100, 0, rg, tags, 1.0);
+    assert!(played.limited > 0);
+    let left = played.left();
+    let peak = left.iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= 1.0 && peak > 0.99, "peak {peak}");
+    let settled = &left[left.len() / 2..left.len() - 4_410];
+    let db = distortion_db(settled, 44_100, 441.0);
+    assert!(db < -50.0, "distortion {db:.1} dB");
+
+    // With gain that stays within full scale the limiter has nothing to do.
+    let quiet = play_at(
+        &["gap_a.wav"],
+        44_100,
+        0,
+        ReplayGainSettings {
+            prevent_clipping: true,
+            ..rg
+        },
+        tags,
+        1.0,
+    );
+    assert_eq!(quiet.limited, 0);
+}
+
+#[test]
+fn a_track_played_from_its_beginning_is_the_file_from_the_very_first_sample() {
+    // No fade-in over the start of a track: every sample, the first one included, is
+    // the file's own.
+    for name in ["gap_b.wav", "gap_b.flac", "gap_a.aiff", "gap_a.alac.m4a"] {
+        let (rate, channels, expected) = decode_all(name);
+        assert_eq!((rate, channels), (44_100, 2), "{name}");
+        let played = play(&[name], 44_100);
+        assert_eq!(played.limited, 0, "{name}");
+        assert_eq!(played.pcm.len(), expected.len(), "{name}");
+        assert!(
+            played
+                .pcm
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "{name}: not bit for bit"
+        );
+    }
+    assert!(
+        decode_all("gap_b.wav").2[..200]
+            .iter()
+            .any(|s| s.abs() > 0.3),
+        "the tone is at its crest within a millisecond: a fade would have shown"
+    );
+
+    // Starting in the middle of a track (a seek) is still faded in: no click.
+    let seeked = play_at(
+        &["gap_b.wav"],
+        44_100,
+        501,
+        ReplayGainSettings::default(),
+        ReplayGainTags::default(),
+        1.0,
+    );
+    let (_, _, whole) = decode_all("gap_b.wav");
+    let from = 22_094 * 2; // 501 ms, where the tone is well away from zero
+    assert!(whole[from].abs() > 0.1, "{}", whole[from]);
+    assert!(seeked.pcm[0].abs() < whole[from].abs() * 0.1);
+    assert_eq!(
+        max_abs_diff(
+            &seeked.pcm[FADE_GUARD * 2..],
+            &whole[from + FADE_GUARD * 2..]
+        ),
+        0.0
+    );
+}
+
+/// Plays `name` at 44.1 kHz with the equalizer set to `eq`.
+fn play_equalized(name: &str, eq: oneum::audio::EqSettings) -> Played {
+    let (mut engine, mut renderer) =
+        Engine::new_offline(44_100, 1.0, ReplayGainSettings::default());
+    engine.set_eq(eq);
+    let queue = [request(1, name)];
+    let slot = NextSlot::new();
+    slot.set(NextTrack::End);
+    engine
+        .start_feed(queue[0].clone(), 0, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    pump(&mut engine, &mut renderer, &queue, &slot)
+}
+
+#[test]
+fn the_equalizer_changes_the_level_by_what_its_curve_says() {
+    use oneum::audio::EqSettings;
+    use oneum::audio::eq::response_db;
+    // The fixture is a 441 Hz tone; the 500 Hz band up by 6 dB, the pre-amp down by 2.
+    let mut gains = [0.0; 10];
+    gains[4] = 6.0;
+    let eq = EqSettings {
+        enabled: true,
+        preamp_db: -2.0,
+        gains_db: gains,
+    };
+    let (_, _, plain) = decode_all("gap_a.wav");
+    let played = play_equalized("gap_a.wav", eq);
+    assert_eq!(played.pcm.len(), plain.len());
+    assert_eq!(played.limited, 0);
+    let settled = plain.len() / 2..plain.len() - 2000;
+    let heard_db = 20.0 * (rms(&played.pcm[settled.clone()]) / rms(&plain[settled])).log10();
+    let curve_db = response_db(&eq, 44_100, 441.0);
+    assert!((2.0..4.0).contains(&curve_db), "{curve_db}");
+    assert!(
+        (heard_db - curve_db).abs() < 0.05,
+        "heard {heard_db:.3} dB, the curve says {curve_db:.3} dB"
+    );
+
+    // Switched on but with everything at 0 dB, and switched off with values set: the
+    // file goes out untouched, from the first sample to the last.
+    for nothing in [
+        EqSettings {
+            enabled: true,
+            ..EqSettings::default()
+        },
+        EqSettings {
+            enabled: false,
+            ..eq
+        },
+    ] {
+        let played = play_equalized("gap_a.wav", nothing);
+        assert!(
+            played
+                .pcm
+                .iter()
+                .zip(&plain)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "{nothing:?}"
+        );
+    }
+}
+
+#[test]
+fn a_boost_beyond_full_scale_is_limited_not_clipped() {
+    // Everything around the tone up by 12 dB and the pre-amp up as well: the tone
+    // (peak 0.35) would come out at more than four times full scale.
+    let mut gains = [0.0; 10];
+    gains[3] = 12.0;
+    gains[4] = 12.0;
+    let eq = oneum::audio::EqSettings {
+        enabled: true,
+        preamp_db: 12.0,
+        gains_db: gains,
+    };
+    let played = play_equalized("gap_a.wav", eq);
+    assert!(played.limited > 10_000, "limited {}", played.limited);
+    let left = played.left();
+    let peak = left.iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= 1.0 && peak > 0.99, "peak {peak}");
+    let settled = &left[left.len() / 2..left.len() - 4_410];
+    let db = distortion_db(settled, 44_100, 441.0);
+    assert!(db < -50.0, "distortion {db:.1} dB");
+}
+
+#[test]
+fn crossfeed_reaches_the_audio_and_leaves_the_centre_almost_alone() {
+    use oneum::audio::Crossfeed;
+    let (_, _, plain) = decode_all("gap_a.wav");
+    let (mut engine, mut renderer) =
+        Engine::new_offline(44_100, 1.0, ReplayGainSettings::default());
+    engine.set_crossfeed(Crossfeed::Strong);
+    let queue = [request(1, "gap_a.wav")];
+    let slot = NextSlot::new();
+    slot.set(NextTrack::End);
+    engine
+        .start_feed(queue[0].clone(), 0, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    let played = pump(&mut engine, &mut renderer, &queue, &slot);
+    assert_eq!(played.pcm.len(), plain.len());
+    assert_eq!(played.limited, 0, "crossfeed never makes anything louder");
+    // The fixture has the same tone on both channels (a sound in the middle): both
+    // channels stay alike, and at 441 Hz the level drops by less than 2 dB.
+    assert!(
+        played
+            .pcm
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|f| (f[0] - f[1]).abs() < 1e-6)
+    );
+    let settled = plain.len() / 2..plain.len() - 2000;
+    let change_db = 20.0 * (rms(&played.pcm[settled.clone()]) / rms(&plain[settled])).log10();
+    assert!((-2.0..-0.05).contains(&change_db), "{change_db:.3} dB");
+}
+
+/// Writes a 32-bit float stereo WAV (the same samples on both channels).
+fn write_float_wav(path: &std::path::Path, rate: u32, samples: &[f32]) {
+    let data_len = (samples.len() * 8) as u32;
+    let mut bytes = Vec::with_capacity(44 + data_len as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 8).to_le_bytes());
+    bytes.extend_from_slice(&8u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        bytes.extend_from_slice(&s.to_le_bytes());
+        bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, bytes).expect("wav written");
+}
+
+/// A float file can hold anything: numbers far outside the range, infinities, NaN.
+/// None of it may reach the device, and none of it may stay behind in the equalizer
+/// or the crossfeed and spoil the music that follows.
+#[test]
+fn garbage_in_a_float_file_does_not_poison_what_follows() {
+    use oneum::audio::{Crossfeed, EqSettings};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("garbage.wav");
+    let rate = 44_100u32;
+    let tone = |n: usize| 0.1 * (std::f32::consts::TAU * 1000.0 * n as f32 / rate as f32).sin();
+    let mut samples: Vec<f32> = (0..rate as usize * 2).map(tone).collect();
+    // A burst of garbage a quarter of a second in.
+    let garbage = [
+        3.0e38,
+        -3.0e38,
+        f32::INFINITY,
+        f32::NAN,
+        f32::NEG_INFINITY,
+        1.0e30,
+    ];
+    for (k, bad) in garbage.iter().cycle().take(600).enumerate() {
+        samples[11_025 + k] = *bad;
+    }
+    write_float_wav(&path, rate, &samples);
+
+    let mut gains = [0.0; 10];
+    gains[5] = 12.0; // 1 kHz up as far as it goes
+    let eq = EqSettings {
+        enabled: true,
+        preamp_db: 0.0,
+        gains_db: gains,
+    };
+    // At the file's rate and through the rate conversion.
+    for out_rate in [44_100, 48_000] {
+        let (mut engine, mut renderer) =
+            Engine::new_offline(out_rate, 1.0, ReplayGainSettings::default());
+        engine.set_eq(eq);
+        engine.set_crossfeed(Crossfeed::Strong);
+        let queue = [TrackRequest {
+            item_id: 1,
+            track_id: 1,
+            path: path.clone(),
+            replaygain: ReplayGainTags::default(),
+        }];
+        let slot = NextSlot::new();
+        slot.set(NextTrack::End);
+        engine
+            .start_feed(queue[0].clone(), 0, slot.clone())
+            .expect("feed starts");
+        engine.set_playing(true);
+        let played = pump(&mut engine, &mut renderer, &queue, &slot);
+        assert!(
+            played.pcm.iter().all(|s| s.is_finite() && s.abs() <= 1.0),
+            "{out_rate} Hz: something that is not audio came out"
+        );
+        // The last half second is the tone again, at the level the equalizer and the
+        // crossfeed give it: +12 dB at 1 kHz, a little off for the crossfeed.
+        let left = played.left();
+        let tail = &left[left.len() - out_rate as usize / 2..];
+        let level_db = 20.0 * (rms(tail) / (0.1 / std::f32::consts::SQRT_2)).log10();
+        assert!(
+            (10.0..12.5).contains(&level_db),
+            "{out_rate} Hz: the tone after the garbage is at {level_db:.2} dB"
+        );
+    }
 }

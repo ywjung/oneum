@@ -1,5 +1,8 @@
 //! Scanning real files in real temporary directories: formats, incremental rescans,
 //! offline folders, moved/missing files, symlinks, broken files, artwork, watching.
+// Unix only: many of these tests build their folders with symbolic links and
+// permission bits, and compare paths in their Unix form.
+#![cfg(unix)]
 #[path = "library_support.rs"]
 mod support;
 
@@ -453,6 +456,48 @@ fn m4a_codec_is_read_from_the_content() {
     );
 }
 
+/// MPEG Layer II is told apart from MP3 by what is in the file, whatever it is called.
+#[test]
+fn mpeg_layer_2_is_recognised_under_either_name() {
+    if !has_encoder("mp2") {
+        eprintln!("skipped: this ffmpeg has no mp2 encoder");
+        return;
+    }
+    let env = TestEnv::new();
+    let music = env.music();
+    ffmpeg_audio(
+        &music.join("broadcast.mp2"),
+        &["-c:a", "mp2", "-b:a", "192k"],
+        &[],
+        None,
+    );
+    ffmpeg_audio(
+        &music.join("misnamed.mp3"),
+        &["-c:a", "mp2", "-f", "mp2"],
+        &[],
+        None,
+    );
+    ffmpeg_audio(
+        &music.join("real.mp3"),
+        &["-c:a", "libmp3lame", "-b:a", "128k"],
+        &[],
+        None,
+    );
+    let (library, _) = env.open_scanned();
+    let status = library.scan_status();
+    assert_eq!((status.unsupported, status.errors), (0, 0));
+    for (title, codec) in [("broadcast", "MP2"), ("misnamed", "MP2"), ("real", "MP3")] {
+        let track = by_title(&library, title);
+        assert_eq!(track.codec, codec, "{title}");
+        assert_eq!((track.sample_rate, track.channels), (44_100, 1), "{title}");
+        assert!(
+            (900..=1200).contains(&track.duration_ms),
+            "{title}: {}",
+            track.duration_ms
+        );
+    }
+}
+
 #[test]
 fn unsupported_codecs_are_counted_not_added() {
     if !ffmpeg_or_skip("unsupported_codecs_are_counted_not_added") {
@@ -468,16 +513,6 @@ fn unsupported_codecs_are_counted_not_added() {
             &music.join("opus.ogg"),
             &["-c:a", "libopus", "-ar", "48000", "-f", "ogg"],
             &[("title", "Opus")],
-            None,
-        );
-        expected_unsupported += 1;
-    }
-    if has_encoder("mp2") {
-        // MPEG layer 2 audio named .mp3.
-        ffmpeg_audio(
-            &music.join("layer2.mp3"),
-            &["-c:a", "mp2", "-f", "mp2"],
-            &[],
             None,
         );
         expected_unsupported += 1;
@@ -1950,4 +1985,31 @@ fn concurrent_favourites_and_plays_end_up_published() {
         plays += current.play_count;
     }
     assert_eq!(plays, 300);
+}
+
+/// A link that leads up and out (to the folder above the music folder, to the home
+/// folder, to the top of the disk) is not followed: the scan must not wander off over
+/// everything the user has because an album folder contained such a link.
+#[test]
+fn links_that_lead_above_the_music_folder_are_not_followed() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("a/inside.wav"), 300, "Inside", "A", "B");
+    // Next to the music folder, where only a link upwards could reach it.
+    write_tagged_wav(
+        &env.dir.path().join("elsewhere/private.wav"),
+        300,
+        "Private",
+        "A",
+        "B",
+    );
+    symlink(env.dir.path(), music.join("a/up")).unwrap();
+    symlink("/", music.join("a/everything")).unwrap();
+    // A link to a folder beside it is the ordinary case and still followed.
+    let beside = env.dir.path().join("more-music");
+    write_tagged_wav(&beside.join("linked.wav"), 300, "Linked", "A", "B");
+    symlink(&beside, music.join("more")).unwrap();
+
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["Inside", "Linked"]);
 }

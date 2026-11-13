@@ -6,6 +6,11 @@
 //! oneum-libtool gen-db <N> <data_dir>       write N synthetic tracks into <data_dir>/library.db
 //! oneum-libtool open-bench <data_dir>       time Library::open on an existing database
 //! oneum-libtool scan <folder> [--verbose]   scan a folder into a throw-away library
+//! oneum-libtool audio-devices               list output devices: rates, hardware formats, exclusive owner
+//! oneum-libtool audio-probe <id> <rate> [--exclusive]
+//!                                           switch a device to a rate for a second, then put it back
+//! oneum-libtool audio-selftest <id>         play silence on a device and check that the engine
+//!                                           recovers from a late format notification
 //! ```
 //! Synthetic metadata is generated from a fixed seed; no audio files are involved.
 use oneum::library::{Library, LibraryPaths, LibrarySnapshot, SortKey, album_key};
@@ -20,7 +25,10 @@ const USAGE: &str = "usage:
   oneum-libtool bench-search <N>
   oneum-libtool gen-db <N> <data_dir>
   oneum-libtool open-bench <data_dir>
-  oneum-libtool scan <folder> [--verbose]";
+  oneum-libtool scan <folder> [--verbose]
+  oneum-libtool audio-devices
+  oneum-libtool audio-probe <device-id> <rate> [--exclusive]
+  oneum-libtool audio-selftest <device-id>";
 
 /// Root of the synthetic library. It does not exist, so the app shows it as offline.
 const FAKE_ROOT: &str = "/Volumes/OnEumBench/Music";
@@ -36,6 +44,10 @@ fn main() -> ExitCode {
         ["scan", folder, "--verbose"] | ["scan", "--verbose", folder] => {
             scan(Path::new(folder), true)
         }
+        ["audio-devices"] => audio_devices(),
+        ["audio-probe", id, rate] => audio_probe(id, rate, false),
+        ["audio-probe", id, rate, "--exclusive"] => audio_probe(id, rate, true),
+        ["audio-selftest", id] => audio_selftest(id),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -44,6 +56,214 @@ fn main() -> ExitCode {
             eprintln!("{message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Prints what the system reports about every output device. Read-only.
+fn audio_devices() -> Result<(), String> {
+    use oneum::audio::output::list_output_devices;
+    use oneum::platform::device::AudioDevice;
+    let devices = list_output_devices();
+    if devices.is_empty() {
+        return Err("no output devices".to_string());
+    }
+    for info in devices {
+        let default = if info.is_default { " (default)" } else { "" };
+        println!("{}{default}\n  id: {}", info.name, info.id);
+        let Some(device) = AudioDevice::from_cpal_id(&info.id) else {
+            println!("  (not found through the audio HAL)");
+            continue;
+        };
+        println!("  nominal rate: {:?}", device.nominal_rate());
+        println!("  rates: {:?}", device.rate_ranges());
+        println!("  exclusive owner (pid): {:?}", device.hog_owner());
+        match device.physical_format() {
+            Some(f) => println!(
+                "  hardware format now: {} Hz, {} bit{}, {} ch",
+                f.sample_rate,
+                f.bits,
+                if f.float { " float" } else { "" },
+                f.channels
+            ),
+            None => println!("  hardware format now: unknown"),
+        }
+        for f in device.physical_formats() {
+            println!(
+                "    offers {}..={} Hz, {} bit{}, {} ch{}",
+                f.min_rate,
+                f.max_rate,
+                f.bits,
+                if f.float { " float" } else { "" },
+                f.channels,
+                if f.pcm { "" } else { " (not PCM)" }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Does to a device what rate matching does for one track, with timings: claims it,
+/// switches it to `rate`, waits a second and puts everything back. No audio is played.
+/// Use it to see whether (and how fast) a DAC follows.
+fn audio_probe(id: &str, rate: &str, exclusive: bool) -> Result<(), String> {
+    use oneum::audio::output::{DeviceHold, default_output_id};
+    let rate: u32 = rate
+        .parse()
+        .map_err(|_| format!("invalid rate {rate:?}\n{USAGE}"))?;
+    let report = |label: &str, hold: &DeviceHold| {
+        println!(
+            "{label}: rate {:?}, hardware (bits, float) {:?}, exclusive {}, system default {:?}",
+            hold.nominal_rate(),
+            hold.hardware_bits(),
+            hold.is_exclusive(),
+            default_output_id()
+        );
+    };
+    println!("system default before: {:?}", default_output_id());
+    let started = Instant::now();
+    let mut hold =
+        DeviceHold::acquire(id, exclusive).ok_or_else(|| format!("device {id:?} not found"))?;
+    println!("claimed in {:?}", started.elapsed());
+    report("before", &hold);
+    let started = Instant::now();
+    let ok = hold.apply_rate(rate);
+    println!("switch to {rate} Hz: ok={ok} in {:?}", started.elapsed());
+    report("during", &hold);
+    std::thread::sleep(Duration::from_secs(1));
+    let started = Instant::now();
+    drop(hold);
+    println!("put back in {:?}", started.elapsed());
+    println!("system default after: {:?}", default_output_id());
+    audio_devices()
+}
+
+/// Writes `seconds` of a quiet 440 Hz tone as a 16-bit stereo WAV at `rate`.
+fn write_tone_wav(path: &Path, rate: u32, seconds: u32) -> std::io::Result<()> {
+    let frames = rate * seconds;
+    let data_len = frames * 4;
+    let mut bytes = Vec::with_capacity(44 + data_len as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    for n in 0..frames {
+        let phase = f64::from(n) * 440.0 * std::f64::consts::TAU / f64::from(rate);
+        let v = (phase.sin() * 3000.0) as i16;
+        bytes.extend_from_slice(&v.to_le_bytes());
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, bytes)
+}
+
+/// Plays a tone on `id` at volume 0 with rate matching on, then does to the stream what
+/// the audio backend does when the device announces a format change (it stops the stream
+/// and reports an invalidation) while the device is in fact still at the stream's rate.
+/// That is the "our own rate change is announced late" case. The engine must restart
+/// the stream and go on, without rebuilding it. Nothing is audible.
+fn audio_selftest(id: &str) -> Result<(), String> {
+    // Like in the app, the engine runs on a thread of its own while the main thread
+    // serves the system's run loop.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(audio_selftest_run(&id));
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(result) = rx.try_recv() {
+            return result;
+        }
+        if Instant::now() >= deadline {
+            return Err("FAIL: the self-test did not finish within a minute".into());
+        }
+        oneum::platform::pump_main_loop(Duration::from_millis(50));
+    }
+}
+
+fn audio_selftest_run(id: &str) -> Result<(), String> {
+    use oneum::audio::output::device_nominal_rate;
+    use oneum::audio::{
+        Engine, EngineEvent, NextSlot, NextTrack, OutputSettings, ReplayGainSettings, TrackRequest,
+    };
+    let rate = device_nominal_rate(id).ok_or_else(|| format!("device {id:?} not found"))?;
+    let dir = std::env::temp_dir().join(format!("oneum-selftest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let wav = dir.join("tone.wav");
+    write_tone_wav(&wav, rate, 8).map_err(|e| e.to_string())?;
+
+    let mut engine = Engine::new(Some(id.to_string()), 0.0, ReplayGainSettings::default());
+    engine.set_output_settings(OutputSettings {
+        match_sample_rate: true,
+        ..OutputSettings::default()
+    });
+    let result = (|| -> Result<bool, String> {
+        engine
+            .open_output_for(Some(rate))
+            .map_err(|e| e.to_string())?;
+        let slot = NextSlot::new();
+        slot.set(NextTrack::End);
+        let request = TrackRequest {
+            item_id: 1,
+            track_id: 1,
+            path: wav.clone(),
+            replaygain: ReplayGainTags::default(),
+        };
+        engine
+            .start_feed(request, 0, slot)
+            .map_err(|e| e.to_string())?;
+        engine.set_playing(true);
+        let mut events = Vec::new();
+        let run = |engine: &mut Engine, events: &mut Vec<EngineEvent>, ms: u64| {
+            let until = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < until {
+                engine.poll(events);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        run(&mut engine, &mut events, 800);
+        let flowing = engine.played().1;
+        println!("playing at {rate} Hz: {flowing} frames played");
+        if flowing == 0 {
+            return Err("no audio reached the device".into());
+        }
+
+        engine.simulate_format_notification();
+        std::thread::sleep(Duration::from_millis(300));
+        let stopped_at = engine.shared().callbacks();
+        std::thread::sleep(Duration::from_millis(400));
+        let still_stopped = engine.shared().callbacks() == stopped_at;
+        let frames_before = engine.played().1;
+        println!("stream stopped by the simulated backend: {still_stopped}");
+
+        events.clear();
+        run(&mut engine, &mut events, 1000);
+        let callbacks_after = engine.shared().callbacks() - stopped_at;
+        let frames_after = engine.played().1.saturating_sub(frames_before);
+        let rebuilt = events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::OutputChanged | EngineEvent::DeviceLost));
+        println!(
+            "after the engine noticed: {callbacks_after} callbacks, {frames_after} frames more, stream rebuilt: {rebuilt}"
+        );
+        Ok(still_stopped && callbacks_after > 10 && frames_after > u64::from(rate) / 4 && !rebuilt)
+    })();
+    engine.close_output();
+    let _ = std::fs::remove_dir_all(&dir);
+    match result {
+        Ok(true) => {
+            println!("PASS: the engine restarted the stream and went on playing");
+            Ok(())
+        }
+        Ok(false) => Err("FAIL: the engine did not recover as expected".into()),
+        Err(e) => Err(format!("FAIL: {e}")),
     }
 }
 

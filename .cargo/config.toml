@@ -1,0 +1,4 @@
+# Cross-building the Windows version from a Mac (see scripts/package-windows.sh):
+# the GNU target is linked with the mingw-w64 compiler (`brew install mingw-w64`).
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"

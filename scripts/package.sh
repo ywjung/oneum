@@ -29,10 +29,16 @@ ARCH=$(uname -m)
 [ "$ARCH" = arm64 ] || { echo "only Apple silicon (arm64) builds are supported" >&2; exit 1; }
 # The bundle declares macOS 14 as its minimum (assets/Info.plist.in): build for it.
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+# The scripted verification channel is compiled in only for development runs
+# (scripts/dev/run.sh sets ONEUM_AUTOMATION=1), never into what is given to users.
+FEATURES=""
+[ "${ONEUM_AUTOMATION:-0}" = 1 ] && FEATURES="--features automation"
 if [ "$PROFILE" = release ]; then
-  cargo build --release --locked --bin oneum
+  # shellcheck disable=SC2086
+  cargo build --release --locked --bin oneum $FEATURES
 else
-  cargo build --locked --bin oneum
+  # shellcheck disable=SC2086
+  cargo build --locked --bin oneum $FEATURES
 fi
 # Honour CARGO_TARGET_DIR and build.target-dir instead of assuming ./target.
 TARGET_DIR=$(cargo metadata --format-version 1 --no-deps --locked \
@@ -57,9 +63,12 @@ for key in NSDownloadsFolderUsageDescription NSDocumentsFolderUsageDescription N
            NSRemovableVolumesUsageDescription NSNetworkVolumesUsageDescription; do
   printf '"%s" = "%s";\n' "$key" "$EN_DESC" >> "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
 done
-for doc in docs/USER_GUIDE.md THIRD_PARTY_NOTICES.md LICENSE; do
+# (The user guide is compiled into the app and shown in a window of its own.)
+for doc in THIRD_PARTY_NOTICES.md LICENSE; do
   [ -f "$doc" ] && cp "$doc" "$APP/Contents/Resources/"
 done
+# The full license texts of everything linked in, gathered from the crates themselves.
+python3 scripts/gen-licenses.py "$APP/Contents/Resources/THIRD_PARTY_LICENSES.txt" >/dev/null
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 if [ -n "${ONEUM_SIGN_IDENTITY:-}" ]; then

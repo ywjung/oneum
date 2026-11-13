@@ -77,6 +77,50 @@ fn install_fonts(ctx: &egui::Context) {
             .insert(0, "system-ui".into());
         semibold_stack.insert(0, "system-ui-semibold".into());
     }
+    // Windows: Segoe UI for Latin text and Malgun Gothic for Korean, each with its bold
+    // face for "semibold". Missing files are skipped (the bundled fonts remain).
+    #[cfg(windows)]
+    {
+        let dir = std::env::var_os("WINDIR")
+            .map_or_else(
+                || std::path::PathBuf::from("C:\\Windows"),
+                std::path::PathBuf::from,
+            )
+            .join("Fonts");
+        let mut load = |name: &str, file: &str| -> bool {
+            match std::fs::read(dir.join(file)) {
+                Ok(bytes) => {
+                    fonts.font_data.insert(
+                        name.into(),
+                        std::sync::Arc::new(FontData::from_owned(bytes)),
+                    );
+                    true
+                }
+                Err(_) => false,
+            }
+        };
+        let latin = load("win-ui", "segoeui.ttf");
+        let latin_bold = load("win-ui-semibold", "seguisb.ttf");
+        let korean = load("win-korean", "malgun.ttf");
+        let korean_bold = load("win-korean-bold", "malgunbd.ttf");
+        let regular = fonts.families.entry(FontFamily::Proportional).or_default();
+        if korean {
+            regular.insert(0, "win-korean".into());
+        }
+        if latin {
+            regular.insert(0, "win-ui".into());
+        }
+        if korean_bold {
+            semibold_stack.insert(0, "win-korean-bold".into());
+        } else if korean {
+            semibold_stack.insert(0, "win-korean".into());
+        }
+        if latin_bold {
+            semibold_stack.insert(0, "win-ui-semibold".into());
+        } else if latin {
+            semibold_stack.insert(0, "win-ui".into());
+        }
+    }
     fonts
         .families
         .insert(FontFamily::Name(SEMIBOLD.into()), semibold_stack);

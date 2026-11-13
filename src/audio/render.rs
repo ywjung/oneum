@@ -3,7 +3,7 @@
 //! Rules for everything in [`Renderer::render`]: no allocation or deallocation, no locks,
 //! no I/O, no logging. It only reads pre-filled ring buffers and atomics.
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Frames processed per inner block (stack buffer size).
 const BLOCK: usize = 256;
@@ -11,6 +11,109 @@ const FADE_SECONDS: f32 = 0.006;
 const VOLUME_RAMP_SECONDS: f32 = 0.03;
 const EPOCH_SHIFT: u32 = 48;
 const FRAME_MASK: u64 = (1 << EPOCH_SHIFT) - 1;
+
+/// One reading of the [`LevelMeter`], per channel (left, right), as linear amplitude
+/// where 1.0 is full scale.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Levels {
+    /// Mean of the absolute sample values over the most recent callback: what a VU
+    /// meter's rectifier sees.
+    pub average: [f32; 2],
+    /// Highest absolute sample value since the previous reading.
+    pub peak: [f32; 2],
+}
+
+/// Signal level of what is being played, for the VU meter. Written by the output
+/// callback (atomics only), read by the UI.
+///
+/// The level is that of the programme itself: after ReplayGain and the pause/seek fades,
+/// before the app volume. A meter that sank with the volume slider would say nothing
+/// about the music.
+#[derive(Debug, Default)]
+pub struct LevelMeter {
+    average: [AtomicU32; 2],
+    peak: [AtomicU32; 2],
+}
+
+impl LevelMeter {
+    fn store(&self, average: [f32; 2], peak: [f32; 2]) {
+        for ch in 0..2 {
+            self.average[ch].store(average[ch].to_bits(), Ordering::Relaxed);
+            // Bit patterns of non-negative floats order like the floats themselves.
+            self.peak[ch].fetch_max(peak[ch].to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// The current levels. Peaks are handed out once: reading clears them.
+    pub fn read(&self) -> Levels {
+        let get = |a: &AtomicU32| f32::from_bits(a.load(Ordering::Relaxed));
+        let take = |a: &AtomicU32| f32::from_bits(a.swap(0, Ordering::Relaxed));
+        Levels {
+            average: [get(&self.average[0]), get(&self.average[1])],
+            peak: [take(&self.peak[0]), take(&self.peak[1])],
+        }
+    }
+
+    /// Back to silence: nothing is rendering any more (the stream was closed).
+    pub fn reset(&self) {
+        for ch in 0..2 {
+            self.average[ch].store(0, Ordering::Relaxed);
+            self.peak[ch].store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Samples kept for the spectrum display: enough for its analysis at the highest sample
+/// rates, where it looks at four times as many samples.
+pub const SCOPE_LEN: usize = 8192;
+
+/// The most recent samples of what is being played (left and right mixed to one
+/// channel, before the app volume), for the spectrum display. One writer (the output
+/// callback, atomics only), any reader; a reader may catch a few samples of the next
+/// block mixed in, which a picture of the spectrum does not show.
+pub struct Scope {
+    samples: Box<[AtomicU32]>,
+    written: AtomicUsize,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self {
+            samples: (0..SCOPE_LEN).map(|_| AtomicU32::new(0)).collect(),
+            written: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Scope {
+    fn push(&self, sample: f32) {
+        let at = self.written.load(Ordering::Relaxed);
+        self.samples[at % SCOPE_LEN].store(sample.to_bits(), Ordering::Relaxed);
+        self.written.store(at.wrapping_add(1), Ordering::Relaxed);
+    }
+
+    /// Copies the latest `out.len()` samples (at most [`SCOPE_LEN`]), oldest first.
+    /// What has not been played yet reads as silence.
+    pub fn latest(&self, out: &mut [f32]) {
+        let n = out.len().min(SCOPE_LEN);
+        let end = self.written.load(Ordering::Relaxed);
+        let have = end.min(n);
+        let (silence, filled) = out.split_at_mut(out.len() - have);
+        silence.fill(0.0);
+        for (k, slot) in filled.iter_mut().enumerate() {
+            let at = end - have + k;
+            *slot = f32::from_bits(self.samples[at % SCOPE_LEN].load(Ordering::Relaxed));
+        }
+    }
+
+    /// Forgets everything (the stream was closed).
+    pub fn reset(&self) {
+        self.written.store(0, Ordering::Relaxed);
+        for sample in self.samples.iter() {
+            sample.store(0, Ordering::Relaxed);
+        }
+    }
+}
 
 /// State shared between the callback and the control thread. Atomics only.
 pub struct RenderShared {
@@ -27,6 +130,15 @@ pub struct RenderShared {
     /// When non-zero, only the feed with this epoch may be heard; any other feed is faded
     /// out and held until the required one arrives.
     required_epoch: AtomicU32,
+    meter: Arc<LevelMeter>,
+    scope: Arc<Scope>,
+    /// Size of one step of the device's integer sample format (0.0 = no dither: the
+    /// device takes floating point, or its format is not known).
+    dither_lsb: AtomicU32,
+    /// The samples of the feed are no longer the file's own (resampled, gain applied,
+    /// decoded from a lossy codec, wider than the device): rounding them to the
+    /// device's format needs dither.
+    processed: AtomicBool,
 }
 
 impl RenderShared {
@@ -41,7 +153,40 @@ impl RenderShared {
             callbacks: AtomicU64::new(0),
             leaked_feeds: AtomicU32::new(0),
             required_epoch: AtomicU32::new(0),
+            meter: Arc::new(LevelMeter::default()),
+            scope: Arc::new(Scope::default()),
+            dither_lsb: AtomicU32::new(0f32.to_bits()),
+            processed: AtomicBool::new(false),
         })
+    }
+    /// The samples for the spectrum display, fed by the callback.
+    pub fn scope(&self) -> &Arc<Scope> {
+        &self.scope
+    }
+    /// Tells the callback the device's integer sample format: `Some(bits)` for an
+    /// integer format of that width, `None` for floating point or unknown.
+    pub fn set_dither_bits(&self, bits: Option<u32>) {
+        let lsb = match bits {
+            Some(bits @ 8..=24) => 1.0 / (1u32 << (bits - 1)) as f32,
+            // 32-bit integer is finer than the 24 bits a float sample carries.
+            _ => 0.0,
+        };
+        self.dither_lsb.store(lsb.to_bits(), Ordering::Relaxed);
+    }
+    /// See the `processed` field.
+    pub fn set_processed(&self, processed: bool) {
+        self.processed.store(processed, Ordering::Relaxed);
+    }
+    /// True when dither is being added: the device is an integer device and the samples
+    /// are not passed through untouched (processed, or the app volume is below 100 %).
+    pub fn dither_active(&self) -> bool {
+        f32::from_bits(self.dither_lsb.load(Ordering::Relaxed)) > 0.0
+            && (self.processed.load(Ordering::Relaxed)
+                || f32::from_bits(self.volume_bits.load(Ordering::Relaxed)) != 1.0)
+    }
+    /// The level meter fed by the callback.
+    pub fn meter(&self) -> &Arc<LevelMeter> {
+        &self.meter
     }
     /// Sets the linear output gain (already mapped from the volume slider).
     pub fn set_volume_gain(&self, gain: f32) {
@@ -93,6 +238,11 @@ pub struct FeedConsumer {
     pub consumer: rtrb::Consumer<f32>,
     /// Set by the decode thread after it has written its very last sample.
     pub finished: Arc<AtomicBool>,
+    /// The feed begins with the first sample of a track (not at a seek position). Such
+    /// a feed is not faded in: how a track begins is part of the track, and a fade
+    /// would take the edge off one that opens on a beat. Anywhere else playback starts
+    /// in the middle of a waveform, where the fade is what prevents a click.
+    pub from_start: bool,
 }
 
 /// Control-thread end of the queues connecting to a [`Renderer`].
@@ -113,6 +263,8 @@ pub struct Renderer {
     fade_step: f32,
     vol: f32,
     vol_step: f32,
+    /// State of the dither noise generator (never 0).
+    noise: u32,
     block: [f32; BLOCK * 2],
 }
 
@@ -133,6 +285,7 @@ pub fn render_pair(shared: Arc<RenderShared>, sample_rate: u32) -> (Renderer, Re
         fade_step: 1.0 / (FADE_SECONDS * rate),
         vol,
         vol_step: 1.0 / (VOLUME_RAMP_SECONDS * rate),
+        noise: 0x9E37_79B9,
         block: [0.0; BLOCK * 2],
     };
     (
@@ -160,6 +313,19 @@ impl Renderer {
         }
     }
 
+    /// The next dither value: triangular noise of ±1 device step (TPDF), which turns the
+    /// rounding to the device's format into steady, signal-independent noise.
+    fn tpdf(&mut self, lsb: f32) -> f32 {
+        let mut next = || {
+            // xorshift32: cheap, no state beyond one word, good enough for dither.
+            self.noise ^= self.noise << 13;
+            self.noise ^= self.noise >> 17;
+            self.noise ^= self.noise << 5;
+            (self.noise >> 8) as f32 / (1u32 << 24) as f32
+        };
+        (next() - next()) * lsb
+    }
+
     /// Fills `out` (interleaved, `channels` per frame) with the next audio.
     pub fn render(&mut self, out: &mut [f32], channels: usize) {
         self.shared.callbacks.fetch_add(1, Ordering::Relaxed);
@@ -172,9 +338,14 @@ impl Renderer {
         let playing = self.shared.playing.load(Ordering::Relaxed);
         let required = self.shared.required_epoch.load(Ordering::Relaxed);
         let vol_target = f32::from_bits(self.shared.volume_bits.load(Ordering::Relaxed));
+        let dither_lsb = f32::from_bits(self.shared.dither_lsb.load(Ordering::Relaxed));
+        let processed = self.shared.processed.load(Ordering::Relaxed);
         let frames = out.len() / channels;
         let mut done = 0;
         let mut underrun = false;
+        // Level of the programme over this callback (see `LevelMeter`).
+        let mut level_sum = [0f32; 2];
+        let mut level_peak = [0f32; 2];
 
         while done < frames {
             if self.pending.is_some() && (self.current.is_none() || self.fade <= 0.0 || !playing) {
@@ -192,6 +363,9 @@ impl Renderer {
             let fading_out = !playing || superseded || self.pending.is_some();
             if fading_out && self.fade <= 0.0 {
                 break; // paused or superseded: hold silently without consuming
+            }
+            if self.consumed == 0 && cur.from_start && !fading_out {
+                self.fade = 1.0; // see `FeedConsumer::from_start`
             }
             let mut n = (frames - done).min(BLOCK);
             if fading_out {
@@ -241,8 +415,26 @@ impl Renderer {
                     self.vol = (self.vol - self.vol_step).max(vol_target);
                 }
                 let g = self.fade * self.vol;
-                let l = (self.block[k * 2] * g).clamp(-1.0, 1.0);
-                let r = (self.block[k * 2 + 1] * g).clamp(-1.0, 1.0);
+                // Untouched samples (full volume, nothing done to them) go out exactly
+                // as they are; anything else is dithered for an integer device.
+                let (dl, dr) = if dither_lsb > 0.0 && (processed || g != 1.0) {
+                    (self.tpdf(dither_lsb), self.tpdf(dither_lsb))
+                } else {
+                    (0.0, 0.0)
+                };
+                let l = (self.block[k * 2] * g + dl).clamp(-1.0, 1.0);
+                let r = (self.block[k * 2 + 1] * g + dr).clamp(-1.0, 1.0);
+                self.shared
+                    .scope
+                    .push((self.block[k * 2] + self.block[k * 2 + 1]) * 0.5 * self.fade);
+                let metered = [
+                    (self.block[k * 2] * self.fade).abs(),
+                    (self.block[k * 2 + 1] * self.fade).abs(),
+                ];
+                for ch in 0..2 {
+                    level_sum[ch] += metered[ch];
+                    level_peak[ch] = level_peak[ch].max(metered[ch]);
+                }
                 let frame = &mut out[(done + k) * channels..(done + k + 1) * channels];
                 if channels == 1 {
                     frame[0] = (l + r) * 0.5;
@@ -262,6 +454,11 @@ impl Renderer {
         if underrun {
             self.shared.underruns.fetch_add(1, Ordering::Relaxed);
         }
+        // Silence written above (paused, starved, end of feed) counts as silence.
+        let span = frames.max(1) as f32;
+        self.shared
+            .meter
+            .store([level_sum[0] / span, level_sum[1] / span], level_peak);
         let epoch = self.current.as_ref().map_or(0, |c| u64::from(c.epoch));
         self.shared.position.store(
             (epoch << EPOCH_SHIFT) | (self.consumed & FRAME_MASK),
@@ -274,6 +471,8 @@ impl Renderer {
 mod tests {
     use super::*;
 
+    /// A feed that starts somewhere inside a track (the usual case for these tests:
+    /// it is the one that is faded in).
     fn feed(
         epoch: u16,
         samples: &[f32],
@@ -289,10 +488,38 @@ mod tests {
                 epoch,
                 consumer: rx,
                 finished: flag.clone(),
+                from_start: false,
             },
             tx,
             flag,
         )
+    }
+
+    #[test]
+    fn a_track_played_from_its_beginning_starts_with_its_own_first_sample() {
+        let (shared, mut r, mut link) = setup(48_000);
+        let (mut f, _tx, _) = feed(3, &[0.5; 8000], false);
+        f.from_start = true;
+        link.incoming.push(f).expect("push");
+        // Handed over while paused: nothing is heard or consumed yet …
+        let mut out = vec![1.0; 64];
+        r.render(&mut out, 2);
+        assert!(out.iter().all(|s| *s == 0.0));
+        assert_eq!(shared.position(), (3, 0));
+        // … and when playback starts, the first sample is the track's, at full level.
+        shared.set_playing(true);
+        let mut out = vec![0.0; 2000];
+        r.render(&mut out, 2);
+        assert!(out.iter().all(|s| *s == 0.5), "no fade-in");
+        // Pausing and resuming in the middle is still faded both ways.
+        shared.set_playing(false);
+        let mut out = vec![0.0; 2000];
+        r.render(&mut out, 2);
+        assert!(out[0] < 0.5 && out[1998] == 0.0, "fade-out");
+        shared.set_playing(true);
+        let mut out = vec![0.0; 2000];
+        r.render(&mut out, 2);
+        assert!(out[0].abs() < 0.01 && out[1998] == 0.5, "fade back in");
     }
 
     fn setup(rate: u32) -> (Arc<RenderShared>, Renderer, RenderLink) {
@@ -439,6 +666,120 @@ mod tests {
         let left: Vec<f32> = out.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
         assert!(left.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01));
         assert!((left.last().expect("sample") - 0.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn levels_follow_the_programme_not_the_volume() {
+        let (shared, mut r, mut link) = setup(48_000);
+        // Left at 0.5, right at 0.25, with one louder sample on the right.
+        let mut samples: Vec<f32> = (0..9600).flat_map(|_| [0.5, -0.25]).collect();
+        samples[14_001] = 0.9; // frame 7000, in the second callback below
+        let (a, _atx, _) = feed(1, &samples, false);
+        link.incoming.push(a).expect("push");
+        shared.set_volume_gain(0.0); // the listener hears nothing…
+        shared.set_playing(true);
+        let mut out = vec![0.0; 9600];
+        r.render(&mut out, 2); // (contains the fade-in)
+        shared.meter().read();
+        r.render(&mut out, 2);
+        assert!(out.iter().all(|s| s.abs() < 1e-6));
+        // …but the meter shows the music.
+        let levels = shared.meter().read();
+        assert!((levels.average[0] - 0.5).abs() < 1e-4, "{levels:?}");
+        assert!((levels.average[1] - 0.25).abs() < 1e-3, "{levels:?}");
+        assert_eq!(levels.peak, [0.5, 0.9]);
+        // Peaks are handed out once; the average stays until the next callback.
+        let again = shared.meter().read();
+        assert_eq!(again.peak, [0.0, 0.0]);
+        assert_eq!(again.average, levels.average);
+        // Paused: the needle's target is silence.
+        shared.set_playing(false);
+        r.render(&mut out, 2);
+        r.render(&mut out, 2);
+        assert_eq!(shared.meter().read().average, [0.0, 0.0]);
+        shared.meter().reset();
+        assert_eq!(shared.meter().read(), Levels::default());
+    }
+
+    /// Dither: none when the samples pass through untouched, triangular noise of at most
+    /// one device step otherwise.
+    #[test]
+    fn dither_only_touches_samples_that_are_no_longer_the_files_own() {
+        let step = 1.0 / 32_768.0; // a 16-bit device
+        let run = |volume: f32, processed: bool, bits: Option<u32>| -> Vec<f32> {
+            let (shared, mut r, mut link) = setup(48_000);
+            shared.set_volume_gain(volume);
+            shared.set_dither_bits(bits);
+            shared.set_processed(processed);
+            let (a, _atx, _) = feed(1, &[0.25; 40_000], false);
+            link.incoming.push(a).expect("push");
+            shared.set_playing(true);
+            let mut out = vec![0.0; 20_000];
+            r.render(&mut out, 2); // fade-in and volume settle here
+            r.render(&mut out, 2);
+            out
+        };
+        // Full volume, untouched: exact, with or without an integer device.
+        assert!(run(1.0, false, Some(16)).iter().all(|s| *s == 0.25));
+        assert!(run(1.0, false, None).iter().all(|s| *s == 0.25));
+        // A float device never gets dither, whatever is done to the signal.
+        assert!(run(0.5, true, None).iter().all(|s| *s == 0.125));
+        assert!(run(0.5, true, Some(32)).iter().all(|s| *s == 0.125));
+        // Reduced volume on a 16-bit device: noise around the scaled value.
+        for (volume, processed, expected) in [(0.5, false, 0.125), (1.0, true, 0.25)] {
+            let out = run(volume, processed, Some(16));
+            let errors: Vec<f32> = out.iter().map(|s| s - expected).collect();
+            assert!(
+                errors.iter().all(|e| e.abs() <= step * 1.0001),
+                "more than one step"
+            );
+            assert!(
+                errors.iter().any(|e| *e > step * 0.5) && errors.iter().any(|e| *e < -step * 0.5)
+            );
+            let mean = errors.iter().sum::<f32>() / errors.len() as f32;
+            assert!(mean.abs() < step * 0.05, "dither is not centred: {mean}");
+            // Triangular: the variance of the difference of two uniform numbers is 1/6.
+            let variance =
+                errors.iter().map(|e| (e / step).powi(2)).sum::<f32>() / errors.len() as f32;
+            assert!((variance - 1.0 / 6.0).abs() < 0.02, "variance {variance}");
+        }
+        let (shared, _r, _link) = setup(48_000);
+        shared.set_dither_bits(Some(24));
+        assert!(!shared.dither_active(), "full volume, untouched");
+        shared.set_processed(true);
+        assert!(shared.dither_active());
+        shared.set_dither_bits(None);
+        assert!(!shared.dither_active());
+    }
+
+    #[test]
+    fn the_scope_holds_the_latest_samples_in_order() {
+        let (shared, mut r, mut link) = setup(48_000);
+        // A ramp on both channels, so that the mono mix is the ramp itself.
+        let samples: Vec<f32> = (0..6000).flat_map(|i| [i as f32 / 8000.0; 2]).collect();
+        let (a, _atx, _) = feed(1, &samples, false);
+        link.incoming.push(a).expect("push");
+        shared.set_volume_gain(0.0); // the scope shows the music, not the volume
+        shared.set_playing(true);
+        let mut out = vec![0.0; 12_000];
+        r.render(&mut out, 2);
+        let mut latest = [0f32; 1000];
+        shared.scope().latest(&mut latest);
+        assert_eq!(latest[999], 5999.0 / 8000.0);
+        assert!(
+            latest.windows(2).all(|w| w[1] > w[0]),
+            "in order, oldest first"
+        );
+        // More than has been played: silence in front.
+        let scope = Scope::default();
+        scope.push(0.5);
+        scope.push(0.75);
+        let mut four = [9.0f32; 4];
+        scope.latest(&mut four);
+        assert_eq!(four, [0.0, 0.0, 0.5, 0.75]);
+        scope.reset();
+        scope.latest(&mut four);
+        assert_eq!(four, [0.0; 4]);
     }
 
     #[test]

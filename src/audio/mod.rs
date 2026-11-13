@@ -1,19 +1,26 @@
-//! Audio pipeline: file → decode → stereo map → ReplayGain → resample → PCM ring → output callback.
+//! Audio pipeline: file → decode → stereo map → ReplayGain → resample → peak limiter → PCM ring
+//! → output callback.
 //!
 //! See `docs/ARCHITECTURE.md` ("오디오 경로") for the design and threading rules.
+pub mod crossfeed;
 pub mod decoder;
 pub mod dsp;
 pub mod engine;
+pub mod eq;
 pub mod feed;
+pub mod limiter;
 pub mod output;
 pub mod render;
-
 pub mod resample;
+pub mod source;
 
+pub use crossfeed::Crossfeed;
 pub use dsp::{ReplayGainMode, ReplayGainSettings};
-pub use engine::{Engine, EngineEvent};
+pub use engine::{Engine, EngineEvent, OutputStatus};
+pub use eq::{EqPreset, EqSettings};
 pub use feed::{NextSlot, NextTrack, TrackRequest};
-pub use output::{OutputDeviceInfo, OutputError};
+pub use output::{OutputDeviceInfo, OutputError, OutputSettings};
+pub use render::{LevelMeter, Levels, SCOPE_LEN, Scope};
 
 /// Why a track could not be played. The UI turns this into a localized message.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -15,6 +15,7 @@ $FF -i full.wav -af "atrim=start_sample=44100,asetpts=PTS-STARTPTS" -c:a pcm_s16
 for half in gap_a gap_b; do
   $FF -i $half.wav -c:a flac $half.flac
   $FF -i $half.wav -c:a libmp3lame -b:a 192k $half.mp3
+  $FF -i $half.wav -c:a mp2 -b:a 256k $half.mp2
   $FF -i $half.wav -c:a aac -b:a 160k $half.aac.m4a
   $FF -i $half.wav -c:a alac $half.alac.m4a
   $FF -i $half.wav -c:a pcm_s16be $half.aiff

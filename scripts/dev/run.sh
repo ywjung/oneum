@@ -14,7 +14,7 @@ pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true
 sleep 0.5
 mkdir -p dist/dev
 # shellcheck disable=SC2086
-ONEUM_APP_DIR=dist/dev scripts/package.sh $MODE >/dev/null
+ONEUM_APP_DIR=dist/dev ONEUM_AUTOMATION=1 scripts/package.sh $MODE >/dev/null
 mkdir -p "$PROFILE"
 : > "$PROFILE/script.txt"
 MEDIA_ENV="--env ONEUM_NO_MEDIA_SESSION=1"

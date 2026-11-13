@@ -1,43 +1,9 @@
 //! The native menu bar (muda). Menu items only produce [`MenuAction`]s; the app decides
 //! what they do, so menu commands and in-window controls share one code path.
 use crate::i18n::Strings;
+use crate::platform::MenuAction;
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuAction {
-    Settings,
-    OpenFiles,
-    AddFolder,
-    NewPlaylist,
-    ImportPlaylist,
-    Find,
-    PlayPause,
-    Next,
-    Previous,
-    VolumeUp,
-    VolumeDown,
-    ToggleShuffle,
-    CycleRepeat,
-    GoToCurrent,
-    ToggleQueue,
-    ToggleInfo,
-    Rescan,
-    ShowMainWindow,
-    UserGuide,
-    ToggleMute,
-    /// These act on the playlist that is open in the window.
-    PlaylistRename,
-    PlaylistExport,
-    PlaylistDelete,
-    /// The "Song" menu: these act on the rows selected in the window.
-    SongPlay,
-    SongPlayNext,
-    SongAddToQueue,
-    SongToggleFavorite,
-    SongShowInFinder,
-    SongInfo,
-}
 
 const ACTIONS: &[(&str, MenuAction)] = &[
     ("settings", MenuAction::Settings),
@@ -56,6 +22,8 @@ const ACTIONS: &[(&str, MenuAction)] = &[
     ("go_to_current", MenuAction::GoToCurrent),
     ("toggle_queue", MenuAction::ToggleQueue),
     ("toggle_info", MenuAction::ToggleInfo),
+    ("toggle_meter", MenuAction::ToggleMeter),
+    ("equalizer", MenuAction::Equalizer),
     ("rescan", MenuAction::Rescan),
     ("main_window", MenuAction::ShowMainWindow),
     ("user_guide", MenuAction::UserGuide),
@@ -231,6 +199,12 @@ impl AppMenu {
             view.append_items(&[
                 &item(MenuAction::ToggleQueue, s.menu_show_queue, cmd(Code::KeyU)),
                 &item(MenuAction::ToggleInfo, s.menu_show_info, cmd(Code::KeyI)),
+                &item(
+                    MenuAction::ToggleMeter,
+                    s.menu_show_meter,
+                    cmd_shift(Code::KeyU),
+                ),
+                &item(MenuAction::Equalizer, s.menu_equalizer, cmd(Code::KeyE)),
                 &sep(),
                 &PredefinedMenuItem::fullscreen(Some(s.menu_fullscreen)),
             ])?;

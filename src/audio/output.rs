@@ -4,9 +4,290 @@
 //! the system default automatically, which would move playback to the speakers when
 //! headphones are unplugged; we want to pause instead.
 use super::render::{RenderLink, RenderShared, Renderer, render_pair};
+use crate::platform::device::{AudioDevice, PhysicalFormat};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
+
+/// How long a device may take to switch its rate or format. USB DACs that click a relay
+/// need a moment; the built-in output answers within milliseconds.
+const FORMAT_SWITCH_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a device may take to change its sample format once the rate is right.
+const BIT_DEPTH_SWITCH_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// How the output device is used (docs/ARCHITECTURE.md, "출력 품질 옵션"). Everything is
+/// off by default: the device is then left exactly as the system has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputSettings {
+    /// Run the device at the track's own sample rate (and its widest sample format)
+    /// instead of converting the track to whatever rate the device happens to be at.
+    pub match_sample_rate: bool,
+    /// Take exclusive access to the device while playing: no other app can play through
+    /// it or change its format.
+    pub exclusive: bool,
+    /// Load each file into memory while it plays (and the next one ahead of time), so
+    /// playback does not depend on the disk.
+    pub memory_playback: bool,
+}
+
+impl OutputSettings {
+    /// True when the settings ask for anything that touches the device itself.
+    pub fn touches_device(&self) -> bool {
+        self.match_sample_rate || self.exclusive
+    }
+}
+
+/// The rate to run a device at for a track of `source` Hz, given the rates the device
+/// offers as inclusive `(min, max)` ranges. `None` when there is nothing to choose from.
+///
+/// Order of preference: the track's own rate (no conversion at all); the smallest whole
+/// multiple of it; the nearest rate above; the highest rate there is. In other words a
+/// rate that keeps everything the file holds while there is one, and otherwise the
+/// one that keeps the most. Whether the two rates are in a simple ratio does not come
+/// into it: the converter is as clean at any ratio (see the tests in `resample.rs`).
+pub fn choose_rate(source: u32, ranges: &[(u32, u32)]) -> Option<u32> {
+    if source == 0 || ranges.is_empty() {
+        return None;
+    }
+    let offered = |rate: u32| ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&rate));
+    if offered(source) {
+        return Some(source);
+    }
+    const RATIOS: [u32; 5] = [2, 3, 4, 6, 8];
+    if let Some(rate) = RATIOS
+        .iter()
+        .filter_map(|k| source.checked_mul(*k))
+        .find(|r| offered(*r))
+    {
+        return Some(rate);
+    }
+    let above = ranges
+        .iter()
+        .filter(|(_, hi)| *hi >= source)
+        .map(|(lo, _)| (*lo).max(source))
+        .min();
+    above.or_else(|| ranges.iter().map(|(_, hi)| *hi).max())
+}
+
+/// What matters about a hardware format when choosing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatTraits {
+    /// Usable by the system mixer (see `PhysicalFormat::mixable`).
+    pub mixable: bool,
+    pub supports_rate: bool,
+    pub bits: u32,
+    pub channels: u32,
+    pub float: bool,
+    pub pcm: bool,
+}
+
+/// Index of the hardware format to use: linear PCM at the wanted rate, with the channel
+/// count the device is using now if possible, and the widest samples on offer. Our
+/// pipeline is 32-bit float, so nothing wider than 32 bits is of any use; between equally
+/// wide formats the kind the device is using now (integer or float) wins, so that a
+/// device is not reconfigured for nothing.
+pub fn best_format(formats: &[FormatTraits], channels_now: u32, float_now: bool) -> Option<usize> {
+    formats
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.pcm && f.mixable && f.supports_rate && f.channels > 0 && f.bits > 0)
+        .max_by_key(|(i, f)| {
+            (
+                f.channels == channels_now,
+                f.bits.min(32),
+                f.float == float_now,
+                // Earlier entries win ties: `max_by_key` would otherwise take the last.
+                usize::MAX - i,
+            )
+        })
+        .map(|(i, _)| i)
+}
+
+/// What the device was like before we changed it.
+struct Original {
+    rate: Option<u32>,
+    format: Option<PhysicalFormat>,
+}
+
+/// Our claim on an output device: exclusive access and/or a changed format. Dropping it
+/// puts the device back the way it was found.
+pub struct DeviceHold {
+    /// CPAL id of the device.
+    pub device_id: String,
+    device: AudioDevice,
+    hogging: bool,
+    original: Option<Original>,
+}
+
+impl DeviceHold {
+    /// `None` when the device cannot be found through the audio HAL.
+    pub fn acquire(device_id: &str, exclusive: bool) -> Option<Self> {
+        let device = AudioDevice::from_cpal_id(device_id)?;
+        let mut hold = Self {
+            device_id: device_id.to_string(),
+            device,
+            hogging: false,
+            original: None,
+        };
+        hold.set_exclusive(exclusive);
+        Some(hold)
+    }
+
+    /// Takes or gives back exclusive access. Failing to get it is not an error: playback
+    /// goes on shared, and [`DeviceHold::is_exclusive`] says so.
+    pub fn set_exclusive(&mut self, exclusive: bool) {
+        if exclusive && !self.hogging {
+            self.hogging = self.device.take_hog();
+            if !self.hogging {
+                tracing::warn!("exclusive access to the output device was refused");
+            }
+        } else if !exclusive {
+            // Also when we believe we never got it: a grant that arrived after we
+            // stopped waiting for it would otherwise never be given back.
+            self.device.release_hog();
+            self.hogging = false;
+        }
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.hogging
+    }
+
+    pub fn rate_ranges(&self) -> Vec<(u32, u32)> {
+        self.device.rate_ranges()
+    }
+
+    /// The hardware format right now: `(bits, is_float)`.
+    pub fn hardware_bits(&self) -> Option<(u32, bool)> {
+        self.device.physical_format().map(|f| (f.bits, f.float))
+    }
+
+    pub fn nominal_rate(&self) -> Option<u32> {
+        self.device.nominal_rate()
+    }
+
+    /// The widest hardware format the device offers at `rate`, if that is wider than
+    /// what it is using now.
+    fn wider_format(&self, rate: u32) -> Option<PhysicalFormat> {
+        let current = self.device.physical_format()?;
+        let formats = self.device.physical_formats();
+        let traits: Vec<FormatTraits> = formats
+            .iter()
+            .map(|f| FormatTraits {
+                mixable: f.mixable,
+                supports_rate: f.supports_rate(rate),
+                bits: f.bits,
+                channels: f.channels,
+                float: f.float,
+                pcm: f.pcm,
+            })
+            .collect();
+        let best = formats[best_format(&traits, current.channels, current.float)?];
+        (best.bits.min(32) > current.bits.min(32)).then_some(best)
+    }
+
+    /// Runs the device at `rate`, in its widest sample format. Returns false when the
+    /// device did not follow (it then stays usable at whatever rate it has).
+    pub fn apply_rate(&mut self, rate: u32) -> bool {
+        let rate_now = self.device.nominal_rate();
+        let wider = self.wider_format(rate);
+        if rate_now == Some(rate) && wider.is_none() {
+            return true;
+        }
+        if self.original.is_none() {
+            self.original = Some(Original {
+                rate: rate_now,
+                format: self.device.physical_format(),
+            });
+        }
+        // The clock rate first: every device understands that, and it is what decides
+        // whether we have to resample. Wider samples are asked for separately, and a
+        // device that does not follow there is still running at the right rate.
+        let ok = self.device.set_nominal_rate(rate, FORMAT_SWITCH_TIMEOUT);
+        if ok
+            && let Some(format) = wider.or_else(|| self.wider_format(rate))
+            && !self
+                .device
+                .set_physical_format(&format, rate, BIT_DEPTH_SWITCH_TIMEOUT)
+        {
+            tracing::info!(
+                bits = format.bits,
+                "the output device kept its sample format"
+            );
+        }
+        tracing::info!(
+            rate,
+            ok,
+            bits = self.device.physical_format().map(|f| f.bits),
+            "output device format requested"
+        );
+        ok
+    }
+
+    /// Puts rate and format back the way they were before [`DeviceHold::apply_rate`].
+    fn restore(&mut self) {
+        let Some(original) = self.original.take() else {
+            return;
+        };
+        // An unplugged device answers nothing; one taken over by another app is theirs.
+        if self.device.nominal_rate().is_none()
+            || self
+                .device
+                .hog_owner()
+                .is_some_and(|pid| pid != std::process::id() as i32)
+        {
+            return;
+        }
+        let mut restored = original
+            .rate
+            .is_none_or(|rate| self.device.set_nominal_rate(rate, FORMAT_SWITCH_TIMEOUT));
+        if let Some(format) = original.format
+            && format.sample_rate > 0
+            && self.device.physical_format().is_some_and(|now| {
+                now.bits != format.bits
+                    || now.float != format.float
+                    || now.mixable != format.mixable
+            })
+        {
+            restored &= self.device.set_physical_format(
+                &format,
+                format.sample_rate,
+                BIT_DEPTH_SWITCH_TIMEOUT,
+            );
+        }
+        tracing::info!(restored, "output device format put back");
+    }
+}
+
+impl Drop for DeviceHold {
+    fn drop(&mut self) {
+        self.restore();
+        // Unconditionally (it only acts when this process holds the device): see
+        // `set_exclusive`.
+        self.device.release_hog();
+        self.hogging = false;
+    }
+}
+
+/// Rates `device_id` can run at; empty when the device cannot be asked.
+pub fn device_rate_ranges(device_id: &str) -> Vec<(u32, u32)> {
+    AudioDevice::from_cpal_id(device_id).map_or_else(Vec::new, |d| d.rate_ranges())
+}
+
+/// The clock rate `device_id` is running at right now.
+pub fn device_nominal_rate(device_id: &str) -> Option<u32> {
+    AudioDevice::from_cpal_id(device_id)?.nominal_rate()
+}
+
+/// The hardware sample format of `device_id` right now: `(bits, is_float)`.
+pub fn device_hardware_bits(device_id: &str) -> Option<(u32, bool)> {
+    AudioDevice::from_cpal_id(device_id)?
+        .physical_format()
+        .map(|f| (f.bits, f.float))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputDeviceInfo {
@@ -209,6 +490,23 @@ impl OutputStream {
         self.running
     }
 
+    /// Stops the callback without the engine's knowledge, the way the backend does before
+    /// it reports a format notification. For the device self-test only.
+    pub fn stop_like_the_backend(&mut self) {
+        let _ = self.stream.pause();
+    }
+
+    /// Starts the callback again after the backend stopped it on its own: CPAL pauses a
+    /// stream before it reports that the device's format changed, whether or not the
+    /// stream is still good.
+    pub fn resume_after_notification(&mut self) -> Result<(), OutputError> {
+        if !self.running {
+            return Ok(());
+        }
+        self.running = false;
+        self.set_running(true)
+    }
+
     /// Starts or stops the device callback. A stopped stream lets the device (and the Mac) sleep.
     pub fn set_running(&mut self, run: bool) -> Result<(), OutputError> {
         if run == self.running {
@@ -289,4 +587,152 @@ where
             None,
         )
         .map_err(|e| OutputError::Backend(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn discrete(rates: &[u32]) -> Vec<(u32, u32)> {
+        rates.iter().map(|r| (*r, *r)).collect()
+    }
+
+    #[test]
+    fn the_tracks_own_rate_wins_when_the_device_offers_it() {
+        let dac = discrete(&[44_100, 48_000, 88_200, 96_000, 176_400, 192_000]);
+        for rate in [44_100, 48_000, 88_200, 96_000, 176_400, 192_000] {
+            assert_eq!(choose_rate(rate, &dac), Some(rate));
+        }
+        // A virtual device offering a continuous range.
+        assert_eq!(choose_rate(44_100, &[(8_000, 384_000)]), Some(44_100));
+    }
+
+    #[test]
+    fn otherwise_the_rate_that_keeps_the_most_is_chosen() {
+        // Built-in output: nothing above 96 kHz, so that is what keeps the most.
+        let builtin = discrete(&[44_100, 48_000, 88_200, 96_000]);
+        assert_eq!(choose_rate(176_400, &builtin), Some(96_000));
+        assert_eq!(choose_rate(192_000, &builtin), Some(96_000));
+        assert_eq!(choose_rate(352_800, &builtin), Some(96_000));
+        // Low rates go up by a whole factor: 22.05 → 44.1, 32 → 96 (3×), 8 → 48 (6×).
+        assert_eq!(choose_rate(22_050, &builtin), Some(44_100));
+        assert_eq!(choose_rate(32_000, &builtin), Some(96_000));
+        assert_eq!(choose_rate(8_000, &builtin), Some(48_000));
+        // A 48 kHz-only device and a CD: no multiple fits, take the nearest rate above.
+        assert_eq!(choose_rate(44_100, &discrete(&[48_000])), Some(48_000));
+        assert_eq!(
+            choose_rate(44_100, &discrete(&[48_000, 96_000])),
+            Some(48_000)
+        );
+        // An older USB DAC without the 88.2 kHz family: an 88.2 kHz file goes up to
+        // 96 kHz, not down to 44.1 kHz where half of what it holds would be cut off.
+        let usb1 = discrete(&[44_100, 48_000, 96_000]);
+        assert_eq!(choose_rate(88_200, &usb1), Some(96_000));
+        assert_eq!(choose_rate(176_400, &usb1), Some(96_000));
+        assert_eq!(choose_rate(192_000, &usb1), Some(96_000));
+        // Nothing above either: the highest there is.
+        assert_eq!(choose_rate(96_000, &discrete(&[44_100])), Some(44_100));
+        assert_eq!(
+            choose_rate(50_000, &discrete(&[44_100, 48_000])),
+            Some(48_000)
+        );
+    }
+
+    #[test]
+    fn no_choice_without_a_rate_or_a_device() {
+        assert_eq!(choose_rate(0, &discrete(&[44_100])), None);
+        assert_eq!(choose_rate(44_100, &[]), None);
+    }
+
+    fn format(bits: u32, float: bool, supports_rate: bool) -> FormatTraits {
+        FormatTraits {
+            mixable: true,
+            supports_rate,
+            bits,
+            channels: 2,
+            float,
+            pcm: true,
+        }
+    }
+
+    #[test]
+    fn the_widest_format_at_the_wanted_rate_is_chosen() {
+        // A typical USB DAC: 16/24/32-bit integer.
+        let dac = [
+            format(16, false, true),
+            format(24, false, true),
+            format(32, false, true),
+        ];
+        assert_eq!(best_format(&dac, 2, false), Some(2));
+        // Wider formats that are not offered at this rate do not count.
+        let partial = [
+            format(16, false, true),
+            format(24, false, true),
+            format(32, false, false),
+        ];
+        assert_eq!(best_format(&partial, 2, false), Some(1));
+        // Built-in output: float only.
+        assert_eq!(best_format(&[format(32, true, true)], 2, true), Some(0));
+        // Equally wide: stay with the kind in use, and with the first of equals.
+        let mixed = [format(32, false, true), format(32, true, true)];
+        assert_eq!(best_format(&mixed, 2, true), Some(1));
+        assert_eq!(best_format(&mixed, 2, false), Some(0));
+        let twins = [format(24, false, true), format(24, false, true)];
+        assert_eq!(best_format(&twins, 2, false), Some(0));
+        // 64-bit float is no better than 32-bit for a 32-bit pipeline.
+        let wide = [format(32, true, true), format(64, true, true)];
+        assert_eq!(best_format(&wide, 2, true), Some(0));
+    }
+
+    #[test]
+    fn formats_that_cannot_be_used_are_never_chosen() {
+        let ac3 = FormatTraits {
+            pcm: false,
+            ..format(16, false, true)
+        };
+        assert_eq!(best_format(&[ac3], 2, false), None);
+        assert_eq!(best_format(&[format(24, false, false)], 2, false), None);
+        // The non-mixable twin of a format would lock every other app out of the device:
+        // it is never chosen, even when it is listed first or is the wider one.
+        let locked = |bits| FormatTraits {
+            mixable: false,
+            ..format(bits, false, true)
+        };
+        assert_eq!(
+            best_format(&[locked(24), format(24, false, true)], 2, false),
+            Some(1)
+        );
+        assert_eq!(
+            best_format(&[locked(32), format(16, false, true)], 2, false),
+            Some(1)
+        );
+        assert_eq!(best_format(&[locked(24)], 2, false), None);
+        assert_eq!(best_format(&[], 2, false), None);
+        // The channel count in use is kept when a format with it exists.
+        let multi = FormatTraits {
+            channels: 8,
+            ..format(32, false, true)
+        };
+        assert_eq!(
+            best_format(&[multi, format(24, false, true)], 2, false),
+            Some(1)
+        );
+        assert_eq!(best_format(&[multi], 2, false), Some(0));
+    }
+
+    #[test]
+    fn default_settings_leave_the_device_alone() {
+        let settings = OutputSettings::default();
+        assert!(!settings.touches_device());
+        assert!(!settings.memory_playback);
+        let json = serde_json::to_string(&settings).expect("serializes");
+        assert_eq!(
+            serde_json::from_str::<OutputSettings>(&json).expect("parses"),
+            settings
+        );
+        assert_eq!(
+            serde_json::from_str::<OutputSettings>("{}").expect("parses"),
+            settings
+        );
+    }
 }

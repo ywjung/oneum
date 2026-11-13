@@ -1,6 +1,8 @@
-//! OnEum — a local music player for macOS.
+//! OnEum — a local music player for macOS and Windows.
+// A Windows GUI program: no console window behind it.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 use eframe::egui;
-use oneum::{app, platform::macos::app_hooks, ui::OneumApp};
+use oneum::{app, platform::app_hooks, ui::OneumApp};
 
 fn main() {
     // Must be registered before the event loop exists so that files the app is launched
@@ -30,7 +32,9 @@ fn main() {
             .with_title("OnEum")
             .with_inner_size(size)
             .with_min_inner_size([760.0, 480.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(window_icon()),
+        #[cfg(target_os = "macos")]
         event_loop_builder: Some(Box::new(|builder| {
             use winit::platform::macos::EventLoopBuilderExtMacOS;
             // The menu bar is built by the app (platform::macos::menu).
@@ -54,17 +58,27 @@ fn main() {
     core.shutdown();
 }
 
+/// The icon of the window and the taskbar button. On a Mac the icon comes from the app
+/// bundle, so none is set here.
+fn window_icon() -> egui::IconData {
+    #[cfg(not(target_os = "macos"))]
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-160.png")) {
+        return icon;
+    }
+    egui::IconData::default()
+}
+
 /// Tells the user why the app is not coming up, in the system language.
 fn startup_alert(detail: &str) {
     use oneum::i18n::Lang;
-    let lang = if oneum::platform::macos::locale::prefers_korean() {
+    let lang = if oneum::platform::locale::prefers_korean() {
         Lang::Ko
     } else {
         Lang::En
     };
     let s = lang.strings();
     let log = oneum::app::log_dir_hint();
-    oneum::platform::macos::fatal_alert(
+    oneum::platform::fatal_alert(
         s.startup_failed_title,
         &format!(
             "{}\n\n{detail}\n\n{}: {log}",

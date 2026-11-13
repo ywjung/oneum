@@ -4,15 +4,19 @@
 //! naturally the same feed continues with the next track, writing into the same ring,
 //! which is what makes transitions gapless. Output of an abandoned feed lands in a ring
 //! nobody reads, so stale audio can never leak into a newer feed.
-use super::decoder::{SourceInfo, TrackDecoder};
+use super::crossfeed::{Crossfeed, Crossfeeder};
+use super::decoder::{SourceInfo, TrackDecoder, map_file_error, sanitize};
 use super::dsp::{ReplayGainMode, ReplayGainSettings, replaygain_factor, to_stereo};
+use super::eq::{EqShared, Equalizer};
+use super::limiter::PeakLimiter;
 use super::render::FeedConsumer;
 use super::resample::StereoResampler;
+use super::source::{FileInMemory, LoadCompletion};
 use super::{PlaybackError, PlaybackErrorKind};
 use crate::model::{ReplayGainTags, TrackId};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,6 +32,9 @@ const RING_FULL_SLEEP: Duration = Duration::from_millis(10);
 /// The decode thread waits for at least this much room (in seconds of audio) before
 /// writing again, instead of trickling a few frames in after every sleep.
 const RING_REFILL_SECONDS: f64 = 0.1;
+/// Memory playback: how often the decode thread looks whether the next track can be
+/// loaded ahead.
+const PRELOAD_CHECK: Duration = Duration::from_millis(250);
 
 /// Unit tests only: a feed whose first request has this item id panics while decoding.
 #[cfg(test)]
@@ -62,6 +69,13 @@ impl NextSlot {
     pub fn set(&self, next: NextTrack) {
         if let Ok(mut slot) = self.0.lock() {
             *slot = next;
+        }
+    }
+    /// What is announced right now, without taking it.
+    fn peek(&self) -> NextTrack {
+        match self.0.lock() {
+            Ok(slot) => slot.clone(),
+            Err(_) => NextTrack::End,
         }
     }
     /// Takes the announced track, leaving `Pending`. `End` stays in place.
@@ -129,6 +143,9 @@ pub enum FeedEvent {
         /// Position inside the track (ms) that `at_frame` corresponds to.
         start_ms: u64,
         info: SourceInfo,
+        /// What the peak limiter's counter (`FeedParams::limited`) stood at when the
+        /// track began.
+        limited_before: u64,
     },
     /// The track could not be opened or broke mid-way. The feed ends after what was written.
     TrackFailed {
@@ -157,6 +174,15 @@ pub struct FeedParams {
     pub next: Arc<NextSlot>,
     pub rg: Arc<RgShared>,
     pub events: Sender<FeedEvent>,
+    /// Memory playback: load each file into memory while it plays, and the next one
+    /// ahead of time.
+    pub memory: bool,
+    /// Counts the frames whose gain the peak limiter turned down (all feeds together).
+    pub limited: Arc<AtomicU64>,
+    /// The equalizer's settings; followed while the feed runs.
+    pub eq: Arc<EqShared>,
+    /// The headphone crossfeed setting (`Crossfeed::to_u8`); followed like the equalizer.
+    pub crossfeed: Arc<AtomicU8>,
 }
 
 impl FeedHandle {
@@ -168,6 +194,7 @@ impl FeedHandle {
         let finished = Arc::new(AtomicBool::new(false));
         let written = Arc::new(AtomicU64::new(0));
         let epoch = params.epoch;
+        let from_start = params.start_ms == 0;
         let worker = Worker {
             current: (params.first.item_id, params.first.track_id),
             refill: ((f64::from(params.out_rate) * RING_REFILL_SECONDS) as usize * 2)
@@ -177,6 +204,9 @@ impl FeedHandle {
             cancel: cancel.clone(),
             finished: finished.clone(),
             written: written.clone(),
+            preload: None,
+            current_load: None,
+            last_preload_check: Instant::now(),
         };
         std::thread::Builder::new()
             .name(format!("oneum-decode-{epoch}"))
@@ -191,6 +221,7 @@ impl FeedHandle {
                 epoch,
                 consumer,
                 finished,
+                from_start,
             }),
         })
     }
@@ -228,9 +259,100 @@ struct Worker {
     cancel: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
     written: Arc<AtomicU64>,
+    /// Memory playback: the track after the current one, being opened and loaded ahead.
+    preload: Option<Preload>,
+    /// Memory playback: turns true when the current track is entirely in memory.
+    current_load: Option<LoadCompletion>,
+    last_preload_check: Instant,
+}
+
+/// A file being opened ahead of its turn, on a thread of its own: opening can block for
+/// seconds (a drive that has to spin up, a share that does not answer), and the decode
+/// thread must go on feeding the track that is playing meanwhile.
+struct Preload {
+    path: PathBuf,
+    /// The opened file, once: `None` inside when it is not suited or could not be opened.
+    opened: Receiver<Option<FileInMemory>>,
+}
+
+impl Preload {
+    fn start(path: &std::path::Path) -> Option<Self> {
+        let (tx, opened) = channel();
+        let target = path.to_path_buf();
+        std::thread::Builder::new()
+            .name("oneum-preopen".into())
+            .spawn(move || {
+                // A failure is not reported from here: the track is opened again when
+                // its turn comes, and fails then if it is still unreadable.
+                let _ = tx.send(FileInMemory::start(&target).ok().flatten());
+            })
+            .ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            opened,
+        })
+    }
+
+    /// The file, if it has been opened by now and is suited for memory playback.
+    fn take(self) -> Option<FileInMemory> {
+        self.opened.try_recv().ok().flatten()
+    }
 }
 
 impl Worker {
+    /// Opens the decoder for `req`: from memory when memory playback is on (using the
+    /// file loaded ahead, if it is this one), from the file otherwise.
+    fn open_decoder(&mut self, req: &TrackRequest) -> Result<TrackDecoder, PlaybackError> {
+        self.current_load = None;
+        if !self.params.memory {
+            return TrackDecoder::open(&req.path);
+        }
+        let ahead = self
+            .preload
+            .take()
+            .filter(|p| p.path == req.path)
+            .and_then(Preload::take);
+        let file = match ahead {
+            Some(file) => Some(file),
+            None => FileInMemory::start(&req.path).map_err(|e| map_file_error(&e))?,
+        };
+        match file {
+            Some(file) => {
+                self.current_load = Some(file.completion());
+                TrackDecoder::open_in_memory(file)
+            }
+            // Too large for memory: streamed like without memory playback.
+            None => TrackDecoder::open(&req.path),
+        }
+    }
+
+    /// Memory playback: once the current track is in memory, start loading the one the
+    /// controller has announced to follow (on a thread of its own, see [`Preload`]). One
+    /// file is read at a time, and the disk is
+    /// used long before the track boundary: a drive that went to sleep during a long
+    /// track has the whole track to wake up.
+    fn preload_next(&mut self) {
+        if !self.params.memory || self.last_preload_check.elapsed() < PRELOAD_CHECK {
+            return;
+        }
+        self.last_preload_check = Instant::now();
+        if self.current_load.as_ref().is_some_and(|c| !c.is_complete()) {
+            return;
+        }
+        match self.params.next.peek() {
+            NextTrack::Track(next) => {
+                // Once per track that is announced: a file that cannot be loaded ahead
+                // (too large, unreadable) is not tried again and again.
+                if self.preload.as_ref().is_none_or(|p| p.path != next.path) {
+                    self.preload = Preload::start(&next.path);
+                }
+            }
+            NextTrack::End => self.preload = None,
+            // Not decided yet (or already taken): keep what is there.
+            NextTrack::Pending => {}
+        }
+    }
+
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
@@ -260,6 +382,40 @@ impl Worker {
             offset += n;
         }
         true
+    }
+
+    /// Sends `samples` through the peak limiter and on into the ring. Returns the
+    /// frames written (the limiter keeps its look-ahead back), `None` when cancelled.
+    fn push_limited(
+        &mut self,
+        limiter: &mut PeakLimiter,
+        samples: &[f32],
+        scratch: &mut Vec<f32>,
+    ) -> Option<u64> {
+        scratch.clear();
+        let before = limiter.limited_frames();
+        limiter.process(samples, scratch);
+        self.finish_push(limiter, before, scratch)
+    }
+
+    /// Writes what the limiter still holds: the end of the feed.
+    fn push_limiter_tail(
+        &mut self,
+        limiter: &mut PeakLimiter,
+        scratch: &mut Vec<f32>,
+    ) -> Option<u64> {
+        scratch.clear();
+        let before = limiter.limited_frames();
+        limiter.flush(scratch);
+        self.finish_push(limiter, before, scratch)
+    }
+
+    fn finish_push(&mut self, limiter: &PeakLimiter, before: u64, ready: &[f32]) -> Option<u64> {
+        let newly = limiter.limited_frames() - before;
+        if newly > 0 {
+            self.params.limited.fetch_add(newly, Ordering::Relaxed);
+        }
+        self.push_all(ready).then_some((ready.len() / 2) as u64)
     }
 
     fn wait_next(&self) -> Option<TrackRequest> {
@@ -328,6 +484,16 @@ impl Worker {
         let mut decoded: Vec<f32> = Vec::new();
         let mut stereo: Vec<f32> = Vec::new();
         let mut resampled: Vec<f32> = Vec::new();
+        // The last stage before the ring, one for the whole feed: it runs across track
+        // boundaries like the audio does. `written` counts what has left it.
+        let mut limiter = PeakLimiter::new(out_rate);
+        let mut limited: Vec<f32> = Vec::new();
+        // The equalizer, in front of the limiter and like it one for the whole feed.
+        let mut eq_version = self.params.eq.version();
+        let mut eq = Equalizer::new(out_rate, self.params.eq.get());
+        let crossfeed_now =
+            |params: &FeedParams| Crossfeed::from_u8(params.crossfeed.load(Ordering::Relaxed));
+        let mut crossfeed = Crossfeeder::new(out_rate, crossfeed_now(&self.params));
         let mut gain_now;
 
         'tracks: loop {
@@ -338,7 +504,7 @@ impl Worker {
                 track_id: req.track_id,
                 error,
             };
-            let mut dec = match TrackDecoder::open(&req.path) {
+            let mut dec = match self.open_decoder(&req) {
                 Ok(d) => d,
                 Err(e) => {
                     self.send(fail(e));
@@ -362,10 +528,12 @@ impl Worker {
                 if let Some(mut old) = resampler.take() {
                     resampled.clear();
                     if old.flush(&mut resampled).is_ok() {
-                        if !self.push_all(&resampled) {
-                            return false;
+                        eq.process(&mut resampled);
+                        crossfeed.process(&mut resampled);
+                        match self.push_limited(&mut limiter, &resampled, &mut limited) {
+                            Some(frames) => written += frames,
+                            None => return false,
                         }
-                        written += (resampled.len() / 2) as u64;
                         self.written.store(written, Ordering::Relaxed);
                     }
                 }
@@ -373,7 +541,7 @@ impl Worker {
                     match StereoResampler::new(info.sample_rate, out_rate) {
                         Ok(r) => {
                             resampler = Some(r);
-                            chain_base = written;
+                            chain_base = written + limiter.held_frames();
                         }
                         Err(detail) => {
                             self.send(fail(PlaybackError {
@@ -387,7 +555,7 @@ impl Worker {
             }
             let at_frame = match &resampler {
                 Some(r) => chain_base + r.expected_out_frames(),
-                None => written,
+                None => written + limiter.held_frames(),
             };
             self.send(FeedEvent::TrackStarted {
                 epoch,
@@ -396,6 +564,7 @@ impl Worker {
                 at_frame,
                 start_ms,
                 info: info.clone(),
+                limited_before: self.params.limited.load(Ordering::Relaxed),
             });
             // A different track is a different signal: its gain applies from its first sample.
             gain_now = replaygain_factor(&req.replaygain, &self.params.rg.get());
@@ -410,6 +579,7 @@ impl Worker {
                     self.params.first.item_id != TEST_PANIC_ITEM,
                     "test: decoder panic"
                 );
+                self.preload_next();
                 match dec.next(&mut decoded) {
                     Ok(true) => {
                         stereo.clear();
@@ -431,7 +601,7 @@ impl Worker {
                                 *s *= gain_now;
                             }
                         }
-                        let pushed = match resampler.as_mut() {
+                        let ready = match resampler.as_mut() {
                             Some(rs) => {
                                 resampled.clear();
                                 if let Err(detail) = rs.process(&stereo, &mut resampled) {
@@ -441,22 +611,27 @@ impl Worker {
                                     }));
                                     break 'tracks;
                                 }
-                                let buf = std::mem::take(&mut resampled);
-                                let ok = self.push_all(&buf);
-                                written += (buf.len() / 2) as u64;
-                                resampled = buf;
-                                ok
+                                &mut resampled
                             }
-                            None => {
-                                let buf = std::mem::take(&mut stereo);
-                                let ok = self.push_all(&buf);
-                                written += (buf.len() / 2) as u64;
-                                stereo = buf;
-                                ok
-                            }
+                            None => &mut stereo,
                         };
-                        if !pushed {
-                            return false;
+                        // The settings may change while playing: the equalizer glides.
+                        let version = self.params.eq.version();
+                        if version != eq_version {
+                            eq_version = version;
+                            eq.set(self.params.eq.get());
+                        }
+                        // A sample that the gain or the rate conversion pushed out
+                        // of the number range must not get into the filters (it
+                        // would stay in them), and what leaves them must be numbers.
+                        sanitize(ready);
+                        eq.process(ready);
+                        crossfeed.set(crossfeed_now(&self.params));
+                        crossfeed.process(ready);
+                        sanitize(ready);
+                        match self.push_limited(&mut limiter, ready, &mut limited) {
+                            Some(frames) => written += frames,
+                            None => return false,
                         }
                         self.written.store(written, Ordering::Relaxed);
                     }
@@ -479,11 +654,17 @@ impl Worker {
         if let Some(mut rs) = resampler.take() {
             resampled.clear();
             if rs.flush(&mut resampled).is_ok() {
-                if !self.push_all(&resampled) {
-                    return false;
+                eq.process(&mut resampled);
+                crossfeed.process(&mut resampled);
+                match self.push_limited(&mut limiter, &resampled, &mut limited) {
+                    Some(frames) => written += frames,
+                    None => return false,
                 }
-                written += (resampled.len() / 2) as u64;
             }
+        }
+        match self.push_limiter_tail(&mut limiter, &mut limited) {
+            Some(frames) => written += frames,
+            None => return false,
         }
         self.written.store(written, Ordering::Relaxed);
         true
@@ -518,7 +699,11 @@ mod tests {
                 slot
             },
             rg: RgShared::new(ReplayGainSettings::default()),
+            limited: Arc::new(AtomicU64::new(0)),
+            eq: EqShared::new(Default::default()),
+            crossfeed: Arc::new(AtomicU8::new(0)),
             events,
+            memory: false,
         }
     }
 
@@ -559,6 +744,149 @@ mod tests {
             Some(FeedEvent::Finished { epoch: 7, .. })
         ));
         assert!(feed.is_finished());
+    }
+
+    /// Memory playback: a track that is in memory plays to its end although its file
+    /// is emptied underneath it. Without memory playback the same thing cuts it short
+    /// (the second half of this test), which is what makes the first half meaningful.
+    #[test]
+    fn a_track_in_memory_does_not_need_its_file_any_more() {
+        fn frames_after_emptying_the_second_file(memory: bool) -> u64 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (a, b) = (dir.path().join("a.wav"), dir.path().join("b.wav"));
+            std::fs::copy(fixture("gap_a.wav"), &a).expect("copy");
+            std::fs::copy(fixture("gap_b.wav"), &b).expect("copy");
+            let (tx, rx) = channel();
+            let mut p = params(1, tx);
+            p.memory = memory;
+            p.first.path = a;
+            p.next = NextSlot::new();
+            p.next.set(NextTrack::Track(TrackRequest {
+                item_id: 2,
+                track_id: 4,
+                path: b.clone(),
+                replaygain: ReplayGainTags::default(),
+            }));
+            let next = p.next.clone();
+            let mut feed = FeedHandle::spawn(p).expect("spawn");
+            let mut consumer = feed.take_consumer().expect("consumer").consumer;
+            // The ring holds the first track exactly, so the decode thread opens the
+            // second one right away and then waits for room.
+            let mut events = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !events
+                .iter()
+                .any(|e| matches!(e, FeedEvent::TrackStarted { item_id: 2, .. }))
+            {
+                assert!(Instant::now() < deadline, "second track never opened");
+                if let Ok(event) = rx.recv_timeout(Duration::from_millis(50)) {
+                    events.push(event);
+                }
+            }
+            next.set(NextTrack::End);
+            // Time for the loader to read 176 kB (it started when the track was opened).
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::File::create(&b).expect("truncate");
+            let mut read = 0u64;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let available = consumer.slots();
+                if available > 0 {
+                    consumer.read_chunk(available).expect("chunk").commit_all();
+                    read += available as u64;
+                } else if feed.is_finished() && consumer.slots() == 0 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "feed never finished");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            read / 2
+        }
+        assert_eq!(frames_after_emptying_the_second_file(true), 88_200);
+        assert!(frames_after_emptying_the_second_file(false) < 88_200);
+    }
+
+    /// Memory playback must not let the next file hold up the one that is playing: the
+    /// next "file" here is a FIFO, whose open blocks for ever (a stand-in for a drive
+    /// that does not answer). The track in front of it still plays to its end.
+    #[cfg(unix)]
+    #[test]
+    fn a_next_file_that_never_opens_does_not_stall_the_playing_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Three seconds of audio, so that the look-ahead certainly starts mid-track.
+        let long = dir.path().join("long.wav");
+        let frames: u32 = 44_100 * 3;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 4).to_le_bytes());
+        wav.resize(wav.len() + frames as usize * 4, 0);
+        std::fs::write(&long, wav).expect("write");
+        let stuck = dir.path().join("stuck.wav");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&stuck)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+
+        let (tx, rx) = channel();
+        let mut p = params(1, tx);
+        p.memory = true;
+        p.first.path = long;
+        p.next = NextSlot::new();
+        p.next.set(NextTrack::Track(TrackRequest {
+            item_id: 2,
+            track_id: 4,
+            path: stuck,
+            replaygain: ReplayGainTags::default(),
+        }));
+        let next = p.next.clone();
+        let mut feed = FeedHandle::spawn(p).expect("spawn");
+        let mut consumer = feed.take_consumer().expect("consumer").consumer;
+        // Read at about four times real time; the look-ahead (every 250 ms) is tried
+        // several times while the track is being decoded.
+        let mut read = 0u64;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut ended = false;
+        loop {
+            let available = consumer.slots().min(2 * 1764);
+            if available > 0 {
+                consumer.read_chunk(available).expect("chunk").commit_all();
+                read += available as u64;
+            } else if feed.is_finished() && consumer.slots() == 0 {
+                break;
+            }
+            // Before the track is over the controller withdraws the stuck file, as the
+            // player does when the queue changes; otherwise the decode thread would go
+            // on to open it, which is the stall watchdog's business, not this test's.
+            if !ended && read / 2 >= u64::from(frames) * 2 / 3 {
+                next.set(NextTrack::End);
+                ended = true;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the playing track stalled after {} of {frames} frames",
+                read / 2
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(read / 2, u64::from(frames));
+        let events = collect(&rx);
+        assert!(matches!(events.last(), Some(FeedEvent::Finished { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, FeedEvent::TrackFailed { .. }))
+        );
     }
 
     /// The reader is slower than the decoder: everything still arrives, in order, although

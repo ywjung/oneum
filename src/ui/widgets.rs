@@ -174,16 +174,21 @@ pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
 /// A hairline between two rows of a [`card`].
 pub fn row_divider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
-    let color = if ui.visuals().dark_mode {
-        Color32::from_rgb(0x34, 0x34, 0x3C)
-    } else {
-        Color32::from_rgb(0xE4, 0xE4, 0xEA)
-    };
+    let color = divider_color(ui);
     ui.painter().hline(
         rect.x_range(),
         rect.center().y,
         egui::Stroke::new(1.0, color),
     );
+}
+
+/// The colour of the thin lines between the rows of a card.
+pub fn divider_color(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(0x34, 0x34, 0x3C)
+    } else {
+        Color32::from_rgb(0xE4, 0xE4, 0xEA)
+    }
 }
 
 /// One setting: what it is on the left (title, optional explanation), its control on the
@@ -445,9 +450,11 @@ pub fn key_caps(ui: &mut Ui, keys: &str) {
     let groups: Vec<&str> = keys.split("   ").collect();
     for (g, group) in groups.iter().enumerate().rev() {
         for key in group.split(' ').filter(|k| !k.is_empty()).rev() {
+            // The Mac's modifier symbols are spelled out on other keyboards.
+            let key = crate::platform::key_names(key);
             let galley = ui
                 .painter()
-                .layout_no_wrap(key.to_string(), font.clone(), text);
+                .layout_no_wrap(key.into_owned(), font.clone(), text);
             let width = (galley.size().x + 12.0).max(22.0);
             let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 22.0), Sense::hover());
             ui.painter().rect_filled(rect, 5.0, fill);

@@ -81,8 +81,17 @@ fn button(pos: Pos2, button: PointerButton, pressed: bool, modifiers: Modifiers)
     }
 }
 
+/// The verification channel exists only in builds made for verification: debug builds
+/// and release builds with the `automation` feature (what `scripts/dev/run.sh` builds).
+/// A script can do everything the user can and write files where it likes, so the app
+/// that is given to users must not listen for one, whatever its environment says.
+pub(super) const AVAILABLE: bool = cfg!(any(debug_assertions, feature = "automation"));
+
 impl Automation {
     pub(super) fn from_env() -> Option<Self> {
+        if !AVAILABLE {
+            return None;
+        }
         let path = PathBuf::from(std::env::var_os("ONEUM_SCRIPT")?);
         Some(Self {
             path,

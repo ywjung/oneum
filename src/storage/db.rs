@@ -5,11 +5,9 @@
 //! as parameters. SQL text is only ever assembled from the constant column lists below.
 use crate::model::{ReplayGainTags, Track, TrackId};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, params};
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1007,12 +1005,12 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn path_to_blob(path: &Path) -> &[u8] {
-    path.as_os_str().as_bytes()
+fn path_to_blob(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+    crate::platform::path_to_bytes(path)
 }
 
 fn blob_to_path(blob: Vec<u8>) -> PathBuf {
-    PathBuf::from(OsString::from_vec(blob))
+    crate::platform::path_from_bytes(blob)
 }
 
 fn to_i64(value: u64) -> i64 {

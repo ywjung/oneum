@@ -1,8 +1,9 @@
 # Third-party notices
 
 OnEum is built from the open-source Rust crates listed below (as linked into the
-macOS arm64 build). Each crate remains under its own license; the license texts are
-distributed with the crates' sources at the listed locations.
+macOS arm64 build). Each crate remains under its own license. The full license texts
+come with the app in the file `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under
+Contents/Resources; on Windows next to the program).
 
 Crates: 253
 

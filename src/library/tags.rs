@@ -2,7 +2,7 @@
 //!
 //! Files are selected by extension and then verified by content: the container/codec
 //! reported here is what the file really is, and anything the audio engine cannot play
-//! (DRM-protected MP4, Opus-in-Ogg, MPEG layer 1/2, compressed WAV/AIFF …) is reported
+//! (DRM-protected MP4, Opus-in-Ogg, compressed WAV/AIFF …) is reported
 //! as unsupported instead of being added to the library.
 use crate::model::ReplayGainTags;
 use lofty::config::ParseOptions;
@@ -22,8 +22,8 @@ use std::path::Path;
 
 /// Extensions the scanner looks at. `m4p` is listed only so that protected purchases are
 /// counted as unsupported rather than silently ignored.
-const AUDIO_EXTENSIONS: [&str; 11] = [
-    "mp3", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "m4p", "ogg", "oga",
+const AUDIO_EXTENSIONS: [&str; 13] = [
+    "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "m4p", "ogg", "oga",
 ];
 
 /// WAVE format tags the PCM decoder handles: integer PCM, IEEE float, A-law, µ-law.
@@ -89,7 +89,7 @@ pub(crate) fn has_audio_extension(path: &Path) -> bool {
 fn type_from_extension(path: &Path) -> Option<FileType> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
-        "mp3" => Some(FileType::Mpeg),
+        "mp3" | "mp2" | "mp1" => Some(FileType::Mpeg),
         "flac" => Some(FileType::Flac),
         "wav" => Some(FileType::Wav),
         "aif" | "aiff" => Some(FileType::Aiff),
@@ -154,6 +154,17 @@ fn failed(err: impl std::error::Error) -> ReadError {
 
 /// Reads tags and audio properties of the file at `path`.
 pub(crate) fn read_tags(path: &Path, want_picture: bool) -> Result<FileTags, ReadError> {
+    read_file(path, want_picture, true)
+}
+
+/// Reads what the audio itself says (codec, length, sample rate) and leaves the tags
+/// alone: for a file whose tags cannot be read (damaged, or stored in a way that is
+/// refused, such as a compressed ID3v2 frame). The song is then known by its file name.
+pub(crate) fn read_without_tags(path: &Path) -> Result<FileTags, ReadError> {
+    read_file(path, false, false)
+}
+
+fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTags, ReadError> {
     let file = File::open(path).map_err(failed)?;
     let mut reader = BufReader::new(file);
 
@@ -186,14 +197,20 @@ pub(crate) fn read_tags(path: &Path, want_picture: bool) -> Result<FileTags, Rea
     };
     reader.seek(SeekFrom::Start(0)).map_err(failed)?;
 
-    let options = ParseOptions::new().read_cover_art(want_picture);
+    let options = ParseOptions::new()
+        .read_cover_art(want_picture)
+        .read_tags(want_tags);
     let (tagged, codec, container): (TaggedFile, &'static str, &'static str) = match file_type {
         FileType::Mpeg => {
             let file = MpegFile::read_from(&mut reader, options).map_err(failed)?;
-            if !matches!(file.properties().layer(), Layer::Layer3) {
-                return Err(ReadError::Unsupported("MPEG audio layer 1/2".into()));
-            }
-            (file.into(), "MP3", "MP3")
+            // Layer I and II are the older members of the family (MP2 is still common
+            // in broadcast archives); they decode with the same decoder.
+            let codec = match file.properties().layer() {
+                Layer::Layer1 => "MP1",
+                Layer::Layer2 => "MP2",
+                Layer::Layer3 => "MP3",
+            };
+            (file.into(), codec, "MP3")
         }
         FileType::Flac => {
             let file = FlacFile::read_from(&mut reader, options).map_err(failed)?;
@@ -345,8 +362,17 @@ pub(crate) fn read_picture(path: &Path) -> Option<Vec<u8>> {
     read_tags(path, true).ok().and_then(|tags| tags.picture)
 }
 
+/// Longest tag value that is kept, in characters. Longer than any title, artist or
+/// album name; a tag that holds megabytes is cut here instead of being carried into
+/// the database, the search index and every list that shows it.
+const MAX_TAG_CHARS: usize = 1_000;
+
 fn clean(text: &str) -> String {
-    text.replace('\0', " ").trim().to_string()
+    let cut = text
+        .char_indices()
+        .nth(MAX_TAG_CHARS)
+        .map_or(text.len(), |(at, _)| at);
+    text[..cut].replace('\0', " ").trim().to_string()
 }
 
 /// First non-empty value of `key` across the tags.
@@ -438,6 +464,86 @@ pub(crate) fn parse_peak(text: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endless_tag_values_are_cut() {
+        assert_eq!(clean("  제목\0 "), "제목");
+        let long = "가".repeat(50_000);
+        let cut = clean(&long);
+        assert_eq!(cut.chars().count(), MAX_TAG_CHARS);
+        assert!(
+            cut.chars().all(|c| c == '가'),
+            "cut on a character boundary"
+        );
+        assert_eq!(clean(&"a".repeat(MAX_TAG_CHARS)).len(), MAX_TAG_CHARS);
+    }
+
+    /// An ID3v2 frame can be stored compressed, and a few kilobytes can unpack to
+    /// gigabytes. The tag reader is built without that support: such a frame is not
+    /// unpacked, and the file is still a song.
+    #[test]
+    fn a_compressed_tag_frame_is_not_unpacked() {
+        // zlib of an encoding byte followed by a megabyte of the letter A.
+        let packed: Vec<u8> = (0..COMPRESSED_TITLE.len() / 2)
+            .map(|i| u8::from_str_radix(&COMPRESSED_TITLE[i * 2..i * 2 + 2], 16).expect("hex"))
+            .collect();
+        let syncsafe = |n: u32| {
+            [
+                (n >> 21) as u8 & 0x7F,
+                (n >> 14) as u8 & 0x7F,
+                (n >> 7) as u8 & 0x7F,
+                n as u8 & 0x7F,
+            ]
+        };
+        // Frame: id, size, flags (compressed + data length indicator), unpacked size, data.
+        let mut frame = b"TIT2".to_vec();
+        frame.extend(syncsafe(packed.len() as u32 + 4));
+        frame.extend([0x00, 0x09]);
+        frame.extend(syncsafe(1_000_001));
+        frame.extend(&packed);
+        let mut file = b"ID3\x04\x00\x00".to_vec();
+        file.extend(syncsafe(frame.len() as u32));
+        file.extend(&frame);
+        // The audio of a fixture, without the tag it came with.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gap_a.mp3");
+        let audio = std::fs::read(fixture).expect("fixture");
+        let own_tag = if audio.starts_with(b"ID3") {
+            10 + audio[6..10]
+                .iter()
+                .fold(0usize, |n, b| (n << 7) | usize::from(*b))
+        } else {
+            0
+        };
+        file.extend(&audio[own_tag..]);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("압축된 제목.mp3");
+        std::fs::write(&path, file).expect("write");
+
+        let started = std::time::Instant::now();
+        match read_tags(&path, true) {
+            // The frame is passed over: the title is the file's name.
+            Ok(tags) => {
+                assert!(
+                    tags.title.len() < 100,
+                    "title of {} bytes",
+                    tags.title.len()
+                );
+                assert_eq!(tags.codec, "MP3");
+            }
+            // Or the tag is refused as a whole. The scan then reads the file without
+            // its tags: still a song, known by its file name.
+            Err(ReadError::Failed(_)) => {
+                let plain = read_without_tags(&path).expect("the audio is fine");
+                assert_eq!(plain.title, "압축된 제목");
+                assert_eq!(plain.codec, "MP3");
+                assert!(plain.duration_ms > 900);
+            }
+            Err(other) => panic!("unexpected: {other:?}"),
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    const COMPRESSED_TITLE: &str = "78daedc1210100000002a0e032ff9f7288400a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dc1a87480c64";
 
     #[test]
     fn gain_forms() {

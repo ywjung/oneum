@@ -4,11 +4,11 @@
 //! is on the left, its control on the right. The window keeps one size for all tabs.
 use super::dialogs::Dialog;
 use super::icons::Icon;
-use super::{OneumApp, bundled_resource, theme, widgets};
+use super::{OneumApp, markdown, theme, widgets};
 use crate::app::settings::ThemeChoice;
 use crate::audio::ReplayGainMode;
 use crate::i18n::LanguageChoice;
-use crate::platform::macos::finder;
+use crate::platform::finder;
 use crate::playback::Command;
 use eframe::egui::{self, Align, Layout, RichText, Sense};
 
@@ -22,6 +22,18 @@ pub(super) enum Tab {
 }
 
 const LICENSE_NOTICES: &str = include_str!("../../THIRD_PARTY_NOTICES.md");
+/// The notices are small print: a size below the rest of Settings.
+const NOTICES_LOOK: markdown::Look = markdown::Look {
+    body: 12.5,
+    heading: 14.0,
+    heading_gap: 14.0,
+};
+
+/// The open source notices, parsed once.
+fn license_notices() -> &'static [markdown::Block] {
+    static NOTICES: std::sync::OnceLock<Vec<markdown::Block>> = std::sync::OnceLock::new();
+    NOTICES.get_or_init(|| markdown::parse(LICENSE_NOTICES))
+}
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon-160.png");
 
 const WIDTH: f32 = 620.0;
@@ -426,6 +438,52 @@ impl OneumApp {
         widgets::section_note(ui, s.output_hint);
 
         ui.add_space(14.0);
+        widgets::section_title(ui, s.settings_section_quality);
+        let before = self.settings.output;
+        widgets::card(ui, |ui| {
+            // Changing the device's rate and taking it exclusively is macOS-only.
+            let device_control = crate::platform::DEVICE_CONTROL;
+            let describe = |text: &'static str| {
+                Some(if device_control {
+                    text
+                } else {
+                    s.out_macos_only
+                })
+            };
+            widgets::setting_row(
+                ui,
+                s.out_match_rate,
+                describe(s.out_match_rate_desc),
+                device_control,
+                |ui| {
+                    widgets::toggle(
+                        ui,
+                        &mut self.settings.output.match_sample_rate,
+                        s.out_match_rate,
+                    );
+                },
+            );
+            widgets::row_divider(ui);
+            widgets::setting_row(
+                ui,
+                s.out_exclusive,
+                describe(s.out_exclusive_desc),
+                device_control,
+                |ui| {
+                    widgets::toggle(ui, &mut self.settings.output.exclusive, s.out_exclusive);
+                },
+            );
+            widgets::row_divider(ui);
+            widgets::setting_row(ui, s.out_memory, Some(s.out_memory_desc), true, |ui| {
+                widgets::toggle(ui, &mut self.settings.output.memory_playback, s.out_memory);
+            });
+        });
+        widgets::section_note(ui, s.out_quality_hint);
+        if self.settings.output != before {
+            player.send(Command::SetOutput(self.settings.output));
+        }
+
+        ui.add_space(14.0);
         widgets::section_title(ui, s.replaygain);
         let before = self.settings.replaygain;
         widgets::card(ui, |ui| {
@@ -485,6 +543,61 @@ impl OneumApp {
         if self.settings.replaygain != before {
             player.send(Command::SetReplayGain(self.settings.replaygain));
         }
+
+        ui.add_space(14.0);
+        widgets::section_title(ui, s.equalizer);
+        let mut open_equalizer = false;
+        widgets::card(ui, |ui| {
+            let state = if self.settings.eq.is_active() {
+                s.eq_row_on
+            } else {
+                s.eq_row_off
+            };
+            widgets::setting_row(ui, state, Some(s.eq_row_desc), true, |ui| {
+                let button = egui::Button::new(s.open_guide).min_size(egui::vec2(0.0, 26.0));
+                open_equalizer = ui.add(button).clicked();
+            });
+        });
+        if open_equalizer {
+            self.open_equalizer();
+        }
+
+        ui.add_space(14.0);
+        widgets::section_title(ui, s.crossfeed);
+        let crossfeed_before = self.settings.crossfeed;
+        widgets::card(ui, |ui| {
+            widgets::setting_row(ui, s.crossfeed_row, Some(s.crossfeed_desc), true, |ui| {
+                use crate::audio::Crossfeed;
+                widgets::segmented(
+                    ui,
+                    "crossfeed",
+                    &mut self.settings.crossfeed,
+                    &[
+                        (Crossfeed::Off, s.rg_off),
+                        (Crossfeed::Light, s.crossfeed_light),
+                        (Crossfeed::Medium, s.crossfeed_medium),
+                        (Crossfeed::Strong, s.crossfeed_strong),
+                    ],
+                );
+            });
+        });
+        widgets::section_note(ui, s.crossfeed_hint);
+        if self.settings.crossfeed != crossfeed_before {
+            player.send(Command::SetCrossfeed(self.settings.crossfeed));
+        }
+
+        ui.add_space(14.0);
+        widgets::section_title(ui, s.radio);
+        let radio_before = self.settings.radio;
+        widgets::card(ui, |ui| {
+            widgets::setting_row(ui, s.radio_row, Some(s.radio_desc), true, |ui| {
+                widgets::toggle(ui, &mut self.settings.radio, s.radio_row);
+            });
+        });
+        widgets::section_note(ui, s.radio_hint);
+        if self.settings.radio != radio_before {
+            player.send(Command::SetRadio(self.settings.radio));
+        }
     }
 
     /// A reference of the keyboard shortcuts, grouped the way people look for them.
@@ -536,6 +649,7 @@ impl OneumApp {
                 &[
                     ("⌘ U", s.menu_show_queue),
                     ("⌘ I", s.menu_show_info),
+                    ("⇧ ⌘ U", s.menu_show_meter),
                     ("⌘ ,", s.menu_settings),
                     ("⌘ W", s.menu_close_window),
                     ("⌘ Q", s.menu_quit),
@@ -620,7 +734,7 @@ impl OneumApp {
         });
 
         ui.add_space(14.0);
-        let guide = bundled_resource("USER_GUIDE.md").filter(|p| p.exists());
+        let mut open_guide = false;
         let log_dir = self.core.paths.log_dir.clone();
         let data_dir = self.core.paths.data_dir.clone();
         widgets::card(ui, |ui| {
@@ -632,13 +746,9 @@ impl OneumApp {
                 ui,
                 s.menu_user_guide,
                 Some(s.about_guide_desc),
-                guide.is_some(),
+                true,
                 |ui| {
-                    if button(ui, s.show_in_finder)
-                        && let Some(guide) = &guide
-                    {
-                        finder::reveal(guide);
-                    }
+                    open_guide = button(ui, s.open_guide);
                 },
             );
             widgets::row_divider(ui);
@@ -653,13 +763,106 @@ impl OneumApp {
                     finder::reveal(&data_dir);
                 }
             });
+            widgets::row_divider(ui);
+            let toggle = if self.licenses_shown {
+                s.licenses_hide
+            } else {
+                s.licenses_show
+            };
+            widgets::setting_row(ui, s.licenses, Some(s.licenses_desc), true, |ui| {
+                if button(ui, toggle) {
+                    self.licenses_shown = !self.licenses_shown;
+                }
+            });
         });
 
-        ui.add_space(12.0);
-        egui::CollapsingHeader::new(RichText::new(s.licenses).color(dim))
-            .id_salt("licenses")
-            .show(ui, |ui| {
-                ui.add(egui::Label::new(RichText::new(LICENSE_NOTICES).small().monospace()).wrap());
+        if open_guide {
+            self.open_guide();
+        }
+
+        if self.licenses_shown {
+            // The notices themselves (THIRD_PARTY_NOTICES.md), below the card.
+            ui.add_space(14.0);
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                markdown::show(ui, license_notices(), NOTICES_LOOK, |_, _| {});
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use markdown::{Block, Span, web_address};
+
+    fn plain(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    /// The notices that ship: all of the document is understood, the table is whole.
+    #[test]
+    fn the_open_source_notices_are_fully_understood() {
+        let blocks = license_notices();
+        let headings: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Heading(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings, ["License summary", "Crates"]);
+        let tables: Vec<_> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table { head, rows } => Some((head, rows)),
+                _ => None,
+            })
+            .collect();
+        let [(head, rows)] = tables[..] else {
+            panic!("one table expected, found {}", tables.len());
+        };
+        let names: Vec<String> = head.iter().map(|c| plain(c)).collect();
+        assert_eq!(names, ["Crate", "Version", "License", "Source"]);
+        // As many rows as the document says there are crates.
+        let stated = LICENSE_NOTICES
+            .lines()
+            .find_map(|l| l.strip_prefix("Crates: "))
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .expect("the crate count is stated");
+        assert_eq!(rows.len(), stated);
+        assert!(rows.len() > 100);
+        for row in rows {
+            assert_eq!(row.len(), 4, "{row:?}");
+            assert!(row.iter().all(|cell| !plain(cell).is_empty()), "{row:?}");
+            // Where the crate comes from is a link.
+            assert!(web_address(&row[3]).is_some(), "{row:?}");
+        }
+        // One line per license in the summary, each with the license as code.
+        let licenses = blocks
+            .iter()
+            .filter(
+                |b| matches!(b, Block::Item { text, .. } if text.first().is_some_and(|s| s.code)),
+            )
+            .count();
+        assert!(licenses >= 10);
+        // Nothing is left as markup.
+        for block in blocks {
+            let texts: Vec<String> = match block {
+                Block::Title(t) | Block::Heading(t) => vec![t.clone()],
+                Block::Paragraph(s) | Block::Item { text: s, .. } => vec![plain(s)],
+                Block::Table { head, rows } => head
+                    .iter()
+                    .chain(rows.iter().flatten())
+                    .map(|c| plain(c))
+                    .collect(),
+            };
+            for text in texts {
+                assert!(
+                    !text.contains('`') && !text.contains("**") && !text.starts_with(['#', '|']),
+                    "markup left in: {text}"
+                );
+            }
+        }
     }
 }

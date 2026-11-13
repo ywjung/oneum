@@ -27,12 +27,84 @@ struct TableOptions {
     reorderable: bool,
 }
 
+/// What the "listen again" view shows: ways back into the library that do not start
+/// from a name one already has in mind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub(super) enum Rediscover {
+    /// What was played, most recent first.
+    #[default]
+    Played,
+    /// What came into the library, newest first.
+    Added,
+    /// What has been played most.
+    MostPlayed,
+    /// What was played once and not for a long time since.
+    Forgotten,
+}
+
+/// How many songs the "listen again" lists show at most.
+const REDISCOVER_LIMIT: usize = 300;
+/// A song counts as "not heard for a long time" after this many days.
+const FORGOTTEN_AFTER_DAYS: i64 = 30;
+
+/// The songs of a "listen again" list as indices into `tracks`, in the list's order.
+/// `now` is the time in Unix seconds. ([`Rediscover::Played`] comes from the play
+/// history instead, which also knows about repeats.)
+pub(super) fn rediscover(
+    tracks: &[std::sync::Arc<crate::model::Track>],
+    mode: Rediscover,
+    now: i64,
+) -> Vec<u32> {
+    let mut picked: Vec<u32> = (0..tracks.len() as u32)
+        .filter(|&i| {
+            let t = &tracks[i as usize];
+            match mode {
+                Rediscover::Played => false,
+                Rediscover::Added => true,
+                Rediscover::MostPlayed => t.play_count > 0,
+                Rediscover::Forgotten => {
+                    t.play_count > 0
+                        && t.last_played_at
+                            .is_some_and(|at| now - at >= FORGOTTEN_AFTER_DAYS * 86_400)
+                }
+            }
+        })
+        .collect();
+    let track = |i: &u32| &tracks[*i as usize];
+    match mode {
+        Rediscover::Played => {}
+        // Newest first; songs that came in together (one scan) by id, i.e. in the
+        // order they were found.
+        Rediscover::Added => {
+            picked.sort_by_key(|i| (std::cmp::Reverse(track(i).added_at), track(i).id))
+        }
+        Rediscover::MostPlayed => picked.sort_by_key(|i| {
+            (
+                std::cmp::Reverse(track(i).play_count),
+                std::cmp::Reverse(track(i).last_played_at),
+                track(i).id,
+            )
+        }),
+        // Longest ago first.
+        Rediscover::Forgotten => picked.sort_by_key(|i| (track(i).last_played_at, track(i).id)),
+    }
+    picked.truncate(REDISCOVER_LIMIT);
+    picked
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 fn build_rows(
     snap: &LibrarySnapshot,
     library: &Library,
     nav: &Nav,
     query: &str,
     sort: Option<(SortKey, bool)>,
+    mode: Rediscover,
 ) -> Vec<Row> {
     let q = LibrarySnapshot::prepare_query(query);
     let track_row = |idx: u32| Row {
@@ -52,10 +124,15 @@ fn build_rows(
             .filter(|&i| snap.tracks[i as usize].favorite && matches(i))
             .map(track_row)
             .collect(),
-        Nav::Recent => library
-            .recent_plays(300)
+        Nav::Recent if mode == Rediscover::Played => library
+            .recent_plays(REDISCOVER_LIMIT)
             .into_iter()
             .filter_map(|id| snap.index_of(id))
+            .filter(|&i| matches(i))
+            .map(track_row)
+            .collect(),
+        Nav::Recent => rediscover(&snap.tracks, mode, unix_now())
+            .into_iter()
             .filter(|&i| matches(i))
             .map(track_row)
             .collect(),
@@ -220,8 +297,15 @@ enum Step {
 impl OneumApp {
     /// Rebuilds the row list of `nav` when the library, the query or the sort changed.
     fn ensure_rows(&mut self, nav: &Nav) {
+        let mode = self.rediscover;
         let extra = match nav {
-            Nav::Recent => self.player.current.map_or(0, |c| c.item_id),
+            // The lists change with what is played, and with which of them is shown.
+            Nav::Recent => self
+                .player
+                .current
+                .map_or(0, |c| c.item_id)
+                .wrapping_mul(4)
+                .wrapping_add(mode as u64 + 1),
             _ => 0,
         };
         let stamp_generation = self
@@ -245,6 +329,7 @@ impl OneumApp {
             nav,
             &state.query,
             state.sort,
+            mode,
         );
         let keys: HashSet<u64> = rows.iter().map(|r| r.key).collect();
         state.selection.retain(|k| keys.contains(k));
@@ -295,7 +380,24 @@ impl OneumApp {
                 self.track_list(ui, &nav, TableOptions::default(), actions);
             }
             Nav::Recent => {
-                self.view_title(ui, self.s().recently_played, None);
+                let s = self.s();
+                self.view_title(ui, s.recently_played, None);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    widgets::segmented(
+                        ui,
+                        "rediscover",
+                        &mut self.rediscover,
+                        &[
+                            (Rediscover::Played, s.rediscover_played),
+                            (Rediscover::Added, s.rediscover_added),
+                            (Rediscover::MostPlayed, s.rediscover_most),
+                            (Rediscover::Forgotten, s.rediscover_forgotten),
+                        ],
+                    );
+                });
+                ui.add_space(6.0);
+                self.ensure_rows(&nav);
                 self.track_list(
                     ui,
                     &nav,
@@ -405,7 +507,13 @@ impl OneumApp {
         } else {
             match nav {
                 Nav::Favorites => (Icon::Heart, s.empty_favorites, s.empty_favorites_hint),
-                Nav::Recent => (Icon::Note, s.empty_recent, ""),
+                Nav::Recent => match self.rediscover {
+                    Rediscover::Played | Rediscover::MostPlayed => (Icon::Note, s.empty_recent, ""),
+                    Rediscover::Added => (Icon::Note, s.empty_search, ""),
+                    Rediscover::Forgotten => {
+                        (Icon::Clock, s.empty_forgotten, s.empty_forgotten_hint)
+                    }
+                },
                 Nav::Playlist(_) => (Icon::Queue, s.empty_playlist, s.empty_playlist_hint),
                 _ => (Icon::Note, s.empty_search, ""),
             }
@@ -430,7 +538,7 @@ impl OneumApp {
             || ui.ctx().text_edit_focused()
             || self.key_pane != KeyPane::List
             || self.dialog.is_some()
-            || self.settings_open
+            || self.sheet_open()
             || state.rows.is_empty()
         {
             return;
@@ -1326,5 +1434,67 @@ impl OneumApp {
                 });
             });
         self.views.insert(nav.clone(), state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Rediscover, rediscover};
+    use crate::model::{Track, test_track};
+    use std::sync::Arc;
+
+    const DAY: i64 = 86_400;
+    const NOW: i64 = 2_000_000_000;
+
+    fn library() -> Vec<Arc<Track>> {
+        // (id, added days ago, plays, last played days ago)
+        [
+            (1, 400, 12, Some(200)),
+            (2, 400, 3, Some(2)),
+            (3, 10, 0, None),
+            (4, 1, 1, Some(45)),
+            (5, 1, 30, Some(0)),
+            (6, 90, 5, Some(31)),
+        ]
+        .into_iter()
+        .map(|(id, added, plays, last)| {
+            Arc::new(Track {
+                added_at: NOW - added * DAY,
+                play_count: plays,
+                last_played_at: last.map(|days: i64| NOW - days * DAY),
+                ..test_track(id)
+            })
+        })
+        .collect()
+    }
+
+    fn ids(tracks: &[Arc<Track>], mode: Rediscover) -> Vec<i64> {
+        rediscover(tracks, mode, NOW)
+            .into_iter()
+            .map(|i| tracks[i as usize].id)
+            .collect()
+    }
+
+    #[test]
+    fn the_listen_again_lists() {
+        let tracks = library();
+        // Newest first; added together: in the order they were found.
+        assert_eq!(ids(&tracks, Rediscover::Added), [4, 5, 3, 6, 1, 2]);
+        // Most plays first; never played songs are not in it.
+        assert_eq!(ids(&tracks, Rediscover::MostPlayed), [5, 1, 6, 2, 4]);
+        // Played before, but not for 30 days: longest ago first.
+        assert_eq!(ids(&tracks, Rediscover::Forgotten), [1, 4, 6]);
+        // "Recently played" comes from the play history, not from here.
+        assert!(ids(&tracks, Rediscover::Played).is_empty());
+        assert!(ids(&[], Rediscover::Added).is_empty());
+    }
+
+    #[test]
+    fn a_list_is_never_longer_than_its_limit() {
+        let many: Vec<Arc<Track>> = (1..=1000).map(|id| Arc::new(test_track(id))).collect();
+        assert_eq!(
+            rediscover(&many, Rediscover::Added, NOW).len(),
+            super::REDISCOVER_LIMIT
+        );
     }
 }

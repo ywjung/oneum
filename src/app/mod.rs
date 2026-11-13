@@ -6,8 +6,8 @@ pub mod settings;
 
 use crate::i18n::Lang;
 use crate::library::{Library, LibraryPaths, OpenReport};
-use crate::platform::macos::nowplaying::{MediaSession, NowPlayingInfo, RemoteCommand};
-use crate::platform::macos::{self, app_hooks};
+use crate::platform::nowplaying::{MediaSession, NowPlayingInfo, RemoteCommand};
+use crate::platform::{self, app_hooks};
 use crate::playback::{self, Command, PlayState, PlayerConfig, PlayerHandle};
 use paths::AppPaths;
 use settings::Settings;
@@ -15,6 +15,23 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// How long quitting waits for the player thread (a format switch back on a slow DAC
+/// can take a few seconds).
+const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Waits for `thread` to finish, but not longer than `patience`. Returns whether it did;
+/// a thread that did not is left to itself.
+pub fn join_within(thread: std::thread::JoinHandle<()>, patience: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + patience;
+    while !thread.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = thread.join();
+    true
+}
 /// Remote "play" commands arriving this soon after launch are not user intent.
 const LAUNCH_GUARD: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -66,8 +83,13 @@ impl Core {
     pub fn shutdown(&self) {
         self.player.send(Command::Shutdown);
         let thread = self.player_thread.lock().ok().and_then(|mut t| t.take());
-        if let Some(thread) = thread {
-            let _ = thread.join();
+        // The player thread saves the session and gives the output device back, which
+        // takes a moment. It is not waited for without end: a thread stuck in a device
+        // driver that has hung would keep the app from ever quitting.
+        if let Some(thread) = thread
+            && !join_within(thread, SHUTDOWN_PATIENCE)
+        {
+            tracing::error!("the player thread did not stop; quitting without it");
         }
         self.library.shutdown();
     }
@@ -91,7 +113,7 @@ fn refresh_now_playing(core: &Arc<Core>) {
     if !ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    macos::run_on_main(move || {
+    platform::run_on_main(move || {
         MEDIA.with(|media| {
             if let Some(session) = media.borrow_mut().as_mut() {
                 session.update(info.as_ref());
@@ -161,6 +183,7 @@ pub fn log_dir_hint() -> String {
             .join("logs")
             .display()
             .to_string(),
+        None if cfg!(windows) => "%LOCALAPPDATA%\\OnEum\\Logs".to_string(),
         None => "~/Library/Logs/OnEum".to_string(),
     }
 }
@@ -172,7 +195,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     logging::init(&paths.log_dir);
     tracing::info!(version = VERSION, "starting OnEum");
     let settings: Settings = crate::storage::settings::load_json(&paths.settings_file());
-    let system_prefers_korean = macos::locale::prefers_korean();
+    let system_prefers_korean = platform::locale::prefers_korean();
     let lang = settings.language.resolve(system_prefers_korean);
 
     let (library, open_report) = Library::open(LibraryPaths {
@@ -193,7 +216,11 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let config = PlayerConfig {
         default_volume: 0.8,
         replaygain: settings.replaygain,
+        eq: settings.eq,
+        crossfeed: settings.crossfeed,
+        radio: settings.radio,
         device_pref: settings.output_device.clone(),
+        output: settings.output,
         ..PlayerConfig::default()
     };
     let (player, player_thread) = playback::player::spawn(host, config);
@@ -218,7 +245,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let wake_core = core.clone();
     app_hooks::set_waker(move || wake_core.request_repaint());
     let sleep_player = player;
-    macos::power::observe_sleep(move || sleep_player.send(Command::SystemWillSleep));
+    platform::power::observe_sleep(move || sleep_player.send(Command::SystemWillSleep));
 
     Ok(Startup {
         core,

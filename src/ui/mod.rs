@@ -6,11 +6,17 @@
 mod art;
 mod automation;
 mod dialogs;
+mod equalizer;
+mod guide;
 mod icons;
 mod lists;
+mod markdown;
+mod menubar;
+mod meter;
 mod panels;
 mod player_bar;
 mod settings_window;
+mod spectrum;
 pub mod theme;
 mod widgets;
 
@@ -20,9 +26,10 @@ use crate::audio::{OutputDeviceInfo, PlaybackErrorKind};
 use crate::i18n::{Lang, Strings};
 use crate::library::{LibraryError, LibrarySnapshot, OpenReport, PlaylistInfo, SortKey};
 use crate::model::{Track, TrackId};
-use crate::platform::macos::menu::{AppMenu, MenuAction};
-use crate::platform::macos::responder::{self, EditAction};
-use crate::platform::macos::{app_hooks, finder, window};
+use crate::platform::MenuAction;
+use crate::platform::menu::AppMenu;
+use crate::platform::responder::{self, EditAction};
+use crate::platform::{app_hooks, finder, window};
 use crate::playback::{Command, Notice, PlayState, PlayerSnapshot, RepeatMode};
 use art::ArtCache;
 use dialogs::Dialog;
@@ -34,10 +41,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "ogg", "oga",
+    "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "ogg", "oga",
 ];
 const PLAYLIST_EXTENSIONS: &[&str] = &["m3u8", "m3u"];
 const VOLUME_STEP: f32 = 0.05;
+/// The player thread answers within a fraction of a second, or a few seconds while an
+/// output device switches its format. Silence for this long means it is stuck.
+const PLAYER_STUCK_AFTER: Duration = Duration::from_secs(12);
 
 /// What the central area shows.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -155,6 +165,8 @@ enum UiRequest {
     GoToCurrent,
     ToggleQueue,
     ToggleInfo,
+    ToggleMeter,
+    Equalizer,
     UserGuide,
     ToggleMute,
     PlaylistRename,
@@ -198,6 +210,8 @@ pub struct OneumApp {
     playlists_generation: u64,
     player: PlayerSnapshot,
     last_notice_seq: u64,
+    /// The player thread has not been heard from for [`PLAYER_STUCK_AFTER`].
+    player_stuck: bool,
     scan_was_running: bool,
     announce_scan: bool,
     scan_started_at: Option<Instant>,
@@ -238,8 +252,22 @@ pub struct OneumApp {
     last_settings_save: Instant,
 
     art: ArtCache,
+    /// Needles of the VU meter panel.
+    meter: meter::MeterState,
+    /// Columns of the spectrum display in the meter deck.
+    spectrum: spectrum::Spectrum,
     /// The app icon shown in Settings ▸ About (decoded on first use).
     about_icon: Option<egui::TextureHandle>,
+    /// The open source notices in Settings ▸ About are shown.
+    licenses_shown: bool,
+    /// Lyrics of the song the info panel shows (or showed last).
+    lyrics: Option<panels::Lyrics>,
+    /// Which of the "listen again" lists is shown.
+    rediscover: lists::Rediscover,
+    /// The equalizer sheet is open.
+    eq_open: bool,
+    /// The name being typed for a preset of the user's own.
+    eq_name: String,
     /// Transient message.
     toast: Option<Toast>,
     /// Message that stays until dismissed or resolved (lost device, …). A transient
@@ -249,10 +277,19 @@ pub struct OneumApp {
     renaming: Option<(i64, String, bool)>,
     settings_open: bool,
     settings_tab: settings_window::Tab,
+    /// The user guide sheet.
+    guide_open: bool,
+    /// Section of the guide to scroll to in the next frame (0 = the top).
+    guide_jump: Option<usize>,
     devices: Vec<OutputDeviceInfo>,
     devices_checked: Option<Instant>,
 
     menu: Option<AppMenu>,
+    /// What a menu command does, shared by the system menu and the menu bar in the window.
+    menu_dispatch: Option<Arc<dyn Fn(MenuAction) + Send + Sync>>,
+    /// Draw the menu bar inside the window (always where there is no system menu bar;
+    /// `ONEUM_WINDOW_MENU` forces it elsewhere, to look at it).
+    window_menu: bool,
     automation: Option<automation::Automation>,
     ui_requests: Arc<Mutex<Vec<UiRequest>>>,
     events_tx: Sender<AppEvent>,
@@ -291,12 +328,15 @@ impl OneumApp {
         let mut this = Self {
             perf: Perf::default(),
             art: ArtCache::new(core.library.clone(), ctx.clone()),
+            meter: meter::MeterState::default(),
+            spectrum: spectrum::Spectrum::default(),
             snapshot: core.library.snapshot(),
             lib_generation: core.library.generation(),
             art_generation: core.library.art_generation(),
             playlists: core.library.playlists(),
             playlists_generation: core.library.playlists_generation(),
             last_notice_seq: player.notice_seq,
+            player_stuck: false,
             player,
             scan_was_running: false,
             announce_scan: false,
@@ -322,15 +362,25 @@ impl OneumApp {
             seek_pending: None,
             last_settings_save: Instant::now(),
             about_icon: None,
+            licenses_shown: false,
+            lyrics: None,
+            rediscover: lists::Rediscover::default(),
+            eq_open: false,
+            eq_name: String::new(),
             toast: None,
             alert: None,
             dialog: None,
             renaming: None,
             settings_open: false,
+            guide_open: false,
+            guide_jump: None,
             settings_tab: settings_window::Tab::General,
             devices: Vec::new(),
             devices_checked: None,
             menu: None,
+            menu_dispatch: None,
+            window_menu: crate::platform::MENU_IN_WINDOW
+                || std::env::var_os("ONEUM_WINDOW_MENU").is_some(),
             automation: automation::Automation::from_env(),
             ui_requests: Arc::new(Mutex::new(Vec::new())),
             events_tx,
@@ -357,7 +407,7 @@ impl OneumApp {
         let library = self.core.library.clone();
         let requests = self.ui_requests.clone();
         let ctx = ctx.clone();
-        self.menu = AppMenu::install(self.s(), app::VERSION, move |action| {
+        let dispatch: Arc<dyn Fn(MenuAction) + Send + Sync> = Arc::new(move |action| {
             // Playback commands work even while the window is hidden; everything else
             // needs the window, so it is brought back first.
             let request = match action {
@@ -387,6 +437,8 @@ impl OneumApp {
                 MenuAction::GoToCurrent => UiRequest::GoToCurrent,
                 MenuAction::ToggleQueue => UiRequest::ToggleQueue,
                 MenuAction::ToggleInfo => UiRequest::ToggleInfo,
+                MenuAction::ToggleMeter => UiRequest::ToggleMeter,
+                MenuAction::Equalizer => UiRequest::Equalizer,
                 MenuAction::UserGuide => UiRequest::UserGuide,
                 MenuAction::ToggleMute => UiRequest::ToggleMute,
                 MenuAction::PlaylistRename => UiRequest::PlaylistRename,
@@ -418,6 +470,8 @@ impl OneumApp {
             }
             ctx.request_repaint();
         });
+        self.menu_dispatch = Some(dispatch.clone());
+        self.menu = AppMenu::install(self.s(), app::VERSION, move |action| dispatch(action));
     }
 
     // ----- state synchronisation ------------------------------------------------------
@@ -459,6 +513,32 @@ impl OneumApp {
             if let Some(notice) = self.player.notice.clone() {
                 self.show_notice(&notice);
             }
+        }
+        // A player thread that has gone silent is stuck in a call that does not return,
+        // in practice a device driver that has hung. Nothing can be done about that
+        // from here except telling the user why nothing reacts any more.
+        let silent = self.core.player.unresponsive_for();
+        if silent >= PLAYER_STUCK_AFTER {
+            if !self.player_stuck {
+                self.player_stuck = true;
+                tracing::error!("the player thread has not responded for {silent:?}");
+                self.alert = Some(Toast {
+                    text: self.s().notice_player_stuck.into(),
+                    warning: true,
+                    action: None,
+                    expires: None,
+                });
+            }
+        } else if self.player_stuck {
+            self.player_stuck = false;
+            let ours = self.s().notice_player_stuck;
+            if self.alert.as_ref().is_some_and(|t| t.text == ours) {
+                self.alert = None;
+            }
+        }
+        if silent >= Duration::from_secs(1) {
+            // Keep looking: nothing else would redraw a window nobody touches.
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
         // A lost-device message is obsolete once playback is running again.
         if !self.player.device_lost
@@ -560,10 +640,13 @@ impl OneumApp {
             self.handle_request(request);
         }
         // Closing the window hides it; the app keeps running and playing (docs/UX.md).
+        // Where there is no Dock to bring it back from, closing the window quits.
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.persist_settings();
-            window::hide_main_window();
+            if crate::platform::CLOSE_HIDES_WINDOW {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                window::hide_main_window();
+            }
         }
     }
 
@@ -692,7 +775,7 @@ impl OneumApp {
 
     fn handle_request(&mut self, request: UiRequest) {
         match request {
-            UiRequest::Settings => self.settings_open = true,
+            UiRequest::Settings => self.open_settings(),
             UiRequest::OpenFiles => self.pick_files(),
             UiRequest::AddFolder => self.pick_folder(),
             UiRequest::NewPlaylist => {
@@ -703,12 +786,13 @@ impl OneumApp {
             UiRequest::GoToCurrent => self.go_to_current(),
             UiRequest::ToggleQueue => self.toggle_right_panel(RightPanel::Queue),
             UiRequest::ToggleInfo => self.toggle_right_panel(RightPanel::Info),
-            UiRequest::UserGuide => {
-                let guide = self.core.paths.data_dir.join("USER_GUIDE.md");
-                let bundled = bundled_resource("USER_GUIDE.md");
-                let target = bundled.filter(|p| p.exists()).unwrap_or(guide);
-                if target.exists() {
-                    finder::reveal(&target);
+            UiRequest::ToggleMeter => self.settings.show_meter = !self.settings.show_meter,
+            UiRequest::UserGuide => self.open_guide(),
+            UiRequest::Equalizer => {
+                if self.eq_open {
+                    self.eq_open = false;
+                } else {
+                    self.open_equalizer();
                 }
             }
             UiRequest::ToggleMute => self.toggle_mute(),
@@ -1104,7 +1188,19 @@ impl OneumApp {
             window_size: self.saved_settings.window_size,
             ..self.settings.clone()
         } == self.saved_settings;
-        if !only_size_changed || self.last_settings_save.elapsed() > Duration::from_secs(2) {
+        if only_size_changed {
+            if self.last_settings_save.elapsed() > Duration::from_secs(2) {
+                self.persist_settings();
+            }
+            return;
+        }
+        // Not in the middle of a drag (a slider passes through dozens of values on its
+        // way) and not many times a second: every save is a file written and synced.
+        const SETTLE: Duration = Duration::from_millis(250);
+        let dragging = ctx.input(|i| i.pointer.any_down());
+        if dragging || self.last_settings_save.elapsed() < SETTLE {
+            ctx.request_repaint_after(SETTLE);
+        } else {
             self.persist_settings();
         }
     }
@@ -1164,7 +1260,11 @@ impl OneumApp {
         if escape {
             // egui drops keyboard focus on Escape before the frame starts, so "was the
             // search field focused" has to come from the previous frame.
-            if self.settings_open {
+            if self.guide_open {
+                self.guide_open = false;
+            } else if self.eq_open {
+                self.eq_open = false;
+            } else if self.settings_open {
                 self.settings_open = false;
             } else if self.search_had_focus
                 && let Some(state) = self.views.get_mut(&self.nav)
@@ -1272,12 +1372,12 @@ impl OneumApp {
                 automation::AppStep::Open(path) => self.open_paths(vec![path]),
                 automation::AppStep::Volume(v) => self.core.player.send(Command::SetVolume(v)),
                 automation::AppStep::OsKey(code, cmd, shift) => {
-                    if !crate::platform::macos::testing::post_key(code, cmd, shift) {
+                    if !crate::platform::testing::post_key(code, cmd, shift) {
                         tracing::warn!("oskey: no key window");
                     }
                 }
                 automation::AppStep::InputSource(id) => {
-                    crate::platform::macos::testing::select_input_source(&id);
+                    crate::platform::testing::select_input_source(&id);
                 }
                 automation::AppStep::Menu(id) => {
                     let request = match id.as_str() {
@@ -1291,7 +1391,11 @@ impl OneumApp {
                         "playlist_delete" => Some(UiRequest::PlaylistDelete),
                         "toggle_queue" => Some(UiRequest::ToggleQueue),
                         "toggle_info" => Some(UiRequest::ToggleInfo),
+                        "toggle_meter" => Some(UiRequest::ToggleMeter),
+                        "equalizer" => Some(UiRequest::Equalizer),
                         "go_to_current" => Some(UiRequest::GoToCurrent),
+                        "user_guide" => Some(UiRequest::UserGuide),
+                        "settings" => Some(UiRequest::Settings),
                         _ => None,
                     };
                     match request {
@@ -1352,6 +1456,10 @@ impl OneumApp {
             "output_device": p.output_device,
             "output_rate": p.output_sample_rate,
             "source": p.source.as_ref().map(|s| format!("{} {}Hz {}ch", s.codec, s.sample_rate, s.channels)),
+            "output_bits": p.output.as_ref().and_then(|o| o.hardware_bits).map(|(bits, _)| bits),
+            "exclusive": p.output.as_ref().is_some_and(|o| o.exclusive),
+            "in_memory": p.source.as_ref().is_some_and(|s| s.in_memory),
+            "match_sample_rate": p.output_settings.match_sample_rate,
             "device_lost": p.device_lost,
             "toast": self.toast.as_ref().or(self.alert.as_ref()).map(|t| t.text.clone()),
             "dialog_open": self.dialog.is_some(),
@@ -1361,7 +1469,7 @@ impl OneumApp {
             "dark": ctx.global_style().visuals.dark_mode,
             "text_focus": ctx.text_edit_focused(),
             "window_visible": window::is_main_window_visible(),
-            "input_source": crate::platform::macos::testing::current_input_source(),
+            "input_source": crate::platform::testing::current_input_source(),
             "pixels_per_point": ctx.pixels_per_point(),
             "window_size": ctx.input(|i| i.viewport().inner_rect).map(|r| [r.width(), r.height()]),
         });
@@ -1402,6 +1510,49 @@ impl OneumApp {
             self.settings.replaygain.preamp_db,
             self.settings.replaygain.prevent_clipping
         ));
+        state["guide_open"] = serde_json::json!(self.guide_open);
+        state["eq_open"] = serde_json::json!(self.eq_open);
+        state["radio"] = serde_json::json!(p.radio);
+        state["crossfeed"] = serde_json::json!(format!("{:?}", p.crossfeed));
+        state["rediscover"] = serde_json::json!(format!("{:?}", self.rediscover));
+        state["lyrics_chars"] = serde_json::json!(
+            self.lyrics
+                .as_ref()
+                .and_then(|l| l.text.as_ref())
+                .map(|t| t.chars().count())
+        );
+        state["eq"] = serde_json::json!({
+            "enabled": self.settings.eq.enabled,
+            "active": p.eq.is_active(),
+            "preamp_db": self.settings.eq.preamp_db,
+            "gains_db": self.settings.eq.gains_db,
+            "player_gains_db": p.eq.gains_db,
+            "preset": match equalizer::matching_preset(&self.settings.eq, &self.settings.eq_presets) {
+                Some(equalizer::PresetRef::Builtin(i)) => crate::audio::eq::BUILTIN_PRESETS[i].id.to_string(),
+                Some(equalizer::PresetRef::User(i)) => format!("user:{}", self.settings.eq_presets[i].name),
+                None => "custom".to_string(),
+            },
+            "user_presets": self.settings.eq_presets.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+        });
+        state["licenses_shown"] = serde_json::json!(self.settings_open && self.licenses_shown);
+        state["player_stuck"] = serde_json::json!(self.player_stuck);
+        state["spectrum_peak_hz"] = serde_json::json!(self.spectrum.loudest_band_hz());
+        state["dither_bits"] = serde_json::json!(p.dither_bits);
+        state["peak_limited_frames"] = serde_json::json!(p.peak_limited_frames);
+        state["meter_visible"] = serde_json::json!(self.settings.show_meter);
+        state["meter"] = serde_json::json!({
+            "position": [self.meter.needles[0].position, self.meter.needles[1].position],
+            "vu": [
+                meter::reading(self.meter.needles[0].position),
+                meter::reading(self.meter.needles[1].position),
+            ],
+            "peak": [self.meter.peak_lit(0), self.meter.peak_lit(1)],
+        });
+        state["output_options"] = serde_json::json!({
+            "match_sample_rate": self.settings.output.match_sample_rate,
+            "exclusive": self.settings.output.exclusive,
+            "memory_playback": self.settings.output.memory_playback,
+        });
         state["perf"] = serde_json::json!({
             "first_frame_ms": self.perf.first_frame_ms,
             "last_frame_ms": self.perf.last_frame_ms,
@@ -1443,12 +1594,6 @@ pub(crate) fn next_repeat(mode: RepeatMode) -> RepeatMode {
         RepeatMode::All => RepeatMode::One,
         RepeatMode::One => RepeatMode::Off,
     }
-}
-
-/// Path of a file in the app bundle's `Resources` folder, when running from a bundle.
-pub(crate) fn bundled_resource(name: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.parent()?.join("Resources").join(name))
 }
 
 impl eframe::App for OneumApp {
@@ -1514,8 +1659,15 @@ impl eframe::App for OneumApp {
         self.global_shortcuts(&ctx);
         let mut actions: Vec<Action> = Vec::new();
 
+        if crate::platform::MENU_IN_WINDOW {
+            self.menu_shortcuts(&ctx);
+        }
+        if self.window_menu {
+            self.menu_bar(ui);
+        }
         self.top_bar(ui);
         self.player_bar(ui);
+        self.meter_deck(ui);
         self.toast_bar(ui);
         self.sidebar(ui, &mut actions);
         self.right_panel(ui, &mut actions);
@@ -1524,6 +1676,8 @@ impl eframe::App for OneumApp {
         self.drop_overlay(&ctx);
         self.drag_preview(&ctx);
         self.settings_window(&ctx);
+        self.guide_window(&ctx);
+        self.equalizer_window(&ctx);
         self.dialogs(&ctx);
         for action in actions {
             self.apply(action);

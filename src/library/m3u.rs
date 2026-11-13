@@ -1,7 +1,5 @@
 //! Reading and writing extended M3U (UTF-8, `.m3u8`) playlists.
 use crate::model::Track;
-use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
 /// One playlist line that names a file.
@@ -30,10 +28,18 @@ pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// File names may begin or end with spaces, so a line is first taken without its
 /// surrounding whitespace and, if no such file exists but the line as written does,
 /// as written.
+///
+/// A playlist is a file from anywhere, so what it names is not trusted: lines that
+/// point at another machine are not followed (see [`is_remote`]), and no more than
+/// [`MAX_ENTRIES`] lines are taken.
 pub(crate) fn parse(text: &str, base_dir: &Path) -> Vec<M3uEntry> {
     let exists = |path: &Option<PathBuf>| path.as_deref().is_some_and(Path::exists);
     let mut entries = Vec::new();
     for raw in text.split('\n') {
+        if entries.len() >= MAX_ENTRIES {
+            tracing::warn!("playlist has more than {MAX_ENTRIES} entries; the rest is ignored");
+            break;
+        }
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         let trimmed = line.trim();
         if trimmed.is_empty() || is_directive(trimmed) {
@@ -57,10 +63,54 @@ pub(crate) fn parse(text: &str, base_dir: &Path) -> Vec<M3uEntry> {
     entries
 }
 
+/// The most entries taken from one playlist. Every entry costs a look at the disk; a
+/// file of millions of two-letter lines must not become minutes of that.
+pub(crate) const MAX_ENTRIES: usize = 100_000;
+
+/// True for a path on another machine that merely looking at would connect to: a
+/// Windows share (`\\host\share\…`, where the system would also send the user's
+/// credentials to that host) or device path, or the automounter's `/net/host/…` on
+/// Unix. A playlist that came from somewhere must not be able to make the app do that.
+/// (A share that is mounted, `/Volumes/…` or a drive letter, is a local path.)
+fn is_remote(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(
+                prefix.kind(),
+                Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)
+            )
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        bytes.starts_with(b"//") || bytes.starts_with(b"/net/")
+    }
+}
+
+/// The path, unless it leads to another machine. A playlist that itself lies on that
+/// machine may name files next to it: the user has been there already.
+fn local_only(path: PathBuf, base_dir: &Path) -> Option<PathBuf> {
+    (!is_remote(&path) || path.starts_with(base_dir)).then_some(path)
+}
+
 /// True for extended-M3U directives such as `#EXTM3U`, `#EXTINF:…`, `#EXT-X-…`.
 fn is_directive(line: &str) -> bool {
     line.get(..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("#EXT"))
+}
+
+/// The path of `file:///C:/Music/a.mp3` is `/C:/Music/a.mp3`: on Windows the slash in
+/// front of the drive letter is not part of the file's path.
+fn strip_slash_before_drive(path: &mut Vec<u8>) {
+    if let [b'/', drive, b':', ..] = path.as_slice()
+        && drive.is_ascii_alphabetic()
+    {
+        path.remove(0);
+    }
 }
 
 fn resolve(line: &str, base_dir: &Path) -> Option<PathBuf> {
@@ -75,8 +125,12 @@ fn resolve(line: &str, base_dir: &Path) -> Option<PathBuf> {
         if !rest.starts_with('/') {
             return None; // a file URL on another host
         }
-        let decoded = PathBuf::from(OsString::from_vec(percent_decode(rest)));
-        return Some(lexical_normalize(&decoded));
+        let mut bytes = percent_decode(rest);
+        if cfg!(windows) {
+            strip_slash_before_drive(&mut bytes);
+        }
+        let decoded = crate::platform::path_from_bytes(bytes);
+        return local_only(lexical_normalize(&decoded), base_dir);
     }
     if is_url(line) {
         return None;
@@ -87,7 +141,8 @@ fn resolve(line: &str, base_dir: &Path) -> Option<PathBuf> {
     } else {
         base_dir.join(path)
     };
-    let absolute = lexical_normalize(&absolute);
+    // Before anything looks at the disk.
+    let absolute = local_only(lexical_normalize(&absolute), base_dir)?;
     if !absolute.exists() && line.contains('\\') {
         // Playlists written on Windows use backslashes for relative paths.
         let converted = line.replace('\\', "/");
@@ -176,6 +231,77 @@ fn single_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_that_point_at_another_machine_are_not_followed() {
+        let base = Path::new("/Users/me/Playlists");
+        let path_of = |line: &str| parse(line, base).into_iter().next().and_then(|e| e.path);
+        // Ordinary entries resolve as before.
+        assert_eq!(path_of("a.mp3"), Some(base.join("a.mp3")));
+        assert_eq!(
+            path_of("/Volumes/NAS/Music/a.mp3"),
+            Some(PathBuf::from("/Volumes/NAS/Music/a.mp3"))
+        );
+        assert_eq!(
+            path_of("file:///Users/me/Music/a%20b.mp3"),
+            Some(PathBuf::from("/Users/me/Music/a b.mp3"))
+        );
+        // A file URL on another host, and the automounter's way to any host.
+        assert_eq!(path_of("file://evil.example/share/a.mp3"), None);
+        #[cfg(not(windows))]
+        {
+            assert_eq!(path_of("/net/evil.example/share/a.mp3"), None);
+            assert_eq!(path_of("file:///net/evil.example/share/a.mp3"), None);
+            assert!(is_remote(Path::new("//evil.example/share/a.mp3")));
+            assert!(!is_remote(Path::new("/network/a.mp3")) && !is_remote(Path::new("/Volumes/x")));
+            // A playlist that lies there itself may name its neighbours.
+            let there = Path::new("/net/nas/music");
+            let entry = parse("/net/nas/music/album/a.mp3", there).remove(0);
+            assert_eq!(
+                entry.path,
+                Some(PathBuf::from("/net/nas/music/album/a.mp3"))
+            );
+        }
+        #[cfg(windows)]
+        {
+            for line in [
+                r"\\evil.example\share\a.mp3",
+                "//evil.example/share/a.mp3",
+                "file:////evil.example/share/a.mp3",
+                r"\\?\UNC\evil.example\share\a.mp3",
+                r"\\.\pipe\x",
+            ] {
+                assert_eq!(path_of(line), None, "{line}");
+            }
+            assert!(!is_remote(Path::new(r"C:\Music\a.mp3")));
+        }
+        // The entry is still listed (it is reported as not found), just never looked at.
+        assert_eq!(parse("file://evil.example/share/a.mp3", base).len(), 1);
+    }
+
+    #[test]
+    fn a_playlist_of_millions_of_lines_is_cut_short() {
+        let text = "a\n".repeat(MAX_ENTRIES + 50);
+        let entries = parse(&text, Path::new("/nowhere/at/all"));
+        assert_eq!(entries.len(), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn windows_file_urls_lose_the_slash_before_the_drive() {
+        let strip = |text: &str| {
+            let mut bytes = text.as_bytes().to_vec();
+            strip_slash_before_drive(&mut bytes);
+            String::from_utf8(bytes).expect("utf-8")
+        };
+        assert_eq!(strip("/C:/Music/a.mp3"), "C:/Music/a.mp3");
+        assert_eq!(strip("/d:/x"), "d:/x");
+        // Anything else is left alone: a server path, a relative path, a lone slash.
+        assert_eq!(strip("/Music/a.mp3"), "/Music/a.mp3");
+        assert_eq!(strip("//server/share/a.mp3"), "//server/share/a.mp3");
+        assert_eq!(strip("/1:/a"), "/1:/a");
+        assert_eq!(strip("/"), "/");
+        assert_eq!(strip(""), "");
+    }
 
     #[test]
     fn decode_strips_bom_and_tolerates_bad_bytes() {

@@ -24,6 +24,7 @@ impl AppPaths {
                     log_dir: root.join("logs"),
                 }
             }
+            #[cfg(not(windows))]
             None => {
                 let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set")
@@ -33,6 +34,28 @@ impl AppPaths {
                     data_dir: library.join("Application Support").join("OnEum"),
                     cache_dir: library.join("Caches").join("OnEum"),
                     log_dir: library.join("Logs").join("OnEum"),
+                }
+            }
+            // Windows: settings and the library roam with the user (%APPDATA%); what can
+            // be rebuilt or thrown away stays on this machine (%LOCALAPPDATA%).
+            #[cfg(windows)]
+            None => {
+                let folder = |name: &str| {
+                    std::env::var_os(name)
+                        .filter(|v| !v.is_empty())
+                        .map(PathBuf::from)
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                format!("{name} is not set"),
+                            )
+                        })
+                };
+                let local = folder("LOCALAPPDATA")?.join("OnEum");
+                Self {
+                    data_dir: folder("APPDATA")?.join("OnEum"),
+                    cache_dir: local.join("Cache"),
+                    log_dir: local.join("Logs"),
                 }
             }
         };

@@ -3,7 +3,7 @@
 use oneum::audio::decoder::TrackDecoder;
 use oneum::audio::output::{OutputError, OutputSignals};
 use oneum::audio::render::Renderer;
-use oneum::audio::{Engine, PlaybackErrorKind, ReplayGainSettings};
+use oneum::audio::{Engine, OutputSettings, PlaybackErrorKind, ReplayGainSettings};
 use oneum::model::{ReplayGainTags, TrackId};
 use oneum::playback::player::{self, MAX_CONSECUTIVE_FAILURES};
 use oneum::playback::{
@@ -46,7 +46,14 @@ struct TestHost {
     saves: AtomicUsize,
     /// Saves that had to rewrite the queue's items.
     queue_saves: AtomicUsize,
+    /// While set, looking a track up does not return: a stand-in for the player thread
+    /// being stuck in a call into a device driver that has hung.
+    hang: AtomicBool,
     changes: AtomicUsize,
+    /// What the host's "library" has to offer the radio, in order of preference.
+    radio_pool: Vec<TrackId>,
+    /// Seeds the radio was asked about.
+    radio_asked: Mutex<Vec<TrackId>>,
 }
 
 impl TestHost {
@@ -60,6 +67,8 @@ impl TestHost {
                     replaygain: ReplayGainTags::default(),
                     duration_ms: 1000,
                     available,
+                    sample_rate: 0,
+                    bit_depth: None,
                 },
             );
         };
@@ -86,8 +95,20 @@ impl TestHost {
                 replaygain: ReplayGainTags::default(),
                 duration_ms,
                 available: true,
+                sample_rate: 0,
+                bit_depth: None,
             },
         );
+        self
+    }
+    /// Sets what the library knows as the track's sample rate.
+    fn with_rate(mut self, id: TrackId, sample_rate: u32) -> Self {
+        self.tracks.get_mut(&id).expect("track exists").sample_rate = sample_rate;
+        self
+    }
+    /// Sets what the library knows as the track's bit depth.
+    fn with_bits(mut self, id: TrackId, bits: u8) -> Self {
+        self.tracks.get_mut(&id).expect("track exists").bit_depth = Some(bits);
         self
     }
     fn plays(&self) -> Vec<TrackId> {
@@ -97,10 +118,22 @@ impl TestHost {
 
 impl PlayerHost for TestHost {
     fn track(&self, id: TrackId) -> Option<PlayableTrack> {
+        while self.hang.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         self.tracks.get(&id).cloned()
     }
     fn record_play(&self, id: TrackId) {
         self.plays.lock().expect("lock").push(id);
+    }
+    fn radio_picks(&self, seed: TrackId, exclude: &[TrackId], count: usize) -> Vec<TrackId> {
+        self.radio_asked.lock().expect("lock").push(seed);
+        self.radio_pool
+            .iter()
+            .copied()
+            .filter(|id| !exclude.contains(id))
+            .take(count)
+            .collect()
     }
     fn load_session(&self) -> Option<Session> {
         self.session.lock().expect("lock").clone()
@@ -142,6 +175,15 @@ impl Rig {
     }
 
     fn start_with(host: TestHost, stall_timeout: Duration) -> Self {
+        Self::start_configured(host, stall_timeout, |_| {})
+    }
+
+    /// `configure` sets the offline engine up before the player takes it.
+    fn start_configured(
+        host: TestHost,
+        stall_timeout: Duration,
+        configure: impl FnOnce(&mut Engine) + Send + 'static,
+    ) -> Self {
         let host = Arc::new(host);
         let (renderer_tx, renderer_rx) =
             std::sync::mpsc::channel::<(Renderer, Arc<OutputSignals>)>();
@@ -153,8 +195,9 @@ impl Rig {
                 ..Default::default()
             },
             move |volume| {
-                let (engine, renderer) =
+                let (mut engine, renderer) =
                     Engine::new_offline(44_100, volume, ReplayGainSettings::default());
+                configure(&mut engine);
                 renderer_tx
                     .send((renderer, engine.output_signals()))
                     .expect("test is alive");
@@ -1134,4 +1177,561 @@ fn the_published_queue_follows_a_shuffled_wrap() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(orders.len() > 1, "the order changed across passes");
+}
+
+const T48: TrackId = 70; // tone_48k.wav
+const T48_AGAIN: TrackId = 71; // the same file once more
+
+/// A library that knows the sample rates of its tracks, as the real one does.
+fn rated_host() -> TestHost {
+    TestHost::new()
+        .with_rate(A, 44_100)
+        .with_rate(B, 44_100)
+        .with_track(T48, fixture("tone_48k.wav"), 1000)
+        .with_rate(T48, 48_000)
+        .with_track(T48_AGAIN, fixture("tone_48k.wav"), 1000)
+        .with_rate(T48_AGAIN, 48_000)
+}
+
+/// A rig whose pretend device offers 44.1 and 48 kHz, with rate matching on or off.
+fn rate_rig(match_sample_rate: bool) -> Rig {
+    Rig::start_configured(rated_host(), Duration::from_secs(15), move |engine| {
+        engine.set_offline_rates(&[44_100, 48_000]);
+        engine.set_output_settings(OutputSettings {
+            match_sample_rate,
+            ..OutputSettings::default()
+        });
+    })
+}
+
+/// With rate matching, tracks of one rate still join gaplessly in one feed, and the feed
+/// ends exactly where the device has to change its rate. Nothing is lost at the break.
+#[test]
+fn rate_matching_starts_a_new_feed_only_where_the_rate_changes() {
+    let rig = rate_rig(true);
+    rig.send(play(&[A, B, T48, T48_AGAIN], 0));
+    rig.wait("first track", |s| Rig::track(s) == Some(A));
+    let ended = rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(Rig::track(&ended), Some(T48_AGAIN));
+    assert!(ended.output_settings.match_sample_rate);
+    assert_eq!(rig.host.plays(), vec![A, B, T48, T48_AGAIN]);
+
+    let audio = rig.audio.lock().expect("lock").clone();
+    assert_eq!(
+        audio.len(),
+        2,
+        "one feed for the 44.1 kHz pair, one for the 48 kHz pair"
+    );
+    // The 44.1 kHz pair is the uncut signal, sample for sample.
+    let expected: Vec<f32> = decode_all("gap_a.wav")
+        .into_iter()
+        .chain(decode_all("gap_b.wav"))
+        .collect();
+    assert_eq!(audio[0].1.len(), expected.len());
+    assert_eq!(
+        max_abs_diff(&audio[0].1[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]),
+        0.0
+    );
+    // The 48 kHz pair plays in full (the offline sink itself stays at 44.1 kHz, so it is
+    // resampled here: twice one second, give or take the resampler's rounding).
+    let frames = audio[1].1.len() / 2;
+    assert!((88_190..=88_210).contains(&frames), "{frames} frames");
+}
+
+/// Without rate matching nothing changes: tracks of different rates share one feed.
+#[test]
+fn without_rate_matching_mixed_rates_stay_in_one_feed() {
+    let rig = rate_rig(false);
+    rig.send(play(&[A, T48, B], 0));
+    rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, T48, B]);
+    assert_eq!(rig.feeds(), 1);
+}
+
+/// A track whose rate the library does not know never breaks a feed: the device cannot
+/// be set up for it ahead of time, so it is converted like without rate matching.
+#[test]
+fn rate_matching_leaves_tracks_of_unknown_rate_alone() {
+    let rig = Rig::start_configured(
+        rated_host().with_rate(B, 0),
+        Duration::from_secs(15),
+        |engine| {
+            engine.set_offline_rates(&[44_100, 48_000]);
+            engine.set_output_settings(OutputSettings {
+                match_sample_rate: true,
+                ..OutputSettings::default()
+            });
+        },
+    );
+    rig.send(play(&[A, B], 0));
+    rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, B]);
+    assert_eq!(rig.feeds(), 1);
+}
+
+/// Queue edits and mode changes keep working across a rate break: what is announced to
+/// the decode thread is decided again each time.
+#[test]
+fn rate_matching_follows_queue_edits() {
+    let rig = rate_rig(true);
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time: leave room to edit
+    rig.send(play(&[A, T48], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    // Put a 44.1 kHz track in front of the 48 kHz one. (Whether it still joins the
+    // running feed depends on how far the decode thread is; these tracks are one second
+    // long, so it usually has finished the feed already.)
+    rig.send(Command::PlayNext(vec![B]));
+    rig.pace_ms.store(2, Ordering::Relaxed);
+    rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, B, T48]);
+    assert!(
+        rig.feeds() >= 2,
+        "the 48 kHz track starts a feed of its own"
+    );
+}
+
+/// Switching the output options while playing reopens the output and goes on from the
+/// same position; switching memory playback alone does not interrupt anything.
+#[test]
+fn changing_output_settings_keeps_the_position() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.pace_ms.store(12, Ordering::Relaxed);
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing for a while", |s| {
+        // The shown position runs on the clock and is a little ahead of this rig's
+        // audio; ask for clearly more than what is checked below.
+        s.state == PlayState::Playing && s.position_now_ms() >= 600
+    });
+    let feeds = rig.feeds();
+    rig.send(Command::SetOutput(OutputSettings {
+        memory_playback: true,
+        ..OutputSettings::default()
+    }));
+    let snap = rig.wait("memory playback noted", |s| {
+        s.output_settings.memory_playback
+    });
+    assert_eq!(snap.state, PlayState::Playing);
+    assert_eq!(
+        rig.feeds(),
+        feeds,
+        "memory playback alone starts no new feed"
+    );
+
+    rig.send(Command::SetOutput(OutputSettings {
+        match_sample_rate: true,
+        exclusive: true,
+        memory_playback: true,
+    }));
+    let snap = rig.wait("reopened and playing", |s| {
+        s.output_settings.exclusive && s.state == PlayState::Playing && rig.feeds() > feeds
+    });
+    assert!(
+        snap.position_now_ms() >= 300,
+        "continues, does not restart: {snap:?}"
+    );
+    assert!(
+        snap.source.as_ref().is_some_and(|s| s.in_memory),
+        "the new feed plays from memory"
+    );
+}
+
+const MP3_A: TrackId = 80; // gap_a.mp3
+const WIDE_A: TrackId = 81; // gap_a.wav, which the library takes for a 24-bit file
+
+/// A rig whose pretend device takes 16-bit integers.
+fn sixteen_bit_rig() -> Rig {
+    let host = TestHost::new()
+        .with_rate(A, 44_100)
+        .with_bits(A, 16)
+        .with_track(MP3_A, fixture("gap_a.mp3"), 1000)
+        .with_rate(MP3_A, 44_100)
+        .with_track(WIDE_A, fixture("gap_a.wav"), 1000)
+        .with_rate(WIDE_A, 44_100)
+        .with_bits(WIDE_A, 24);
+    Rig::start_configured(host, Duration::from_secs(15), |engine| {
+        engine.set_offline_hardware_bits(Some((16, false)));
+    })
+}
+
+/// On an integer device, a file that fits the device and is played untouched goes out
+/// sample for sample; anything else is dithered, by no more than one device step.
+#[test]
+fn an_integer_device_gets_dither_only_when_the_samples_are_not_the_files_own() {
+    let step = 1.0 / 32_768.0;
+    let expected = decode_all("gap_a.wav");
+
+    // 16-bit file, 16-bit device, full volume: untouched, no dither.
+    let rig = sixteen_bit_rig();
+    rig.send(play(&[A], 0));
+    let playing = rig.wait("playing", |s| s.state == PlayState::Playing);
+    assert_eq!(playing.dither_bits, None);
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    let audio = rig.last_feed_audio();
+    assert_eq!(audio.len(), expected.len());
+    assert_eq!(
+        max_abs_diff(&audio[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]),
+        0.0
+    );
+    drop(rig);
+
+    // The same file taken for a 24-bit one does not fit a 16-bit device: dithered.
+    let rig = sixteen_bit_rig();
+    rig.send(play(&[WIDE_A], 0));
+    rig.wait("dither for a wider file", |s| {
+        s.state == PlayState::Playing && s.dither_bits == Some(16)
+    });
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    let audio = rig.last_feed_audio();
+    let worst = max_abs_diff(&audio[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]);
+    assert!(
+        worst > 0.0 && worst <= step * 1.0001,
+        "worst deviation {worst}"
+    );
+    drop(rig);
+
+    // A lossy file is never "the file's own samples".
+    let rig = sixteen_bit_rig();
+    rig.send(play(&[MP3_A], 0));
+    rig.wait("dither for a lossy file", |s| {
+        s.state == PlayState::Playing && s.dither_bits == Some(16)
+    });
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    let (audio, decoded) = (rig.last_feed_audio(), decode_all("gap_a.mp3"));
+    assert_eq!(audio.len(), decoded.len());
+    let worst = max_abs_diff(&audio[FADE_GUARD * 2..], &decoded[FADE_GUARD * 2..]);
+    assert!(
+        worst > 0.0 && worst <= step * 1.0001,
+        "worst deviation {worst}"
+    );
+    drop(rig);
+
+    // Turning the volume down touches the samples of even a fitting file.
+    let rig = sixteen_bit_rig();
+    rig.send(Command::SetVolume(0.5));
+    rig.send(play(&[A], 0));
+    let snap = rig.wait("dither below full volume", |s| {
+        s.state == PlayState::Playing && s.dither_bits == Some(16)
+    });
+    assert_eq!(snap.volume, 0.5);
+}
+
+/// A device that takes floating point (or whose format is unknown) never gets dither.
+#[test]
+fn a_float_device_never_gets_dither() {
+    let host = TestHost::new()
+        .with_track(MP3_A, fixture("gap_a.mp3"), 1000)
+        .with_rate(MP3_A, 44_100);
+    let rig = Rig::start_configured(host, Duration::from_secs(15), |engine| {
+        engine.set_offline_hardware_bits(Some((32, true)));
+    });
+    rig.send(Command::SetVolume(0.5));
+    rig.send(play(&[MP3_A, A], 0));
+    let snap = rig.wait("second track", |s| Rig::track(s) == Some(A));
+    assert_eq!(snap.dither_bits, None);
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.player.snapshot().dither_bits, None);
+}
+
+/// Across a gapless boundary the dither follows the tracks: the lossy track is dithered
+/// to its end, and the untouched file after it goes out exactly (once the boundary has
+/// been noticed, which takes a moment).
+#[test]
+fn dither_ends_when_the_processed_track_has_left_the_feed() {
+    let step = 1.0 / 32_768.0;
+    let rig = sixteen_bit_rig();
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time: boundaries are noticed promptly
+    rig.send(play(&[MP3_A, A], 0));
+    rig.wait("the lossy track is dithered", |s| {
+        s.state == PlayState::Playing && Rig::track(s) == Some(MP3_A) && s.dither_bits == Some(16)
+    });
+    rig.wait("the untouched track is not", |s| {
+        Rig::track(s) == Some(A) && s.dither_bits.is_none()
+    });
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.feeds(), 1, "one gapless feed");
+    let audio = rig.last_feed_audio();
+    let (lossy, exact) = (decode_all("gap_a.mp3"), decode_all("gap_a.wav"));
+    assert_eq!(audio.len(), lossy.len() + exact.len());
+    // The middle of the lossy track: dithered, by no more than a step.
+    let range = 10_000..70_000;
+    let worst = max_abs_diff(&audio[range.clone()], &lossy[range]);
+    assert!(worst > 0.0 && worst <= step * 1.0001, "lossy part: {worst}");
+    // The second half of the file after it: sample for sample.
+    let from = lossy.len() + exact.len() / 2;
+    assert_eq!(
+        max_abs_diff(&audio[from..], &exact[exact.len() / 2..]),
+        0.0,
+        "untouched part"
+    );
+}
+
+/// The player thread gives a sign of life several times a second. When it is stuck in a
+/// call that does not return, the sign stops, which is how the window knows to tell the
+/// user; when the call returns, everything goes on.
+#[test]
+fn a_stuck_player_thread_is_noticed_and_recovers() {
+    let rig = Rig::start(TestHost::new());
+    std::thread::sleep(Duration::from_millis(450));
+    assert!(
+        rig.player.unresponsive_for() < Duration::from_millis(400),
+        "idle: heard from within the last tick"
+    );
+    rig.host.hang.store(true, Ordering::Relaxed);
+    rig.send(play(&[A, B], 0));
+    std::thread::sleep(Duration::from_millis(700));
+    let silent = rig.player.unresponsive_for();
+    assert!(silent >= Duration::from_millis(500), "stuck for {silent:?}");
+    assert_eq!(
+        rig.player.snapshot().state,
+        PlayState::Idle,
+        "nothing moved"
+    );
+    // The call returns: the command that was waiting is carried out.
+    rig.host.hang.store(false, Ordering::Relaxed);
+    rig.wait("playing after all", |s| s.state == PlayState::Playing);
+    assert!(rig.player.unresponsive_for() < Duration::from_millis(400));
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, B]);
+}
+
+// ----- peak protection ---------------------------------------------------------------
+
+const HOT: TrackId = 90; // gap_a.wav with a ReplayGain tag asking for +12 dB
+
+/// The snapshot says, per track, whether the peak limiter had to step in: for the
+/// track that is heard, not for the one that is being decoded ahead of it.
+#[test]
+fn peak_protection_is_reported_for_the_track_it_acted_on() {
+    let mut host = TestHost::new().with_track(HOT, fixture("gap_a.wav"), 1000);
+    host.tracks.get_mut(&HOT).expect("track exists").replaygain = ReplayGainTags {
+        track_gain_db: Some(12.0),
+        track_peak: Some(0.354),
+        ..Default::default()
+    };
+    let rig = Rig::start(host);
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time: boundaries are noticed promptly
+    rig.send(Command::SetReplayGain(ReplayGainSettings {
+        mode: oneum::audio::ReplayGainMode::Track,
+        preamp_db: 0.0,
+        prevent_clipping: false,
+    }));
+    rig.send(play(&[A, HOT, B], 0));
+    rig.wait("the first track needs no protection", |s| {
+        s.state == PlayState::Playing && Rig::track(s) == Some(A) && s.position_ms > 300
+    });
+    assert_eq!(rig.player.snapshot().peak_limited_frames, 0);
+    rig.wait("the amplified track is protected", |s| {
+        Rig::track(s) == Some(HOT) && s.peak_limited_frames > 10_000
+    });
+    rig.wait("the track after it is not", |s| {
+        Rig::track(s) == Some(B) && s.peak_limited_frames == 0
+    });
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.feeds(), 1, "one gapless feed");
+    // Nothing that was heard exceeds full scale, and the amplified second is at it.
+    let audio = rig.last_feed_audio();
+    let peak =
+        |range: std::ops::Range<usize>| audio[range].iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(peak(0..audio.len()) <= 1.0);
+    // (Interleaved stereo: a second is 88,200 samples.)
+    assert_eq!(audio.len(), 3 * 88_200);
+    assert!(peak(100_000..160_000) > 0.99, "{}", peak(100_000..160_000));
+    assert!(peak(2_000..80_000) < 0.4);
+    assert!(peak(190_000..260_000) < 0.4);
+}
+
+// ----- equalizer ----------------------------------------------------------------------
+
+/// The equalizer reaches the audio that is playing (within the second that is decoded
+/// ahead), counts as processing for an integer device, and leaves no trace when it is
+/// switched off again.
+#[test]
+fn the_equalizer_is_applied_while_playing_and_dithered_for_an_integer_device() {
+    use oneum::audio::EqSettings;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let host = long_host(&dir).with_rate(LONG, 44_100).with_bits(LONG, 16);
+    let rig = Rig::start_configured(host, Duration::from_secs(15), |engine| {
+        engine.set_offline_hardware_bits(Some((16, false)));
+    });
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time
+    rig.send(play(&[LONG], 0));
+    let playing = rig.wait("untouched: no dither", |s| {
+        s.state == PlayState::Playing && s.position_ms > 300
+    });
+    assert_eq!(playing.dither_bits, None);
+    assert!(!playing.eq.is_active());
+
+    // Out of range on purpose: the player brings the values back.
+    let mut gains = [0.0; 10];
+    gains[5] = 40.0;
+    rig.send(Command::SetEq(EqSettings {
+        enabled: true,
+        preamp_db: -12.0,
+        gains_db: gains,
+    }));
+    let on = rig.wait("equalized: dithered", |s| {
+        s.eq.is_active() && s.dither_bits == Some(16)
+    });
+    assert_eq!(on.eq.gains_db[5], 12.0);
+    assert_eq!(on.eq.preamp_db, -12.0);
+
+    rig.send(Command::SetEq(EqSettings::default()));
+    rig.wait("switched off: the file's own samples again", |s| {
+        !s.eq.is_active() && s.dither_bits.is_none()
+    });
+    assert_eq!(rig.player.snapshot().state, PlayState::Playing);
+    assert_eq!(rig.feeds(), 1, "the equalizer never restarts the feed");
+}
+
+// ----- radio ---------------------------------------------------------------------------
+
+/// With radio on, the queue does not end: when its last song starts, songs that go
+/// with it are added, and they follow without a gap like anything else in the queue.
+#[test]
+fn radio_keeps_playing_when_the_queue_runs_out() {
+    let mut host = TestHost::new();
+    host.radio_pool = vec![A, B, FLAC_A];
+    let rig = Rig::start(host);
+    rig.send(Command::SetRadio(true));
+    rig.send(play(&[A], 0));
+    // A is in the queue already, so the radio adds the other two; when the last of
+    // them starts there is nothing left to add, and the queue ends.
+    let ended = rig.wait("the end of what the radio had", |s| {
+        s.state == PlayState::Ended
+    });
+    assert!(ended.radio);
+    let queued: Vec<TrackId> = ended.queue.iter().map(|i| i.track).collect();
+    assert_eq!(queued, [A, B, FLAC_A]);
+    assert_eq!(
+        rig.feeds(),
+        1,
+        "the added songs follow gaplessly in the same feed"
+    );
+    let audio = rig.last_feed_audio();
+    let expected: usize = ["gap_a.wav", "gap_b.wav", "gap_a.flac"]
+        .iter()
+        .map(|name| decode_all(name).len())
+        .sum();
+    assert_eq!(audio.len(), expected);
+    // Asked for the song that was the last one when playback started, and then only
+    // for the last of what it had to give (when it starts, and once more at the end).
+    let asked = rig.host.radio_asked.lock().expect("lock").clone();
+    assert_eq!(asked.first(), Some(&A));
+    assert!(
+        asked.len() >= 2 && asked[1..].iter().all(|seed| *seed == FLAC_A),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn radio_is_off_unless_asked_for_and_leaves_repeat_alone() {
+    let mut host = TestHost::new();
+    host.radio_pool = vec![B, FLAC_A];
+    let rig = Rig::start(host);
+    // Off: the queue ends where it ends.
+    rig.send(play(&[A], 0));
+    let ended = rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(ended.queue.len(), 1);
+    assert!(!ended.radio);
+    assert!(rig.host.radio_asked.lock().expect("lock").is_empty());
+    // Repeat is a way of not ending already: the radio stays out of it.
+    rig.send(Command::SetRadio(true));
+    rig.send(Command::SetRepeat(RepeatMode::One));
+    rig.send(play(&[A], 0));
+    rig.wait("the song comes round again", |s| {
+        s.state == PlayState::Playing && rig.feeds() >= 1 && rig.host.plays().len() >= 2
+    });
+    assert_eq!(rig.player.snapshot().queue.len(), 1);
+    assert!(rig.host.radio_asked.lock().expect("lock").is_empty());
+}
+
+/// Switched on while the last song of the queue is playing, it applies to that queue.
+#[test]
+fn radio_switched_on_during_the_last_song_extends_the_queue() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut host = long_host(&dir);
+    host.radio_pool = vec![A, B];
+    let rig = Rig::start(host);
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms > 200
+    });
+    assert_eq!(rig.player.snapshot().queue.len(), 1);
+    rig.send(Command::SetRadio(true));
+    let grown = rig.wait("the queue grows", |s| s.queue.len() == 3);
+    assert_eq!(grown.state, PlayState::Playing);
+    assert_eq!(Rig::track(&grown), Some(LONG));
+    assert_eq!(rig.feeds(), 1, "the song that is playing is not restarted");
+}
+
+/// Crossfeed is processing like the equalizer: it reaches the player, and an integer
+/// device gets dither while it is on.
+#[test]
+fn crossfeed_counts_as_processing() {
+    use oneum::audio::Crossfeed;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let host = long_host(&dir).with_rate(LONG, 44_100).with_bits(LONG, 16);
+    let rig = Rig::start_configured(host, Duration::from_secs(15), |engine| {
+        engine.set_offline_hardware_bits(Some((16, false)));
+    });
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time
+    rig.send(play(&[LONG], 0));
+    let playing = rig.wait("untouched", |s| {
+        s.state == PlayState::Playing && s.position_ms > 200
+    });
+    assert_eq!(
+        (playing.crossfeed, playing.dither_bits),
+        (Crossfeed::Off, None)
+    );
+    rig.send(Command::SetCrossfeed(Crossfeed::Medium));
+    rig.wait("crossfed: dithered", |s| {
+        s.crossfeed == Crossfeed::Medium && s.dither_bits == Some(16)
+    });
+    rig.send(Command::SetCrossfeed(Crossfeed::Off));
+    rig.wait("off again", |s| {
+        s.crossfeed == Crossfeed::Off && s.dither_bits.is_none()
+    });
+    assert_eq!(rig.feeds(), 1);
+}
+
+/// A queue edit can leave the song that is playing as the last one: the radio is asked
+/// then too, not only when a song starts.
+#[test]
+fn radio_steps_in_when_an_edit_leaves_the_playing_song_last() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut host = long_host(&dir);
+    host.radio_pool = vec![B, FLAC_A];
+    let rig = Rig::start(host);
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time
+    rig.send(Command::SetRadio(true));
+    rig.send(play(&[LONG, A], 0));
+    let playing = rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms > 200
+    });
+    assert_eq!(playing.queue.len(), 2, "something follows: nothing to add");
+    let last = playing.queue[1].id;
+    rig.send(Command::RemoveItems(vec![last]));
+    let grown = rig.wait("the radio fills in", |s| s.queue.len() == 3);
+    let queued: Vec<TrackId> = grown.queue.iter().map(|i| i.track).collect();
+    assert_eq!(queued, [LONG, B, FLAC_A]);
+    assert_eq!(rig.feeds(), 1, "the song that is playing is not restarted");
+}
+
+/// Shuffle with Repeat All decides its next round only when it wraps, so at the last
+/// song of a round "nothing follows" does not mean the queue ends: the radio must not
+/// take it for that and grow the queue round after round.
+#[test]
+fn radio_does_not_grow_a_shuffled_repeating_queue() {
+    let mut host = TestHost::new();
+    host.radio_pool = vec![FLAC_A, MONO];
+    let rig = Rig::start(host);
+    rig.send(Command::SetRadio(true));
+    rig.send(Command::SetRepeat(RepeatMode::All));
+    rig.send(Command::SetShuffle(true));
+    rig.send(play(&[A, B], 0));
+    rig.wait_host("more than one round", |h| h.plays().len() >= 5);
+    assert_eq!(rig.player.snapshot().queue.len(), 2);
+    assert!(rig.host.radio_asked.lock().expect("lock").is_empty());
 }

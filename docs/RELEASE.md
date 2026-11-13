@@ -10,13 +10,16 @@
 | 별도 위치에 설치해 실행 | 완료 (docs/TESTING.md "패키지 검증") |
 | Developer ID 서명 + Hardened Runtime | **검증 대기** — 인증서 없음 |
 | 공증(notarytool), stapling, `spctl` 평가 | **검증 대기** — Apple 계정 자격 증명 없음 |
-| 라이선스 전문 묶음 | **대기** — 현재는 의존성 목록만 포함 |
+| 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
+| 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
+| Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
 
 ## 1. 준비
 - `Cargo.toml`의 `version`을 올리고 `CHANGELOG.md`를 갱신합니다. 빌드 번호는 git 커밋 수에서 자동으로 정해집니다.
-- 의존성이 바뀌었으면 `python3 scripts/gen-notices.py`로 `THIRD_PARTY_NOTICES.md`를 다시 만듭니다.
+- 의존성이 바뀌었으면 `python3 scripts/gen-notices.py`로 `THIRD_PARTY_NOTICES.md`를 다시 만듭니다. 라이선스 전문(`THIRD_PARTY_LICENSES.txt`)은 패키징 스크립트가 만듭니다.
+- `vendor/lofty`는 lofty 0.25.5에서 한 곳을 고친 사본입니다(`vendor/lofty/README-ONEUM.md`). lofty를 올릴 때, 새 버전이 `id3v2_compression_support` 없이 빌드되면 폴더와 `Cargo.toml`의 `[patch.crates-io]`를 지웁니다.
 - 아이콘을 바꿨으면 `scripts/gen-icon.sh`.
 
 ## 2. 검사
@@ -35,12 +38,31 @@ cargo test --workspace --locked
 scripts/package.sh --dmg
 ```
 결과물:
-- `dist/OnEum.app` — 번들(`Info.plist`, 아이콘, 사용 안내, 고지 포함)
+- `dist/OnEum.app` — 번들(`Info.plist`, 아이콘, 고지와 라이선스 전문 포함. 사용 안내는 실행 파일에 내장)
+
+`scripts/package.sh`는 검증 채널(`ONEUM_SCRIPT`)이 없는 빌드를 만듭니다. 그 채널이 든 빌드는 `scripts/dev/run.sh`(`ONEUM_AUTOMATION=1`)가 `dist/dev`에만 만듭니다. **`dist/dev`의 앱을 배포하지 마세요.**
 - `dist/OnEum-<버전>-arm64.dmg` — 앱과 `/Applications` 바로가기
 - `dist/SHA256SUMS.txt`
 
 아키텍처: Apple Silicon(arm64) 전용입니다. Intel/유니버설 빌드는 검증 장비가 없어 만들지 않습니다
 (`rustup target add x86_64-apple-darwin` 후 `lipo`로 합칠 수는 있으나, 검증 전에는 지원한다고 표기하지 않습니다).
+
+### Windows판
+```bash
+rustup target add x86_64-pc-windows-gnu
+```
+```bash
+brew install mingw-w64
+```
+```bash
+scripts/package-windows.sh
+```
+`dist/OnEum-<버전>-windows-x86_64.zip`(OnEum.exe, LICENSE.txt, Windows 빌드 기준 THIRD_PARTY_NOTICES.md, README.txt)과
+`dist/SHA256SUMS-windows.txt`가 만들어집니다. 설치 프로그램은 없고, 압축을 푼 폴더에서 바로 실행합니다.
+- 서명하지 않으므로 Windows SmartScreen 경고가 나옵니다(코드 서명 인증서가 필요합니다).
+- 스크립트는 실행 파일이 컴파일러 런타임 DLL을 필요로 하지 않는지만 검사합니다. **Windows에서 실행해 보는 단계는 없습니다** — 배포 전에 실제 Windows에서
+  docs/TESTING.md "Windows"의 항목을 확인해야 합니다.
+- 실행 파일 자체의 아이콘(탐색기에 보이는 아이콘)은 넣지 않았습니다. 창과 작업 표시줄 아이콘만 설정됩니다.
 
 ## 4. Developer ID 서명 (자격 증명 필요)
 필요한 것: Apple Developer Program의 **Developer ID Application** 인증서(키체인에 설치).
@@ -86,8 +108,9 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
 
 ## 7. 공개
 - 공개 업로드는 권한이 있는 사람이 수행합니다. 공개 전에 결과물(`dist/*.dmg`, `SHA256SUMS.txt`)과 `CHANGELOG.md`를 검토합니다.
-- 공개 배포 전에 라이선스 전문 묶음을 추가합니다. 권장: `cargo install cargo-about` 후 `cargo about generate`로
-  각 crate의 라이선스 본문을 모아 번들 `Resources`에 넣습니다(MIT·Apache-2.0·MPL-2.0 등의 고지 의무).
+- 라이선스 전문 묶음(`THIRD_PARTY_LICENSES.txt`)이 번들 `Resources`와 Windows zip에 들어 있는지 확인합니다. 각 crate 패키지에 든 LICENSE·COPYING·NOTICE 파일을 모은 것이고,
+  파일이 없는 crate는 목록과 함께 표준 본문이 묶음 안에 있는지 스크립트가 검사합니다(없으면 실패).
+- 판매·공개 전 남은 일: Developer ID 서명과 공증(4·5절), Windows 실제 실행 확인(docs/TESTING.md "Windows"), 그리고 가능하면 Windows 코드 서명(없으면 SmartScreen 경고).
 
 ## 샌드박스와 권한
 - 직접 배포이므로 **App Sandbox는 쓰지 않습니다.** 사용자가 고른 폴더를 일반 파일 권한으로 읽습니다.
