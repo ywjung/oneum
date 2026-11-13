@@ -1,4 +1,5 @@
 //! Demuxing and decoding of one audio file with Symphonia.
+use super::mp4_edit::{self, Trim};
 use super::source::FileInMemory;
 use super::{PlaybackError, PlaybackErrorKind};
 use std::path::Path;
@@ -38,6 +39,9 @@ pub struct TrackDecoder {
     track_id: u32,
     time_base: Option<TimeBase>,
     info: SourceInfo,
+    /// For AAC in an MP4 file: which frames of the decoded stream are the music (the
+    /// reader does not act on the file's edit list or Apple's gapless note itself).
+    trim: Option<Trim>,
     /// After a seek: source frame the output must start at. Decoded audio before it is
     /// dropped using packet timestamps. `Some(u64::MAX)` means "at end of stream".
     drop_until: Option<u64>,
@@ -90,6 +94,15 @@ pub(crate) fn map_file_error(e: &std::io::Error) -> PlaybackError {
             format!("open failed: {kind}"),
         ),
     }
+}
+
+/// Whether the decoder can play the file at all: opens it and decodes its first packet.
+/// For the scanner, to tell apart what a file's header calls by one name: AAC-LC in
+/// stereo plays, HE-AAC and 5.1 AAC do not. `Err` says why not.
+pub fn can_play(path: &Path) -> Result<(), PlaybackError> {
+    let mut decoder = TrackDecoder::open(path)?;
+    let mut first = Vec::new();
+    decoder.next(&mut first).map(|_| ())
 }
 
 impl TrackDecoder {
@@ -156,6 +169,16 @@ impl TrackDecoder {
             .filter(|c| (1..=MAX_CHANNELS).contains(c))
             .ok_or_else(|| err(PlaybackErrorKind::Unsupported, "unusable channel layout"))?;
         let codec = decoder.codec_info().short_name.to_string();
+        // AAC's priming and padding: the reader passes them on as audio. What the file
+        // says about them is read here and applied while decoding.
+        let trim = (codec == "aac" && !has_gapless_info)
+            .then(|| std::fs::File::open(path).ok())
+            .flatten()
+            .and_then(|file| mp4_edit::read(std::io::BufReader::new(file), sample_rate));
+        let (total_frames, has_gapless_info) = match trim {
+            Some(trim) => (Some(trim.valid), true),
+            None => (total_frames, has_gapless_info),
+        };
         Ok(Self {
             format,
             decoder,
@@ -169,6 +192,7 @@ impl TrackDecoder {
                 has_gapless_info,
                 in_memory,
             },
+            trim,
             drop_until: None,
             consecutive_errors: 0,
             skipped_packets: 0,
@@ -198,6 +222,8 @@ impl TrackDecoder {
     /// timestamp while decoding. This gives codecs that need a warm-up packet after a
     /// reset (Vorbis, MP3 bit reservoir) valid audio at the target.
     pub fn seek(&mut self, frame: u64) -> Result<(), PlaybackError> {
+        // Positions are counted in the music; the decoded stream has the priming in front.
+        let frame = frame.saturating_add(self.trim.map_or(0, |t| t.delay));
         let preroll = u64::from(self.info.sample_rate) / 8;
         let secs = frame.saturating_sub(preroll) as f64 / f64::from(self.info.sample_rate);
         let Some(time) = Time::try_from_secs_f64(secs) else {
@@ -272,12 +298,37 @@ impl TrackDecoder {
                     // Float files can carry NaN/infinity; those would poison the
                     // resampler and every gain stage after it.
                     sanitize(out);
+                    // First frame of this buffer in the decoded stream (what the decoder
+                    // trimmed of the encoder delay itself included).
+                    let trimmed = i64::try_from(packet.trim_start.get()).unwrap_or(0);
+                    let mut start = self.ts_to_frame(packet.pts.get().saturating_add(trimmed));
+                    if let Some(trim) = self.trim {
+                        // Keep what lies inside the music: after the priming, before
+                        // the padding.
+                        let first = i64::try_from(trim.delay).unwrap_or(i64::MAX);
+                        let end =
+                            first.saturating_add(i64::try_from(trim.valid).unwrap_or(i64::MAX));
+                        if start >= end {
+                            out.clear();
+                            return Ok(false);
+                        }
+                        let buffer_end = start.saturating_add(frames as i64);
+                        if buffer_end > end {
+                            out.truncate((end - start) as usize * channels);
+                        }
+                        if buffer_end <= first {
+                            out.clear();
+                            continue;
+                        }
+                        if start < first {
+                            out.drain(..(first - start) as usize * channels);
+                            start = first;
+                        }
+                    }
                     if let Some(target) = self.drop_until {
-                        // First audible frame of this buffer (encoder-delay trim included).
-                        let trim = i64::try_from(packet.trim_start.get()).unwrap_or(0);
-                        let start = self.ts_to_frame(packet.pts.get().saturating_add(trim));
                         let target = i64::try_from(target).unwrap_or(i64::MAX);
-                        if start.saturating_add(frames as i64) <= target {
+                        let left = (out.len() / channels) as i64;
+                        if start.saturating_add(left) <= target {
                             out.clear();
                             continue;
                         }
@@ -285,6 +336,9 @@ impl TrackDecoder {
                             out.drain(..(target - start) as usize * channels);
                         }
                         self.drop_until = None;
+                    }
+                    if out.is_empty() {
+                        continue;
                     }
                     return Ok(true);
                 }

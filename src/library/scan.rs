@@ -315,6 +315,9 @@ struct Known {
     size: u64,
     mtime_ns: i64,
     needs_touch: bool,
+    /// The tags would be read differently today (see `tags::would_read_differently`):
+    /// the file is read again although it has not changed.
+    reread: bool,
     art_id: Option<String>,
     folder_art: bool,
 }
@@ -540,6 +543,9 @@ fn scan_root(
                         size: t.file_size,
                         mtime_ns: t.mtime_ns,
                         needs_touch: !t.available || t.root_id != Some(root_id),
+                        reread: [&t.title, &t.artist, &t.album_artist, &t.album, &t.genre]
+                            .into_iter()
+                            .any(|text| tags::would_read_differently(text)),
                         art_id: t.art_id.clone(),
                         folder_art: entry.folder_art,
                     },
@@ -788,6 +794,7 @@ fn walk(
             if let Some(known_file) = known_file
                 && known_file.size == size
                 && known_file.mtime_ns == mtime
+                && !known_file.reread
             {
                 counters.files_done.fetch_add(1, Ordering::Relaxed);
                 if known_file.needs_touch && out_tx.send(Outcome::Touch(known_file.id)).is_err() {
@@ -1416,6 +1423,7 @@ mod tests {
             file_size: size,
             mtime_ns: 0,
             replaygain: ReplayGainTags::default(),
+            measured: None,
             art_id: None,
             favorite: false,
             play_count: 0,

@@ -20,7 +20,7 @@ const HISTORY_KEEP_ROWS: i64 = 20_000;
 
 /// Ordered migration list. Entry `i` upgrades the schema from version `i` to `i + 1`;
 /// the current version is stored in `PRAGMA user_version`.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE roots (
@@ -108,6 +108,22 @@ ALTER TABLE tracks ADD COLUMN art_from_folder INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE roots ADD COLUMN unconfirmed_after INTEGER;
 ";
 
+/// Version 3: leveling values the app measured itself for files without ReplayGain tags.
+/// A row belongs to one state of the file (`of_mtime_ns`, `of_file_size`): when the file
+/// changes, the row no longer matches and is not read. The column names differ from
+/// those of `tracks` so that the two can be joined without qualifying anything.
+const SCHEMA_V3: &str = "
+CREATE TABLE loudness (
+    track_id      INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    of_mtime_ns   INTEGER NOT NULL,
+    of_file_size  INTEGER NOT NULL,
+    m_track_gain  REAL NOT NULL,
+    m_track_peak  REAL NOT NULL,
+    m_album_gain  REAL,
+    m_album_peak  REAL
+);
+";
+
 /// Columns filled from the file on disk (re-written on every rescan of a changed file).
 const SCAN_COLS: [&str; 27] = [
     "root_id",
@@ -144,7 +160,9 @@ const USER_COLS: [&str; 4] = ["favorite", "play_count", "last_played_at", "added
 
 static SELECT_TRACKS_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "SELECT id, path, {}, {} FROM tracks",
+        "SELECT id, path, {}, {}, m_track_gain, m_track_peak, m_album_gain, m_album_peak \
+         FROM tracks LEFT JOIN loudness \
+         ON track_id = id AND of_mtime_ns = mtime_ns AND of_file_size = file_size",
         SCAN_COLS.join(", "),
         USER_COLS.join(", ")
     )
@@ -697,6 +715,41 @@ impl Db {
         self.get_track(keep)
     }
 
+    /// Stores what was measured for tracks, replacing earlier measurements. Each entry
+    /// names the state of the file it was measured from. Tracks that no longer exist
+    /// are skipped.
+    pub fn set_loudness(&mut self, rows: &[(TrackId, i64, u64, ReplayGainTags)]) -> SqlResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO loudness \
+                 (track_id, of_mtime_ns, of_file_size, m_track_gain, m_track_peak, \
+                  m_album_gain, m_album_peak) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1)",
+            )?;
+            for (id, mtime_ns, file_size, values) in rows {
+                stmt.execute(params![
+                    id,
+                    mtime_ns,
+                    file_size.cast_signed(),
+                    f64::from(values.track_gain_db.unwrap_or(0.0)),
+                    f64::from(values.track_peak.unwrap_or(0.0)),
+                    values.album_gain_db.map(f64::from),
+                    values.album_peak.map(f64::from),
+                ])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Forgets everything that was measured.
+    pub fn clear_loudness(&self) -> SqlResult<usize> {
+        self.conn.execute("DELETE FROM loudness", [])
+    }
+
     pub fn set_favorite(&mut self, ids: &[TrackId], favorite: bool) -> SqlResult<()> {
         if ids.is_empty() {
             return Ok(());
@@ -1061,6 +1114,16 @@ fn row_to_track(row: &Row<'_>) -> SqlResult<StoredTrack> {
                 album_gain_db: gain(25)?,
                 album_peak: gain(26)?,
             },
+            measured: gain(33)?
+                .map(|track_gain| -> SqlResult<ReplayGainTags> {
+                    Ok(ReplayGainTags {
+                        track_gain_db: Some(track_gain),
+                        track_peak: gain(34)?,
+                        album_gain_db: gain(35)?,
+                        album_peak: gain(36)?,
+                    })
+                })
+                .transpose()?,
             art_id: row.get(27)?,
             favorite: row.get(29)?,
             play_count: clamp_u32(row.get(30)?),
@@ -1107,6 +1170,7 @@ mod tests {
                     album_gain_db: None,
                     album_peak: None,
                 },
+                measured: None,
                 art_id: Some("0123456789abcdef".into()),
                 favorite: false,
                 play_count: 0,
@@ -1127,6 +1191,65 @@ mod tests {
 
     fn db_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join(DB_FILE_NAME)
+    }
+
+    #[test]
+    fn measured_loudness_belongs_to_one_state_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        let mut row = sample_track("/Music/a.flac", None);
+        let id = db.upsert_tracks(std::slice::from_ref(&row)).unwrap()[0];
+        assert_eq!(db.get_track(id).unwrap().unwrap().track.measured, None);
+        let values = ReplayGainTags {
+            track_gain_db: Some(-3.25),
+            track_peak: Some(0.5),
+            album_gain_db: None,
+            album_peak: None,
+        };
+        // A track that does not exist is skipped, not an error.
+        db.set_loudness(&[
+            (id, row.track.mtime_ns, row.track.file_size, values),
+            (id + 100, 1, 1, values),
+        ])
+        .unwrap();
+        assert_eq!(
+            db.get_track(id).unwrap().unwrap().track.measured,
+            Some(values)
+        );
+        assert_eq!(db.load_tracks().unwrap()[0].track.measured, Some(values));
+        // Measured again, with album values: the row is replaced.
+        let with_album = ReplayGainTags {
+            album_gain_db: Some(-2.0),
+            album_peak: Some(0.75),
+            ..values
+        };
+        db.set_loudness(&[(id, row.track.mtime_ns, row.track.file_size, with_album)])
+            .unwrap();
+        assert_eq!(
+            db.get_track(id).unwrap().unwrap().track.measured,
+            Some(with_album)
+        );
+        // The file changed: what was measured before no longer applies.
+        row.track.mtime_ns += 1;
+        assert_eq!(db.upsert_tracks(std::slice::from_ref(&row)).unwrap(), [id]);
+        assert_eq!(db.get_track(id).unwrap().unwrap().track.measured, None);
+        // Measured anew, forgotten on request, and gone with the track.
+        db.set_loudness(&[(id, row.track.mtime_ns, row.track.file_size, values)])
+            .unwrap();
+        assert_eq!(
+            db.get_track(id).unwrap().unwrap().track.measured,
+            Some(values)
+        );
+        assert_eq!(db.clear_loudness().unwrap(), 1);
+        assert_eq!(db.get_track(id).unwrap().unwrap().track.measured, None);
+        db.set_loudness(&[(id, row.track.mtime_ns, row.track.file_size, values)])
+            .unwrap();
+        db.delete_tracks(&[id]).unwrap();
+        let left: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM loudness", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

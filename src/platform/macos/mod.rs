@@ -27,6 +27,19 @@ pub fn run_on_main(f: impl FnOnce() + Send + 'static) {
     unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&block) };
 }
 
+/// Text in the Korean code page of older Windows (CP949, a superset of EUC-KR) as
+/// Unicode. `None` if the bytes are not that.
+pub fn decode_cp949(bytes: &[u8]) -> Option<String> {
+    use objc2_core_foundation::CFString;
+    /// `kCFStringEncodingDOSKorean`.
+    const CP949: u32 = 0x0422;
+    let length = isize::try_from(bytes.len()).ok()?;
+    // SAFETY: pointer and length describe `bytes`, which is alive for the call;
+    // CoreFoundation copies what it converts and keeps nothing of ours.
+    let string = unsafe { CFString::with_bytes(None, bytes.as_ptr(), length, CP949, false) }?;
+    Some(string.to_string())
+}
+
 /// Hands a web address (already checked by the caller) to the default browser.
 pub(super) fn open_in_browser(address: &str) -> bool {
     std::process::Command::new("/usr/bin/open")

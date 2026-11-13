@@ -5,7 +5,7 @@
 //! never lock. Everything that depends on a track's text (normalised strings, choseong
 //! form) is cached per track in [`TrackIndex`], so rebuilding after a scan batch only
 //! pays for sorting and concatenation, not for re-normalising unchanged tracks.
-use super::search::{FIELD_SEP, PreparedQuery, Term, choseong_form, normalize};
+use super::search::{FIELD_SEP, Field, Filter, PreparedQuery, Term, choseong_form, normalize};
 use crate::model::{Track, TrackId};
 use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
@@ -58,6 +58,8 @@ pub(crate) struct TrackIndex {
     artist: String,
     album: String,
     album_artist: String,
+    /// Not part of the plain search; `genre:` terms look here.
+    genre: String,
     /// Choseong form of the four fields joined by [`FIELD_SEP`]; empty without Hangul.
     cho: String,
 }
@@ -84,7 +86,47 @@ impl TrackIndex {
             artist,
             album,
             album_artist,
+            genre: normalize(&track.genre),
             cho,
+        }
+    }
+
+    /// True if the field holds the term (`artist:` looks at both artists).
+    fn field_contains(&self, field: Field, term: &Term, track: &Track) -> bool {
+        let text = term.text.as_str();
+        if field == Field::Format {
+            let lossless = matches!(track.codec.as_str(), "FLAC" | "ALAC" | "PCM");
+            return match text {
+                "lossless" | "무손실" => lossless,
+                "lossy" | "손실" => !lossless,
+                _ => {
+                    track.codec.to_lowercase().contains(text)
+                        || track.container.to_lowercase().contains(text)
+                }
+            };
+        }
+        if term.choseong {
+            if field == Field::Genre {
+                return choseong_form(&self.genre).is_some_and(|form| form.contains(text));
+            }
+            // `cho` holds title, artist, album, album artist, in that order.
+            let wanted: &[usize] = match field {
+                Field::Title => &[0],
+                Field::Artist => &[1, 3],
+                _ => &[2],
+            };
+            return self
+                .cho
+                .split(FIELD_SEP)
+                .enumerate()
+                .any(|(i, form)| wanted.contains(&i) && form.contains(text));
+        }
+        match field {
+            Field::Title => self.title.contains(text),
+            Field::Artist => self.artist.contains(text) || self.album_artist.contains(text),
+            Field::Album => self.album.contains(text),
+            Field::Genre => self.genre.contains(text),
+            Field::Format => false,
         }
     }
 
@@ -103,6 +145,7 @@ impl TrackIndex {
             + self.artist.capacity()
             + self.album.capacity()
             + self.album_artist.capacity()
+            + self.genre.capacity()
             + self.cho.capacity()
     }
 }
@@ -330,7 +373,29 @@ impl LibrarySnapshot {
 
     /// True if the track at `index` matches every term of the query.
     pub fn matches(&self, index: u32, q: &PreparedQuery) -> bool {
-        (index as usize) < self.tracks.len() && q.terms.iter().all(|t| self.term_matches(index, t))
+        (index as usize) < self.tracks.len()
+            && q.terms.iter().all(|t| self.term_matches(index, t))
+            && q.filters.iter().all(|f| self.filter_matches(index, f))
+    }
+
+    fn filter_matches(&self, index: u32, filter: &Filter) -> bool {
+        let index = index as usize;
+        let (Some(track), Some(ix)) = (self.tracks.get(index), self.index.per_track.get(index))
+        else {
+            return false;
+        };
+        match filter {
+            Filter::Text { field, term } => ix.field_contains(*field, term, track),
+            Filter::Year(from, to) => track.year.is_some_and(|y| (*from..=*to).contains(&y)),
+            Filter::Plays(from, to) => {
+                let plays = i32::try_from(track.play_count).unwrap_or(i32::MAX);
+                (*from..=*to).contains(&plays)
+            }
+            Filter::Favorite(wanted) => track.favorite == *wanted,
+            Filter::AddedSince(since) => track.added_at >= *since,
+            Filter::PlayedSince(since) => track.last_played_at.is_some_and(|at| at >= *since),
+            Filter::Never => false,
+        }
     }
 
     fn term_matches(&self, index: u32, term: &Term) -> bool {
@@ -352,27 +417,33 @@ impl LibrarySnapshot {
     pub fn search_prepared(&self, q: &PreparedQuery) -> Vec<u32> {
         // Scan the whole blob once for the longest (most selective) term, then check the
         // remaining terms only on those candidates.
-        let Some((first_pos, first)) = q
+        let longest = q
             .terms
             .iter()
             .enumerate()
-            .max_by_key(|(_, term)| term.text.len())
-        else {
-            return (0..self.tracks.len() as u32).collect();
+            .max_by_key(|(_, term)| term.text.len());
+        let mut hits = match longest {
+            Some((first_pos, first)) => {
+                let blob = if first.choseong {
+                    &self.index.cho
+                } else {
+                    &self.index.text
+                };
+                let mut hits = blob.records_containing(&first.text);
+                if q.terms.len() > 1 {
+                    hits.retain(|&i| {
+                        q.terms
+                            .iter()
+                            .enumerate()
+                            .all(|(pos, term)| pos == first_pos || self.term_matches(i, term))
+                    });
+                }
+                hits
+            }
+            None => (0..self.tracks.len() as u32).collect(),
         };
-        let blob = if first.choseong {
-            &self.index.cho
-        } else {
-            &self.index.text
-        };
-        let mut hits = blob.records_containing(&first.text);
-        if q.terms.len() > 1 {
-            hits.retain(|&i| {
-                q.terms
-                    .iter()
-                    .enumerate()
-                    .all(|(pos, term)| pos == first_pos || self.term_matches(i, term))
-            });
+        if !q.filters.is_empty() {
+            hits.retain(|&i| q.filters.iter().all(|f| self.filter_matches(i, f)));
         }
         hits
     }
@@ -796,6 +867,7 @@ mod tests {
             file_size: 1,
             mtime_ns: 1,
             replaygain: ReplayGainTags::default(),
+            measured: None,
             art_id: None,
             favorite: false,
             play_count: 0,
@@ -943,6 +1015,109 @@ mod tests {
         assert!(s.search("beatles 아이유").is_empty());
         // Terms may come from different fields but not span a field boundary.
         assert!(s.search("judethe").is_empty());
+    }
+
+    #[test]
+    fn field_terms_look_at_one_field_only() {
+        let mut tracks = vec![
+            track(1, "Hey Jude", "The Beatles", "1"),
+            track(2, "Beatles Medley", "Stars on 45", "Long Play Album"),
+            track(3, "밤편지", "아이유", "Palette"),
+            track(4, "Palette", "아이유", "Palette"),
+            track(5, "So What", "Miles Davis", "Kind of Blue"),
+        ];
+        tracks[0].year = Some(1968);
+        tracks[0].genre = "Rock".into();
+        tracks[1].year = Some(1981);
+        tracks[1].genre = "Pop; Disco".into();
+        tracks[1].codec = "MP3".into();
+        tracks[1].container = "MP3".into();
+        tracks[2].year = Some(2017);
+        tracks[2].genre = "발라드".into();
+        tracks[3].year = Some(2017);
+        tracks[3].genre = "K-Pop".into();
+        tracks[4].year = Some(1959);
+        tracks[4].genre = "Jazz".into();
+        tracks[4].album_artist = "Miles Davis Sextet".into();
+        let s = LibrarySnapshot::from_tracks(tracks);
+
+        // Plain: anywhere. With a field: only there.
+        assert_eq!(
+            titles(&s, &s.search("beatles")),
+            ["beatles medley", "hey jude"]
+        );
+        assert_eq!(titles(&s, &s.search("artist:beatles")), ["hey jude"]);
+        assert_eq!(titles(&s, &s.search("title:beatles")), ["beatles medley"]);
+        assert_eq!(titles(&s, &s.search("title:palette")), ["palette"]);
+        assert_eq!(
+            titles(&s, &s.search("album:palette")),
+            ["palette", "밤편지"]
+        );
+        assert_eq!(
+            titles(&s, &s.search("artist:\"the beatles\"")),
+            ["hey jude"]
+        );
+        // The album artist counts as an artist.
+        assert_eq!(titles(&s, &s.search("artist:sextet")), ["so what"]);
+        // Korean names and initial consonants work in a field too.
+        assert_eq!(titles(&s, &s.search("가수:ㅇㅇㅇ 제목:ㅂㅍㅈ")), ["밤편지"]);
+        assert_eq!(titles(&s, &s.search("장르:발라드")), ["밤편지"]);
+        assert_eq!(titles(&s, &s.search("장르:ㅂㄹㄷ")), ["밤편지"]);
+        assert!(s.search("제목:ㅇㅇㅇ").is_empty());
+
+        // Genre is only searched when asked for.
+        assert!(s.search("jazz").is_empty());
+        assert_eq!(titles(&s, &s.search("genre:jazz")), ["so what"]);
+        assert_eq!(titles(&s, &s.search("genre:disco")), ["beatles medley"]);
+
+        // Years.
+        assert_eq!(titles(&s, &s.search("year:2017")), ["palette", "밤편지"]);
+        assert_eq!(
+            titles(&s, &s.search("year:1960-1989")),
+            ["beatles medley", "hey jude"]
+        );
+        assert_eq!(titles(&s, &s.search("year:<1960")), ["so what"]);
+        assert_eq!(titles(&s, &s.search("year:>=2000 밤")), ["밤편지"]);
+        assert!(s.search("year:abc").is_empty());
+
+        // Format.
+        assert_eq!(titles(&s, &s.search("format:mp3")), ["beatles medley"]);
+        assert_eq!(titles(&s, &s.search("format:lossless")).len(), 4);
+        assert_eq!(titles(&s, &s.search("형식:무손실 year:1959")), ["so what"]);
+
+        // What the library itself keeps: favourites, play counts, dates.
+        let mut kept = vec![
+            track(1, "Often", "A", "X"),
+            track(2, "Never", "A", "X"),
+            track(3, "New", "B", "Y"),
+        ];
+        const NOW: i64 = 1_800_000_000;
+        kept[0].play_count = 12;
+        kept[0].favorite = true;
+        kept[0].added_at = NOW - 400 * 86_400;
+        kept[0].last_played_at = Some(NOW - 3 * 86_400);
+        kept[1].added_at = NOW - 400 * 86_400;
+        kept[2].play_count = 1;
+        kept[2].added_at = NOW - 5 * 86_400;
+        kept[2].last_played_at = Some(NOW - 90 * 86_400);
+        let k = LibrarySnapshot::from_tracks(kept);
+        let found =
+            |query: &str| titles(&k, &k.search_prepared(&PreparedQuery::new_at(query, NOW)));
+        assert_eq!(found("plays:>=5"), ["often"]);
+        assert_eq!(found("plays:0"), ["never"]);
+        assert_eq!(found("plays:1-20"), ["new", "often"]);
+        assert_eq!(found("fav:yes"), ["often"]);
+        assert_eq!(found("fav:no artist:a"), ["never"]);
+        assert_eq!(found("added:30d"), ["new"]);
+        assert_eq!(found("played:1w"), ["often"]);
+        assert_eq!(found("played:1y"), ["new", "often"]);
+        assert!(found("fav:perhaps").is_empty());
+
+        // A field still being typed changes nothing; `matches` agrees with `search`.
+        assert_eq!(s.search("artist:").len(), 5);
+        let q = LibrarySnapshot::prepare_query("artist:beatles");
+        let by_matches: Vec<u32> = (0..5).filter(|&i| s.matches(i, &q)).collect();
+        assert_eq!(by_matches, s.search("artist:beatles"));
     }
 
     #[test]

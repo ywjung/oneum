@@ -521,6 +521,35 @@ fn unsupported_codecs_are_counted_not_added() {
         ffmpeg_audio(&music.join("adpcm.wav"), &["-c:a", "adpcm_ms"], &[], None);
         expected_unsupported += 1;
     }
+    // AAC that goes by the same name as what plays, but that the decoder refuses:
+    // 5.1, and HE-AAC (v1 and v2; only Apple's encoder writes those here).
+    ffmpeg_audio(
+        &music.join("aac51.m4a"),
+        &["-ac", "6", "-ar", "48000", "-c:a", "aac", "-b:a", "256k"],
+        &[("title", "Surround")],
+        None,
+    );
+    expected_unsupported += 1;
+    if has_encoder("aac_at") {
+        for (name, profile) in [("he.m4a", "4"), ("hev2.m4a", "28")] {
+            ffmpeg_audio(
+                &music.join(name),
+                &[
+                    "-ac",
+                    "2",
+                    "-c:a",
+                    "aac_at",
+                    "-profile:a",
+                    profile,
+                    "-b:a",
+                    "48k",
+                ],
+                &[("title", "High Efficiency")],
+                None,
+            );
+            expected_unsupported += 1;
+        }
+    }
     let (library, _) = env.open_scanned();
     let status = library.scan_status();
     assert_eq!(titles(&library), ["ok"]);
@@ -2012,4 +2041,62 @@ fn links_that_lead_above_the_music_folder_are_not_followed() {
 
     let (library, _) = env.open_scanned();
     assert_eq!(titles(&library), ["Inside", "Linked"]);
+}
+
+/// An MP3 as Korean Windows software of the 2000s tagged it: ID3v2.3 text frames that
+/// say "Latin-1" and hold the system code page (CP949). The library shows what was meant.
+#[cfg(target_os = "macos")]
+#[test]
+fn korean_tags_in_the_old_code_page_are_read_as_korean() {
+    let env = TestEnv::new();
+    let music = env.music();
+    fs::create_dir_all(&music).unwrap();
+    let frame = |id: &[u8; 4], text: &[u8]| {
+        let mut frame = id.to_vec();
+        frame.extend((text.len() as u32 + 1).to_be_bytes());
+        frame.extend([0, 0]); // flags
+        frame.push(0); // "ISO-8859-1"
+        frame.extend(text);
+        frame
+    };
+    // 밤편지 / 아이유 / 꽃갈피 둘 in CP949.
+    let mut frames = frame(b"TIT2", b"\xb9\xe3\xc6\xed\xc1\xf6");
+    frames.extend(frame(b"TPE1", b"\xbe\xc6\xc0\xcc\xc0\xaf"));
+    frames.extend(frame(b"TALB", b"\xb2\xc9\xb0\xa5\xc7\xc7 \xb5\xd1"));
+    // A Western title on the same disc stays what it is.
+    let mut western = frame(b"TIT2", b"D\xe9j\xe0 Vu");
+    western.extend(frame(b"TPE1", b"Beyonc\xe9"));
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gap_a.mp3");
+    let audio = fs::read(fixture).unwrap();
+    let own_tag = if audio.starts_with(b"ID3") {
+        10 + audio[6..10]
+            .iter()
+            .fold(0usize, |n, b| (n << 7) | usize::from(*b))
+    } else {
+        0
+    };
+    for (name, frames) in [("old.mp3", &frames), ("western.mp3", &western)] {
+        let size = frames.len() as u32;
+        let syncsafe = [
+            (size >> 21) as u8 & 0x7F,
+            (size >> 14) as u8 & 0x7F,
+            (size >> 7) as u8 & 0x7F,
+            size as u8 & 0x7F,
+        ];
+        let mut file = b"ID3\x03\x00\x00".to_vec();
+        file.extend(syncsafe);
+        file.extend(frames);
+        file.extend(&audio[own_tag..]);
+        fs::write(music.join(name), file).unwrap();
+    }
+
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["Déjà Vu", "밤편지"]);
+    let song = by_title(&library, "밤편지");
+    assert_eq!(song.artist, "아이유");
+    assert_eq!(song.album, "꽃갈피 둘");
+    assert_eq!(by_title(&library, "Déjà Vu").artist, "Beyoncé");
+    // Searchable the way Korean titles are, initial consonants included.
+    let found = library.snapshot().search("ㅂㅍㅈ");
+    assert_eq!(found.len(), 1);
 }

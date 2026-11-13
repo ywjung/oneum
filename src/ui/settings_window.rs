@@ -539,10 +539,11 @@ impl OneumApp {
                 },
             );
         });
-        widgets::section_note(ui, s.rg_hint);
         if self.settings.replaygain != before {
             player.send(Command::SetReplayGain(self.settings.replaygain));
         }
+        self.loudness_card(ui);
+        widgets::section_note(ui, s.rg_hint);
 
         ui.add_space(14.0);
         widgets::section_title(ui, s.equalizer);
@@ -587,6 +588,9 @@ impl OneumApp {
         }
 
         ui.add_space(14.0);
+        self.correction_card(ui);
+
+        ui.add_space(14.0);
         widgets::section_title(ui, s.radio);
         let radio_before = self.settings.radio;
         widgets::card(ui, |ui| {
@@ -600,6 +604,160 @@ impl OneumApp {
         }
     }
 
+    /// Headphone correction: which imported profile is applied, importing a file, and
+    /// removing the selected profile.
+    fn correction_card(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let player = self.core.player.clone();
+        widgets::section_title(ui, s.correction);
+        let before = self.settings.correction.clone();
+        let rate = self.player.output_sample_rate.unwrap_or(48_000);
+        let summary = self.settings.active_correction().map(|p| {
+            self.lang
+                .correction_summary(p.filters.len(), p.preamp_db, p.peak_db(rate))
+        });
+        let mut import = false;
+        let mut remove = false;
+        widgets::card(ui, |ui| {
+            let desc = summary.as_deref().unwrap_or(s.correction_none_desc);
+            widgets::setting_row(ui, s.correction_row, Some(desc), true, |ui| {
+                let selected = before.clone().unwrap_or_else(|| s.rg_off.to_string());
+                egui::ComboBox::from_id_salt("correction-profile")
+                    .selected_text(selected)
+                    .width(200.0)
+                    .height(320.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.settings.correction, None, s.rg_off);
+                        let group = |ui: &mut egui::Ui, title: &str| {
+                            ui.separator();
+                            ui.label(RichText::new(title).small().weak());
+                        };
+                        // The user's own first, then the ones that come with the app.
+                        let imported: Vec<String> = self
+                            .settings
+                            .corrections
+                            .iter()
+                            .map(|p| p.name.clone())
+                            .collect();
+                        if !imported.is_empty() {
+                            group(ui, s.correction_group_imported);
+                        }
+                        for name in &imported {
+                            ui.selectable_value(
+                                &mut self.settings.correction,
+                                Some(name.clone()),
+                                name,
+                            );
+                        }
+                        group(ui, s.correction_group_builtin);
+                        for profile in crate::audio::peq::builtin_profiles() {
+                            // One of the same name that the user imported stands for it.
+                            if imported.contains(&profile.name) {
+                                continue;
+                            }
+                            ui.selectable_value(
+                                &mut self.settings.correction,
+                                Some(profile.name.clone()),
+                                &profile.name,
+                            );
+                        }
+                    });
+            });
+            widgets::row_divider(ui);
+            widgets::setting_row(
+                ui,
+                s.correction_file_row,
+                Some(s.correction_file_desc),
+                true,
+                |ui| {
+                    let button =
+                        |text: &str| egui::Button::new(text).min_size(egui::vec2(0.0, 26.0));
+                    import = ui.add(button(s.correction_import)).clicked();
+                    // Removes the selected profile, if it is one that was imported.
+                    remove = ui
+                        .add_enabled(self.settings.correction_is_imported(), button(s.delete))
+                        .clicked();
+                },
+            );
+        });
+        widgets::section_note(ui, s.correction_hint);
+        if remove && let Some(name) = &before {
+            self.settings.corrections.retain(|p| &p.name != name);
+            // A built-in profile of the same name stays available; nothing is selected.
+            self.settings.correction = None;
+        }
+        if self.settings.correction != before {
+            player.send(Command::SetCorrection(
+                self.settings.active_correction().cloned(),
+            ));
+        }
+        if import {
+            self.pick_correction_file();
+        }
+    }
+
+    /// Measuring the loudness of songs without leveling tags: how many are waiting,
+    /// a button to start or stop, the progress, and a way to forget what was measured.
+    fn loudness_card(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let library = self.core.library.clone();
+        let status = library.loudness_status();
+        let (mut waiting, mut measured) = (0usize, 0usize);
+        for track in &self.snapshot.tracks {
+            measured += usize::from(track.measured.is_some());
+            waiting += usize::from(track.available && track.wants_measuring());
+        }
+        let text = if status.running {
+            self.lang
+                .loudness_progress(true, status.done, status.total, status.failed)
+        } else if waiting > 0 {
+            self.lang.loudness_waiting(waiting)
+        } else if status.done > 0 {
+            self.lang
+                .loudness_progress(false, status.done, status.total, status.failed)
+        } else {
+            s.rg_measure_none.to_string()
+        };
+        ui.add_space(8.0);
+        widgets::card(ui, |ui| {
+            widgets::setting_row(ui, s.rg_measure, Some(&text), true, |ui| {
+                let label = if status.running {
+                    s.rg_measure_stop
+                } else {
+                    s.rg_measure_start
+                };
+                let button = egui::Button::new(label).min_size(egui::vec2(0.0, 26.0));
+                if ui
+                    .add_enabled(status.running || waiting > 0, button)
+                    .clicked()
+                {
+                    if status.running {
+                        library.cancel_loudness();
+                    } else {
+                        library.measure_loudness();
+                    }
+                }
+            });
+            if status.running {
+                let fraction = status.done as f32 / status.total.max(1) as f32;
+                ui.add(egui::ProgressBar::new(fraction).desired_height(4.0));
+                // The numbers move without any input.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            if measured > 0 {
+                widgets::row_divider(ui);
+                let count = self.lang.song_count(measured);
+                widgets::setting_row(ui, s.rg_measured, Some(&count), !status.running, |ui| {
+                    let button = egui::Button::new(s.rg_forget).min_size(egui::vec2(0.0, 26.0));
+                    if ui.add(button).clicked() {
+                        library.forget_loudness();
+                    }
+                });
+            }
+        });
+    }
+
     /// A reference of the keyboard shortcuts, grouped the way people look for them.
     fn settings_shortcuts(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
@@ -610,6 +768,9 @@ impl OneumApp {
                     ("Space", s.menu_play_pause),
                     ("⌘ →", s.menu_next),
                     ("⌘ ←", s.menu_previous),
+                    ("⌥ ⌘ →", s.menu_seek_forward),
+                    ("⌥ ⌘ ←", s.menu_seek_back),
+                    ("⇧ ⌘ .", s.menu_stop_after_current),
                     ("⌘ ↑", s.menu_volume_up),
                     ("⌘ ↓", s.menu_volume_down),
                     ("⇧ ⌘ M", s.menu_mute),
@@ -650,6 +811,7 @@ impl OneumApp {
                     ("⌘ U", s.menu_show_queue),
                     ("⌘ I", s.menu_show_info),
                     ("⇧ ⌘ U", s.menu_show_meter),
+                    ("⌘ E", s.equalizer),
                     ("⌘ ,", s.menu_settings),
                     ("⌘ W", s.menu_close_window),
                     ("⌘ Q", s.menu_quit),
@@ -800,7 +962,7 @@ mod tests {
         spans.iter().map(|s| s.text.as_str()).collect()
     }
 
-    /// The notices that ship: all of the document is understood, the table is whole.
+    /// The notices that ship: all of the document is understood, the tables are whole.
     #[test]
     fn the_open_source_notices_are_fully_understood() {
         let blocks = license_notices();
@@ -811,7 +973,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(headings, ["License summary", "Crates"]);
+        assert_eq!(headings, ["License summary", "Crates", "Data"]);
         let tables: Vec<_> = blocks
             .iter()
             .filter_map(|b| match b {
@@ -819,9 +981,19 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let [(head, rows)] = tables[..] else {
-            panic!("one table expected, found {}", tables.len());
+        // The crates, and the data that is compiled in without being a crate.
+        let [(head, rows), (data_head, data_rows)] = tables[..] else {
+            panic!("two tables expected, found {}", tables.len());
         };
+        let names: Vec<String> = data_head.iter().map(|c| plain(c)).collect();
+        assert_eq!(names, ["Data", "License", "Source"]);
+        assert_eq!(data_rows.len(), 1);
+        for row in data_rows {
+            assert_eq!(row.len(), 3, "{row:?}");
+            assert!(plain(&row[0]).contains("AutoEq"), "{row:?}");
+            assert!(plain(&row[1]).contains("Jaakko Pasanen"), "{row:?}");
+            assert!(web_address(&row[2]).is_some(), "{row:?}");
+        }
         let names: Vec<String> = head.iter().map(|c| plain(c)).collect();
         assert_eq!(names, ["Crate", "Version", "License", "Source"]);
         // As many rows as the document says there are crates.

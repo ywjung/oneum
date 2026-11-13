@@ -35,7 +35,7 @@ use art::ArtCache;
 use dialogs::Dialog;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -45,6 +45,8 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 ];
 const PLAYLIST_EXTENSIONS: &[&str] = &["m3u8", "m3u"];
 const VOLUME_STEP: f32 = 0.05;
+/// How far the "skip ahead/back" commands move within a song.
+const SEEK_STEP_MS: i64 = 5_000;
 /// The player thread answers within a fraction of a second, or a few seconds while an
 /// output device switches its format. Silence for this long means it is stuck.
 const PLAYER_STUCK_AFTER: Duration = Duration::from_secs(12);
@@ -60,6 +62,30 @@ pub enum Nav {
     Favorites,
     Recent,
     Playlist(i64),
+    /// The genres named in the library's tags.
+    Genres,
+    /// Every song of one genre.
+    Genre(String),
+    /// A smart playlist (a saved search), by its name.
+    Smart(String),
+}
+
+/// An optional column of the song lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnKind {
+    Format,
+    Year,
+    Genre,
+    Plays,
+    Added,
+    LastPlayed,
+}
+
+/// A genre and how many songs carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenreEntry {
+    name: String,
+    songs: usize,
 }
 
 /// One row of a list: `key` identifies the row for selection (track id, playlist item
@@ -108,6 +134,13 @@ enum Action {
     RemoveFromLibrary(Vec<TrackId>),
     Go(Nav),
     Sort(SortKey),
+    /// Show or hide an optional column of the song lists.
+    ToggleColumn(ColumnKind),
+    /// Rename a smart playlist (asks for the new name).
+    RenameSmart(String),
+    DeleteSmart(String),
+    /// Put a smart playlist's search into the search field of the song list.
+    EditSmart(String),
 }
 
 /// What is being dragged out of a list: songs, and — when they come from a playlist view
@@ -260,8 +293,8 @@ pub struct OneumApp {
     about_icon: Option<egui::TextureHandle>,
     /// The open source notices in Settings ▸ About are shown.
     licenses_shown: bool,
-    /// Lyrics of the song the info panel shows (or showed last).
-    lyrics: Option<panels::Lyrics>,
+    /// What the file of the song in the info panel says beyond the library.
+    extras: Option<panels::Extras>,
     /// Which of the "listen again" lists is shown.
     rediscover: lists::Rediscover,
     /// The equalizer sheet is open.
@@ -287,6 +320,12 @@ pub struct OneumApp {
     menu: Option<AppMenu>,
     /// What a menu command does, shared by the system menu and the menu bar in the window.
     menu_dispatch: Option<Arc<dyn Fn(MenuAction) + Send + Sync>>,
+    /// The genres of the library, for the genre view (built when that view is shown).
+    genre_list: Vec<GenreEntry>,
+    /// Library generation `genre_list` was built from.
+    genre_list_generation: Option<u64>,
+    /// Verification runs: whether the menu bar took each `menukey` so far.
+    menu_keys: Vec<bool>,
     /// Draw the menu bar inside the window (always where there is no system menu bar;
     /// `ONEUM_WINDOW_MENU` forces it elsewhere, to look at it).
     window_menu: bool,
@@ -363,7 +402,7 @@ impl OneumApp {
             last_settings_save: Instant::now(),
             about_icon: None,
             licenses_shown: false,
-            lyrics: None,
+            extras: None,
             rediscover: lists::Rediscover::default(),
             eq_open: false,
             eq_name: String::new(),
@@ -379,6 +418,9 @@ impl OneumApp {
             devices_checked: None,
             menu: None,
             menu_dispatch: None,
+            genre_list: Vec::new(),
+            genre_list_generation: None,
+            menu_keys: Vec::new(),
             window_menu: crate::platform::MENU_IN_WINDOW
                 || std::env::var_os("ONEUM_WINDOW_MENU").is_some(),
             automation: automation::Automation::from_env(),
@@ -414,6 +456,18 @@ impl OneumApp {
                 MenuAction::PlayPause => return player.send(Command::TogglePlayPause),
                 MenuAction::Next => return player.send(Command::Next),
                 MenuAction::Previous => return player.send(Command::Previous),
+                MenuAction::SeekForward => {
+                    return player.send(Command::SeekRelative(SEEK_STEP_MS));
+                }
+                MenuAction::SeekBack => return player.send(Command::SeekRelative(-SEEK_STEP_MS)),
+                MenuAction::StopAfterCurrent => {
+                    let on = player.snapshot().stop_after_current;
+                    return player.send(Command::SetStopAfterCurrent(!on));
+                }
+                MenuAction::SleepTimer(minutes) => {
+                    let after = (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60));
+                    return player.send(Command::SetSleepTimer(after));
+                }
                 MenuAction::VolumeUp => {
                     return player.send(Command::SetVolume(player.snapshot().volume + VOLUME_STEP));
                 }
@@ -693,7 +747,10 @@ impl OneumApp {
                 .or(tracks.first().copied());
             return (tracks, focus);
         }
-        if matches!(self.nav, Nav::Albums | Nav::Artists | Nav::Artist(_)) {
+        if matches!(
+            self.nav,
+            Nav::Albums | Nav::Artists | Nav::Artist(_) | Nav::Genres
+        ) {
             return (Vec::new(), None);
         }
         let Some(state) = self.views.get(&self.nav) else {
@@ -848,7 +905,17 @@ impl OneumApp {
         }
         self.key_pane = KeyPane::List;
         self.info_track = None;
-        let detail = matches!(nav, Nav::Album(_) | Nav::Artist(_));
+        let detail = matches!(nav, Nav::Album(_) | Nav::Artist(_) | Nav::Genre(_));
+        // A smart playlist that is gone (renamed, deleted) has nothing to show.
+        if let Nav::Smart(name) = &nav
+            && !self
+                .settings
+                .smart_playlists
+                .iter()
+                .any(|p| &p.name == name)
+        {
+            return;
+        }
         if detail {
             self.history.push(self.nav.clone());
         } else {
@@ -1006,6 +1073,69 @@ impl OneumApp {
         }
     }
 
+    /// Asks for a correction file (Equalizer APO format) and imports it.
+    fn pick_correction_file(&mut self) {
+        let s = self.s();
+        let picked = rfd::FileDialog::new()
+            .set_title(s.correction_choose)
+            .add_filter(s.correction_filter_text, &["txt"])
+            .pick_file();
+        if let Some(file) = picked {
+            self.import_correction(&file);
+        }
+    }
+
+    /// Reads a correction file, keeps it as a profile named after the file and applies
+    /// it. A file that is not understood in full is not imported at all.
+    fn import_correction(&mut self, file: &Path) {
+        use crate::audio::{PeqError, PeqProfile, peq};
+        use std::io::Read;
+
+        let s = self.s();
+        // AutoEq names its files "<headphone> ParametricEQ.txt".
+        let stem = file.file_stem().map(|n| n.to_string_lossy().into_owned());
+        let name = stem
+            .as_deref()
+            .map(|n| n.trim_end_matches("ParametricEQ").trim())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(s.correction)
+            .to_string();
+        // Opened once and read with a limit: the file is whatever the user picked.
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(file).and_then(|f| {
+            if !f.metadata()?.is_file() {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            f.take(peq::MAX_FILE_BYTES + 1).read_to_end(&mut bytes)
+        });
+        if read.is_err() || bytes.len() as u64 > peq::MAX_FILE_BYTES {
+            self.warn_toast(s.correction_err_read);
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let profile = match PeqProfile::parse(&name, &text) {
+            Ok(profile) if !profile.name.is_empty() => profile,
+            Ok(_) | Err(PeqError::Empty) => return self.warn_toast(s.correction_err_empty),
+            Err(PeqError::TooManyFilters) => return self.warn_toast(s.correction_err_many),
+            Err(PeqError::UnsupportedFilter(kind)) => {
+                return self.warn_toast(self.lang.correction_unsupported(&kind));
+            }
+            Err(PeqError::Malformed(line)) => {
+                return self.warn_toast(self.lang.correction_malformed(&line));
+            }
+        };
+        // Imported again under the same name: the new values replace the old.
+        let list = &mut self.settings.corrections;
+        list.retain(|p| p.name != profile.name);
+        if list.len() >= crate::app::settings::MAX_CORRECTIONS {
+            list.remove(0);
+        }
+        list.push(profile.clone());
+        self.settings.correction = Some(profile.name.clone());
+        self.info_toast(self.lang.correction_imported(&profile.name));
+        self.core.player.send(Command::SetCorrection(Some(profile)));
+    }
+
     fn pick_playlist_to_import(&mut self) {
         let s = self.s();
         let picked = rfd::FileDialog::new()
@@ -1156,6 +1286,51 @@ impl OneumApp {
             }
             Action::RemoveFromLibrary(tracks) => self.dialog = Some(Dialog::RemoveTracks(tracks)),
             Action::Go(nav) => self.go(nav),
+            Action::ToggleColumn(kind) => {
+                let columns = &mut self.settings.list_columns;
+                let flag = match kind {
+                    ColumnKind::Format => &mut self.settings.show_format_column,
+                    ColumnKind::Year => &mut columns.year,
+                    ColumnKind::Genre => &mut columns.genre,
+                    ColumnKind::Plays => &mut columns.plays,
+                    ColumnKind::Added => &mut columns.added,
+                    ColumnKind::LastPlayed => &mut columns.last_played,
+                };
+                *flag = !*flag;
+            }
+            Action::RenameSmart(name) => {
+                if let Some(smart) = self
+                    .settings
+                    .smart_playlists
+                    .iter()
+                    .find(|p| p.name == name)
+                {
+                    self.dialog = Some(Dialog::smart_playlist(
+                        &smart.name,
+                        smart.query.clone(),
+                        Some(name),
+                    ));
+                }
+            }
+            Action::DeleteSmart(name) => {
+                self.settings.smart_playlists.retain(|p| p.name != name);
+                if self.nav == Nav::Smart(name) {
+                    self.go(Nav::Songs);
+                }
+            }
+            Action::EditSmart(name) => {
+                if let Some(query) = self
+                    .settings
+                    .smart_playlists
+                    .iter()
+                    .find(|p| p.name == name)
+                    .map(|p| p.query.clone())
+                {
+                    self.go(Nav::Songs);
+                    self.views.entry(Nav::Songs).or_default().query = query;
+                    self.focus_search = true;
+                }
+            }
             Action::Sort(key) => {
                 let state = self.views.entry(self.nav.clone()).or_default();
                 state.sort = match state.sort {
@@ -1371,15 +1546,71 @@ impl OneumApp {
                 }
                 automation::AppStep::Open(path) => self.open_paths(vec![path]),
                 automation::AppStep::Volume(v) => self.core.player.send(Command::SetVolume(v)),
-                automation::AppStep::OsKey(code, cmd, shift) => {
-                    if !crate::platform::testing::post_key(code, cmd, shift) {
+                automation::AppStep::OsKey(code, cmd, shift, alt) => {
+                    if !crate::platform::testing::post_key(code, cmd, shift, alt) {
                         tracing::warn!("oskey: no key window");
                     }
+                }
+                automation::AppStep::MenuKey(code, cmd, shift, alt) => {
+                    let taken = crate::platform::testing::menu_key(code, cmd, shift, alt);
+                    self.menu_keys.push(taken);
                 }
                 automation::AppStep::InputSource(id) => {
                     crate::platform::testing::select_input_source(&id);
                 }
                 automation::AppStep::Menu(id) => {
+                    // The playback commands of the menu go straight to the player.
+                    let playback = match id.as_str() {
+                        "stop_after_current" => Some(MenuAction::StopAfterCurrent),
+                        "sleep_off" => Some(MenuAction::SleepTimer(0)),
+                        "sleep_15" => Some(MenuAction::SleepTimer(15)),
+                        "sleep_90" => Some(MenuAction::SleepTimer(90)),
+                        "seek_forward" => Some(MenuAction::SeekForward),
+                        "seek_back" => Some(MenuAction::SeekBack),
+                        _ => None,
+                    };
+                    if let (Some(action), Some(dispatch)) = (playback, self.menu_dispatch.clone()) {
+                        dispatch(action);
+                        continue;
+                    }
+                    // Importing a correction file, and switching the correction off.
+                    if let Some(path) = id.strip_prefix("correction_import ") {
+                        self.import_correction(Path::new(path));
+                        continue;
+                    }
+                    // Selecting a profile by name (as the pop-up in Settings does).
+                    if let Some(name) = id.strip_prefix("correction_select ") {
+                        // A name that is no profile leaves the selection as it was.
+                        let previous = self.settings.correction.replace(name.to_string());
+                        match self.settings.active_correction().cloned() {
+                            Some(profile) => {
+                                self.core.player.send(Command::SetCorrection(Some(profile)));
+                            }
+                            None => self.settings.correction = previous,
+                        }
+                        continue;
+                    }
+                    if id == "correction_off" {
+                        self.settings.correction = None;
+                        self.core.player.send(Command::SetCorrection(None));
+                        continue;
+                    }
+                    // The buttons of the loudness card in Settings.
+                    match id.as_str() {
+                        "loudness_start" => {
+                            self.core.library.measure_loudness();
+                            continue;
+                        }
+                        "loudness_stop" => {
+                            self.core.library.cancel_loudness();
+                            continue;
+                        }
+                        "loudness_forget" => {
+                            self.core.library.forget_loudness();
+                            continue;
+                        }
+                        _ => {}
+                    }
                     let request = match id.as_str() {
                         "song_play" => Some(UiRequest::SongPlay),
                         "song_play_next" => Some(UiRequest::SongPlayNext),
@@ -1436,6 +1667,7 @@ impl OneumApp {
                 v.rows.iter().take(8).filter_map(|r| match self.nav {
                     Nav::Albums | Nav::Artist(_) => self.snapshot.albums().get(r.idx as usize).map(|a| a.title.clone()),
                     Nav::Artists => self.snapshot.artists().get(r.idx as usize).map(|a| a.name.clone()),
+                    Nav::Genres => self.genre_list.get(r.idx as usize).map(|g| g.name.clone()),
                     _ => self.snapshot.tracks.get(r.idx as usize).map(|t| t.title.clone()),
                 }).collect()
             }),
@@ -1513,13 +1745,67 @@ impl OneumApp {
         state["guide_open"] = serde_json::json!(self.guide_open);
         state["eq_open"] = serde_json::json!(self.eq_open);
         state["radio"] = serde_json::json!(p.radio);
+        state["stop_after_current"] = serde_json::json!(p.stop_after_current);
+        state["sleep_in_s"] = serde_json::json!(
+            p.sleep_at
+                .map(|at| at.saturating_duration_since(Instant::now()).as_secs())
+        );
+        state["columns"] = serde_json::json!({
+            "format": self.settings.show_format_column,
+            "year": self.settings.list_columns.year,
+            "genre": self.settings.list_columns.genre,
+            "plays": self.settings.list_columns.plays,
+            "added": self.settings.list_columns.added,
+            "last_played": self.settings.list_columns.last_played,
+        });
+        state["smart_playlists"] = serde_json::json!(
+            self.settings
+                .smart_playlists
+                .iter()
+                .map(|p| (p.name.clone(), p.query.clone()))
+                .collect::<Vec<_>>()
+        );
+        state["correction"] = serde_json::json!({
+            "selected": self.settings.correction,
+            "applied": p.correction,
+            "profiles": self.settings.corrections.iter().map(|c| (c.name.clone(), c.filters.len())).collect::<Vec<_>>(),
+            "builtin": crate::audio::peq::builtin_profiles().len(),
+        });
+        state["app_active"] = serde_json::json!(crate::platform::testing::app_is_active());
+        state["menu_keys"] = serde_json::json!(self.menu_keys);
+        let loudness = self.core.library.loudness_status();
+        state["loudness"] = serde_json::json!({
+            "running": loudness.running,
+            "total": loudness.total,
+            "done": loudness.done,
+            "failed": loudness.failed,
+            "measured": self.snapshot.tracks.iter().filter(|t| t.measured.is_some()).count(),
+            "waiting": self
+                .snapshot
+                .tracks
+                .iter()
+                .filter(|t| t.available && t.wants_measuring())
+                .count(),
+        });
         state["crossfeed"] = serde_json::json!(format!("{:?}", p.crossfeed));
         state["rediscover"] = serde_json::json!(format!("{:?}", self.rediscover));
-        state["lyrics_chars"] = serde_json::json!(
-            self.lyrics
+        let details = self.extras.as_ref().and_then(|e| e.details.as_ref());
+        let lyrics = details.and_then(|d| d.lyrics.as_ref());
+        state["lyrics"] = serde_json::json!({
+            "chars": lyrics.map(|l| l.plain.chars().count()),
+            "timed_lines": lyrics.and_then(|l| l.timed.as_ref()).map(Vec::len),
+            "current_line": lyrics.and_then(|l| l.line_at(p.position_now_ms())),
+        });
+        state["credits"] = serde_json::json!(details.map(|d| {
+            d.credits
+                .iter()
+                .map(|c| format!("{:?}: {}", c.role, c.names.join(", ")))
+                .collect::<Vec<_>>()
+        }));
+        state["versions"] = serde_json::json!(
+            self.extras
                 .as_ref()
-                .and_then(|l| l.text.as_ref())
-                .map(|t| t.chars().count())
+                .map_or(0, panels::Extras::version_count)
         );
         state["eq"] = serde_json::json!({
             "enabled": self.settings.eq.enabled,

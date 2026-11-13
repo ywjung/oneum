@@ -47,6 +47,9 @@ pub struct Track {
     pub file_size: u64,
     pub mtime_ns: i64,
     pub replaygain: ReplayGainTags,
+    /// Leveling values the app measured itself for a file without such tags (see
+    /// `library::loudness`); kept in the app's database, never written to the file.
+    pub measured: Option<ReplayGainTags>,
     /// Cached cover image id (hex), if the track has artwork.
     pub art_id: Option<String>,
     pub favorite: bool,
@@ -55,6 +58,31 @@ pub struct Track {
     pub last_played_at: Option<i64>,
     /// Unix seconds.
     pub added_at: i64,
+}
+
+impl Track {
+    /// The values volume leveling works with: the file's tags, and where a gain is
+    /// missing there, what the app measured. A gain always comes with the peak from
+    /// the same source.
+    pub fn leveling(&self) -> ReplayGainTags {
+        let mut values = self.replaygain;
+        if let Some(measured) = self.measured {
+            if values.track_gain_db.is_none() {
+                values.track_gain_db = measured.track_gain_db;
+                values.track_peak = measured.track_peak;
+            }
+            if values.album_gain_db.is_none() {
+                values.album_gain_db = measured.album_gain_db;
+                values.album_peak = measured.album_peak;
+            }
+        }
+        values
+    }
+
+    /// True when the file's tags give no track gain, so that measuring it would help.
+    pub fn wants_measuring(&self) -> bool {
+        self.replaygain.track_gain_db.is_none() && self.measured.is_none()
+    }
 }
 
 /// A track with plausible values everywhere, for tests that only care about a few.
@@ -84,10 +112,40 @@ pub(crate) fn test_track(id: TrackId) -> Track {
         file_size: 1,
         mtime_ns: 1,
         replaygain: ReplayGainTags::default(),
+        measured: None,
         art_id: None,
         favorite: false,
         play_count: 0,
         last_played_at: None,
         added_at: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tags_come_before_what_was_measured() {
+        let mut track = test_track(1);
+        assert!(track.wants_measuring());
+        assert_eq!(track.leveling(), ReplayGainTags::default());
+        track.measured = Some(ReplayGainTags {
+            track_gain_db: Some(-5.0),
+            track_peak: Some(0.9),
+            album_gain_db: Some(-4.0),
+            album_peak: Some(0.95),
+        });
+        assert!(!track.wants_measuring());
+        assert_eq!(track.leveling(), track.measured.expect("set above"));
+        // A tagged track gain keeps its own peak (even an unknown one); the album
+        // values, which the tags do not have, come from the measurement.
+        track.replaygain.track_gain_db = Some(-7.5);
+        let values = track.leveling();
+        assert_eq!(values.track_gain_db, Some(-7.5));
+        assert_eq!(values.track_peak, None);
+        assert_eq!(values.album_gain_db, Some(-4.0));
+        assert_eq!(values.album_peak, Some(0.95));
+        assert!(!track.wants_measuring());
     }
 }

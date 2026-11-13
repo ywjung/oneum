@@ -8,8 +8,12 @@
 //!   click X Y [cmd] [shift] · dclick X Y · rclick X Y · move X Y · drag X1 Y1 X2 Y2
 //!   scroll X Y DY · key NAME [cmd] [shift] [alt] · text STRING · wait MS
 //!   shot FILE.png · dump FILE.json · open PATH · volume V · quit
-//!   oskey KEYCODE [cmd] [shift] (real OS key event) · inputsource ID · activate · hide
+//!   oskey KEYCODE [cmd] [shift] [alt] (real OS key event; the app has to be the active one)
+//!   menukey KEYCODE [cmd] [shift] [alt] (the same key handed to the menu bar; works in the background)
+//!   · inputsource ID · activate · hide
 //!   front / back (keep the window above others without taking focus, and undo) · resize W H · menu ID (a menu-bar command: song_play_next, toggle_mute, …)
+//!   (`menu` also takes loudness_start / loudness_stop / loudness_forget: the buttons of the
+//!   analysis card in Settings)
 use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, pos2};
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -23,7 +27,9 @@ pub(super) enum AppStep {
     Open(PathBuf),
     Volume(f32),
     Quit,
-    OsKey(u16, bool, bool),
+    OsKey(u16, bool, bool, bool),
+    /// A key press handed straight to the menu bar's key equivalents.
+    MenuKey(u16, bool, bool, bool),
     InputSource(String),
     Activate,
     Hide,
@@ -246,8 +252,20 @@ impl Automation {
                     return;
                 };
                 let (cmd, shift) = (words.contains(&"cmd"), words.contains(&"shift"));
+                let alt = words.contains(&"alt");
                 self.steps
-                    .push_back(Step::App(AppStep::OsKey(code, cmd, shift)));
+                    .push_back(Step::App(AppStep::OsKey(code, cmd, shift, alt)));
+            }
+            Some("menukey") => {
+                let Some(code) = words.get(1).and_then(|w| w.parse::<u16>().ok()) else {
+                    return;
+                };
+                self.steps.push_back(Step::App(AppStep::MenuKey(
+                    code,
+                    words.contains(&"cmd"),
+                    words.contains(&"shift"),
+                    words.contains(&"alt"),
+                )));
             }
             Some("inputsource") => self
                 .steps

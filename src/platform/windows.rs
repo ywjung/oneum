@@ -22,6 +22,55 @@ pub fn pump_main_loop(duration: std::time::Duration) {
     std::thread::sleep(duration);
 }
 
+/// Text in the Korean code page (CP949) as Unicode. `None` if the bytes are not that.
+pub fn decode_cp949(bytes: &[u8]) -> Option<String> {
+    const CP949: u32 = 949;
+    /// Fail on bytes that are not valid in the code page instead of replacing them.
+    const MB_ERR_INVALID_CHARS: u32 = 8;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MultiByteToWideChar(
+            code_page: u32,
+            flags: u32,
+            bytes: *const u8,
+            byte_count: i32,
+            wide: *mut u16,
+            wide_count: i32,
+        ) -> i32;
+    }
+    let count = i32::try_from(bytes.len()).ok()?;
+    if count == 0 {
+        return Some(String::new());
+    }
+    // SAFETY: pointer and length describe `bytes`; with no output buffer the function
+    // only reports how many UTF-16 units the text needs.
+    let needed = unsafe {
+        MultiByteToWideChar(
+            CP949,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            count,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let mut wide = vec![0u16; usize::try_from(needed).ok().filter(|n| *n > 0)?];
+    // SAFETY: as above, and the output buffer has exactly the `needed` units.
+    let written = unsafe {
+        MultiByteToWideChar(
+            CP949,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            count,
+            wide.as_mut_ptr(),
+            needed,
+        )
+    };
+    (written == needed)
+        .then(|| String::from_utf16(&wide).ok())
+        .flatten()
+}
+
 /// Windows' own Explorer, by its full path: a program of that name lying next to
 /// OnEum.exe (the app can be unzipped into any folder) must never be started instead.
 fn explorer() -> std::process::Command {
@@ -217,7 +266,15 @@ pub mod responder {
 pub mod testing {
     //! The scripted-verification helpers that drive macOS itself have no counterpart.
 
-    pub fn post_key(_key_code: u16, _command: bool, _shift: bool) -> bool {
+    pub fn post_key(_key_code: u16, _command: bool, _shift: bool, _option: bool) -> bool {
+        false
+    }
+
+    pub fn app_is_active() -> bool {
+        false
+    }
+
+    pub fn menu_key(_key_code: u16, _command: bool, _shift: bool, _option: bool) -> bool {
         false
     }
 

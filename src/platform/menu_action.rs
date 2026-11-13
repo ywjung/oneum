@@ -16,6 +16,11 @@ pub enum MenuAction {
     VolumeDown,
     ToggleShuffle,
     CycleRepeat,
+    StopAfterCurrent,
+    /// Sleep timer in minutes; 0 switches it off.
+    SleepTimer(u16),
+    SeekForward,
+    SeekBack,
     GoToCurrent,
     ToggleQueue,
     ToggleInfo,

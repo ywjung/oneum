@@ -1735,3 +1735,196 @@ fn radio_does_not_grow_a_shuffled_repeating_queue() {
     assert_eq!(rig.player.snapshot().queue.len(), 2);
     assert!(rig.host.radio_asked.lock().expect("lock").is_empty());
 }
+
+// ----- stop after the current song -------------------------------------------------------
+
+/// Asked for at the start of a song: that song is played to its end and nothing after
+/// it; the next one is ready, and "play" goes on from there.
+#[test]
+fn stop_after_current_stops_at_the_end_of_the_song() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(play(&[A, B], 0));
+    rig.send(Command::SetStopAfterCurrent(true));
+    let stopped = rig.wait("stopped with the next song ready", |s| {
+        s.state == PlayState::Paused && Rig::track(s) == Some(B)
+    });
+    assert!(!stopped.stop_after_current, "it applied to that one song");
+    assert_eq!(stopped.position_ms, 0);
+    assert_eq!(rig.host.plays(), vec![A]);
+    assert_eq!(rig.feeds(), 1);
+    assert_eq!(
+        rig.last_feed_audio().len(),
+        decode_all("gap_a.wav").len(),
+        "the whole song and nothing of the next"
+    );
+    rig.send(Command::Play);
+    rig.wait("the rest of the queue", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, B]);
+}
+
+/// Asked for while the song is on (the next one may already have been decoded behind
+/// it): still nothing of the next song is heard.
+#[test]
+fn stop_after_current_asked_for_in_the_middle_of_a_song() {
+    let rig = Rig::start(TestHost::new());
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time
+    rig.send(play(&[A, B, MONO], 0));
+    rig.wait("the first song is on", |s| {
+        s.state == PlayState::Playing && Rig::track(s) == Some(A) && s.position_now_ms() >= 200
+    });
+    rig.send(Command::SetStopAfterCurrent(true));
+    rig.wait("marked", |s| s.stop_after_current);
+    let stopped = rig.wait("stopped with the next song ready", |s| {
+        s.state == PlayState::Paused && Rig::track(s) == Some(B)
+    });
+    assert!(!stopped.stop_after_current);
+    assert_eq!(rig.host.plays(), vec![A]);
+    let heard: usize = rig
+        .audio
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|(_, pcm)| pcm.len())
+        .sum();
+    assert!(
+        heard <= decode_all("gap_a.wav").len() + 2 * 4096,
+        "nothing of the next song was played ({heard} samples heard)"
+    );
+}
+
+/// Taking it back, or starting another song, ends it.
+#[test]
+fn stop_after_current_can_be_taken_back_and_ends_with_the_song() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(play(&[A, B], 0));
+    rig.send(Command::SetStopAfterCurrent(true));
+    rig.send(Command::SetStopAfterCurrent(false));
+    let ended = rig.wait("the queue plays to its end", |s| {
+        s.state == PlayState::Ended
+    });
+    assert!(!ended.stop_after_current);
+    assert_eq!(rig.host.plays(), vec![A, B]);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG, A, B], 0));
+    rig.send(Command::SetStopAfterCurrent(true));
+    rig.wait("marked", |s| s.stop_after_current);
+    rig.send(Command::Next);
+    rig.wait("another song ends it", |s| {
+        !s.stop_after_current && Rig::track(s) == Some(A)
+    });
+    rig.wait("and playback goes on", |s| s.state == PlayState::Ended);
+    // Nothing to mark without a song.
+    rig.send(Command::ClearQueue);
+    rig.send(Command::SetStopAfterCurrent(true));
+    let idle = rig.wait("idle", |s| s.state == PlayState::Idle);
+    assert!(!idle.stop_after_current);
+}
+
+// ----- sleep timer -----------------------------------------------------------------------
+
+/// The sleep timer pauses playback when its time is up, with the song where it was;
+/// the volume setting is untouched and "play" goes on at full level.
+#[test]
+fn sleep_timer_pauses_and_leaves_the_volume_alone() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rig = Rig::start(long_host(&dir));
+    rig.pace_ms.store(12, Ordering::Relaxed); // real time
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    rig.send(Command::SetSleepTimer(Some(Duration::from_millis(1500))));
+    let set = rig.wait("the timer is set", |s| s.sleep_at.is_some());
+    assert_eq!(set.state, PlayState::Playing);
+    let asleep = rig.wait("paused by the timer", |s| s.state == PlayState::Paused);
+    assert_eq!(asleep.sleep_at, None, "the timer is over");
+    assert_eq!(asleep.volume, 1.0, "the volume setting was not changed");
+    assert_eq!(Rig::track(&asleep), Some(LONG));
+    assert!(
+        (800..6000).contains(&asleep.position_ms),
+        "paused where the song was: {} ms",
+        asleep.position_ms
+    );
+    // What was heard last was faded: quieter than the start of the song.
+    let peak = |pcm: &[f32]| pcm.iter().fold(0f32, |m, s| m.max(s.abs()));
+    let heard = rig.last_feed_audio();
+    let (start, end) = (&heard[..8_820], &heard[heard.len() - 8_820..]);
+    assert!(
+        peak(end) < peak(start) * 0.6,
+        "{} vs {}",
+        peak(end),
+        peak(start)
+    );
+    // Play again: full level.
+    let before = heard.len();
+    rig.send(Command::Play);
+    rig.wait("playing again", |s| {
+        s.state == PlayState::Playing && rig.last_feed_audio().len() > before + 44_100
+    });
+    let again = rig.last_feed_audio();
+    let resumed = &again[again.len() - 22_050..];
+    assert!(
+        (peak(resumed) - peak(start)).abs() < peak(start) * 0.05,
+        "{} vs {}",
+        peak(resumed),
+        peak(start)
+    );
+}
+
+#[test]
+fn sleep_timer_can_be_switched_off() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rig = Rig::start(long_host(&dir));
+    rig.pace_ms.store(12, Ordering::Relaxed);
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    rig.send(Command::SetSleepTimer(Some(Duration::from_millis(900))));
+    rig.wait("set", |s| s.sleep_at.is_some());
+    rig.send(Command::SetSleepTimer(None));
+    rig.wait("off", |s| s.sleep_at.is_none());
+    std::thread::sleep(Duration::from_millis(1500));
+    let later = rig.player.snapshot();
+    assert_eq!(later.state, PlayState::Playing, "nothing pauses it now");
+    // A timer set while nothing plays simply runs out.
+    rig.send(Command::Pause);
+    rig.wait("paused", |s| s.state == PlayState::Paused);
+    rig.send(Command::SetSleepTimer(Some(Duration::from_millis(300))));
+    rig.wait("set while paused", |s| s.sleep_at.is_some());
+    let over = rig.wait("ran out", |s| s.sleep_at.is_none());
+    assert_eq!(over.state, PlayState::Paused);
+}
+
+// ----- parametric correction -------------------------------------------------------------
+
+/// The correction profile is set and taken away while playing, without restarting the
+/// feed; the player says which profile is applied.
+#[test]
+fn a_correction_profile_is_applied_and_named() {
+    use oneum::audio::PeqProfile;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rig = Rig::start(long_host(&dir));
+    rig.pace_ms.store(12, Ordering::Relaxed);
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    assert_eq!(rig.player.snapshot().correction, None);
+    let profile = PeqProfile::parse(
+        "HD 600",
+        "Preamp: -6 dB\nFilter 1: ON PK Fc 1000 Hz Gain 4 dB Q 1.4",
+    )
+    .expect("parses");
+    rig.send(Command::SetCorrection(Some(profile)));
+    let on = rig.wait("named", |s| s.correction.as_deref() == Some("HD 600"));
+    assert_eq!(on.state, PlayState::Playing);
+    // A profile that changes nothing is not "applied".
+    rig.send(Command::SetCorrection(Some(PeqProfile {
+        name: "Flat".into(),
+        ..Default::default()
+    })));
+    rig.wait("nothing applied", |s| s.correction.is_none());
+    rig.send(Command::SetCorrection(None));
+    std::thread::sleep(Duration::from_millis(300));
+    let after = rig.player.snapshot();
+    assert_eq!(after.correction, None);
+    assert_eq!(after.state, PlayState::Playing);
+    assert_eq!(rig.feeds(), 1, "the feed was not restarted");
+}

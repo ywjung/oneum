@@ -272,6 +272,18 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
                     return Err(ReadError::Unsupported(format!("MP4 with codec {other:?}")));
                 }
             };
+            // "AAC" covers more than can be played: HE-AAC (which the header does not
+            // always admit to) and AAC with more than two channels are refused by the
+            // decoder. Asking the decoder is the only reliable way to tell.
+            if codec == "AAC"
+                && let Err(error) = crate::audio::decoder::can_play(path)
+                && error.kind == crate::audio::PlaybackErrorKind::Unsupported
+            {
+                return Err(ReadError::Unsupported(format!(
+                    "AAC the decoder cannot play (HE-AAC, or more than two channels): {}",
+                    error.detail
+                )));
+            }
             (file.into(), codec, "MP4")
         }
         FileType::Vorbis => {
@@ -367,7 +379,16 @@ pub(crate) fn read_picture(path: &Path) -> Option<Vec<u8>> {
 /// the database, the search index and every list that shows it.
 const MAX_TAG_CHARS: usize = 1_000;
 
+/// True if a tag value that is in the library would read differently today: Korean
+/// that was stored as Latin-1 (see `legacy`). The scan reads such a file again.
+pub(crate) fn would_read_differently(text: &str) -> bool {
+    super::legacy::repair(text).is_some()
+}
+
 fn clean(text: &str) -> String {
+    // Korean from an old code page, declared as Latin-1 by the tag.
+    let repaired = super::legacy::repair(text);
+    let text = repaired.as_deref().unwrap_or(text);
     let cut = text
         .char_indices()
         .nth(MAX_TAG_CHARS)
@@ -468,6 +489,13 @@ mod tests {
     #[test]
     fn endless_tag_values_are_cut() {
         assert_eq!(clean("  제목\0 "), "제목");
+        // Korean that an old tag declares as Latin-1 is read as Korean.
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            assert_eq!(clean("°¡»ç"), "가사");
+            assert!(would_read_differently("¾ÆÀÌÀ¯") && !would_read_differently("아이유"));
+        }
+        assert_eq!(clean("Motörhead"), "Motörhead");
         let long = "가".repeat(50_000);
         let cut = clean(&long);
         assert_eq!(cut.chars().count(), MAX_TAG_CHARS);

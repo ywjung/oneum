@@ -9,8 +9,8 @@ use crate::audio::decoder::SourceInfo;
 use crate::audio::dsp::replaygain_factor;
 use crate::audio::{
     Crossfeed, Engine, EngineEvent, EqSettings, LevelMeter, Levels, NextSlot, NextTrack,
-    OutputError, OutputSettings, OutputStatus, PlaybackErrorKind, ReplayGainSettings, Scope,
-    TrackRequest,
+    OutputError, OutputSettings, OutputStatus, PeqProfile, PlaybackErrorKind, ReplayGainSettings,
+    Scope, TrackRequest,
 };
 use crate::model::{ReplayGainTags, TrackId};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ const TICK_ACTIVE: Duration = Duration::from_millis(20);
 const TICK_IDLE: Duration = Duration::from_millis(200);
 const POSITION_PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
+/// The sleep timer turns the volume down over its last seconds instead of cutting off.
+const SLEEP_FADE: Duration = Duration::from_secs(5);
 const QUEUE_SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 /// Playback stops after this many tracks in a row could not be played.
 pub const MAX_CONSECUTIVE_FAILURES: usize = 10;
@@ -110,8 +112,17 @@ pub enum Command {
     SetReplayGain(ReplayGainSettings),
     SetEq(EqSettings),
     SetCrossfeed(Crossfeed),
+    /// The parametric correction profile (headphone correction); `None` switches it off.
+    SetCorrection(Option<PeqProfile>),
     /// Radio on or off: when the queue runs out, go on with songs like the last one.
     SetRadio(bool),
+    /// Stop when the song that is on now has ended, with the next one ready to play.
+    /// Applies to this one song: it is over once playback has stopped there or another
+    /// song was started.
+    SetStopAfterCurrent(bool),
+    /// Sleep timer: pause when this much time has passed (`None` switches it off).
+    /// The sound fades out over the last seconds; the volume setting is not changed.
+    SetSleepTimer(Option<Duration>),
     /// `None` follows the system default device.
     SetOutputDevice(Option<String>),
     /// Rate matching, exclusive access, memory playback.
@@ -198,8 +209,14 @@ pub struct PlayerSnapshot {
     pub eq: EqSettings,
     /// The headphone crossfeed as it is set.
     pub crossfeed: Crossfeed,
+    /// Name of the parametric correction profile that is applied, if one is.
+    pub correction: Option<String>,
     /// Radio is on (see `Command::SetRadio`).
     pub radio: bool,
+    /// Playback stops when the current song ends (see `Command::SetStopAfterCurrent`).
+    pub stop_after_current: bool,
+    /// When the sleep timer will pause playback, while one is set.
+    pub sleep_at: Option<Instant>,
     /// Frames of the current track, as far as it has been decoded, that would have
     /// exceeded full scale and had their gain turned down instead of being clipped.
     pub peak_limited_frames: u64,
@@ -235,7 +252,10 @@ impl PlayerSnapshot {
             dither_bits: None,
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
+            correction: None,
             radio: false,
+            stop_after_current: false,
+            sleep_at: None,
             peak_limited_frames: 0,
             last_start_latency_ms: None,
         }
@@ -260,6 +280,8 @@ pub struct PlayerConfig {
     pub replaygain: ReplayGainSettings,
     pub eq: EqSettings,
     pub crossfeed: Crossfeed,
+    /// The parametric correction profile to start with.
+    pub correction: Option<PeqProfile>,
     pub radio: bool,
     pub device_pref: Option<String>,
     pub output: OutputSettings,
@@ -275,6 +297,7 @@ impl Default for PlayerConfig {
             replaygain: ReplayGainSettings::default(),
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
+            correction: None,
             radio: false,
             device_pref: None,
             output: OutputSettings::default(),
@@ -401,6 +424,7 @@ pub fn spawn_with_engine<H: PlayerHost>(
             let engine = make_engine(volume);
             engine.set_eq(config.eq);
             engine.set_crossfeed(config.crossfeed);
+            engine.set_correction(config.correction.clone());
             let _ = meter_slot.set(engine.shared().meter().clone());
             let _ = scope_slot.set(engine.shared().scope().clone());
             Player::new(host, engine, rx, shared, config, session, volume).run(&thread_pulse);
@@ -538,7 +562,14 @@ struct Player<H: PlayerHost> {
     replaygain: ReplayGainSettings,
     eq: EqSettings,
     crossfeed: Crossfeed,
+    /// Name of the correction profile that is applied (one that changes nothing is
+    /// not applied).
+    correction: Option<String>,
     radio: bool,
+    /// The queue item after which playback stops.
+    stop_after: Option<ItemId>,
+    /// Sleep timer: when to pause.
+    sleep_at: Option<Instant>,
     /// While set: audio decoded with processing that has since been switched off is
     /// still being played (see `review_processed`).
     processed_until: Option<Instant>,
@@ -611,7 +642,14 @@ impl<H: PlayerHost> Player<H> {
             replaygain: config.replaygain,
             eq: config.eq.sanitized(),
             crossfeed: config.crossfeed,
+            correction: config
+                .correction
+                .as_ref()
+                .filter(|p| !p.is_flat())
+                .map(|p| p.name.clone()),
             radio: config.radio,
+            stop_after: None,
+            sleep_at: None,
             processed_until: None,
             notice: None,
             notice_seq: 0,
@@ -638,9 +676,14 @@ impl<H: PlayerHost> Player<H> {
         let mut events = Vec::new();
         while self.running {
             pulse.beat();
-            let busy = self.chain.is_some()
-                && (self.want_playing
-                    || matches!(self.state, PlayState::Loading | PlayState::Seeking));
+            // While the sleep timer is fading the sound out, the volume moves every tick.
+            let fading = self
+                .sleep_at
+                .is_some_and(|at| at.saturating_duration_since(Instant::now()) <= SLEEP_FADE);
+            let busy = fading
+                || self.chain.is_some()
+                    && (self.want_playing
+                        || matches!(self.state, PlayState::Loading | PlayState::Seeking));
             match self
                 .rx
                 .recv_timeout(if busy { TICK_ACTIVE } else { TICK_IDLE })
@@ -661,6 +704,13 @@ impl<H: PlayerHost> Player<H> {
                 self.on_engine_event(event);
             }
             self.follow_playback();
+            // "Stop after this song" belongs to one song: another one being current
+            // (next, previous, a double-click, the song removed) ends it.
+            if self.stop_after.is_some() && self.stop_after != self.queue.current().map(|i| i.id) {
+                self.stop_after = None;
+                self.dirty = true;
+            }
+            self.follow_sleep_timer();
             self.watch_for_stall();
             self.release_paused_feed();
             if self
@@ -773,6 +823,11 @@ impl<H: PlayerHost> Player<H> {
     /// Tells the decode thread what follows `item_id`.
     fn announce_next_after(&self, item_id: ItemId) {
         let Some(chain) = &self.chain else { return };
+        if self.stop_after == Some(item_id) {
+            // Nothing follows in this feed: playback stops when it has been played.
+            chain.slot.set(NextTrack::End);
+            return;
+        }
         let next = match self.queue.peek_after(item_id) {
             // An unplayable next track ends the feed; it is skipped when we get there.
             // So does one the device should run at another rate for: the feed ends at
@@ -821,6 +876,7 @@ impl<H: PlayerHost> Player<H> {
         let gain = track.map_or(1.0, |t| replaygain_factor(&t.replaygain, &self.replaygain));
         self.eq.is_active()
             || self.crossfeed != Crossfeed::Off
+            || self.correction.is_some()
             || !integer_pcm
             || !fits
             || info.channels != 2
@@ -913,6 +969,34 @@ impl<H: PlayerHost> Player<H> {
         self.state = PlayState::Idle;
         self.dirty = true;
         self.release_device();
+    }
+
+    /// Stops with the current item ready to be played from its start.
+    fn halt(&mut self) {
+        self.drop_chain();
+        self.want_playing = false;
+        self.engine.set_playing(false);
+        self.resume_ms = 0;
+        self.state = PlayState::Paused;
+        self.listen.reset();
+        self.dirty = true;
+        self.release_device();
+    }
+
+    /// Sleep timer: fades the sound out over the last seconds, then pauses. The volume
+    /// the user set is left as it is, and is what the next "play" starts with.
+    fn follow_sleep_timer(&mut self) {
+        let Some(at) = self.sleep_at else { return };
+        let left = at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            self.sleep_at = None;
+            self.pause();
+            self.engine.set_volume(self.volume);
+            self.dirty = true;
+        } else if left < SLEEP_FADE {
+            let fraction = left.as_secs_f32() / SLEEP_FADE.as_secs_f32();
+            self.engine.set_volume(self.volume * fraction);
+        }
     }
 
     fn end_of_queue(&mut self) {
@@ -1057,7 +1141,9 @@ impl<H: PlayerHost> Player<H> {
         if let Some(first) = segments.next() {
             last = first.item_id;
             for seg in segments {
-                if self.queue.peek_after(last).map(|i| i.id) != Some(seg.item_id) {
+                if self.stop_after == Some(last)
+                    || self.queue.peek_after(last).map(|i| i.id) != Some(seg.item_id)
+                {
                     consistent = false;
                     break;
                 }
@@ -1126,14 +1212,23 @@ impl<H: PlayerHost> Player<H> {
             }
             Command::Stop => {
                 if self.queue.current().is_some() {
-                    self.drop_chain();
-                    self.want_playing = false;
-                    self.engine.set_playing(false);
-                    self.resume_ms = 0;
-                    self.state = PlayState::Paused;
-                    self.listen.reset();
+                    self.stop_after = None;
+                    self.halt();
+                }
+            }
+            Command::SetSleepTimer(after) => {
+                self.sleep_at = after.map(|after| Instant::now() + after);
+                // Switched off (or set anew) in the middle of the fade: full volume again.
+                self.engine.set_volume(self.volume);
+                self.dirty = true;
+            }
+            Command::SetStopAfterCurrent(on) => {
+                let wanted = self.queue.current().map(|i| i.id).filter(|_| on);
+                if wanted != self.stop_after {
+                    self.stop_after = wanted;
                     self.dirty = true;
-                    self.release_device();
+                    // What follows the current song in the feed changes with it.
+                    self.sync_next();
                 }
             }
             Command::Next => {
@@ -1195,6 +1290,15 @@ impl<H: PlayerHost> Player<H> {
             Command::SetCrossfeed(setting) => {
                 self.crossfeed = setting;
                 self.engine.set_crossfeed(setting);
+                self.review_processed();
+            }
+            Command::SetCorrection(profile) => {
+                let profile = profile.map(PeqProfile::sanitized);
+                self.correction = profile
+                    .as_ref()
+                    .filter(|p| !p.is_flat())
+                    .map(|p| p.name.clone());
+                self.engine.set_correction(profile);
                 self.review_processed();
             }
             Command::SetRadio(on) => {
@@ -1378,7 +1482,7 @@ impl<H: PlayerHost> Player<H> {
                 if let Some(last) = chain.segments.back() {
                     // Gapless continuation: only valid if the queue still wants it.
                     let expected = self.queue.peek_after(last.item_id).map(|i| i.id);
-                    if expected != Some(item_id) {
+                    if expected != Some(item_id) || self.stop_after == Some(last.item_id) {
                         let position = self.position_ms();
                         self.start_current(position, true);
                         return;
@@ -1508,6 +1612,20 @@ impl<H: PlayerHost> Player<H> {
         self.listen.reset();
         self.meta_dirty_since.get_or_insert_with(Instant::now);
         let current = self.queue.current().map(|c| c.id);
+        if current.is_some() && self.stop_after == current {
+            // "Stop after this song": the next one is made current, so that "play"
+            // goes on from there, and nothing is started.
+            self.stop_after = None;
+            self.consecutive_failures = 0;
+            match self.queue.advance_auto() {
+                Some(_) => {
+                    self.halt();
+                    self.save_session(false);
+                }
+                None => self.end_of_queue(),
+            }
+            return;
+        }
         // Radio's last chance: the feed ended without anything having been lined up.
         if let Some(current) = current {
             self.extend_with_radio(current);
@@ -1758,7 +1876,10 @@ impl<H: PlayerHost> Player<H> {
             dither_bits: self.engine.dither_bits(),
             eq: self.eq,
             crossfeed: self.crossfeed,
+            correction: self.correction.clone(),
             radio: self.radio,
+            stop_after_current: self.stop_after.is_some(),
+            sleep_at: self.sleep_at,
             peak_limited_frames: self.peak_limited_frames(),
             last_start_latency_ms: self.last_start_latency_ms,
         };

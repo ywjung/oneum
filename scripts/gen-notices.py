@@ -46,9 +46,10 @@ for _, _, p in rows:
 
 out = ["# Third-party notices", "",
        "OnEum is built from the open-source Rust crates listed below (as linked into the",
-       f"{build_name} build). Each crate remains under its own license. The full license texts",
-       "come with the app in the file `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under",
-       "Contents/Resources; on Windows next to the program).", "",
+       f"{build_name} build), and contains the data listed at the end. Each remains under its",
+       "own license. The full license texts come with the app in the file",
+       "`THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows",
+       "next to the program).", "",
        f"Crates: {len(rows)}", "",
        "## License summary", ""]
 for lic in sorted(by_license, key=lambda l: (-len(by_license[l]), l)):
@@ -63,6 +64,14 @@ out += ["",
 for _, _, p in rows:
     src = p.get("repository") or p.get("homepage") or f"https://crates.io/crates/{p['name']}"
     out.append(f"| {p['name']} | {p['version']} | {p.get('license') or 'UNKNOWN'} | {src} |")
+# Data that is compiled into the program but is not a crate (see scripts/gen-licenses.py,
+# which reproduces the license text from the same folder).
+out += ["",
+        "## Data", "",
+        "| Data | License | Source |", "|---|---|---|",
+        "| Built-in headphone correction profiles (`assets/corrections/headphones.txt`): "
+        "parametric equalizer settings from AutoEq, computed from oratory1990's measurements "
+        "| MIT, Copyright (c) 2018-2022 Jaakko Pasanen | https://github.com/jaakkopasanen/AutoEq |"]
 out.append("")
 path = sys.argv[2] if windows else os.path.join(root, "THIRD_PARTY_NOTICES.md")
 with open(path, "w") as f:

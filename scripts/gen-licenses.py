@@ -85,13 +85,22 @@ for package in rows:
         if label not in entry[2]:
             entry[2].append(label)
 
+# Data compiled into the program that is not a crate: (label, license file in the repository).
+DATA = [("AutoEq headphone correction data (assets/corrections/headphones.txt)",
+         "assets/corrections/LICENSE-AutoEq.txt")]
+for label, relative in DATA:
+    with open(os.path.join(root, relative), "rb") as f:
+        text = f.read().decode("utf-8").replace("\r\n", "\n").strip()
+    digest = hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
+    texts.setdefault(digest, (text, os.path.basename(relative), []))[2].append(label)
+
 rule = "=" * 78
 out = [
     "OnEum: license texts of third-party software",
     "",
     f"OnEum ({build_name} build) contains the {len(rows)} open-source Rust crates listed in",
-    "THIRD_PARTY_NOTICES.md. Their license texts follow, as shipped in the crates' own",
-    "packages. A text that several crates share word for word appears once, with the",
+    "THIRD_PARTY_NOTICES.md, and the data named there. Their license texts follow, as shipped",
+    "in the crates' own packages. A text that several crates share word for word appears once, with the",
     "crates it applies to. A crate offered under a choice of licenses (\"MIT OR",
     "Apache-2.0\") is used under either; all the texts it ships are reproduced.",
     "",

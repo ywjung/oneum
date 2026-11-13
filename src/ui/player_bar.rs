@@ -159,11 +159,56 @@ impl OneumApp {
                 } else {
                     (Icon::Play, s.play)
                 };
-                if widgets::primary_icon_button(ui, icon, &format!("{label} (Space)"), 36.0)
-                    .clicked()
-                {
+                let stop_after = self.player.stop_after_current;
+                let hint = if stop_after {
+                    format!("{label} (Space)\n{}", s.stop_after_current_on)
+                } else {
+                    format!("{label} (Space)")
+                };
+                let play = widgets::primary_icon_button(ui, icon, &hint, 36.0);
+                if play.clicked() {
                     player.send(Command::TogglePlayPause);
                 }
+                play.context_menu(|ui| {
+                    let mut on = stop_after;
+                    if ui
+                        .add_enabled(
+                            self.player.current.is_some(),
+                            egui::Checkbox::new(&mut on, s.menu_stop_after_current),
+                        )
+                        .changed()
+                    {
+                        player.send(Command::SetStopAfterCurrent(on));
+                        ui.close();
+                    }
+                    ui.menu_button(s.menu_sleep_timer, |ui| {
+                        for (minutes, label) in [
+                            (15, s.sleep_15),
+                            (30, s.sleep_30),
+                            (45, s.sleep_45),
+                            (60, s.sleep_60),
+                            (90, s.sleep_90),
+                        ] {
+                            if ui.button(label).clicked() {
+                                player.send(Command::SetSleepTimer(Some(Duration::from_secs(
+                                    minutes * 60,
+                                ))));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                self.player.sleep_at.is_some(),
+                                egui::Button::new(s.sleep_off),
+                            )
+                            .clicked()
+                        {
+                            player.send(Command::SetSleepTimer(None));
+                            ui.close();
+                        }
+                    });
+                });
                 if widgets::icon_button(
                     ui,
                     Icon::Next,
@@ -291,6 +336,42 @@ impl OneumApp {
         };
         if widgets::icon_button(ui, icon, &format!("{label} (⌘⇧M)"), 26.0, false).clicked() {
             self.toggle_mute();
+        }
+        // The sleep timer, while one is running: the time left; a click switches it off.
+        if let Some(at) = self.player.sleep_at {
+            let left = at.saturating_duration_since(Instant::now()).as_secs();
+            let text = RichText::new(format!("{}:{:02}", left / 60, left % 60))
+                .small()
+                .color(theme::accent(ui.visuals().dark_mode));
+            // Right to left: the time first, then the clock in front of it.
+            let label = ui
+                .add(egui::Label::new(text).sense(Sense::click()))
+                .on_hover_text(s.sleep_cancel_hint);
+            let (clock, _) = ui.allocate_exact_size(egui::Vec2::splat(13.0), Sense::hover());
+            super::icons::paint(
+                ui.painter(),
+                clock,
+                Icon::Clock,
+                theme::accent(ui.visuals().dark_mode),
+            );
+            if label.clicked() {
+                player.send(Command::SetSleepTimer(None));
+            }
+            // The seconds count down without any input.
+            ui.ctx().request_repaint_after(Duration::from_millis(500));
+        }
+        // "Stop after this song", while it is set: said in words (a mark on the play
+        // button read as a drawing fault); a click takes it back.
+        if self.player.stop_after_current {
+            let text = RichText::new(s.stop_after_short)
+                .small()
+                .color(theme::accent(ui.visuals().dark_mode));
+            let label = ui
+                .add(egui::Label::new(text).sense(Sense::click()))
+                .on_hover_text(s.stop_after_cancel_hint);
+            if label.clicked() {
+                player.send(Command::SetStopAfterCurrent(false));
+            }
         }
     }
 }

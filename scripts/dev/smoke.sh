@@ -55,6 +55,12 @@ check c1.json 'd["rows"] == 4 and d["text_focus"]' "Korean partial search finds 
 check c2.json 'd["rows"] == 20 and d["query"] == "" and not d["text_focus"]' "Escape clears the search"
 check c3.json 'd["rows"] == 4' "choseong search"
 check c4.json 'd["rows"] == 1 and d["first_rows"] == ["Come Together"]' "multi-word search"
+ui 'click 200 20' 'text artist:beatles' 'wait 400' 'dump c5.json' 'key Escape' 'wait 300' \
+   'click 200 20' 'text year:2019-2020' 'wait 400' 'dump c6.json' 'key Escape' 'wait 300' \
+   'click 200 20' 'text 장르:가요 format:mp3' 'wait 400' 'dump c7.json' 'key Escape' 'wait 300'
+check c5.json 'd["rows"] == 6' "field search: artist:"
+check c6.json 'd["rows"] == 4' "field search: a range of years"
+check c7.json 'd["rows"] == 2' "field search: genre in Korean and format together"
 
 echo "== playback"
 ui 'dclick 400 93' 'wait 1500' 'dump p1.json'
@@ -72,6 +78,35 @@ check p6.json 'd["queue_index"] == 1 and d["position_ms"] < 3000' "previous afte
 ui "click $PREV" 'wait 700' 'dump p7.json'
 check p7.json 'd["queue_index"] == 0' "previous within 3 s goes to the previous track"
 
+echo "== skip within a song, stop after the song"
+# Controls ▸ Skip Ahead/Back, then "Stop After Current Song": taken back by another
+# song, and carried out on the second song (26 s long, skipped ahead to its last seconds).
+ui 'menu seek_forward' 'wait 800' 'dump sk1.json' 'menu seek_back' 'wait 800' 'dump sk2.json' \
+   'menu stop_after_current' 'wait 300' 'dump sk3.json' "click $NEXT" 'wait 900' 'dump sk4.json' \
+   'menu stop_after_current' 'wait 200' 'menu seek_forward' 'wait 300' 'menu seek_forward' 'wait 300' \
+   'menu seek_forward' 'wait 300' 'menu seek_forward' 'wait 400' 'dump sk5.json' 'wait 6500' 'dump sk6.json' \
+   'key Space' 'wait 800' 'dump sk7.json'
+check sk1.json 'd["position_ms"] >= 5000' "skip ahead moves 5 s on"
+check sk2.json 'd["position_ms"] < 4000' "skip back moves 5 s back"
+check sk3.json 'd["stop_after_current"] and d["state"] == "Playing"' "stop after the current song is marked"
+check sk4.json 'd["queue_index"] == 1 and not d["stop_after_current"]' "…and another song takes the mark away"
+check sk5.json 'd["stop_after_current"] and d["position_ms"] >= 20000' "marked again, near the end of the song"
+check sk6.json 'd["state"] == "Paused" and d["queue_index"] == 2 and d["position_ms"] == 0 and not d["stop_after_current"]' "playback stops at the end of that song with the next one ready"
+check sk7.json 'd["state"] == "Playing" and d["queue_index"] == 2' "Space goes on from there"
+ui 'menu sleep_15' 'wait 400' 'dump sl1.json' 'menu sleep_off' 'wait 300' 'dump sl2.json'
+check sl1.json 'd["sleep_in_s"] is not None and 890 <= d["sleep_in_s"] <= 900 and d["state"] == "Playing"' "the sleep timer counts down from 15 minutes"
+check sl2.json 'd["sleep_in_s"] is None and d["state"] == "Playing"' "…and can be switched off"
+
+echo "== the new shortcuts, as key presses handed to the menu bar"
+# Key codes: 124/123 = right/left arrow, 47 = period. The last press (Command-period,
+# without Shift) is a control: no menu item may take it.
+ui 'menukey 124 cmd alt' 'wait 800' 'dump mk1.json' 'menukey 123 cmd alt' 'wait 800' 'dump mk2.json' \
+   'menukey 47 cmd shift' 'wait 300' 'dump mk3.json' 'menukey 47 cmd shift' 'wait 300' 'menukey 47 cmd' 'wait 200' 'dump mk4.json'
+check mk1.json 'd["position_ms"] >= 5000' "Option-Command-Right skips ahead"
+check mk2.json 'd["position_ms"] < 4500' "Option-Command-Left skips back"
+check mk3.json 'd["stop_after_current"]' "Shift-Command-period marks the song as the last one"
+check mk4.json 'not d["stop_after_current"] and d["menu_keys"] == [True, True, True, True, False]' "…and takes the mark back; Command-period alone is nobody's shortcut"
+
 echo "== modes"
 ui "click $SHUFFLE" 'wait 400' 'dump m1.json' "click $SHUFFLE" 'wait 400' 'dump m2.json' "click $REPEAT" 'wait 300' 'dump m3.json' "click $REPEAT" 'wait 300' 'dump m4.json' "click $REPEAT" 'wait 300' 'dump m5.json'
 check m1.json 'd["shuffle"] and d["queue_index"] == 0' "shuffle on keeps the current track first"
@@ -81,12 +116,15 @@ check m4.json 'd["repeat"] == "One"' "repeat one"
 check m5.json 'd["repeat"] == "Off"' "repeat off"
 
 echo "== views"
-ui 'click 60 129' 'wait 500' 'dump v1.json' 'click 60 159' 'wait 500' 'dump v2.json' 'click 60 99' 'wait 300'
+ui 'click 60 129' 'wait 500' 'dump v1.json' 'click 60 159' 'wait 500' 'dump v2.json' \
+   'click 60 189' 'wait 500' 'dump v3.json' 'click 400 131' 'wait 500' 'dump v4.json' 'click 60 99' 'wait 300'
 check v1.json 'd["nav"] == "Albums" and d["rows"] == 7' "albums view"
 check v2.json 'd["nav"] == "Artists" and d["rows"] >= 5' "artists view"
+check v3.json 'd["nav"] == "Genres" and d["first_rows"] == ["Electronic", "Pop", "Rock", "가요"]' "genres view lists the genres of the tags"
+check v4.json 'd["nav"].startswith("Genre(") and d["rows"] == 4' "a genre opens its songs"
 
 echo "== favourites and queue panel"
-ui 'click 228 157' 'wait 300' 'click 60 189' 'wait 400' 'dump f1.json' 'click 60 99' 'wait 300' 'click 1118 20' 'wait 400' 'dump f2.json' 'click 1118 20' 'wait 300'
+ui 'click 228 157' 'wait 300' 'click 60 219' 'wait 400' 'dump f1.json' 'click 60 99' 'wait 300' 'click 1118 20' 'wait 400' 'dump f2.json' 'click 1118 20' 'wait 300'
 check f1.json 'd["nav"] == "Favorites" and d["rows"] == 1' "heart marks a favourite"
 check f2.json 'd["right_panel"] == "Queue"' "queue panel opens"
 
@@ -165,8 +203,8 @@ PY
 echo "== type-ahead, remaining time, drag and drop"
 ui 'click 60 99' 'wait 400' 'click 400 93' 'wait 300' 'text here' 'wait 300' 'dump ta.json' 'wait 1200' \
    'click 810 743' 'wait 400' 'dump rt1.json' 'click 810 743' 'wait 400' 'dump rt2.json' \
-   'dump dd0.json' 'drag 400 125 100 281' 'wait 700' 'dump dd1.json' 'drag 400 157 1118 20' 'wait 600' 'dump dd2.json' \
-   'click 100 281' 'wait 500' 'dump dd3.json' 'drag 400 132 400 175' 'wait 700' 'dump dd4.json' \
+   'dump dd0.json' 'drag 400 125 100 311' 'wait 700' 'dump dd1.json' 'drag 400 157 1118 20' 'wait 600' 'dump dd2.json' \
+   'click 100 311' 'wait 500' 'dump dd3.json' 'drag 400 132 400 175' 'wait 700' 'dump dd4.json' \
    'menu playlist_rename' 'wait 600' 'key A cmd' 'text 드라이브' 'wait 200' 'key Enter' 'wait 600' 'dump pm1.json' \
    'menu playlist_delete' 'wait 500' 'dump pm2.json' 'key Escape' 'wait 400' 'dump pm3.json' 'click 60 99' 'wait 300'
 check ta.json 'd["selected_titles"] == ["Here Comes the Sun"]' "typing letters jumps to the song"
@@ -200,12 +238,24 @@ check se7.json 'd["guide_open"] and not d["settings_open"]' "Help ▸ User Guide
 check se8.json 'not d["guide_open"] and d["nav"] == "Songs"' "Escape closes the guide"
 check se6.json 'not d["settings_open"] and d["nav"] == "Songs"' "a click outside closes it without acting on what is behind"
 
+echo "== listen again"
+# The four lists behind "Listen Again": what was played, what came in, what is played
+# most, what has not been heard for long (nothing yet in a library this new).
+ui 'click 60 249' 'wait 500' 'dump la0.json' 'click 328 105' 'wait 500' 'dump la1.json' \
+   'click 503 105' 'wait 500' 'dump la2.json' 'click 255 105' 'wait 400' 'dump la3.json' 'click 60 99' 'wait 400' 'dump la4.json'
+check la0.json 'd["nav"] == "Recent" and d["rediscover"] == "Played" and d["rows"] > 0' "Listen Again opens on what was played"
+check la1.json 'd["rediscover"] == "Added" and d["rows"] == 20' "…Recently Added lists the whole new library"
+check la2.json 'd["rediscover"] == "Forgotten" and d["rows"] == 0' "…Not Heard Lately is empty in a library this new"
+check la3.json 'd["rediscover"] == "Played" and d["rows"] > 0' "…and back"
+check la4.json 'd["nav"] == "Songs" and d["rows"] == 20' "back to all songs"
+
 echo "== equalizer, crossfeed, radio"
-# The Playback tab scrolled to its end: equalizer row, crossfeed strengths, radio switch.
+# The Playback tab: scrolled to its end for the radio switch, and 250 points back up from
+# there for the equalizer row and the crossfeed strengths (the correction card lies between).
 # Then the equalizer sheet: preset list, on/off switch, reset.
-ui 'click 1081 20' 'wait 600' 'click 510 176' 'wait 500' 'scroll 590 400 -2000' 'wait 500' \
-   'click 779 379' 'wait 400' 'dump sh1.json' 'click 671 379' 'wait 300' 'click 846 526' 'wait 400' 'dump sh2.json' \
-   'click 846 526' 'wait 400' 'dump sh3.json' 'click 843 267' 'wait 600' 'dump sh4.json' \
+ui 'click 1081 20' 'wait 600' 'click 510 176' 'wait 500' 'scroll 590 400 -2000' 'wait 500' 'scroll 590 400 250' 'wait 500' \
+   'click 779 413' 'wait 400' 'dump sh1.json' 'click 671 413' 'wait 300' 'scroll 590 400 -2000' 'wait 500' 'click 846 526' 'wait 400' 'dump sh2.json' \
+   'click 846 526' 'wait 400' 'dump sh3.json' 'scroll 590 400 250' 'wait 500' 'click 843 301' 'wait 600' 'dump sh4.json' \
    'click 435 183' 'wait 500' 'click 342 435' 'wait 500' 'dump sh5.json' 'click 855 133' 'wait 400' 'dump sh6.json' \
    'click 883 183' 'wait 400' 'dump sh7.json' 'key Escape' 'wait 400' 'dump sh8.json'
 check sh1.json 'd["crossfeed"] == "Medium"' "Playback tab: headphone crossfeed strength"
@@ -216,6 +266,51 @@ check sh5.json 'd["eq"]["preset"] == "rock" and d["eq"]["active"] and d["eq"]["p
 check sh6.json 'not d["eq"]["active"] and d["eq"]["preset"] == "rock"' "the switch turns it off and keeps the values"
 check sh7.json 'd["eq"]["preset"] == "flat" and not d["eq"]["active"]' "Reset returns every band to 0 dB"
 check sh8.json 'not d["eq_open"] and d["nav"] == "Songs"' "Escape closes the equalizer"
+
+echo "== list columns, a search kept as a smart playlist"
+# The column menu opens on a right-click on a column title; it stays open until Escape.
+# The + in the search field appears while All Songs is being searched.
+ui 'rclick 256 62' 'wait 400' 'click 292 100' 'wait 300' 'click 292 160' 'wait 300' 'key Escape' 'wait 300' 'dump co1.json' \
+   'rclick 256 62' 'wait 400' 'click 292 100' 'wait 300' 'click 292 160' 'wait 300' 'key Escape' 'wait 300' 'dump co2.json' \
+   'click 200 20' 'wait 200' 'click 200 20' 'text year:2019-2020' 'wait 400' 'click 365 24' 'wait 500' \
+   'key a cmd' 'text Late' 'key Enter' 'wait 600' 'dump sm1.json' \
+   'click 60 99' 'wait 300' 'click 200 20' 'wait 100' 'key Escape' 'wait 300' 'dump sm2.json'
+check co1.json 'd["columns"]["year"] and d["columns"]["plays"] and not d["columns"]["genre"]' "the column menu switches the year and play count columns on"
+check co2.json 'not d["columns"]["year"] and not d["columns"]["plays"]' "…and off again"
+check sm1.json 'd["nav"] == "Smart(\"Late\")" and d["rows"] == 4 and d["smart_playlists"] == [["Late", "year:2019-2020"]]' "a search is kept as a smart playlist and opens with its songs"
+check sm2.json 'd["nav"] == "Songs" and d["rows"] == 20 and d["query"] == ""' "back to all songs"
+
+echo "== headphone correction"
+# A correction file as AutoEq writes them, and one with a filter type that is not
+# implemented: the first is imported and applied, the second is refused as a whole.
+printf 'Preamp: -6.2 dB\nFilter 1: ON LSC Fc 105 Hz Gain 5.5 dB Q 0.70\nFilter 2: ON PK Fc 2900 Hz Gain 4.1 dB Q 2.10\n' > "$WORK/Test Phones ParametricEQ.txt"
+printf 'Filter 1: ON LP Fc 100 Hz\n' > "$WORK/unsupported.txt"
+ui "menu correction_import $WORK/unsupported.txt" 'wait 300' 'dump hc0.json' \
+   "menu correction_import $WORK/Test Phones ParametricEQ.txt" 'wait 500' 'dump hc1.json' \
+   'menu correction_off' 'wait 400' 'dump hc2.json' \
+   'menu correction_select Sennheiser HD 800 S' 'wait 400' 'dump hc3.json' \
+   'menu correction_select No Such Headphones' 'wait 300' 'dump hc4.json' \
+   'menu correction_off' 'wait 300' 'dump hc5.json'
+check hc0.json 'd["correction"] == {"selected": None, "applied": None, "profiles": [], "builtin": 33}' "a file with a filter that is not supported is not imported"
+check hc1.json 'd["correction"] == {"selected": "Test Phones", "applied": "Test Phones", "profiles": [["Test Phones", 2]], "builtin": 33}' "a correction file is imported, named after the file, and applied"
+check hc2.json 'd["correction"]["applied"] is None and d["correction"]["profiles"] == [["Test Phones", 2]]' "…and can be switched off, the profile kept"
+check hc3.json 'd["correction"]["selected"] == "Sennheiser HD 800 S" and d["correction"]["applied"] == "Sennheiser HD 800 S" and d["correction"]["profiles"] == [["Test Phones", 2]]' "a built-in headphone profile is applied without being copied into the settings"
+check hc4.json 'd["correction"]["applied"] == "Sennheiser HD 800 S"' "a name that is no profile changes nothing"
+check hc5.json 'd["correction"]["applied"] is None' "…and the built-in profile can be switched off"
+
+echo "== loudness of untagged songs"
+# 18 of the 20 songs have no ReplayGain tags. Measured values are forgotten again right
+# away: the VU check below relies on the tone being played as it is.
+ui 'menu loudness_start' 'wait 300'
+i=0
+while :; do
+  ui 'wait 500' 'dump lo1.json'
+  python3 -c "import json,sys; sys.exit(1 if json.load(open(sys.argv[1]))['loudness']['running'] else 0)" "$PROFILE/lo1.json" && break
+  i=$((i + 1)); [ $i -lt 240 ] || break
+done
+ui 'menu loudness_forget' 'wait 500' 'dump lo2.json'
+check lo1.json 'd["loudness"] == {"running": False, "total": 18, "done": 18, "failed": 0, "measured": 18, "waiting": 0}' "the songs without leveling tags are measured"
+check lo2.json 'd["loudness"]["measured"] == 0 and d["loudness"]["waiting"] == 18' "…and what was measured can be forgotten"
 
 echo "== hidden window"
 ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json' \

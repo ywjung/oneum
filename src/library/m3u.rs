@@ -11,10 +11,11 @@ pub(crate) struct M3uEntry {
     pub path: Option<PathBuf>,
 }
 
-/// Decodes playlist bytes: UTF-8 (invalid sequences replaced), optional BOM removed.
+/// Decodes playlist bytes: UTF-8 or UTF-16 (a byte order mark is removed), or Korean in
+/// the code page of old Windows, which is what a plain `.m3u` written there holds.
+/// Anything else is read as UTF-8 with what is invalid replaced.
 pub(crate) fn decode(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
+    super::legacy::decode_file(bytes).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Largest playlist file that is read. Real playlists are a few kilobytes; this keeps a
@@ -377,11 +378,33 @@ mod tests {
         assert_eq!(entries[3].raw, "gone .mp3");
     }
 
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn a_playlist_in_the_old_korean_code_page_is_read() {
+        // A plain .m3u written on Korean Windows: the name is CP949, not UTF-8.
+        let bytes = b"#EXTM3U\n/music/\xb9\xe3\xc6\xed\xc1\xf6.mp3\n/music/ok.mp3\n";
+        let entries = parse(&decode(bytes), Path::new("/lists"));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].path.as_deref(),
+            Some(Path::new("/music/밤편지.mp3"))
+        );
+        assert_eq!(entries[1].path.as_deref(), Some(Path::new("/music/ok.mp3")));
+        // UTF-8 with a byte order mark, as Windows editors write it.
+        let marked = "\u{feff}/music/밤편지.mp3\n";
+        assert_eq!(
+            parse(&decode(marked.as_bytes()), Path::new("/lists"))[0]
+                .path
+                .as_deref(),
+            Some(Path::new("/music/밤편지.mp3"))
+        );
+    }
+
     #[test]
     fn undecodable_entries_are_kept_as_entries() {
-        // A CP949-encoded name is not valid UTF-8. It cannot be resolved, but it must
-        // still come out as an entry so the caller can report it as missing.
-        let bytes = b"#EXTM3U\n/music/\xb9\xe3\xc6\xed\xc1\xf6.mp3\n/music/ok.mp3\n";
+        // Bytes that are neither UTF-8 nor Korean. The name cannot be resolved, but it
+        // must still come out as an entry so the caller can report it as missing.
+        let bytes = b"#EXTM3U\n/music/\xe9\x20\xe8.mp3\n/music/ok.mp3\n";
         let entries = parse(&decode(bytes), Path::new("/lists"));
         assert_eq!(entries.len(), 2);
         assert!(entries[0].raw.contains('\u{fffd}'));

@@ -1,9 +1,10 @@
 # Third-party notices
 
 OnEum is built from the open-source Rust crates listed below (as linked into the
-macOS arm64 build). Each crate remains under its own license. The full license texts
-come with the app in the file `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under
-Contents/Resources; on Windows next to the program).
+macOS arm64 build), and contains the data listed at the end. Each remains under its
+own license. The full license texts come with the app in the file
+`THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
+next to the program).
 
 Crates: 253
 
@@ -297,3 +298,9 @@ Notes:
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zune-core | 0.5.3 | MIT OR Apache-2.0 OR Zlib | https://github.com/etemesi254/zune-image |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg |
+
+## Data
+
+| Data | License | Source |
+|---|---|---|
+| Built-in headphone correction profiles (`assets/corrections/headphones.txt`): parametric equalizer settings from AutoEq, computed from oratory1990's measurements | MIT, Copyright (c) 2018-2022 Jaakko Pasanen | https://github.com/jaakkopasanen/AutoEq |

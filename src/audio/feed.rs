@@ -9,6 +9,7 @@ use super::decoder::{SourceInfo, TrackDecoder, map_file_error, sanitize};
 use super::dsp::{ReplayGainMode, ReplayGainSettings, replaygain_factor, to_stereo};
 use super::eq::{EqShared, Equalizer};
 use super::limiter::PeakLimiter;
+use super::peq::{Corrector, PeqShared};
 use super::render::FeedConsumer;
 use super::resample::StereoResampler;
 use super::source::{FileInMemory, LoadCompletion};
@@ -183,6 +184,8 @@ pub struct FeedParams {
     pub eq: Arc<EqShared>,
     /// The headphone crossfeed setting (`Crossfeed::to_u8`); followed like the equalizer.
     pub crossfeed: Arc<AtomicU8>,
+    /// The parametric correction profile; followed like the equalizer.
+    pub peq: Arc<PeqShared>,
 }
 
 impl FeedHandle {
@@ -494,6 +497,9 @@ impl Worker {
         let crossfeed_now =
             |params: &FeedParams| Crossfeed::from_u8(params.crossfeed.load(Ordering::Relaxed));
         let mut crossfeed = Crossfeeder::new(out_rate, crossfeed_now(&self.params));
+        // The parametric correction, between the equalizer and the crossfeed.
+        let mut peq_version = self.params.peq.version();
+        let mut corrector = Corrector::new(out_rate, self.params.peq.get().as_deref());
         let mut gain_now;
 
         'tracks: loop {
@@ -529,6 +535,7 @@ impl Worker {
                     resampled.clear();
                     if old.flush(&mut resampled).is_ok() {
                         eq.process(&mut resampled);
+                        corrector.process(&mut resampled);
                         crossfeed.process(&mut resampled);
                         match self.push_limited(&mut limiter, &resampled, &mut limited) {
                             Some(frames) => written += frames,
@@ -626,6 +633,12 @@ impl Worker {
                         // would stay in them), and what leaves them must be numbers.
                         sanitize(ready);
                         eq.process(ready);
+                        let version = self.params.peq.version();
+                        if version != peq_version {
+                            peq_version = version;
+                            corrector.set(self.params.peq.get().as_deref());
+                        }
+                        corrector.process(ready);
                         crossfeed.set(crossfeed_now(&self.params));
                         crossfeed.process(ready);
                         sanitize(ready);
@@ -655,6 +668,7 @@ impl Worker {
             resampled.clear();
             if rs.flush(&mut resampled).is_ok() {
                 eq.process(&mut resampled);
+                corrector.process(&mut resampled);
                 crossfeed.process(&mut resampled);
                 match self.push_limited(&mut limiter, &resampled, &mut limited) {
                     Some(frames) => written += frames,
@@ -702,6 +716,7 @@ mod tests {
             limited: Arc::new(AtomicU64::new(0)),
             eq: EqShared::new(Default::default()),
             crossfeed: Arc::new(AtomicU8::new(0)),
+            peq: PeqShared::new(None),
             events,
             memory: false,
         }

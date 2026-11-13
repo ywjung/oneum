@@ -83,6 +83,8 @@ struct PathInputs<'a> {
     leveling: f32,
     /// Name of the equalizer setting while the equalizer is changing the sound.
     equalizer: Option<String>,
+    /// Name of the parametric correction profile while one is applied.
+    correction: Option<&'a str>,
     /// Strength of the headphone crossfeed while it is on.
     crossfeed: Option<&'a str>,
     peak_protection: bool,
@@ -141,6 +143,13 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
     if let Some(setting) = &input.equalizer {
         add(StageKind::Adjustment, s.info_proc_eq, setting.clone());
     }
+    if let Some(profile) = input.correction {
+        add(
+            StageKind::Adjustment,
+            s.info_proc_correction,
+            profile.to_string(),
+        );
+    }
     if let Some(strength) = input.crossfeed {
         add(
             StageKind::Adjustment,
@@ -169,38 +178,117 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
     stages
 }
 
-/// The lines of the meter deck's "processing" readout: the steps two to a line (three
-/// when there are more than four), the first line led by `label`.
-fn processing_lines(label: &str, none: &str, steps: &[String]) -> Vec<String> {
-    if steps.is_empty() {
+/// The most lines the meter deck's "processing" readout takes when the deck is tall
+/// enough for them.
+const PROCESSING_LINES: usize = 3;
+
+/// The lines of the meter deck's "processing" readout: as many steps to a line as fit
+/// into `width` (measured with `measure`, in the font they are drawn in), the first
+/// line led by `label`. No more than `max_lines` lines: what does not fit goes on the
+/// last one, which is cut short when drawn.
+fn processing_lines(
+    label: &str,
+    none: &str,
+    steps: &[String],
+    width: f32,
+    max_lines: usize,
+    measure: impl Fn(&str) -> f32,
+) -> Vec<String> {
+    let Some((first, rest)) = steps.split_first() else {
         return vec![format!("{label}: {none}")];
+    };
+    let mut lines = vec![format!("{label}: {first}")];
+    for step in rest {
+        let last = lines.len() - 1;
+        let joined = format!("{} · {step}", lines[last]);
+        if measure(&joined) <= width || lines.len() >= max_lines.max(1) {
+            lines[last] = joined;
+        } else {
+            lines.push(step.clone());
+        }
     }
-    let per_line = if steps.len() > 4 { 3 } else { 2 };
-    steps
-        .chunks(per_line)
-        .enumerate()
-        .map(|(i, chunk)| {
-            let line = chunk.join(" · ");
-            if i == 0 {
-                format!("{label}: {line}")
-            } else {
-                line
-            }
-        })
-        .collect()
+    lines
 }
 
-/// Lyrics of one song, read on a thread of their own: a file on a drive that has gone
-/// to sleep must not hold up the window.
-pub(super) struct Lyrics {
+/// What the file of one song says beyond what the library keeps (credits, facts,
+/// lyrics), read on a thread of its own: a file on a drive that has gone to sleep must
+/// not hold up the window.
+pub(super) struct Extras {
     track: crate::model::TrackId,
     /// The file's modification time when it was read: an edited file is read again.
     mtime_ns: i64,
     /// Whether the file was there: one that has come back is read then.
     available: bool,
     /// Still being read while this is there.
-    pending: Option<std::sync::mpsc::Receiver<Option<String>>>,
-    pub(super) text: Option<std::sync::Arc<str>>,
+    pending: Option<std::sync::mpsc::Receiver<crate::library::details::Details>>,
+    pub(super) details: Option<std::sync::Arc<crate::library::details::Details>>,
+    /// Other tracks in the library that are the same song (see `other_versions`).
+    versions: Vec<crate::model::TrackId>,
+    /// The synchronised line that was current when the panel was last drawn, so that
+    /// the lyrics are scrolled only when the line changes.
+    shown_line: Option<usize>,
+    /// Where that line was, from the top of the lyrics: the lyrics scroll there.
+    line_top: Option<f32>,
+    /// Scroll the lyrics to `line_top` in the next frame.
+    scroll_due: bool,
+}
+
+impl Extras {
+    /// How many other versions of the song the library has.
+    pub(super) fn version_count(&self) -> usize {
+        self.versions.len()
+    }
+}
+
+/// A sample rate as it is spoken of: "44.1 kHz", "96 kHz".
+fn kilohertz(rate: u32) -> String {
+    if rate.is_multiple_of(1000) {
+        format!("{} kHz", rate / 1000)
+    } else {
+        format!("{:.1} kHz", f64::from(rate) / 1000.0)
+    }
+}
+
+fn extras_scroll_pending(extras: Option<&Extras>) -> bool {
+    extras.is_some_and(|extras| extras.scroll_due)
+}
+
+/// The most "other versions" of a song that are listed.
+const MAX_VERSIONS: usize = 6;
+
+/// How a title or an artist is compared when looking for the same song again:
+/// without regard to case and to space around it.
+fn folded(text: &str) -> String {
+    text.trim().to_lowercase()
+}
+
+/// Other tracks in the library that are the same song as `track`: the same title by
+/// the same artist (another album, another mastering, another format). The best
+/// sounding first: lossless before lossy, then the higher sample rate and bit depth.
+fn other_versions(
+    tracks: &[std::sync::Arc<crate::model::Track>],
+    track: &crate::model::Track,
+) -> Vec<crate::model::TrackId> {
+    let (title, artist) = (folded(&track.title), folded(&track.artist));
+    if title.is_empty() || artist.is_empty() {
+        return Vec::new();
+    }
+    let lossless = |t: &crate::model::Track| matches!(t.codec.as_str(), "FLAC" | "ALAC" | "PCM");
+    let mut same: Vec<&crate::model::Track> = tracks
+        .iter()
+        .map(|t| &**t)
+        .filter(|t| t.id != track.id)
+        .filter(|t| folded(&t.title) == title && folded(&t.artist) == artist)
+        .collect();
+    same.sort_by_key(|t| {
+        (
+            std::cmp::Reverse(lossless(t)),
+            std::cmp::Reverse(t.sample_rate),
+            std::cmp::Reverse(t.bit_depth),
+            t.id,
+        )
+    });
+    same.into_iter().take(MAX_VERSIONS).map(|t| t.id).collect()
 }
 
 /// Colour of a stage's dot in the signal path.
@@ -407,6 +495,9 @@ impl OneumApp {
                     }
                     // Search field for the current view.
                     let nav = self.nav.clone();
+                    // A search of the whole library can be kept as a smart playlist.
+                    let can_save = nav == Nav::Songs;
+                    let mut save_search: Option<String> = None;
                     let state = self.views.entry(nav).or_default();
                     let width = (ui.available_width() - 250.0).clamp(170.0, 400.0);
                     let outline = if self.search_had_focus {
@@ -436,13 +527,14 @@ impl OneumApp {
                                     Icon::Search,
                                     ui.visuals().weak_text_color(),
                                 );
+                                let savable = can_save && !state.query.trim().is_empty();
                                 let edit = egui::TextEdit::singleline(&mut state.query)
                                     .hint_text(s.search_hint)
                                     .frame(egui::Frame::NONE)
                                     .align(egui::Align2::LEFT_CENTER)
                                     .min_size(egui::vec2(0.0, 20.0))
-                                    .desired_width(width - 72.0);
-                                let response = ui.add(edit);
+                                    .desired_width(width - if savable { 96.0 } else { 72.0 });
+                                let response = ui.add(edit).on_hover_text(s.search_syntax_hint);
                                 response.widget_info(|| {
                                     egui::WidgetInfo::labeled(
                                         egui::Role::SearchInput,
@@ -459,6 +551,19 @@ impl OneumApp {
                                     && ui.input(|i| i.key_pressed(egui::Key::Escape))
                                 {
                                     state.query.clear();
+                                }
+                                if can_save
+                                    && !state.query.trim().is_empty()
+                                    && widgets::icon_button(
+                                        ui,
+                                        Icon::Plus,
+                                        s.smart_save,
+                                        20.0,
+                                        false,
+                                    )
+                                    .clicked()
+                                {
+                                    save_search = Some(state.query.clone());
                                 }
                                 if state.query.is_empty() {
                                     ui.add_space(20.0);
@@ -478,6 +583,13 @@ impl OneumApp {
                         },
                     );
                     self.search_had_focus = has_focus;
+                    if let Some(query) = save_search {
+                        let query = crate::app::settings::tidy_text(
+                            &query,
+                            crate::app::settings::MAX_SMART_QUERY_CHARS,
+                        );
+                        self.dialog = Some(Dialog::smart_playlist(&query, query.clone(), None));
+                    }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(4.0);
@@ -602,6 +714,7 @@ impl OneumApp {
                     ),
                     (Nav::Albums, Icon::Album, s.albums, None),
                     (Nav::Artists, Icon::Person, s.artists, None),
+                    (Nav::Genres, Icon::Tag, s.genres, None),
                     (Nav::Favorites, Icon::Heart, s.favorites, None),
                     (Nav::Recent, Icon::Clock, s.recently_played, None),
                 ];
@@ -609,7 +722,9 @@ impl OneumApp {
                     let selected = self.nav == nav
                         || matches!(
                             (&self.nav, &nav),
-                            (Nav::Album(_), Nav::Albums) | (Nav::Artist(_), Nav::Artists)
+                            (Nav::Album(_), Nav::Albums)
+                                | (Nav::Artist(_), Nav::Artists)
+                                | (Nav::Genre(_), Nav::Genres)
                         ) && self.history.first() == Some(&nav);
                     if sidebar_row(ui, selected, icon, label, trailing.filter(|_| total > 0))
                         .clicked()
@@ -664,6 +779,62 @@ impl OneumApp {
                     .id_salt("playlists")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        // Smart playlists first: searches kept under a name.
+                        let smart: Vec<String> = self
+                            .settings
+                            .smart_playlists
+                            .iter()
+                            .map(|p| p.name.clone())
+                            .collect();
+                        for name in smart {
+                            let response = sidebar_row(
+                                ui,
+                                self.nav == Nav::Smart(name.clone()),
+                                Icon::Search,
+                                &name,
+                                None,
+                            )
+                            .on_hover_text(s.smart_hint);
+                            if response.clicked() {
+                                actions.push(Action::Go(Nav::Smart(name.clone())));
+                            }
+                            response.context_menu(|ui| {
+                                if ui.button(s.play_now).clicked() {
+                                    let query = self
+                                        .settings
+                                        .smart_playlists
+                                        .iter()
+                                        .find(|p| p.name == name)
+                                        .map(|p| p.query.clone())
+                                        .unwrap_or_default();
+                                    let tracks: Vec<crate::model::TrackId> = self
+                                        .snapshot
+                                        .search(&query)
+                                        .into_iter()
+                                        .filter_map(|i| self.snapshot.tracks.get(i as usize))
+                                        .map(|t| t.id)
+                                        .collect();
+                                    if !tracks.is_empty() {
+                                        actions.push(Action::PlayTracks(tracks, 0));
+                                    }
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button(s.smart_edit).clicked() {
+                                    actions.push(Action::EditSmart(name.clone()));
+                                    ui.close();
+                                }
+                                if ui.button(s.rename).clicked() {
+                                    actions.push(Action::RenameSmart(name.clone()));
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button(s.delete).clicked() {
+                                    actions.push(Action::DeleteSmart(name.clone()));
+                                    ui.close();
+                                }
+                            });
+                        }
                         let playlists: Vec<(i64, String, usize)> = self
                             .playlists
                             .iter()
@@ -836,33 +1007,36 @@ impl OneumApp {
         }
     }
 
-    /// The lyrics of `track`, once they have been read (see [`Lyrics`]). `None` while
-    /// they are being read and when the song has none.
-    fn lyrics_of(&mut self, track: &crate::model::Track) -> Option<std::sync::Arc<str>> {
+    /// What the file of `track` says beyond the library (see [`Extras`]), once it has
+    /// been read. `None` while it is being read.
+    fn extras_of(
+        &mut self,
+        track: &crate::model::Track,
+    ) -> Option<std::sync::Arc<crate::library::details::Details>> {
         // Collect a read that has finished, whichever song it was for.
-        if let Some(lyrics) = self.lyrics.as_mut()
-            && let Some(pending) = &lyrics.pending
+        if let Some(extras) = self.extras.as_mut()
+            && let Some(pending) = &extras.pending
         {
             match pending.try_recv() {
-                Ok(text) => {
-                    lyrics.text = text.map(std::sync::Arc::from);
-                    lyrics.pending = None;
+                Ok(details) => {
+                    extras.details = Some(std::sync::Arc::new(details));
+                    extras.pending = None;
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => lyrics.pending = None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => extras.pending = None,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        let known = self.lyrics.as_ref().is_some_and(|l| {
-            l.track == track.id && l.mtime_ns == track.mtime_ns && l.available == track.available
+        let known = self.extras.as_ref().is_some_and(|e| {
+            e.track == track.id && e.mtime_ns == track.mtime_ns && e.available == track.available
         });
         if known {
-            return self.lyrics.as_ref().and_then(|l| l.text.clone());
+            return self.extras.as_ref().and_then(|e| e.details.clone());
         }
         // Another song. One read at a time: stepping through a list on a drive that is
         // slow to answer must not start a thread for every row passed. While a read
         // for an earlier song is still out, this one waits (the thread wakes the
         // window when it is done, and the question is asked again).
-        if self.lyrics.as_ref().is_some_and(|l| l.pending.is_some()) {
+        if self.extras.as_ref().is_some_and(|e| e.pending.is_some()) {
             return None;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -870,20 +1044,121 @@ impl OneumApp {
         let core = self.core.clone();
         let started = track.available
             && std::thread::Builder::new()
-                .name("oneum-lyrics".into())
+                .name("oneum-details".into())
                 .spawn(move || {
-                    let _ = tx.send(crate::library::lyrics::read(&path));
+                    let _ = tx.send(crate::library::details::read(&path));
                     core.request_repaint();
                 })
                 .is_ok();
-        self.lyrics = Some(Lyrics {
+        self.extras = Some(Extras {
             track: track.id,
             mtime_ns: track.mtime_ns,
             available: track.available,
             pending: started.then_some(rx),
-            text: None,
+            details: None,
+            versions: other_versions(&self.snapshot.tracks, track),
+            shown_line: None,
+            line_top: None,
+            scroll_due: false,
         });
         None
+    }
+
+    /// Synchronised lyrics of the song that is playing, in a box of their own that
+    /// scrolls with the song (the info panel around it stays where the user left it).
+    fn synced_lyrics(
+        &mut self,
+        ui: &mut Ui,
+        lyrics: &crate::library::lyrics::Lyrics,
+        lines: &[crate::library::lyrics::TimedLine],
+    ) {
+        const HEIGHT: f32 = 230.0;
+        let s = self.s();
+        let position = self.player.position_now_ms();
+        let current = lyrics.line_at(position);
+        let Some(extras) = self.extras.as_mut() else {
+            return;
+        };
+        let line_changed = extras.shown_line != current;
+        extras.shown_line = current;
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt("lyrics")
+            .max_height(HEIGHT)
+            // Inside the panel's own scroll area "what is left" is next to nothing:
+            // the box gets its height whenever the lyrics are longer than it.
+            .min_scrolled_height(HEIGHT)
+            .auto_shrink([false, true]);
+        // One frame after the line changed, when its place is known: bring it to the
+        // middle of the box.
+        if std::mem::take(&mut extras.scroll_due)
+            && let Some(top) = extras.line_top
+        {
+            area = area.vertical_scroll_offset((top - HEIGHT * 0.4).max(0.0));
+        }
+        let dim = theme::dim(ui);
+        let strong = ui.visuals().strong_text_color();
+        let accent = theme::accent(ui.visuals().dark_mode);
+        let mut seek = None;
+        let mut current_top = None;
+        area.show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 5.0;
+            let origin = ui.min_rect().top();
+            for (index, line) in lines.iter().enumerate() {
+                // A stamp without words is a pause in the singing.
+                let words = if line.text.is_empty() {
+                    "♪"
+                } else {
+                    &line.text
+                };
+                let text = if current == Some(index) {
+                    RichText::new(words)
+                        .font(theme::semibold(13.5))
+                        .color(accent)
+                } else if current.is_some_and(|now| index < now) {
+                    RichText::new(words).size(12.5).color(dim)
+                } else {
+                    RichText::new(words)
+                        .size(12.5)
+                        .color(strong.gamma_multiply(0.8))
+                };
+                let response = ui
+                    .add(egui::Label::new(text).wrap().sense(Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(s.lyrics_seek_hint);
+                if current == Some(index) {
+                    current_top = Some(response.rect.top() - origin);
+                }
+                if response.clicked() {
+                    seek = Some(u64::from(line.at_ms));
+                }
+            }
+        });
+        if let Some(extras) = self.extras.as_mut() {
+            if line_changed && current.is_some() {
+                extras.scroll_due = true;
+            }
+            if current_top.is_some() {
+                extras.line_top = current_top;
+            }
+        }
+        if let Some(position) = seek {
+            self.core.player.send(Command::SeekTo(position));
+        }
+        // Wake up for the next line rather than for the next quarter of a second.
+        if self.player.state == PlayState::Playing {
+            let next = current.map_or(0, |now| now + 1);
+            if let Some(line) = lines.get(next) {
+                let wait = u64::from(line.at_ms)
+                    .saturating_sub(position)
+                    .clamp(20, 1000);
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(wait));
+            } else if extras_scroll_pending(self.extras.as_ref()) {
+                ui.ctx().request_repaint();
+            }
+        } else if extras_scroll_pending(self.extras.as_ref()) {
+            ui.ctx().request_repaint();
+        }
     }
 
     /// What is happening to the track that is playing: where it comes from, where it
@@ -925,8 +1200,9 @@ impl OneumApp {
             source_rate: source.sample_rate,
             out_rate,
             channels: source.channels,
-            leveling: replaygain_factor(&track.replaygain, &self.player.replaygain),
+            leveling: replaygain_factor(&track.leveling(), &self.player.replaygain),
             equalizer,
+            correction: self.player.correction.as_deref(),
             crossfeed: match self.player.crossfeed {
                 crate::audio::Crossfeed::Off => None,
                 crate::audio::Crossfeed::Light => Some(s.crossfeed_light),
@@ -1062,10 +1338,24 @@ impl OneumApp {
                     let mut details = vec![path.format.clone()];
                     let steps: Vec<String> =
                         path.stages.iter().map(|stage| stage.name.clone()).collect();
+                    let small = egui::TextStyle::Small.resolve(ui.style());
+                    let measure = |text: &str| {
+                        ui.painter()
+                            .layout_no_wrap(text.to_string(), small.clone(), egui::Color32::WHITE)
+                            .size()
+                            .x
+                    };
                     details.extend(processing_lines(
                         s.info_processing,
                         s.info_proc_none,
                         &steps,
+                        right.width(),
+                        // What the deck's height leaves under the heading, the device
+                        // and the format line (18 points a line, see `deck_readout`).
+                        (((right.height() - 26.0) / 18.0) as usize)
+                            .saturating_sub(2)
+                            .clamp(1, PROCESSING_LINES),
+                        measure,
                     ));
                     Self::deck_readout(ui, right, false, s.info_output, &path.device, &details);
                 }
@@ -1149,6 +1439,15 @@ impl OneumApp {
                 if !queue.is_empty() && ui.small_button(s.clear_queue).clicked() {
                     self.core.player.send(Command::ClearQueue);
                     self.queue_selection.clear();
+                }
+                if !queue.is_empty()
+                    && ui
+                        .small_button(s.queue_save)
+                        .on_hover_text(s.queue_save_hint)
+                        .clicked()
+                {
+                    let tracks = queue.iter().map(|item| item.track).collect();
+                    self.dialog = Some(Dialog::new_playlist(s.untitled_playlist, tracks));
                 }
             });
         });
@@ -1559,7 +1858,7 @@ impl OneumApp {
             let key = state.anchor.filter(|a| state.selection.contains(a))?;
             let row = state.rows.iter().find(|r| r.key == key)?;
             match self.nav {
-                Nav::Albums | Nav::Artists | Nav::Artist(_) => None,
+                Nav::Albums | Nav::Artists | Nav::Artist(_) | Nav::Genres => None,
                 _ => self.snapshot.tracks.get(row.idx as usize).map(|t| t.id),
             }
         });
@@ -1579,7 +1878,34 @@ impl OneumApp {
             return;
         };
         let dim = theme::dim(ui);
-        let lyrics = self.lyrics_of(&track);
+        let details = self.extras_of(&track);
+        let versions: Vec<std::sync::Arc<crate::model::Track>> = self
+            .extras
+            .as_ref()
+            .filter(|extras| extras.track == track.id)
+            .map(|extras| {
+                extras
+                    .versions
+                    .iter()
+                    .filter_map(|id| self.track(*id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The library's own spelling of a name, if it has an artist of that name:
+        // only such names are links, so that a link always leads somewhere.
+        let artists: Vec<String> = self
+            .snapshot
+            .artists()
+            .iter()
+            .map(|artist| artist.name.clone())
+            .collect();
+        let in_library = move |name: &str| {
+            let wanted = folded(name);
+            artists
+                .iter()
+                .find(|known| !wanted.is_empty() && folded(known) == wanted)
+                .cloned()
+        };
         egui::ScrollArea::vertical()
             .id_salt("info")
             .auto_shrink([false, false])
@@ -1604,7 +1930,16 @@ impl OneumApp {
                 } else {
                     track.artist.as_str()
                 };
-                ui.add(egui::Label::new(RichText::new(artist).size(14.0)).wrap());
+                match in_library(&track.artist).or_else(|| in_library(&track.album_artist)) {
+                    Some(known) => {
+                        if ui.link(RichText::new(artist).size(14.0)).clicked() {
+                            actions.push(Action::Go(Nav::Artist(known)));
+                        }
+                    }
+                    None => {
+                        ui.add(egui::Label::new(RichText::new(artist).size(14.0)).wrap());
+                    }
+                }
                 if !track.album.is_empty() && ui.link(&track.album).clicked() {
                     actions.push(Action::Go(Nav::Album(track.album_key)));
                 }
@@ -1653,42 +1988,157 @@ impl OneumApp {
                     s.info_size,
                     format!("{:.1} MB", track.file_size as f64 / 1_048_576.0),
                 ));
-                let rg = track.replaygain;
+                let rg = track.leveling();
                 let gain = match (rg.track_gain_db, rg.album_gain_db) {
                     (None, None) => s.info_none.to_string(),
                     (t, a) => {
                         let fmt =
                             |v: Option<f32>| v.map_or("—".to_string(), |v| format!("{v:+.2} dB"));
-                        format!("{} {} / {} {}", s.rg_track, fmt(t), s.rg_album, fmt(a))
+                        let values =
+                            format!("{} {} / {} {}", s.rg_track, fmt(t), s.rg_album, fmt(a));
+                        // Not from the file's tags: say whose numbers these are.
+                        if track.replaygain.track_gain_db.is_none() && track.measured.is_some() {
+                            format!("{values} ({})", s.info_measured)
+                        } else {
+                            values
+                        }
                     }
                 };
                 rows.push((s.info_replaygain, gain));
                 rows.push((s.info_plays, track.play_count.to_string()));
+                // What the file says beyond the library: work, label, dates.
+                if let Some(details) = &details {
+                    use crate::library::details::Fact;
+                    let year = track.year.map(|y| y.to_string());
+                    for (fact, text) in &details.facts {
+                        let label = match fact {
+                            Fact::Work => s.info_work,
+                            Fact::Movement => s.info_movement,
+                            Fact::Label => s.info_label,
+                            Fact::CatalogNumber => s.info_catalog,
+                            Fact::Recorded => s.info_recorded,
+                            Fact::Released => s.info_released,
+                        };
+                        // A date that is just the year again says nothing new.
+                        let date = matches!(fact, Fact::Recorded | Fact::Released);
+                        if !(date && Some(text) == year.as_ref()) {
+                            rows.push((label, text.clone()));
+                        }
+                    }
+                }
                 egui::Grid::new("info-grid")
                     .num_columns(2)
                     .spacing([10.0, 5.0])
                     .show(ui, |ui| {
                         for (label, value) in rows {
                             ui.label(RichText::new(label).small().color(dim));
-                            ui.add(egui::Label::new(value).wrap());
+                            if label == s.info_genre {
+                                // Every genre is a way to the other songs of its kind.
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    for genre in super::lists::genres(&value) {
+                                        if ui.link(genre).clicked() {
+                                            actions.push(Action::Go(Nav::Genre(genre.to_string())));
+                                        }
+                                    }
+                                });
+                            } else {
+                                ui.add(egui::Label::new(value).wrap());
+                            }
                             ui.end_row();
                         }
                     });
+                // Who wrote, played and produced it. A name the library has as an
+                // artist is a link to that artist.
+                if let Some(details) = details.as_ref().filter(|d| !d.credits.is_empty()) {
+                    use crate::library::details::Role;
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(s.info_credits).small().color(dim));
+                    ui.add_space(3.0);
+                    egui::Grid::new("credits-grid")
+                        .num_columns(2)
+                        .spacing([10.0, 5.0])
+                        .show(ui, |ui| {
+                            for credit in &details.credits {
+                                let role = match credit.role {
+                                    Role::Composer => s.role_composer,
+                                    Role::Lyricist => s.role_lyricist,
+                                    Role::Conductor => s.role_conductor,
+                                    Role::Arranger => s.role_arranger,
+                                    Role::Performer => s.role_performer,
+                                    Role::Producer => s.role_producer,
+                                    Role::Engineer => s.role_engineer,
+                                    Role::Mixer => s.role_mixer,
+                                    Role::Remixer => s.role_remixer,
+                                };
+                                ui.label(RichText::new(role).small().color(dim));
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    for name in &credit.names {
+                                        match in_library(name) {
+                                            Some(known) => {
+                                                if ui.link(name).clicked() {
+                                                    actions.push(Action::Go(Nav::Artist(known)));
+                                                }
+                                            }
+                                            None => {
+                                                ui.label(name);
+                                            }
+                                        }
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                }
+                // The same song elsewhere in the library: another album, another format.
+                if !versions.is_empty() {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(s.info_versions).small().color(dim));
+                    ui.add_space(2.0);
+                    for other in &versions {
+                        let mut what =
+                            format!("{} · {}", other.codec, kilohertz(other.sample_rate));
+                        if let Some(bits) = other.bit_depth {
+                            what = format!("{what} · {bits} bit");
+                        }
+                        let album = if other.album.is_empty() {
+                            s.unknown_album
+                        } else {
+                            other.album.as_str()
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if ui.link(album).on_hover_text(s.info_versions_hint).clicked() {
+                                actions.push(Action::ShowInfo(other.id));
+                            }
+                            ui.label(RichText::new(what).small().color(dim));
+                        });
+                    }
+                }
                 // What the engine is doing with the track that is playing right now.
                 if let Some(path) = self.signal_path().filter(|p| p.track_id == track.id) {
                     ui.add_space(12.0);
                     signal_path_block(ui, s, &path);
                 }
                 // The words, when the file (or a text file next to it) has them.
-                if let Some(lyrics) = &lyrics {
+                if let Some(lyrics) = details.as_ref().and_then(|d| d.lyrics.as_ref()) {
                     ui.add_space(12.0);
                     ui.label(RichText::new(s.info_lyrics).small().color(dim));
                     ui.add_space(2.0);
-                    ui.add(
-                        egui::Label::new(RichText::new(&**lyrics).size(12.5))
-                            .wrap()
-                            .selectable(true),
-                    );
+                    let playing_this = self.player.current.map(|c| c.track_id) == Some(track.id);
+                    match &lyrics.timed {
+                        // With times, and this is the song that is on: the line being
+                        // sung is lit and kept in view; a click on a line goes there.
+                        Some(lines) if playing_this => self.synced_lyrics(ui, lyrics, lines),
+                        _ => {
+                            ui.add(
+                                egui::Label::new(RichText::new(&lyrics.plain).size(12.5))
+                                    .wrap()
+                                    .selectable(true),
+                            );
+                        }
+                    }
                 }
                 ui.add_space(10.0);
                 ui.label(RichText::new(s.info_file).small().color(dim));
@@ -1709,9 +2159,55 @@ impl OneumApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathInputs, PathSummary, StageKind, edge_scroll_step, path_stages, path_summary,
-        processing_lines,
+        PathInputs, PathSummary, StageKind, edge_scroll_step, kilohertz, other_versions,
+        path_stages, path_summary, processing_lines,
     };
+    use crate::model::{Track, test_track};
+    use std::sync::Arc;
+
+    #[test]
+    fn the_same_song_elsewhere_in_the_library_is_found() {
+        let song = |id, title: &str, artist: &str, codec: &str, rate, bits| {
+            Arc::new(Track {
+                title: title.into(),
+                artist: artist.into(),
+                codec: codec.into(),
+                sample_rate: rate,
+                bit_depth: bits,
+                ..test_track(id)
+            })
+        };
+        let library = vec![
+            song(1, "Blackbird", "The Beatles", "FLAC", 44_100, Some(16)),
+            song(2, "Blackbird", "The Beatles", "MP3", 44_100, None),
+            song(3, " blackbird ", "the beatles", "FLAC", 96_000, Some(24)),
+            song(4, "Blackbird", "Sarah McLachlan", "FLAC", 44_100, Some(16)),
+            song(
+                5,
+                "Blackbird (Take 4)",
+                "The Beatles",
+                "FLAC",
+                44_100,
+                Some(16),
+            ),
+            song(6, "", "The Beatles", "FLAC", 44_100, Some(16)),
+        ];
+        // The same title by the same artist, however it is capitalised; the best
+        // sounding first. A cover and another take are other songs.
+        assert_eq!(other_versions(&library, &library[0]), [3, 2]);
+        assert_eq!(other_versions(&library, &library[1]), [3, 1]);
+        assert!(other_versions(&library, &library[3]).is_empty());
+        // A song without a title is not "the same" as every other untitled one.
+        assert!(other_versions(&library, &library[5]).is_empty());
+        let many: Vec<Arc<Track>> = (1..=20)
+            .map(|id| song(id, "Same", "Artist", "FLAC", 44_100, Some(16)))
+            .collect();
+        assert_eq!(other_versions(&many, &many[0]).len(), super::MAX_VERSIONS);
+        assert_eq!(
+            (kilohertz(44_100), kilohertz(96_000), kilohertz(88_200)),
+            ("44.1 kHz".into(), "96 kHz".into(), "88.2 kHz".into())
+        );
+    }
     use crate::i18n::KO;
     use eframe::egui;
 
@@ -1723,6 +2219,7 @@ mod tests {
             channels: 2,
             leveling: 1.0,
             equalizer: None,
+            correction: None,
             crossfeed: None,
             peak_protection: false,
             volume: 1.0,
@@ -1743,6 +2240,7 @@ mod tests {
             channels: 1,
             leveling: 0.5,
             equalizer: Some("록".into()),
+            correction: Some("HD 600"),
             crossfeed: Some("보통"),
             peak_protection: true,
             volume: 0.5,
@@ -1757,6 +2255,7 @@ mod tests {
                 KO.info_proc_replaygain,
                 KO.info_proc_resample,
                 KO.info_proc_eq,
+                KO.info_proc_correction,
                 KO.info_proc_crossfeed,
                 KO.info_proc_limiter,
                 KO.info_proc_volume,
@@ -1771,6 +2270,7 @@ mod tests {
                 "−6.0 dB",
                 "96,000 → 44,100 Hz",
                 "록",
+                "HD 600",
                 "보통",
                 "",
                 "−18.1 dB",
@@ -1813,25 +2313,61 @@ mod tests {
     }
 
     #[test]
-    fn the_decks_processing_readout_fits_its_steps_into_short_lines() {
+    fn the_decks_processing_readout_fits_its_steps_into_the_width_it_has() {
         let steps = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        assert_eq!(processing_lines("처리", "없음", &[]), ["처리: 없음"]);
+        // Every character ten units wide.
+        let measure = |text: &str| text.chars().count() as f32 * 10.0;
+        let lines = |names: &[&str], width: f32| {
+            processing_lines("Processing", "None", &steps(names), width, 3, measure)
+        };
+        assert_eq!(lines(&[], 100.0), ["Processing: None"]);
+        assert_eq!(lines(&["Resampling"], 100.0), ["Processing: Resampling"]);
+        // Wide enough for two steps on the first line, then one each.
         assert_eq!(
-            processing_lines("처리", "없음", &steps(&["리샘플링"])),
-            ["처리: 리샘플링"]
+            lines(
+                &["Resampling", "Equalizer", "Crossfeed", "App volume"],
+                340.0
+            ),
+            [
+                "Processing: Resampling · Equalizer",
+                "Crossfeed · App volume"
+            ]
+        );
+        // Narrow: a step to a line, and what is left over on the third and last.
+        assert_eq!(
+            lines(
+                &["Resampling", "Equalizer", "Crossfeed", "App volume"],
+                230.0
+            ),
+            [
+                "Processing: Resampling",
+                "Equalizer · Crossfeed",
+                "App volume"
+            ]
         );
         assert_eq!(
-            processing_lines("처리", "없음", &steps(&["a", "b", "c"])),
-            ["처리: a · b", "c"]
+            lines(
+                &[
+                    "Resampling",
+                    "Equalizer",
+                    "Crossfeed",
+                    "App volume",
+                    "Dither"
+                ],
+                120.0
+            ),
+            [
+                "Processing: Resampling",
+                "Equalizer",
+                "Crossfeed · App volume · Dither"
+            ]
         );
+        // Wide: everything on one line.
+        assert_eq!(lines(&["a", "b", "c"], 1000.0), ["Processing: a · b · c"]);
+        // A low deck has room for one line only.
         assert_eq!(
-            processing_lines("처리", "없음", &steps(&["a", "b", "c", "d"])),
-            ["처리: a · b", "c · d"]
-        );
-        // All six there can be: still two lines.
-        assert_eq!(
-            processing_lines("처리", "없음", &steps(&["a", "b", "c", "d", "e", "f"])),
-            ["처리: a · b · c", "d · e · f"]
+            processing_lines("P", "None", &steps(&["a", "b", "c"]), 10.0, 1, measure),
+            ["P: a · b · c"]
         );
     }
 

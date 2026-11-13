@@ -19,6 +19,15 @@ const ACTIONS: &[(&str, MenuAction)] = &[
     ("volume_down", MenuAction::VolumeDown),
     ("toggle_shuffle", MenuAction::ToggleShuffle),
     ("cycle_repeat", MenuAction::CycleRepeat),
+    ("stop_after_current", MenuAction::StopAfterCurrent),
+    ("sleep_off", MenuAction::SleepTimer(0)),
+    ("sleep_15", MenuAction::SleepTimer(15)),
+    ("sleep_30", MenuAction::SleepTimer(30)),
+    ("sleep_45", MenuAction::SleepTimer(45)),
+    ("sleep_60", MenuAction::SleepTimer(60)),
+    ("sleep_90", MenuAction::SleepTimer(90)),
+    ("seek_forward", MenuAction::SeekForward),
+    ("seek_back", MenuAction::SeekBack),
     ("go_to_current", MenuAction::GoToCurrent),
     ("toggle_queue", MenuAction::ToggleQueue),
     ("toggle_info", MenuAction::ToggleInfo),
@@ -54,6 +63,10 @@ fn cmd(code: Code) -> Option<Accelerator> {
     Some(Accelerator::new(Modifiers::META, code))
 }
 
+fn cmd_alt(code: Code) -> Option<Accelerator> {
+    Some(Accelerator::new(Modifiers::META | Modifiers::ALT, code))
+}
+
 fn cmd_shift(code: Code) -> Option<Accelerator> {
     Some(Accelerator::new(Modifiers::META | Modifiers::SHIFT, code))
 }
@@ -76,6 +89,7 @@ impl AppMenu {
         let edit = Submenu::new(s.menu_edit, true);
         let song = Submenu::new(s.menu_song, true);
         let controls = Submenu::new(s.menu_controls, true);
+        let sleep = Submenu::new(s.menu_sleep_timer, true);
         let view = Submenu::new(s.menu_view, true);
         let window = Submenu::new(s.menu_window, true);
         let help = Submenu::new(s.menu_help, true);
@@ -156,20 +170,29 @@ impl AppMenu {
                     s.show_in_finder,
                     cmd_shift(Code::KeyF),
                 ),
-                &item(
-                    MenuAction::SongInfo,
-                    s.song_info,
-                    Some(Accelerator::new(
-                        Modifiers::META | Modifiers::ALT,
-                        Code::KeyI,
-                    )),
-                ),
+                &item(MenuAction::SongInfo, s.song_info, cmd_alt(Code::KeyI)),
             ])?;
             // Space is deliberately not a menu shortcut: it must stay typeable in text fields.
             controls.append_items(&[
                 &item(MenuAction::PlayPause, s.menu_play_pause, None),
                 &item(MenuAction::Next, s.menu_next, cmd(Code::ArrowRight)),
                 &item(MenuAction::Previous, s.menu_previous, cmd(Code::ArrowLeft)),
+                &item(
+                    MenuAction::SeekForward,
+                    s.menu_seek_forward,
+                    cmd_alt(Code::ArrowRight),
+                ),
+                &item(
+                    MenuAction::SeekBack,
+                    s.menu_seek_back,
+                    cmd_alt(Code::ArrowLeft),
+                ),
+                &item(
+                    MenuAction::StopAfterCurrent,
+                    s.menu_stop_after_current,
+                    cmd_shift(Code::Period),
+                ),
+                &sleep,
                 &sep(),
                 &item(MenuAction::VolumeUp, s.menu_volume_up, cmd(Code::ArrowUp)),
                 &item(
@@ -195,6 +218,15 @@ impl AppMenu {
                     s.menu_go_to_current,
                     cmd(Code::KeyL),
                 ),
+            ])?;
+            sleep.append_items(&[
+                &item(MenuAction::SleepTimer(15), s.sleep_15, None),
+                &item(MenuAction::SleepTimer(30), s.sleep_30, None),
+                &item(MenuAction::SleepTimer(45), s.sleep_45, None),
+                &item(MenuAction::SleepTimer(60), s.sleep_60, None),
+                &item(MenuAction::SleepTimer(90), s.sleep_90, None),
+                &sep(),
+                &item(MenuAction::SleepTimer(0), s.sleep_off, None),
             ])?;
             view.append_items(&[
                 &item(MenuAction::ToggleQueue, s.menu_show_queue, cmd(Code::KeyU)),

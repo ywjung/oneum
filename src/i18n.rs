@@ -60,6 +60,25 @@ strings! {
     col_album: "앨범", "Album";
     col_duration: "길이", "Time";
     col_format: "포맷", "Format";
+    col_year: "연도", "Year";
+    col_genre: "장르", "Genre";
+    col_plays: "재생", "Plays";
+    col_added: "추가", "Added";
+    col_last_played: "마지막 재생", "Last Played";
+    columns_menu: "표시할 열", "Columns";
+    genres: "장르", "Genres";
+    empty_genres: "장르가 적힌 곡이 없습니다", "No songs with a genre";
+    empty_genres_hint: "파일의 태그에 장르가 있으면 여기에 모입니다.", "Songs whose tags name a genre gather here.";
+    go_to_album: "앨범으로 이동", "Go to Album";
+    go_to_artist: "아티스트로 이동", "Go to Artist";
+    queue_save: "저장", "Save";
+    queue_save_hint: "지금 대기열을 플레이리스트로 저장합니다.", "Saves the queue as a playlist.";
+    smart_playlist: "스마트 플레이리스트", "Smart Playlist";
+    smart_save: "이 검색을 스마트 플레이리스트로 저장", "Save this search as a smart playlist";
+    smart_name: "스마트 플레이리스트 이름", "Smart playlist name";
+    smart_edit: "검색 조건 고치기", "Edit Search";
+    smart_hint: "저장한 검색입니다. 조건에 맞는 곡이 그때그때 모입니다.", "A saved search: it holds whatever matches at the moment.";
+    never: "—", "—";
     col_track_no: "#", "#";
     col_favorite: "즐겨찾기", "Favorite";
     // Top bar
@@ -172,8 +191,15 @@ strings! {
     rg_album: "앨범 기준", "Album";
     rg_preamp: "프리앰프", "Pre-amp";
     rg_prevent_clipping: "클리핑 방지", "Prevent clipping";
-    rg_hint: "파일에 이미 들어 있는 ReplayGain 태그만 사용합니다. 태그가 없는 곡은 보정하지 않습니다.",
-        "Uses ReplayGain tags already present in your files. Songs without tags are not adjusted.";
+    rg_hint: "파일에 든 ReplayGain 태그를 씁니다. 태그가 없는 곡은 ‘태그 없는 곡 분석’으로 분석해 두면 같은 방식으로 보정합니다. 분석 결과는 앱 안에만 저장하고 음악 파일은 바꾸지 않습니다.",
+        "Uses the ReplayGain tags in your files. Songs without tags are leveled the same way once they have been analyzed here. The results are kept inside the app; your music files are not changed.";
+    rg_measure: "태그 없는 곡 분석", "Analyze Songs Without Tags";
+    rg_measure_start: "분석 시작", "Analyze";
+    rg_measure_stop: "중지", "Stop";
+    rg_measure_none: "분석할 곡이 없습니다.", "Nothing to analyze.";
+    rg_measured: "앱이 측정한 값", "Values Measured by the App";
+    rg_forget: "지우기", "Clear";
+    info_measured: "앱 측정", "measured by the app";
     settings_section_display: "화면", "Display";
     settings_section_output: "출력", "Output";
     settings_shortcuts: "단축키", "Shortcuts";
@@ -272,6 +298,25 @@ strings! {
     info_proc_eq: "이퀄라이저", "Equalizer";
     info_signal_path: "신호 경로", "Signal Path";
     info_lyrics: "가사", "Lyrics";
+    lyrics_seek_hint: "누르면 이 줄부터 재생합니다.", "Click to play from this line.";
+    info_credits: "크레딧", "Credits";
+    role_composer: "작곡", "Composer";
+    role_lyricist: "작사", "Lyricist";
+    role_conductor: "지휘", "Conductor";
+    role_arranger: "편곡", "Arranger";
+    role_performer: "연주", "Performer";
+    role_producer: "프로듀서", "Producer";
+    role_engineer: "엔지니어", "Engineer";
+    role_mixer: "믹싱", "Mixing";
+    role_remixer: "리믹스", "Remixer";
+    info_work: "작품", "Work";
+    info_movement: "악장", "Movement";
+    info_label: "레이블", "Label";
+    info_catalog: "카탈로그 번호", "Catalog no.";
+    info_recorded: "녹음", "Recorded";
+    info_released: "발매", "Released";
+    info_versions: "이 곡의 다른 버전", "Other Versions of This Song";
+    info_versions_hint: "누르면 그 버전의 정보를 봅니다.", "Click to see that version.";
     path_untouched: "원본 그대로", "Unchanged";
     path_adjusted: "사용자 조정", "Adjusted";
     path_converted: "변환", "Converted";
@@ -294,6 +339,22 @@ strings! {
     crossfeed_hint: "악기가 한쪽 귀에만 몰린 옛 녹음을 헤드폰으로 들을 때 피로를 줄여 줍니다. 스피커로 들을 때는 꺼 두세요. 켜면 가운데 소리의 고음이 최대 2dB 낮아집니다.",
         "Eases listening on headphones to older recordings with instruments hard on one side. Leave it off for speakers. While on, the highs of what is in the centre are up to 2 dB lower.";
     info_proc_crossfeed: "크로스피드", "Crossfeed";
+    info_proc_correction: "헤드폰 보정", "Headphone correction";
+    correction: "헤드폰 보정", "Headphone Correction";
+    correction_row: "보정 프로필", "Correction Profile";
+    correction_none_desc: "쓰는 헤드폰의 프로필을 고르면 그 주파수 특성을 바로잡습니다.", "Choose your headphone's profile to correct its frequency response.";
+    correction_file_row: "보정값 파일", "Correction File";
+    correction_file_desc: "목록에 없는 헤드폰은 AutoEq의 ParametricEQ.txt 같은 Equalizer APO 형식의 파일을 불러옵니다.", "For a headphone that is not listed: imports a file in Equalizer APO format, such as AutoEq's ParametricEQ.txt.";
+    correction_import: "불러오기…", "Import…";
+    correction_group_imported: "불러온 프로필", "Imported";
+    correction_group_builtin: "기본 프로필 (AutoEq · oratory1990 측정)", "Built in (AutoEq · measured by oratory1990)";
+    correction_choose: "보정값 파일 선택", "Choose a Correction File";
+    correction_filter_text: "텍스트 파일", "Text files";
+    correction_hint: "헤드폰마다 다른 주파수 특성을, 측정해서 만든 필터 값으로 바로잡습니다. 기본 프로필은 AutoEq 프로젝트가 oratory1990의 측정으로 만든 값이며(Harman 목표 곡선 기준), 같은 모델이라도 제품마다 조금씩 다를 수 있습니다. 이퀄라이저 다음, 크로스피드 앞에서 적용됩니다. 켜면 소리는 원본과 달라집니다. 불러오는 파일에서 지원하는 필터는 PK, LSC, HSC입니다.",
+        "Corrects a headphone's frequency response with filter values made from measurements. The built-in profiles are the AutoEq project's results for measurements by oratory1990 (to the Harman target); units of the same model differ a little. Applied after the equalizer and before crossfeed. While on, the sound differs from the original. Imported files may use PK, LSC and HSC filters.";
+    correction_err_read: "보정값 파일을 읽을 수 없습니다.", "The correction file could not be read.";
+    correction_err_empty: "보정값(Preamp, Filter 줄)이 없는 파일입니다.", "The file holds no correction (no Preamp or Filter lines).";
+    correction_err_many: "필터가 너무 많은 파일입니다(32개까지).", "The file has too many filters (32 at most).";
     // Radio
     radio: "라디오", "Radio";
     radio_row: "대기열이 끝나면 이어서 재생", "Keep Playing When the Queue Ends";
@@ -414,6 +475,24 @@ strings! {
     menu_volume_down: "볼륨 내리기", "Decrease Volume";
     menu_toggle_shuffle: "셔플 켜기/끄기", "Toggle Shuffle";
     menu_cycle_repeat: "반복 모드 바꾸기", "Change Repeat Mode";
+    menu_stop_after_current: "현재 곡이 끝나면 정지", "Stop After Current Song";
+    menu_sleep_timer: "잠자기 타이머", "Sleep Timer";
+    sleep_off: "끄기", "Off";
+    sleep_15: "15분 뒤", "In 15 Minutes";
+    sleep_30: "30분 뒤", "In 30 Minutes";
+    sleep_45: "45분 뒤", "In 45 Minutes";
+    sleep_60: "1시간 뒤", "In 1 Hour";
+    sleep_90: "1시간 30분 뒤", "In 1 Hour 30 Minutes";
+    sleep_cancel_hint: "잠자기 타이머: 이 시간이 지나면 재생을 멈춥니다. 누르면 끕니다.",
+        "Sleep timer: playback pauses when this time is up. Click to switch it off.";
+    menu_seek_forward: "5초 앞으로", "Skip Ahead 5 Seconds";
+    menu_seek_back: "5초 뒤로", "Skip Back 5 Seconds";
+    stop_after_current_on: "이 곡이 끝나면 정지합니다", "Stops when this song ends";
+    stop_after_short: "곡 끝에 정지", "Stops after song";
+    stop_after_cancel_hint: "이 곡이 끝나면 재생을 멈춥니다. 누르면 끕니다.",
+        "Playback stops when this song ends. Click to switch it off.";
+    search_syntax_hint: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y\n여러 낱말을 하나로: \"let it be\"\n모든 곡에서 검색한 뒤 ＋를 누르면 스마트 플레이리스트로 저장됩니다.",
+        "Narrow it to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac\nBy what you listened to: plays:>=5 · fav:yes · added:30d · played:1y\nKeep words together: \"let it be\"\nSearch All Songs, then press ＋ to keep the search as a smart playlist.";
     menu_go_to_current: "재생 중인 곡으로 이동", "Go to Current Song";
     menu_show_queue: "재생 대기열 보기/가리기", "Show/Hide Up Next";
     menu_show_info: "곡 정보 보기/가리기", "Show/Hide Song Info";
@@ -460,6 +539,107 @@ impl Lang {
         match self {
             Lang::Ko => format!("스캔 중 · {}곡 확인", group_digits(found as usize)),
             Lang::En => format!("Scanning · {} files checked", group_digits(found as usize)),
+        }
+    }
+
+    /// Songs without leveling tags that have not been analyzed yet.
+    pub fn loudness_waiting(self, n: usize) -> String {
+        match self {
+            Lang::Ko => format!(
+                "분석할 곡 {}곡 · 곡을 끝까지 읽으므로 시간이 걸립니다.",
+                group_digits(n)
+            ),
+            Lang::En => format!(
+                "{} to analyze · every file is read to its end, so this takes a while.",
+                self.song_count(n)
+            ),
+        }
+    }
+
+    /// Progress of the loudness analysis, or its outcome once it has ended.
+    pub fn loudness_progress(self, running: bool, done: u64, total: u64, failed: u64) -> String {
+        let (done, total, failed) = (done as usize, total as usize, failed as usize);
+        let mut text = match (self, running) {
+            (Lang::Ko, true) => format!(
+                "분석 중 · {}곡 중 {}곡",
+                group_digits(total),
+                group_digits(done)
+            ),
+            (Lang::En, true) => {
+                format!(
+                    "Analyzing · {} of {}",
+                    group_digits(done),
+                    group_digits(total)
+                )
+            }
+            (Lang::Ko, false) => {
+                format!("{}곡을 분석했습니다", group_digits(done - failed.min(done)))
+            }
+            (Lang::En, false) => format!("Analyzed {}", self.song_count(done - failed.min(done))),
+        };
+        if failed > 0 {
+            text.push_str(&match self {
+                Lang::Ko => format!(" · 읽지 못한 곡 {}곡", group_digits(failed)),
+                Lang::En => format!(" · {} could not be read", group_digits(failed)),
+            });
+        }
+        if !running {
+            text.push('.');
+        }
+        text
+    }
+
+    /// A correction profile in a line: how many filters, the preamp, and a warning when
+    /// its boosts exceed the room the preamp makes.
+    pub fn correction_summary(self, filters: usize, preamp_db: f32, peak_db: f32) -> String {
+        let preamp = if preamp_db < 0.0 {
+            format!("−{:.1} dB", -preamp_db)
+        } else {
+            format!("+{preamp_db:.1} dB")
+        };
+        let mut text = match self {
+            Lang::Ko => format!("필터 {filters}개 · 프리앰프 {preamp}"),
+            Lang::En => format!(
+                "{} · preamp {preamp}",
+                en_count(filters, "filter", "filters")
+            ),
+        };
+        if peak_db > 0.05 {
+            text.push_str(&match self {
+                Lang::Ko => {
+                    format!(" · 최대 +{peak_db:.1} dB 올림(큰 소리에서 피크 보호가 동작할 수 있음)")
+                }
+                Lang::En => format!(
+                    " · boosts up to +{peak_db:.1} dB (peak protection may act on loud passages)"
+                ),
+            });
+        }
+        text
+    }
+
+    pub fn correction_imported(self, name: &str) -> String {
+        match self {
+            Lang::Ko => format!("“{name}” 보정 프로필을 불러와 적용했습니다."),
+            Lang::En => format!("Imported the correction profile “{name}” and applied it."),
+        }
+    }
+
+    pub fn correction_unsupported(self, kind: &str) -> String {
+        match self {
+            Lang::Ko => format!(
+                "지원하지 않는 필터({kind})가 들어 있어 불러오지 않았습니다. 지원하는 필터: PK, LSC, HSC."
+            ),
+            Lang::En => format!(
+                "Not imported: the file uses a filter that is not supported ({kind}). Supported: PK, LSC, HSC."
+            ),
+        }
+    }
+
+    pub fn correction_malformed(self, line: &str) -> String {
+        let line: String = line.chars().take(80).collect();
+        match self {
+            Lang::Ko => format!("이 줄을 이해할 수 없어 불러오지 않았습니다: {line}"),
+            Lang::En => format!("Not imported: this line could not be understood: {line}"),
         }
     }
 
@@ -611,6 +791,27 @@ impl Lang {
         }
     }
 
+    /// How long ago something happened, to the day: "오늘", "3일 전", "2주 전", "5달 전".
+    pub fn days_ago(self, seconds: i64) -> String {
+        let days = seconds.max(0) / 86_400;
+        let (n, ko, en) = match days {
+            0 => {
+                return match self {
+                    Lang::Ko => "오늘".to_string(),
+                    Lang::En => "Today".to_string(),
+                };
+            }
+            1..=13 => (days, "일", "d"),
+            14..=59 => (days / 7, "주", "wk"),
+            60..=729 => (days / 30, "달", "mo"),
+            _ => (days / 365, "년", "yr"),
+        };
+        match self {
+            Lang::Ko => format!("{n}{ko} 전"),
+            Lang::En => format!("{n} {en} ago"),
+        }
+    }
+
     /// "3 (CD 2)": a track number with its disc, for multi-disc albums.
     pub fn track_on_disc(self, track: u32, disc: u32) -> String {
         match self {
@@ -694,6 +895,11 @@ mod tests {
         );
         assert_eq!(Lang::En.playlist_exported(1), "Playlist exported (1 song).");
         assert_eq!(Lang::Ko.track_on_disc(3, 2), "3 (디스크 2)");
+        assert_eq!(Lang::Ko.days_ago(3600), "오늘");
+        assert_eq!(Lang::Ko.days_ago(3 * 86_400), "3일 전");
+        assert_eq!(Lang::Ko.days_ago(20 * 86_400), "2주 전");
+        assert_eq!(Lang::En.days_ago(100 * 86_400), "3 mo ago");
+        assert_eq!(Lang::En.days_ago(800 * 86_400), "2 yr ago");
         assert_eq!(Lang::Ko.scanned_ago(30), "방금 스캔함");
         assert_eq!(Lang::Ko.scanned_ago(125), "2분 전 스캔");
         assert_eq!(Lang::En.scanned_ago(7300), "Scanned 2 hr ago");

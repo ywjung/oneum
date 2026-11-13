@@ -22,8 +22,8 @@ const CURVE_RANGE_DB: f32 = 15.0;
 /// A slider moves in steps of this many dB.
 const STEP_DB: f32 = 0.5;
 /// How many presets of the user's own are kept, and how long a name may be.
-pub(super) const MAX_USER_PRESETS: usize = 40;
-const MAX_NAME_CHARS: usize = 32;
+pub(super) const MAX_USER_PRESETS: usize = crate::app::settings::MAX_EQ_PRESETS;
+const MAX_NAME_CHARS: usize = crate::app::settings::MAX_EQ_PRESET_NAME_CHARS;
 
 /// One of the presets on offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

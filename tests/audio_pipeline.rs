@@ -313,13 +313,146 @@ fn gapless_mp3_has_no_added_silence_or_discontinuity() {
 }
 
 /// Not a guarantee, just a measurement that is recorded in docs/TESTING.md.
+/// AAC: the priming in front of every track and the padding at its end are taken out,
+/// as the file's edit list says, so that two halves of a continuous tone join the way
+/// they were cut.
+#[test]
+fn gapless_aac_has_no_added_silence_or_discontinuity() {
+    let played = play(&["gap_a.aac.m4a", "gap_b.aac.m4a"], 44_100);
+    assert_eq!(played.underruns, 0);
+    assert_eq!(
+        played.frames(),
+        88_200,
+        "exactly the original number of frames"
+    );
+    assert_eq!(played.started(), vec![(1, 0), (2, 44_100)]);
+    let left = played.left();
+    let reference = reference_tone(88_200);
+    let window = 43_100..45_100;
+    let err = max_abs_diff(&left[window.clone()], &reference[window.clone()]);
+    assert!(
+        err < 0.05,
+        "max deviation from the continuous tone near the boundary: {err}"
+    );
+    let max_step = left[window.clone()]
+        .windows(2)
+        .fold(0f32, |m, w| m.max((w[1] - w[0]).abs()));
+    assert!(
+        max_step < 0.03,
+        "largest sample-to-sample step near the boundary: {max_step}"
+    );
+    let boundary_rms = rms(&left[44_000..44_200]);
+    assert!(
+        (boundary_rms - TONE_RMS).abs() < 0.01,
+        "RMS across the boundary: {boundary_rms}"
+    );
+    // The very start of the first track is the tone, not priming silence.
+    let start_err = max_abs_diff(&left[FADE_GUARD..2_000], &reference[FADE_GUARD..2_000]);
+    assert!(start_err < 0.05, "deviation at the start: {start_err}");
+    println!(
+        "REPORT gap_a.aac.m4a+gap_b.aac.m4a: total_frames=88200, max_error_vs_tone={err:.4}, max_step={max_step:.4}, boundary_rms={boundary_rms:.4}"
+    );
+}
+
+/// Seeking in an AAC file lands where the position says, counted in the music (the
+/// priming is not part of the count), and the track's length is the music's.
+#[test]
+fn aac_positions_are_counted_in_the_music() {
+    let mut decoder = TrackDecoder::open(&fixture("gap_a.aac.m4a")).expect("opens");
+    assert_eq!(decoder.info().total_frames, Some(44_100));
+    assert!(decoder.info().has_gapless_info);
+    let (mut whole, mut buf) = (Vec::new(), Vec::new());
+    while decoder.next(&mut buf).expect("decodes") {
+        whole.extend_from_slice(&buf);
+    }
+    assert_eq!(whole.len() / 2, 44_100);
+    // From the middle: the same samples as in the straight run (after the few
+    // packets the decoder needs to settle after a jump).
+    for target in [0u64, 1_000, 22_050, 43_000] {
+        // A fresh decoder per jump, as playback has (a feed opens its file and seeks).
+        let mut decoder = TrackDecoder::open(&fixture("gap_a.aac.m4a")).expect("opens");
+        decoder.seek(target).expect("seeks");
+        let mut part = Vec::new();
+        while decoder.next(&mut buf).expect("decodes") {
+            part.extend_from_slice(&buf);
+        }
+        assert_eq!(part.len() / 2, 44_100 - target as usize, "from {target}");
+        let settle = 2 * 2_048.min(part.len() / 2);
+        let expected = &whole[target as usize * 2 + settle..];
+        let difference = max_abs_diff(&part[settle..], expected);
+        assert!(difference < 1e-3, "from {target}: {difference}");
+    }
+    // Past the end: nothing.
+    let mut decoder = TrackDecoder::open(&fixture("gap_a.aac.m4a")).expect("opens");
+    decoder.seek(50_000).expect("seeks");
+    assert!(!decoder.next(&mut buf).expect("decodes") || buf.is_empty());
+}
+
+/// AAC from the two kinds of encoder there are: ffmpeg's (which writes an edit list) and
+/// Apple's own (`afconvert`, as Music and iTunes: no edit list, an `iTunSMPB` note). Of
+/// a tone of an odd length, exactly the frames that went in come out, in the same place.
+#[test]
+fn aac_is_trimmed_to_the_music_whoever_encoded_it() {
+    const FRAMES: usize = 54_441;
+    let tone: Vec<i16> = (0..FRAMES)
+        .map(|n| {
+            let phase = 2.0 * std::f64::consts::PI * 441.0 * n as f64 / 44_100.0;
+            (0.35 * 32_767.0 * phase.sin()) as i16
+        })
+        .collect();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("tone.wav");
+    write_wav(&source, 44_100, &tone);
+    // (file name, program, arguments before the input, arguments after it)
+    let encoders: [(&str, &str, &[&str], &[&str]); 2] = [
+        (
+            "ffmpeg.m4a",
+            "ffmpeg",
+            &["-v", "error", "-y", "-i"],
+            &["-c:a", "aac", "-b:a", "160k"],
+        ),
+        (
+            "apple.m4a",
+            "afconvert",
+            &["-f", "m4af", "-d", "aac", "-b", "160000"],
+            &[],
+        ),
+    ];
+    let mut checked = 0;
+    for (name, program, before, after) in encoders {
+        let out = dir.path().join(name);
+        let made = std::process::Command::new(program)
+            .args(before)
+            .arg(&source)
+            .args(after)
+            .arg(&out)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !made {
+            eprintln!("note: {program} is not available; {name} not checked");
+            continue;
+        }
+        let (rate, channels, audio) = decode_file(&out);
+        assert_eq!((rate, channels), (44_100, 2), "{name}");
+        assert_eq!(audio.len() / 2, FRAMES, "{name}: frames of music");
+        // In place: sample for sample against what was encoded (a lossy copy of it).
+        let worst = (1_000..FRAMES - 1_000).fold(0f32, |worst, n| {
+            worst.max((audio[n * 2] - f32::from(tone[n]) / 32_768.0).abs())
+        });
+        assert!(worst < 0.02, "{name}: {worst} away from the source");
+        let info = TrackDecoder::open(&out).expect("opens").info().clone();
+        assert_eq!(info.total_frames, Some(FRAMES as u64), "{name}");
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("note: no AAC encoder available; nothing checked");
+    }
+}
+
 #[test]
 fn report_boundary_behaviour_of_other_lossy_formats() {
-    for (first, second) in [
-        ("gap_a.aac.m4a", "gap_b.aac.m4a"),
-        ("gap_a.ogg", "gap_b.ogg"),
-        ("gap_a.mp2", "gap_b.mp2"),
-    ] {
+    for (first, second) in [("gap_a.ogg", "gap_b.ogg"), ("gap_a.mp2", "gap_b.mp2")] {
         let played = play(&[first, second], 44_100);
         assert_eq!(played.underruns, 0);
         assert!(
@@ -438,7 +571,11 @@ fn seek_starts_at_the_requested_frame() {
     }
     // Lossy formats with trimmed encoder delay: same position within codec tolerance.
     let reference = reference_tone(44_100);
-    for (name, total) in [("gap_a.mp3", 44_100i64), ("gap_a.ogg", 44_160)] {
+    for (name, total) in [
+        ("gap_a.mp3", 44_100i64),
+        ("gap_a.aac.m4a", 44_100),
+        ("gap_a.ogg", 44_160),
+    ] {
         let played = play_at(
             &[name],
             44_100,
@@ -464,20 +601,6 @@ fn seek_starts_at_the_requested_frame() {
             "{name}: audio after seek is misaligned (error {err})"
         );
     }
-    // AAC keeps its encoder delay (not trimmed by the decoder), so only the length is checked.
-    let aac = play_at(
-        &["gap_a.aac.m4a"],
-        44_100,
-        500,
-        ReplayGainSettings::default(),
-        ReplayGainTags::default(),
-        1.0,
-    );
-    println!(
-        "REPORT seek gap_a.aac.m4a: frames={} (stream is 46080 frames long incl. encoder delay)",
-        aac.frames()
-    );
-    assert_eq!(aac.frames(), 46_080 - 22_050);
 }
 
 #[test]
@@ -1069,6 +1192,58 @@ fn a_track_played_from_its_beginning_is_the_file_from_the_very_first_sample() {
 }
 
 /// Plays `name` at 44.1 kHz with the equalizer set to `eq`.
+/// A parametric correction profile reaches the audio as its response says, and
+/// without one (or with one that changes nothing) the file goes out untouched.
+#[test]
+fn a_correction_profile_changes_the_level_by_what_its_response_says() {
+    use oneum::audio::PeqProfile;
+    let play_corrected = |profile: Option<PeqProfile>| -> Played {
+        let (mut engine, mut renderer) =
+            Engine::new_offline(44_100, 1.0, ReplayGainSettings::default());
+        engine.set_correction(profile);
+        let queue = [request(1, "gap_a.wav")];
+        let slot = NextSlot::new();
+        slot.set(NextTrack::End);
+        engine
+            .start_feed(queue[0].clone(), 0, slot.clone())
+            .expect("feed starts");
+        engine.set_playing(true);
+        pump(&mut engine, &mut renderer, &queue, &slot)
+    };
+    // The fixture is a 441 Hz tone. A profile as AutoEq writes them.
+    let profile = PeqProfile::parse(
+        "Test",
+        "Preamp: -4.0 dB\n\
+         Filter 1: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.70\n\
+         Filter 2: ON PK Fc 441 Hz Gain -5.0 dB Q 1.20\n\
+         Filter 3: ON HSC Fc 8000 Hz Gain 3.0 dB Q 0.70\n",
+    )
+    .expect("parses");
+    let (_, _, plain) = decode_all("gap_a.wav");
+    let played = play_corrected(Some(profile.clone()));
+    assert_eq!(played.pcm.len(), plain.len());
+    assert_eq!(played.limited, 0);
+    let settled = plain.len() / 2..plain.len() - 2000;
+    let heard_db = 20.0 * (rms(&played.pcm[settled.clone()]) / rms(&plain[settled])).log10();
+    let says_db = profile.response_db(44_100, 441.0);
+    assert!((-10.0..-8.0).contains(&says_db), "{says_db}");
+    assert!(
+        (heard_db - says_db).abs() < 0.05,
+        "heard {heard_db:.3} dB, the response says {says_db:.3} dB"
+    );
+    for nothing in [None, Some(PeqProfile::default())] {
+        let played = play_corrected(nothing.clone());
+        assert!(
+            played
+                .pcm
+                .iter()
+                .zip(&plain)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "{nothing:?}"
+        );
+    }
+}
+
 fn play_equalized(name: &str, eq: oneum::audio::EqSettings) -> Played {
     let (mut engine, mut renderer) =
         Engine::new_offline(44_100, 1.0, ReplayGainSettings::default());
@@ -1272,6 +1447,217 @@ fn garbage_in_a_float_file_does_not_poison_what_follows() {
         assert!(
             (10.0..12.5).contains(&level_db),
             "{out_rate} Hz: the tone after the garbage is at {level_db:.2} dB"
+        );
+    }
+}
+
+// ----- multichannel files ------------------------------------------------------------------
+
+/// Tone of each channel in the multichannel test files, in the standard channel order
+/// (FL FR FC LFE, then the surrounds).
+const CHANNEL_TONES: [f64; 8] = [300.0, 500.0, 700.0, 60.0, 1100.0, 1300.0, 1700.0, 1900.0];
+
+fn have_ffmpeg() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-version"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Writes a file whose channels each carry their own tone at −14 dBFS.
+fn write_multichannel(path: &std::path::Path, layout: &str, channels: usize, codec: &[&str]) {
+    let tones: Vec<String> = CHANNEL_TONES[..channels]
+        .iter()
+        .map(|f| format!("0.2*sin(2*PI*{f}*t)"))
+        .collect();
+    let source = format!(
+        "aevalsrc={}:channel_layout={layout}:sample_rate=48000:duration=4",
+        tones.join("|")
+    );
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", &source])
+        .args(codec)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run ffmpeg");
+    assert!(
+        output.status.success(),
+        "ffmpeg could not write {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Amplitude of the sine of `freq` in one channel of interleaved audio.
+fn tone_amplitude(samples: &[f32], channels: usize, channel: usize, rate: u32, freq: f64) -> f64 {
+    let (mut re, mut im, mut n) = (0.0f64, 0.0f64, 0usize);
+    // Skip the first and last half second: codec delay and filter ringing.
+    let frames = samples.len() / channels;
+    for i in rate as usize / 2..frames.saturating_sub(rate as usize / 2) {
+        let phase = 2.0 * std::f64::consts::PI * freq * i as f64 / f64::from(rate);
+        let s = f64::from(samples[i * channels + channel]);
+        re += s * phase.cos();
+        im += s * phase.sin();
+        n += 1;
+    }
+    2.0 * (re * re + im * im).sqrt() / n.max(1) as f64
+}
+
+fn decode_file(path: &std::path::Path) -> (u32, usize, Vec<f32>) {
+    let mut decoder = TrackDecoder::open(path).expect("opens");
+    let (rate, channels) = (decoder.info().sample_rate, decoder.info().channels);
+    let (mut all, mut buf) = (Vec::new(), Vec::new());
+    while decoder.next(&mut buf).expect("decodes") {
+        all.extend_from_slice(&buf);
+    }
+    (rate, channels, all)
+}
+
+/// The formats that can hold more than two channels and that the decoder plays.
+const MULTICHANNEL_FORMATS: [(&str, &str, usize, &[&str]); 7] = [
+    ("51.flac", "5.1", 6, &["-c:a", "flac"]),
+    ("51.wav", "5.1", 6, &["-c:a", "pcm_s16le"]),
+    ("51side.wav", "5.1(side)", 6, &["-c:a", "pcm_s24le"]),
+    ("51.aiff", "5.1", 6, &["-c:a", "pcm_s16be"]),
+    ("51.alac.m4a", "5.1", 6, &["-c:a", "alac"]),
+    ("71.flac", "7.1", 8, &["-c:a", "flac"]),
+    ("71.wav", "7.1", 8, &["-c:a", "pcm_s16le"]),
+];
+
+/// 5.1 and 7.1 files come out of the decoder with their channels in the standard
+/// order (FL FR FC LFE, surrounds), whatever order the format stores them in — the
+/// down-mix depends on it.
+#[test]
+fn multichannel_files_are_decoded_in_the_standard_channel_order() {
+    if !have_ffmpeg() {
+        eprintln!("note: skipped, ffmpeg is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (name, layout, channels, codec) in MULTICHANNEL_FORMATS {
+        let path = dir.path().join(name);
+        write_multichannel(&path, layout, channels, codec);
+        let (rate, decoded_channels, audio) = decode_file(&path);
+        assert_eq!((rate, decoded_channels), (48_000, channels), "{name}");
+        assert_eq!(audio.len() / channels, 4 * 48_000, "{name}");
+        for channel in 0..channels {
+            for (tone_of, tone) in CHANNEL_TONES[..channels].iter().enumerate() {
+                let amplitude = tone_amplitude(&audio, channels, channel, rate, *tone);
+                if tone_of == channel {
+                    assert!(
+                        (amplitude - 0.2).abs() < 0.005,
+                        "{name}: channel {channel} holds its own tone at {amplitude:.3}"
+                    );
+                } else {
+                    assert!(
+                        amplitude < 0.002,
+                        "{name}: channel {channel} holds the tone of channel {tone_of} ({amplitude:.4})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// What is played of a multichannel file: front left and right, the centre and the
+/// surrounds mixed in 3 dB down, the LFE left out, and the sum scaled so that it cannot
+/// exceed full scale. The loudness the app measures for the file is that of this mix,
+/// and an independent scanner given the same mix reads the same.
+#[test]
+fn multichannel_files_are_mixed_down_as_documented_and_measured_as_played() {
+    use oneum::audio::loudness::{Meter, measure_file};
+    use std::sync::atomic::AtomicBool;
+
+    if !have_ffmpeg() {
+        eprintln!("note: skipped, ffmpeg is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let c = std::f64::consts::FRAC_1_SQRT_2;
+    for (name, layout, channels, codec) in MULTICHANNEL_FORMATS {
+        let path = dir.path().join(name);
+        write_multichannel(&path, layout, channels, codec);
+        let played = play_file(&path, 48_000);
+        assert_eq!(played.underruns, 0, "{name}");
+        assert_eq!(played.limited, 0, "{name}: the mix stays within full scale");
+        assert_eq!(played.frames(), 4 * 48_000, "{name}");
+        let surrounds = (channels - 4) / 2;
+        let norm = 1.0 / (1.0 + c + c * surrounds as f64);
+        // Expected amplitude of each channel's tone in the left and the right output.
+        for (index, tone) in CHANNEL_TONES[..channels].iter().enumerate() {
+            let weight = match index {
+                0 | 1 => 1.0,
+                3 => 0.0,
+                _ => c,
+            };
+            let (in_left, in_right) = match index {
+                2 => (true, true),
+                3 => (false, false),
+                i => (i % 2 == 0, i % 2 == 1),
+            };
+            for (side, present) in [(0, in_left), (1, in_right)] {
+                let expected = if present { 0.2 * weight * norm } else { 0.0 };
+                let amplitude = tone_amplitude(&played.pcm, 2, side, 48_000, *tone);
+                assert!(
+                    (amplitude - expected).abs() < 0.002,
+                    "{name}: tone of channel {index} on output {side}: {amplitude:.4}, expected {expected:.4}"
+                );
+            }
+        }
+
+        // Measured as played.
+        let never = AtomicBool::new(false);
+        let measured = measure_file(&path, &never)
+            .expect("decodes")
+            .expect("not cancelled");
+        let mut meter = Meter::new(48_000);
+        meter.push(&played.pcm);
+        let of_output = meter.finish();
+        let (file, output) = (
+            measured.loudness().expect("not silent"),
+            of_output.loudness().expect("not silent"),
+        );
+        assert!(
+            (file - output).abs() < 0.05,
+            "{name}: {file:.2} vs {output:.2}"
+        );
+        assert!((measured.peak - of_output.peak).abs() < 0.002, "{name}");
+
+        // ffmpeg, told to make the same mix, reads the same loudness.
+        let side = |own: usize, extra: &[usize]| {
+            let mut terms = vec![format!("{norm:.6}*c{own}"), format!("{:.6}*c2", c * norm)];
+            terms.extend(extra.iter().map(|i| format!("{:.6}*c{i}", c * norm)));
+            terms.join("+")
+        };
+        let (left_extra, right_extra): (&[usize], &[usize]) = if channels == 6 {
+            (&[4], &[5])
+        } else {
+            (&[4, 6], &[5, 7])
+        };
+        let filter = format!(
+            "pan=stereo|c0={}|c1={},ebur128=framelog=quiet",
+            side(0, left_extra),
+            side(1, right_extra)
+        );
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-i"])
+            .arg(&path)
+            .args(["-filter:a", &filter, "-f", "null", "-"])
+            .output()
+            .expect("run ffmpeg");
+        let log = String::from_utf8_lossy(&output.stderr);
+        let theirs: f64 = log
+            .rsplit("Integrated loudness:")
+            .next()
+            .and_then(|summary| summary.split("I:").nth(1))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{name}: no loudness in ffmpeg's output: {log}"));
+        assert!(
+            (file - theirs).abs() <= 0.11,
+            "{name}: {file:.2} LUFS here, {theirs:.1} LUFS by ffmpeg"
         );
     }
 }

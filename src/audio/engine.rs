@@ -8,6 +8,7 @@ use super::feed::{FeedEvent, FeedHandle, FeedParams, NextSlot, RgShared, TrackRe
 use super::output::{
     self, DeviceHold, OutputError, OutputSettings, OutputSignals, OutputStream, choose_rate,
 };
+use super::peq::{PeqProfile, PeqShared};
 use super::render::{RenderLink, RenderShared, Renderer, render_pair};
 use crate::model::TrackId;
 use std::sync::Arc;
@@ -72,6 +73,7 @@ pub struct Engine {
     limited: Arc<AtomicU64>,
     eq: Arc<EqShared>,
     crossfeed: Arc<AtomicU8>,
+    peq: Arc<PeqShared>,
     sink: Sink,
     /// `None` = follow the system default device.
     device_pref: Option<String>,
@@ -128,6 +130,7 @@ impl Engine {
             limited: Arc::new(AtomicU64::new(0)),
             eq: EqShared::new(EqSettings::default()),
             crossfeed: Arc::new(AtomicU8::new(0)),
+            peq: PeqShared::new(None),
             sink: Sink::Closed,
             device_pref,
             feed_tx,
@@ -441,6 +444,7 @@ impl Engine {
             limited: self.limited.clone(),
             eq: self.eq.clone(),
             crossfeed: self.crossfeed.clone(),
+            peq: self.peq.clone(),
         };
         let handle = FeedHandle::spawn(params)
             .ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;
@@ -522,6 +526,12 @@ impl Engine {
 
     pub fn eq(&self) -> EqSettings {
         self.eq.get()
+    }
+
+    /// Sets the parametric correction profile (`None`: none). Like the equalizer it is
+    /// cross-faded to and heard once the audio already decoded has been played.
+    pub fn set_correction(&self, profile: Option<PeqProfile>) {
+        self.peq.set(profile);
     }
 
     /// Sets the headphone crossfeed. Like the equalizer it is cross-faded to and heard

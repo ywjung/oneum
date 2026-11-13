@@ -194,7 +194,8 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let paths = AppPaths::resolve()?;
     logging::init(&paths.log_dir);
     tracing::info!(version = VERSION, "starting OnEum");
-    let settings: Settings = crate::storage::settings::load_json(&paths.settings_file());
+    let settings: Settings =
+        crate::storage::settings::load_json::<Settings>(&paths.settings_file()).sanitized();
     let system_prefers_korean = platform::locale::prefers_korean();
     let lang = settings.language.resolve(system_prefers_korean);
 
@@ -218,6 +219,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         replaygain: settings.replaygain,
         eq: settings.eq,
         crossfeed: settings.crossfeed,
+        correction: settings.active_correction().cloned(),
         radio: settings.radio,
         device_pref: settings.output_device.clone(),
         output: settings.output,

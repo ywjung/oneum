@@ -1,10 +1,13 @@
 //! The central area: song tables, album grid, artist list and their detail views.
 use super::icons::Icon;
 use super::{
-    Action, DragTracks, KeyPane, ListState, Nav, OneumApp, Row, TYPEAHEAD_TIMEOUT, theme, widgets,
+    Action, ColumnKind, DragTracks, GenreEntry, KeyPane, ListState, Nav, OneumApp, Row,
+    TYPEAHEAD_TIMEOUT, theme, widgets,
 };
+use crate::app::settings::SmartPlaylist;
 use crate::i18n::format_time;
-use crate::library::{Album, Library, LibrarySnapshot, SortKey};
+use crate::library::{Album, Library, LibrarySnapshot, PreparedQuery, SortKey, normalize};
+use crate::model::Track;
 use crate::model::TrackId;
 use crate::playback::PlayState;
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
@@ -92,10 +95,54 @@ pub(super) fn rediscover(
     picked
 }
 
+/// The genres named in a genre tag ("Rock; Indie / Alternative"), as written.
+pub(super) fn genres(tag: &str) -> impl Iterator<Item = &str> {
+    tag.split([';', ',', '/', '|'])
+        .map(str::trim)
+        .filter(|genre| !genre.is_empty())
+}
+
+/// The genres of the library with their song counts, by name. Spellings that differ
+/// only in case are one genre, shown as it was first met.
+pub(super) fn genre_entries(tracks: &[std::sync::Arc<Track>]) -> Vec<GenreEntry> {
+    let mut found: HashMap<String, GenreEntry> = HashMap::new();
+    for track in tracks {
+        // A song that names a genre twice still counts once.
+        let mut seen: Vec<String> = Vec::new();
+        for genre in genres(&track.genre) {
+            let key = genre.to_lowercase();
+            if seen.contains(&key) {
+                continue;
+            }
+            found
+                .entry(key.clone())
+                .or_insert_with(|| GenreEntry {
+                    name: genre.to_string(),
+                    songs: 0,
+                })
+                .songs += 1;
+            seen.push(key);
+        }
+    }
+    let mut list: Vec<(String, GenreEntry)> = found
+        .into_values()
+        .map(|entry| (normalize(&entry.name), entry))
+        .collect();
+    list.sort_by(|a, b| a.0.cmp(&b.0));
+    list.into_iter().map(|(_, entry)| entry).collect()
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Lists that are not part of the library itself but that some views are made from.
+#[derive(Clone, Copy)]
+struct Lists<'a> {
+    smart: &'a [SmartPlaylist],
+    genre_list: &'a [GenreEntry],
 }
 
 fn build_rows(
@@ -105,7 +152,9 @@ fn build_rows(
     query: &str,
     sort: Option<(SortKey, bool)>,
     mode: Rediscover,
+    lists: Lists<'_>,
 ) -> Vec<Row> {
+    let Lists { smart, genre_list } = lists;
     let q = LibrarySnapshot::prepare_query(query);
     let track_row = |idx: u32| Row {
         key: snap.tracks[idx as usize].id as u64,
@@ -149,6 +198,43 @@ fn build_rows(
                     .collect()
             })
             .unwrap_or_default(),
+        Nav::Genre(name) => {
+            let wanted = name.trim().to_lowercase();
+            (0..snap.len() as u32)
+                .filter(|&i| {
+                    genres(&snap.tracks[i as usize].genre)
+                        .any(|genre| genre.to_lowercase() == wanted)
+                        && matches(i)
+                })
+                .map(track_row)
+                .collect()
+        }
+        Nav::Smart(name) => smart
+            .iter()
+            .find(|p| &p.name == name)
+            .map(|p| {
+                snap.search_prepared(&PreparedQuery::new(&p.query))
+                    .into_iter()
+                    .filter(|&i| matches(i))
+                    .map(track_row)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Nav::Genres => {
+            let wanted = normalize(query);
+            genre_list
+                .iter()
+                .enumerate()
+                .filter(|(_, genre)| {
+                    let name = normalize(&genre.name);
+                    wanted.split_whitespace().all(|term| name.contains(term))
+                })
+                .map(|(i, _)| Row {
+                    key: i as u64,
+                    idx: i as u32,
+                })
+                .collect()
+        }
         Nav::Playlist(id) => library
             .playlist_items(*id)
             .into_iter()
@@ -208,11 +294,19 @@ fn build_rows(
 
     let is_track_list = matches!(
         nav,
-        Nav::Songs | Nav::Favorites | Nav::Recent | Nav::Album(_) | Nav::Playlist(_)
+        Nav::Songs
+            | Nav::Favorites
+            | Nav::Recent
+            | Nav::Album(_)
+            | Nav::Playlist(_)
+            | Nav::Genre(_)
+            | Nav::Smart(_)
     );
     let effective_sort = match (sort, nav) {
         (Some(s), _) => Some(s),
-        (None, Nav::Songs | Nav::Favorites) => Some((SortKey::Default, true)),
+        (None, Nav::Songs | Nav::Favorites | Nav::Genre(_) | Nav::Smart(_)) => {
+            Some((SortKey::Default, true))
+        }
         _ => None,
     };
     if is_track_list && let Some((key, ascending)) = effective_sort {
@@ -306,8 +400,19 @@ impl OneumApp {
                 .map_or(0, |c| c.item_id)
                 .wrapping_mul(4)
                 .wrapping_add(mode as u64 + 1),
+            // A smart playlist is its search: another search, other rows.
+            Nav::Smart(name) => self
+                .settings
+                .smart_playlists
+                .iter()
+                .find(|p| &p.name == name)
+                .map_or(1, |p| crate::library::fnv1a64(p.query.as_bytes()) | 1),
             _ => 0,
         };
+        if *nav == Nav::Genres && self.genre_list_generation != Some(self.lib_generation) {
+            self.genre_list = genre_entries(&self.snapshot.tracks);
+            self.genre_list_generation = Some(self.lib_generation);
+        }
         let stamp_generation = self
             .lib_generation
             .wrapping_add(extra.wrapping_mul(0x9E37_79B9));
@@ -330,6 +435,10 @@ impl OneumApp {
             &state.query,
             state.sort,
             mode,
+            Lists {
+                smart: &self.settings.smart_playlists,
+                genre_list: &self.genre_list,
+            },
         );
         let keys: HashSet<u64> = rows.iter().map(|r| r.key).collect();
         state.selection.retain(|k| keys.contains(k));
@@ -341,7 +450,10 @@ impl OneumApp {
                 .anchor
                 .and_then(|a| rows.iter().position(|r| r.key == a));
         }
-        state.total_ms = if matches!(nav, Nav::Albums | Nav::Artists | Nav::Artist(_)) {
+        state.total_ms = if matches!(
+            nav,
+            Nav::Albums | Nav::Artists | Nav::Artist(_) | Nav::Genres
+        ) {
             0
         } else {
             rows.iter()
@@ -422,6 +534,27 @@ impl OneumApp {
                     ..Default::default()
                 };
                 self.track_list(ui, &nav, options, actions);
+            }
+            Nav::Genre(name) => {
+                let count = self.views.get(&nav).map_or(0, |state| state.rows.len());
+                let summary = self.lang.song_count(count);
+                self.view_title(ui, name, Some(&summary));
+                self.track_list(ui, &nav, TableOptions::default(), actions);
+            }
+            Nav::Genres => {
+                self.view_title(ui, self.s().genres, None);
+                self.genre_list_view(ui, &nav, actions);
+            }
+            Nav::Smart(name) => {
+                let query = self
+                    .settings
+                    .smart_playlists
+                    .iter()
+                    .find(|p| &p.name == name)
+                    .map(|p| p.query.clone())
+                    .unwrap_or_default();
+                self.view_title(ui, name, Some(&query));
+                self.track_list(ui, &nav, TableOptions::default(), actions);
             }
             Nav::Albums => self.album_grid(ui, &nav, actions),
             Nav::Album(key) => self.album_detail(ui, &nav, *key, actions),
@@ -515,6 +648,8 @@ impl OneumApp {
                     }
                 },
                 Nav::Playlist(_) => (Icon::Queue, s.empty_playlist, s.empty_playlist_hint),
+                Nav::Genres => (Icon::Tag, s.empty_genres, s.empty_genres_hint),
+                Nav::Smart(_) => (Icon::Search, s.empty_search, s.smart_hint),
                 _ => (Icon::Note, s.empty_search, ""),
             }
         };
@@ -701,7 +836,38 @@ impl OneumApp {
         let snap = this.snapshot.clone();
         let current_track = this.player.current.map(|c| c.track_id);
         let is_playing = this.player.state == PlayState::Playing;
-        let show_format = this.settings.show_format_column;
+        let now = unix_now();
+        // The optional columns that are switched on, in the order they are shown, and
+        // all of them with their switches for the header's menu.
+        let columns = this.settings.list_columns;
+        let all_columns = [
+            (ColumnKind::Year, s.col_year, columns.year),
+            (ColumnKind::Genre, s.col_genre, columns.genre),
+            (ColumnKind::Plays, s.col_plays, columns.plays),
+            (ColumnKind::Added, s.col_added, columns.added),
+            (
+                ColumnKind::LastPlayed,
+                s.col_last_played,
+                columns.last_played,
+            ),
+            (
+                ColumnKind::Format,
+                s.col_format,
+                this.settings.show_format_column,
+            ),
+        ];
+        let column_width = |kind: ColumnKind| match kind {
+            ColumnKind::Year | ColumnKind::Plays => 46.0,
+            ColumnKind::Genre => 110.0,
+            ColumnKind::Added => 72.0,
+            ColumnKind::LastPlayed => 84.0,
+            ColumnKind::Format => 64.0,
+        };
+        let mut extras: Vec<ColumnKind> = all_columns
+            .iter()
+            .filter(|(_, _, on)| *on)
+            .map(|(kind, _, _)| *kind)
+            .collect();
         let scroll_to = state.scroll_to.take();
         let sort = state.sort;
         // Positions in a filtered playlist are not positions in the playlist.
@@ -744,17 +910,21 @@ impl OneumApp {
         let rows: &[Row] = rows;
         // Column widths are derived from the available width every frame, so the table
         // always fits, also in a small window or next to the side panel.
-        let column_count = 4
-            + usize::from(options.track_no)
-            + usize::from(!options.hide_album)
-            + usize::from(show_format);
-        let fixed = 26.0
-            + 58.0
-            + if options.track_no { 32.0 } else { 0.0 }
-            + if show_format { 64.0 } else { 0.0 };
-        let gaps =
-            ui.spacing().item_spacing.x * column_count as f32 + ui.spacing().scroll.bar_width + 6.0;
-        let flexible = (ui.available_width() - fixed - gaps).max(180.0);
+        let base = 26.0 + 58.0 + if options.track_no { 32.0 } else { 0.0 };
+        let spacing = ui.spacing().item_spacing.x;
+        let room_for = |extras: &[ColumnKind]| {
+            let column_count =
+                4 + usize::from(options.track_no) + usize::from(!options.hide_album) + extras.len();
+            let fixed = base + extras.iter().map(|k| column_width(*k)).sum::<f32>();
+            let gaps = spacing * column_count as f32 + ui.spacing().scroll.bar_width + 6.0;
+            ui.available_width() - fixed - gaps
+        };
+        // In a narrow window the optional columns give way, last one first, before the
+        // title, artist and album become too narrow to read.
+        while !extras.is_empty() && room_for(&extras) < 320.0 {
+            extras.pop();
+        }
+        let flexible = room_for(&extras).max(180.0);
         let (title_w, artist_w, album_w) = if options.hide_album {
             (flexible * 0.62, flexible * 0.38, 0.0)
         } else {
@@ -779,8 +949,8 @@ impl OneumApp {
             table = table.column(Column::exact(album_w).clip(true));
         }
         table = table.column(Column::exact(58.0));
-        if show_format {
-            table = table.column(Column::exact(64.0));
+        for kind in &extras {
+            table = table.column(Column::exact(column_width(*kind)).clip(true));
         }
         if let Some(row) = scroll_to.filter(|r| *r < rows.len()) {
             table = table.scroll_to_row(row, None);
@@ -802,19 +972,25 @@ impl OneumApp {
                     .small()
                     .strong()
                     .color(dim);
-                match key.filter(|_| sortable) {
-                    Some(key) => {
-                        if ui
-                            .add(egui::Label::new(label).sense(Sense::click()).truncate())
-                            .clicked()
-                        {
-                            actions.push(Action::Sort(key));
-                        }
-                    }
-                    None => {
-                        ui.add(egui::Label::new(label).truncate());
-                    }
+                let response = ui.add(egui::Label::new(label).sense(Sense::click()).truncate());
+                if let Some(key) = key.filter(|_| sortable)
+                    && response.clicked()
+                {
+                    actions.push(Action::Sort(key));
                 }
+                // Right-click on any column title: which optional columns to show.
+                egui::Popup::context_menu(&response)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.label(RichText::new(s.columns_menu).small().color(dim));
+                        for (kind, name, on) in all_columns {
+                            let mut shown = on;
+                            // The menu stays open: several columns can be chosen in one go.
+                            if ui.checkbox(&mut shown, name).changed() {
+                                actions.push(Action::ToggleColumn(kind));
+                            }
+                        }
+                    });
             };
 
         table
@@ -834,8 +1010,16 @@ impl OneumApp {
                         header_cell(ui, s.col_duration, Some(SortKey::Duration), actions);
                     });
                 });
-                if show_format {
-                    header.col(|ui| header_cell(ui, s.col_format, Some(SortKey::Format), actions));
+                for kind in &extras {
+                    let (name, key) = match kind {
+                        ColumnKind::Year => (s.col_year, Some(SortKey::Year)),
+                        ColumnKind::Genre => (s.col_genre, None),
+                        ColumnKind::Plays => (s.col_plays, Some(SortKey::PlayCount)),
+                        ColumnKind::Added => (s.col_added, Some(SortKey::DateAdded)),
+                        ColumnKind::LastPlayed => (s.col_last_played, Some(SortKey::LastPlayed)),
+                        ColumnKind::Format => (s.col_format, Some(SortKey::Format)),
+                    };
+                    header.col(|ui| header_cell(ui, name, key, actions));
                 }
             })
             .body(|body| {
@@ -918,9 +1102,25 @@ impl OneumApp {
                             ui.label(RichText::new(format_time(track.duration_ms)).color(dim));
                         });
                     });
-                    if show_format {
+                    for kind in &extras {
                         row.col(|ui| {
-                            ui.label(RichText::new(&track.codec).small().color(dim));
+                            let text = match kind {
+                                ColumnKind::Year => {
+                                    track.year.map(|y| y.to_string()).unwrap_or_default()
+                                }
+                                ColumnKind::Genre => track.genre.clone(),
+                                ColumnKind::Plays => match track.play_count {
+                                    0 => String::new(),
+                                    n => n.to_string(),
+                                },
+                                ColumnKind::Added => this.lang.days_ago(now - track.added_at),
+                                ColumnKind::LastPlayed => track.last_played_at.map_or_else(
+                                    || s.never.to_string(),
+                                    |at| this.lang.days_ago(now - at),
+                                ),
+                                ColumnKind::Format => track.codec.clone(),
+                            };
+                            widgets::truncated(ui, RichText::new(text).small().color(dim));
                         });
                     }
 
@@ -1072,6 +1272,35 @@ impl OneumApp {
             ui.close();
         }
         ui.separator();
+        // Where this song belongs: its album, and its artist as the artist view groups it.
+        if ui.button(s.go_to_album).clicked() {
+            actions.push(Action::Go(Nav::Album(clicked_track.album_key)));
+            ui.close();
+        }
+        let grouped_under = if clicked_track.album_artist.is_empty() {
+            &clicked_track.artist
+        } else {
+            &clicked_track.album_artist
+        };
+        let artist = snap
+            .artists()
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(grouped_under))
+            .or_else(|| {
+                snap.artists()
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(&clicked_track.artist))
+            })
+            .map(|a| a.name.clone());
+        if ui
+            .add_enabled(artist.is_some(), egui::Button::new(s.go_to_artist))
+            .clicked()
+        {
+            if let Some(name) = artist {
+                actions.push(Action::Go(Nav::Artist(name)));
+            }
+            ui.close();
+        }
         if ui.button(s.show_in_finder).clicked() {
             actions.push(Action::Reveal(clicked_track.id));
             ui.close();
@@ -1357,6 +1586,64 @@ impl OneumApp {
         self.track_list(ui, nav, options, actions);
     }
 
+    fn genre_list_view(&mut self, ui: &mut Ui, nav: &Nav, actions: &mut Vec<Action>) {
+        let state = self.views.remove(nav).unwrap_or_default();
+        if state.rows.is_empty() {
+            self.empty_list_message(ui, nav, !state.query.is_empty());
+            self.views.insert(nav.clone(), state);
+            return;
+        }
+        let s = self.s();
+        let dim = theme::dim(ui);
+        let lang = self.lang;
+        let list = &self.genre_list;
+        TableBuilder::new(ui)
+            .id_salt("genres")
+            .striped(true)
+            .sense(Sense::click())
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .min_scrolled_height(0.0)
+            .column(Column::remainder().at_least(160.0).clip(true))
+            .column(Column::exact(120.0))
+            .header(22.0, |mut header| {
+                header.col(|ui| {
+                    ui.label(RichText::new(s.col_genre).small().strong().color(dim));
+                });
+                header.col(|_| {});
+            })
+            .body(|body| {
+                body.rows(theme::ROW_HEIGHT + 6.0, state.rows.len(), |mut row| {
+                    let Some(genre) = list.get(state.rows[row.index()].idx as usize) else {
+                        return;
+                    };
+                    row.col(|ui| {
+                        ui.add_space(6.0);
+                        let (mark, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(18.0), Sense::hover());
+                        super::icons::paint(
+                            ui.painter(),
+                            mark,
+                            Icon::Tag,
+                            theme::accent(ui.visuals().dark_mode),
+                        );
+                        widgets::truncated(
+                            ui,
+                            RichText::new(&genre.name)
+                                .font(theme::semibold(13.0))
+                                .strong(),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(lang.song_count(genre.songs)).color(dim));
+                    });
+                    if row.response().clicked() {
+                        actions.push(Action::Go(Nav::Genre(genre.name.clone())));
+                    }
+                });
+            });
+        self.views.insert(nav.clone(), state);
+    }
+
     fn artist_list(&mut self, ui: &mut Ui, nav: &Nav, actions: &mut Vec<Action>) {
         let state = self.views.remove(nav).unwrap_or_default();
         if state.rows.is_empty() {
@@ -1439,7 +1726,7 @@ impl OneumApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rediscover, rediscover};
+    use super::{Rediscover, genre_entries, rediscover};
     use crate::model::{Track, test_track};
     use std::sync::Arc;
 
@@ -1487,6 +1774,42 @@ mod tests {
         // "Recently played" comes from the play history, not from here.
         assert!(ids(&tracks, Rediscover::Played).is_empty());
         assert!(ids(&[], Rediscover::Added).is_empty());
+    }
+
+    #[test]
+    fn the_genres_of_a_library() {
+        let with = |id, genre: &str| {
+            Arc::new(Track {
+                genre: genre.into(),
+                ..test_track(id)
+            })
+        };
+        let tracks = vec![
+            with(1, "Rock"),
+            with(2, "rock; Indie"),
+            with(3, "Jazz / jazz"),
+            with(4, ""),
+            with(5, "가요"),
+            with(6, "ROCK"),
+        ];
+        let list = genre_entries(&tracks);
+        let shown: Vec<(&str, usize)> = list.iter().map(|g| (g.name.as_str(), g.songs)).collect();
+        // By name; spellings that differ in case are one genre, as first written; a song
+        // that names a genre twice counts once; songs without a genre are not listed.
+        assert_eq!(shown, [("Indie", 1), ("Jazz", 1), ("Rock", 3), ("가요", 1)]);
+        assert!(genre_entries(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_genres_of_a_tag() {
+        let of = |tag: &'static str| super::genres(tag).collect::<Vec<_>>();
+        assert_eq!(
+            of("Rock; Indie / Alternative"),
+            ["Rock", "Indie", "Alternative"]
+        );
+        assert_eq!(of("K-Pop"), ["K-Pop"]);
+        assert_eq!(of(" Jazz ,, Fusion| "), ["Jazz", "Fusion"]);
+        assert!(of("").is_empty() && of(" ; / ").is_empty());
     }
 
     #[test]

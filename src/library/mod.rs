@@ -8,7 +8,10 @@
 //! Typical start-up: [`Library::open`], [`Library::set_notifier`], then
 //! [`Library::rescan`] and [`Library::start_watching`].
 mod art;
+pub mod details;
 mod ident;
+mod legacy;
+mod loudness;
 pub mod lyrics;
 mod m3u;
 pub mod radio;
@@ -20,6 +23,7 @@ mod watch;
 
 pub use art::ArtImage;
 pub use ident::{album_key, fnv1a64};
+pub use loudness::LoudnessStatus;
 pub use search::{PreparedQuery, normalize};
 pub use snapshot::{Album, Artist, LibrarySnapshot, SortKey};
 
@@ -376,6 +380,8 @@ pub(crate) struct Inner {
     art_generation: AtomicU64,
     scan: ScanQueue,
     counters: Counters,
+    /// The run that measures the loudness of untagged tracks.
+    loudness: loudness::LoudnessJob,
     /// Files that could not be added, by path, with the size and mtime they had. Lets
     /// later scans count them again without reading them again (not persisted).
     skipped: Mutex<HashMap<PathBuf, scan::Skipped>>,
@@ -473,6 +479,7 @@ fn to_stored(file: ScannedFile, now: i64) -> StoredTrack {
             file_size: file.size,
             mtime_ns: file.mtime_ns,
             replaygain: tags.replaygain,
+            measured: None,
             art_id: file.art_id,
             favorite: false,
             play_count: 0,
@@ -531,11 +538,11 @@ impl Inner {
         self.notify();
     }
 
-    /// Publishes changes to a track's play statistics and favourite flag without
-    /// rebuilding the index.
+    /// Publishes changes to a track's play statistics, favourite flag and measured
+    /// loudness without rebuilding the index.
     ///
     /// The values are read from the state here, under the publish lock, so that
-    /// concurrent callers cannot publish in the wrong order. Only those three fields are
+    /// concurrent callers cannot publish in the wrong order. Only those fields are
     /// copied onto the track as it is currently published: if a scan has changed the
     /// track's tags in the meantime, the published track keeps matching its (old) index
     /// entries until the scan's own full publish replaces both together.
@@ -555,10 +562,17 @@ impl Inner {
                         if published.favorite == current.favorite
                             && published.play_count == current.play_count
                             && published.last_played_at == current.last_played_at
+                            && published.measured == current.measured
                         {
                             return None;
                         }
                         let mut track = (**published).clone();
+                        // What was measured belongs to one state of the file.
+                        if published.mtime_ns == current.mtime_ns
+                            && published.file_size == current.file_size
+                        {
+                            track.measured = current.measured;
+                        }
                         track.favorite = current.favorite;
                         track.play_count = current.play_count;
                         track.last_played_at = current.last_played_at;
@@ -679,6 +693,12 @@ impl Inner {
                     track.play_count = old.track.play_count;
                     track.last_played_at = old.track.last_played_at;
                     track.added_at = old.track.added_at;
+                    // What was measured stays valid as long as the file is the same.
+                    if old.track.mtime_ns == track.mtime_ns
+                        && old.track.file_size == track.file_size
+                    {
+                        track.measured = old.track.measured;
+                    }
                     false
                 }
                 None => true,
@@ -1065,6 +1085,7 @@ impl Library {
             art_generation: AtomicU64::new(0),
             scan: ScanQueue::default(),
             counters: Counters::default(),
+            loudness: loudness::LoudnessJob::default(),
             skipped: Mutex::new(HashMap::new()),
             recently_added: Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
@@ -1292,6 +1313,7 @@ impl Library {
             return;
         }
         self.inner.scan.stop();
+        self.inner.loudness.cancel();
         if let Some(tx) = lock(&self.inner.watch_tx).take() {
             let _ = tx.send(WatchMsg::Stop);
         }
@@ -1499,6 +1521,44 @@ impl Library {
             ids
         };
         self.inner.publish_patch(&changed);
+    }
+
+    // ---- measured loudness -----------------------------------------------------------
+
+    /// Starts measuring the loudness of the tracks whose files have no ReplayGain tags,
+    /// in the background. The results are kept in the app's database; the files are
+    /// only read. Returns false if a run is in progress already.
+    pub fn measure_loudness(&self) -> bool {
+        loudness::start(&self.inner)
+    }
+
+    /// Stops the run after the files that are being read; what was stored stays.
+    pub fn cancel_loudness(&self) {
+        self.inner.loudness.cancel();
+    }
+
+    pub fn loudness_status(&self) -> LoudnessStatus {
+        self.inner.loudness.status()
+    }
+
+    /// Forgets everything that was measured (not while a run is in progress).
+    pub fn forget_loudness(&self) {
+        if !self.inner.loudness.status().running {
+            self.inner.forget_loudness();
+        }
+    }
+
+    /// Blocks until no measuring run is in progress. Returns false if `timeout`
+    /// elapsed first. Not for the UI thread; meant for tools and tests.
+    pub fn wait_for_loudness(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.inner.loudness.status().running {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
     }
 
     /// Records that a track was played: adds a history row and updates its play count

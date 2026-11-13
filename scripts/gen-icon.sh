@@ -1,8 +1,11 @@
 #!/bin/sh
-# Regenerates assets/OnEum.icns from the drawing in scripts/gen-icon.swift.
+# Regenerates the app icon from the drawing in scripts/gen-icon.swift:
+# assets/icon-1024.png (the drawing), assets/OnEum.icns (the bundle's icon) and
+# assets/icon-160.png (compiled into the program: window icon and Settings ▸ About).
 set -eu
 cd "$(dirname "$0")/.."
 swift scripts/gen-icon.swift assets/icon-1024.png
+sips -z 160 160 assets/icon-1024.png --out assets/icon-160.png >/dev/null
 SET=$(mktemp -d)/OnEum.iconset
 mkdir -p "$SET"
 for s in 16 32 128 256 512; do
@@ -12,4 +15,4 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$SET" -o assets/OnEum.icns
 rm -rf "$(dirname "$SET")"
-echo "wrote assets/OnEum.icns"
+echo "wrote assets/OnEum.icns and assets/icon-160.png"

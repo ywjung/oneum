@@ -1,7 +1,10 @@
 //! Lyrics of a song, for the info panel: from the file's own tags, or from a text file
 //! of the same name next to it (`Song.lrc`, `Song.txt`). Read when asked for, never
 //! stored: nothing about a file is kept that the scan did not need.
-use lofty::file::TaggedFileExt;
+//!
+//! Lyrics with time stamps (the LRC format, in a file or pasted into a tag) are kept
+//! with their times as well, so that the line being sung can be shown as it is sung.
+use lofty::file::{TaggedFile, TaggedFileExt};
 use lofty::tag::ItemKey;
 use std::path::Path;
 
@@ -10,14 +13,54 @@ const MAX_SIDECAR_BYTES: u64 = 512 * 1024;
 /// Lyrics longer than this are cut (a tag that holds a whole book).
 const MAX_CHARS: usize = 60_000;
 
-/// The lyrics of the file at `path`, as plain text. `None` when there are none (or the
-/// file cannot be read: lyrics are an extra, not worth an error message).
-pub fn read(path: &Path) -> Option<String> {
-    from_tags(path).or_else(|| from_sidecar(path))
+/// One line of lyrics and when it is sung.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimedLine {
+    /// Milliseconds from the start of the song.
+    pub at_ms: u32,
+    /// May be empty: a pause in the singing.
+    pub text: String,
 }
 
-fn from_tags(path: &Path) -> Option<String> {
-    let file = lofty::read_from_path(path).ok()?;
+/// The lyrics of one song.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lyrics {
+    /// The words as plain text, one line per line.
+    pub plain: String,
+    /// The lines with their times, in order, when the lyrics came with time stamps.
+    pub timed: Option<Vec<TimedLine>>,
+}
+
+impl Lyrics {
+    fn from_raw(raw: &str) -> Option<Self> {
+        Some(Self {
+            plain: clean(raw)?,
+            timed: timed(raw),
+        })
+    }
+
+    /// Index of the line that is being sung at `position_ms`: the last one whose time
+    /// has come. `None` before the first line, and for lyrics without times.
+    pub fn line_at(&self, position_ms: u64) -> Option<usize> {
+        let lines = self.timed.as_ref()?;
+        lines
+            .partition_point(|line| u64::from(line.at_ms) <= position_ms)
+            .checked_sub(1)
+    }
+}
+
+/// The lyrics of the file at `path`. `None` when there are none (or the file cannot be
+/// read: lyrics are an extra, not worth an error message).
+pub fn read(path: &Path) -> Option<Lyrics> {
+    let tagged = lofty::read_from_path(path).ok();
+    tagged
+        .as_ref()
+        .and_then(from_tags)
+        .or_else(|| from_sidecar(path))
+}
+
+/// Lyrics from the tags of an opened file.
+pub(crate) fn from_tags(file: &TaggedFile) -> Option<Lyrics> {
     let mut tags = Vec::new();
     tags.extend(file.primary_tag());
     tags.extend(file.tags());
@@ -27,10 +70,15 @@ fn from_tags(path: &Path) -> Option<String> {
                 .into_iter()
                 .filter_map(|key| tag.get_string(key))
         })
-        .find_map(clean)
+        // Korean from an old code page, declared as Latin-1 by the tag.
+        .find_map(|raw| match super::legacy::repair(raw) {
+            Some(korean) => Lyrics::from_raw(&korean),
+            None => Lyrics::from_raw(raw),
+        })
 }
 
-fn from_sidecar(path: &Path) -> Option<String> {
+/// Lyrics from a text file next to the song.
+pub(crate) fn from_sidecar(path: &Path) -> Option<Lyrics> {
     use std::io::Read;
     ["lrc", "txt"].into_iter().find_map(|extension| {
         // Opened once and asked about through the handle, so that what is checked
@@ -43,7 +91,7 @@ fn from_sidecar(path: &Path) -> Option<String> {
         }
         let mut bytes = Vec::new();
         file.take(MAX_SIDECAR_BYTES).read_to_end(&mut bytes).ok()?;
-        clean(&decode(&bytes)?)
+        Lyrics::from_raw(&super::legacy::decode_file(&bytes)?)
     })
 }
 
@@ -74,6 +122,115 @@ fn without_time_stamps(line: &str) -> Option<&str> {
     Some(rest)
 }
 
+/// A time stamp's inside (`01:23.45`, `1:02:03`, `00:12`) in milliseconds.
+fn stamp_ms(tag: &str) -> Option<u32> {
+    let mut parts = tag.split(':');
+    let (first, second, third) = (parts.next()?, parts.next()?, parts.next());
+    if parts.next().is_some() {
+        return None;
+    }
+    let whole = |text: &str| {
+        (!text.is_empty() && text.len() <= 3 && text.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| text.parse::<u32>().ok())
+            .flatten()
+    };
+    // The last part is seconds, with or without a fraction.
+    let seconds_text = third.unwrap_or(second);
+    let (seconds, fraction) = seconds_text.split_once('.').unwrap_or((seconds_text, ""));
+    let seconds = whole(seconds).filter(|s| *s < 60)?;
+    let millis = match fraction.len() {
+        0 => 0,
+        1..=3 if fraction.bytes().all(|b| b.is_ascii_digit()) => {
+            fraction.parse::<u32>().ok()? * 10u32.pow(3 - fraction.len() as u32)
+        }
+        _ => return None,
+    };
+    let minutes = match third {
+        Some(_) => whole(first)? * 60 + whole(second).filter(|m| *m < 60)?,
+        None => whole(first)?,
+    };
+    Some((minutes * 60 + seconds) * 1000 + millis)
+}
+
+/// The text without the per-word time stamps of "enhanced" LRC (`<00:12.34>`).
+fn without_word_stamps(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        let (before, after) = rest.split_at(open);
+        out.push_str(before);
+        match after[1..].split_once('>') {
+            Some((inside, tail)) if stamp_ms(inside).is_some() => rest = tail,
+            _ => {
+                out.push('<');
+                rest = &after[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The fewest stamped lines that make lyrics "synchronised" (one stamp can be chance).
+const MIN_TIMED_LINES: usize = 2;
+/// More lines than any song has; a file that claims more is cut here.
+const MAX_TIMED_LINES: usize = 5_000;
+
+/// The lines of synchronised lyrics with their times, in the order they are sung.
+/// `None` when the text carries no time stamps.
+pub(crate) fn timed(raw: &str) -> Option<Vec<TimedLine>> {
+    let raw = raw
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut lines: Vec<TimedLine> = Vec::new();
+    // "[offset:+250]": the whole text is 250 ms early, i.e. shown that much sooner.
+    let mut offset_ms: i64 = 0;
+    for line in raw.split('\n') {
+        let mut rest = line.trim_start();
+        let mut stamps: Vec<u32> = Vec::new();
+        while let Some(inner) = rest.strip_prefix('[') {
+            let Some((tag, after)) = inner.split_once(']') else {
+                break;
+            };
+            if let Some(at) = stamp_ms(tag) {
+                stamps.push(at);
+                rest = after.trim_start();
+            } else {
+                if stamps.is_empty()
+                    && let Some((name, value)) = tag.split_once(':')
+                    && name.trim().eq_ignore_ascii_case("offset")
+                    && let Ok(value) = value.trim().parse::<i64>()
+                {
+                    offset_ms = value.clamp(-600_000, 600_000);
+                }
+                break;
+            }
+        }
+        if stamps.is_empty() {
+            continue;
+        }
+        let text = without_word_stamps(rest);
+        for at_ms in stamps {
+            if lines.len() < MAX_TIMED_LINES {
+                lines.push(TimedLine {
+                    at_ms,
+                    text: text.clone(),
+                });
+            }
+        }
+    }
+    if lines.len() < MIN_TIMED_LINES {
+        return None;
+    }
+    for line in &mut lines {
+        line.at_ms = (i64::from(line.at_ms) - offset_ms).clamp(0, i64::from(u32::MAX)) as u32;
+    }
+    // A repeated line is written once with all its times: bring them in order.
+    lines.sort_by_key(|line| line.at_ms);
+    Some(lines)
+}
+
 /// True for the inside of an LRC information line: one of the format's field names
 /// before the colon. Anything else in brackets is part of the words: `[Chorus]`,
 /// `[Verse 1: Eminem]`.
@@ -86,32 +243,6 @@ fn is_lrc_field(tag: &str) -> bool {
             .iter()
             .any(|field| name.trim().eq_ignore_ascii_case(field))
     }) || tag.starts_with('#')
-}
-
-/// The text of a lyrics file: UTF-8, or UTF-16 when it says so with a byte order mark.
-/// Anything else (the legacy code pages old lyric files were often saved in) cannot be
-/// read without guessing, and is not shown rather than shown as garbage.
-fn decode(bytes: &[u8]) -> Option<String> {
-    let utf16 = |bytes: &[u8], big_endian: bool| {
-        let units: Vec<u16> = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                if big_endian {
-                    u16::from_be_bytes(*pair)
-                } else {
-                    u16::from_le_bytes(*pair)
-                }
-            })
-            .collect();
-        String::from_utf16(&units).ok()
-    };
-    match bytes {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, false),
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, true),
-        _ => String::from_utf8(bytes.to_vec()).ok(),
-    }
 }
 
 /// Lyrics as they are shown: one line per line whatever the line endings were, time
@@ -146,6 +277,101 @@ pub(crate) fn clean(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The words of the song at `path`, as plain text.
+    fn plain(path: &Path) -> Option<String> {
+        read(path).map(|lyrics| lyrics.plain)
+    }
+
+    fn lines(raw: &str) -> Vec<(u32, String)> {
+        timed(raw)
+            .expect("synchronised lyrics")
+            .into_iter()
+            .map(|line| (line.at_ms, line.text))
+            .collect()
+    }
+
+    #[test]
+    fn time_stamps_in_their_usual_forms() {
+        assert_eq!(stamp_ms("00:12.34"), Some(12_340));
+        assert_eq!(stamp_ms("01:02.5"), Some(62_500));
+        assert_eq!(stamp_ms("3:07.123"), Some(187_123));
+        assert_eq!(stamp_ms("00:12"), Some(12_000));
+        assert_eq!(stamp_ms("1:02:03"), Some(3_723_000));
+        assert_eq!(stamp_ms("99:59.99"), Some(5_999_990));
+        // Not time stamps.
+        for not_one in [
+            "ar:Artist",
+            "00:61",
+            "1:2:3:4",
+            "12",
+            "ab:cd",
+            "00:12.3456",
+            "",
+            ":",
+            "1:",
+        ] {
+            assert_eq!(stamp_ms(not_one), None, "{not_one:?}");
+        }
+    }
+
+    #[test]
+    fn synchronised_lyrics_keep_their_times() {
+        let lrc =
+            "[ti:노래]\n[ar:가수]\n[00:01.00]첫 줄\n[00:05.20] 둘째 줄 \n[00:09.00]\n[00:12]끝";
+        assert_eq!(
+            lines(lrc),
+            [
+                (1_000, "첫 줄".to_string()),
+                (5_200, "둘째 줄".to_string()),
+                (9_000, String::new()),
+                (12_000, "끝".to_string()),
+            ]
+        );
+        // A chorus written once with all its times comes out in the order it is sung.
+        let repeated = "[00:30.00][01:10.00]후렴\n[00:10.00]1절\n[00:50.00]2절";
+        assert_eq!(
+            lines(repeated)
+                .iter()
+                .map(|l| l.1.as_str())
+                .collect::<Vec<_>>(),
+            ["1절", "후렴", "2절", "후렴"]
+        );
+        // "[offset:+500]": everything half a second sooner, never before the start.
+        assert_eq!(
+            lines("[offset:+500]\n[00:00.20]a\n[00:02.00]b"),
+            [(0, "a".to_string()), (1_500, "b".to_string())]
+        );
+        // Per-word stamps of "enhanced" lyrics are taken out of the words.
+        assert_eq!(
+            lines("[00:01.00]<00:01.00>Hold <00:01.50>the <00:02.00>line\n[00:04.00]a < b")[0].1,
+            "Hold the line"
+        );
+        assert_eq!(lines("[00:01.00]x\n[00:04.00]a < b > c")[1].1, "a < b > c");
+        // Plain lyrics, and a text with a single stamp-like line, are not synchronised.
+        assert_eq!(timed("첫 줄\n둘째 줄"), None);
+        assert_eq!(timed("[Chorus]\nla la\n[1:23] once"), None);
+        assert_eq!(timed(""), None);
+    }
+
+    #[test]
+    fn the_line_being_sung() {
+        let lyrics =
+            Lyrics::from_raw("[00:10.00]하나\n[00:20.00]둘\n[00:30.00]셋").expect("lyrics");
+        assert_eq!(lyrics.plain, "하나\n둘\n셋");
+        assert_eq!(lyrics.line_at(0), None, "before the first line");
+        assert_eq!(lyrics.line_at(9_999), None);
+        assert_eq!(lyrics.line_at(10_000), Some(0));
+        assert_eq!(lyrics.line_at(19_999), Some(0));
+        assert_eq!(lyrics.line_at(20_000), Some(1));
+        assert_eq!(lyrics.line_at(3_600_000), Some(2), "the last line stays");
+        // Lyrics without times have no "line being sung".
+        let plain = Lyrics::from_raw("하나\n둘").expect("lyrics");
+        assert_eq!(
+            (plain.timed.is_some(), plain.line_at(15_000)),
+            (false, None)
+        );
+    }
 
     #[test]
     fn plain_lyrics_keep_their_lines() {
@@ -194,13 +420,13 @@ mod tests {
         std::fs::write(&song, b"not audio").expect("write");
         assert_eq!(read(&song), None);
         std::fs::write(dir.path().join("노래.txt"), "텍스트 가사").expect("write");
-        assert_eq!(read(&song).as_deref(), Some("텍스트 가사"));
+        assert_eq!(plain(&song).as_deref(), Some("텍스트 가사"));
         // A synchronised file wins over a plain one.
         std::fs::write(dir.path().join("노래.lrc"), "[00:01.00]싱크 가사").expect("write");
-        assert_eq!(read(&song).as_deref(), Some("싱크 가사"));
+        assert_eq!(plain(&song).as_deref(), Some("싱크 가사"));
         // A file that is far too large for lyrics is left alone.
         std::fs::write(dir.path().join("노래.lrc"), vec![b'a'; 600 * 1024]).expect("write");
-        assert_eq!(read(&song).as_deref(), Some("텍스트 가사"));
+        assert_eq!(plain(&song).as_deref(), Some("텍스트 가사"));
         assert_eq!(read(&dir.path().join("없는 파일.mp3")), None);
 
         // UTF-16 with a byte order mark is read; a legacy code page is not guessed at.
@@ -209,10 +435,14 @@ mod tests {
             .chain("유니코드 가사".encode_utf16().flat_map(u16::to_le_bytes))
             .collect();
         std::fs::write(dir.path().join("노래.lrc"), utf16).expect("write");
-        assert_eq!(read(&song).as_deref(), Some("유니코드 가사"));
-        // "가사" in EUC-KR: not valid UTF-8, so the next candidate is used instead.
+        assert_eq!(plain(&song).as_deref(), Some("유니코드 가사"));
+        // "가사" in the Korean code page of old Windows, as many lyric files are.
         std::fs::write(dir.path().join("노래.lrc"), [0xB0, 0xA1, 0xBB, 0xE7]).expect("write");
-        assert_eq!(read(&song).as_deref(), Some("텍스트 가사"));
+        #[cfg(any(target_os = "macos", windows))]
+        assert_eq!(plain(&song).as_deref(), Some("가사"));
+        // Bytes that are neither Unicode nor Korean: the next candidate is used.
+        std::fs::write(dir.path().join("노래.lrc"), [0xE9, 0x20, 0xE8, 0x20]).expect("write");
+        assert_eq!(plain(&song).as_deref(), Some("텍스트 가사"));
     }
 
     #[test]
@@ -236,10 +466,10 @@ mod tests {
             tag.insert_text(key, "첫 줄\r\n둘째 줄\n".to_string());
             tag.save_to_path(&song, WriteOptions::default())
                 .expect("tag written");
-            assert_eq!(read(&song).as_deref(), Some("첫 줄\n둘째 줄"), "{name}");
+            assert_eq!(plain(&song).as_deref(), Some("첫 줄\n둘째 줄"), "{name}");
             // The tags win over a text file next to the song.
             std::fs::write(song.with_extension("txt"), "다른 가사").expect("write");
-            assert_eq!(read(&song).as_deref(), Some("첫 줄\n둘째 줄"), "{name}");
+            assert_eq!(plain(&song).as_deref(), Some("첫 줄\n둘째 줄"), "{name}");
         }
     }
 }

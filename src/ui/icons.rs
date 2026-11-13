@@ -33,6 +33,7 @@ pub enum Icon {
     Keyboard,
     Meter,
     Equalizer,
+    Tag,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -294,6 +295,20 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 })
                 .collect();
             painter.add(Shape::line(pts, stroke));
+        }
+        Icon::Tag => {
+            // A label with its hole, pointing left.
+            painter.add(Shape::closed_line(
+                vec![
+                    p(0.10, 0.50),
+                    p(0.36, 0.22),
+                    p(0.90, 0.22),
+                    p(0.90, 0.78),
+                    p(0.36, 0.78),
+                ],
+                stroke,
+            ));
+            painter.circle_filled(p(0.40, 0.50), s * 0.07, color);
         }
         Icon::Clock => {
             painter.circle_stroke(c, s * 0.38, stroke);

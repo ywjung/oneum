@@ -128,3 +128,28 @@ fn quitting_does_not_wait_for_a_thread_that_never_ends() {
     );
     release.store(true, Ordering::Relaxed);
 }
+
+/// What the app measured for an untagged file is what the player levels it with.
+#[test]
+fn the_player_is_given_measured_loudness() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let music = dir.path().join("music");
+    std::fs::create_dir_all(&music).expect("music dir");
+    write_wav(&music.join("untagged.wav"), 16_000);
+    let library = open(dir.path());
+    let ids = library.import_files(&[music.join("untagged.wav")]);
+    let host = LibraryHost::new(library.clone(), || {});
+    let before = host.track(ids[0]).expect("track resolves").replaygain;
+    assert_eq!(before.track_gain_db, None);
+
+    assert!(library.measure_loudness());
+    assert!(library.wait_for_loudness(std::time::Duration::from_secs(30)));
+    let after = host.track(ids[0]).expect("track resolves").replaygain;
+    let gain = after.track_gain_db.expect("a measured gain");
+    assert!(gain.is_finite() && gain.abs() < 30.0, "{gain}");
+    assert!(
+        after
+            .track_peak
+            .is_some_and(|peak| peak > 0.0 && peak <= 1.0)
+    );
+}

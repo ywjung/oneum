@@ -37,7 +37,7 @@ impl PlayerHost for LibraryHost {
     fn track(&self, id: TrackId) -> Option<PlayableTrack> {
         self.library.track(id).map(|t| PlayableTrack {
             path: t.path.clone(),
-            replaygain: t.replaygain,
+            replaygain: t.leveling(),
             duration_ms: t.duration_ms,
             available: t.available,
             sample_rate: t.sample_rate,

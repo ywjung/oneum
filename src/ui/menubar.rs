@@ -13,6 +13,8 @@ const CMD_ALT: Modifiers = Modifiers::COMMAND.plus(Modifiers::ALT);
 
 pub(super) enum Entry {
     Item(MenuAction, &'static str, Option<KeyboardShortcut>),
+    /// A menu inside the menu.
+    Sub(&'static str, Vec<Entry>),
     Separator,
     /// Closes the window, which quits where this menu bar is used.
     Quit(&'static str, KeyboardShortcut),
@@ -70,6 +72,31 @@ pub(super) fn menus(s: &'static Strings) -> Vec<(&'static str, Vec<Entry>)> {
                 item(A::PlayPause, s.menu_play_pause),
                 key(A::Next, s.menu_next, CMD, Key::ArrowRight),
                 key(A::Previous, s.menu_previous, CMD, Key::ArrowLeft),
+                key(
+                    A::SeekForward,
+                    s.menu_seek_forward,
+                    CMD_ALT,
+                    Key::ArrowRight,
+                ),
+                key(A::SeekBack, s.menu_seek_back, CMD_ALT, Key::ArrowLeft),
+                key(
+                    A::StopAfterCurrent,
+                    s.menu_stop_after_current,
+                    CMD_SHIFT,
+                    Key::Period,
+                ),
+                Entry::Sub(
+                    s.menu_sleep_timer,
+                    vec![
+                        item(A::SleepTimer(15), s.sleep_15),
+                        item(A::SleepTimer(30), s.sleep_30),
+                        item(A::SleepTimer(45), s.sleep_45),
+                        item(A::SleepTimer(60), s.sleep_60),
+                        item(A::SleepTimer(90), s.sleep_90),
+                        Separator,
+                        item(A::SleepTimer(0), s.sleep_off),
+                    ],
+                ),
                 Separator,
                 key(A::VolumeUp, s.menu_volume_up, CMD, Key::ArrowUp),
                 key(A::VolumeDown, s.menu_volume_down, CMD, Key::ArrowDown),
@@ -96,12 +123,24 @@ pub(super) fn menus(s: &'static Strings) -> Vec<(&'static str, Vec<Entry>)> {
     ]
 }
 
+/// The entries with those of the menus inside them, in order.
+fn flat(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for entry in entries {
+        match entry {
+            Entry::Sub(_, inner) => out.extend(flat(inner)),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Every shortcut of the menus with its action, the ones with more modifiers first:
 /// Ctrl+Shift+U must be tried before Ctrl+U, which it would also satisfy.
 pub(super) fn shortcuts(s: &'static Strings) -> Vec<(KeyboardShortcut, MenuAction)> {
     let mut list: Vec<(KeyboardShortcut, MenuAction)> = menus(s)
         .into_iter()
-        .flat_map(|(_, entries)| entries)
+        .flat_map(|(_, entries)| flat(entries))
         .filter_map(|entry| match entry {
             Entry::Item(action, _, Some(shortcut)) => Some((shortcut, action)),
             _ => None,
@@ -135,6 +174,23 @@ impl OneumApp {
                             match entry {
                                 Entry::Separator => {
                                     ui.separator();
+                                }
+                                Entry::Sub(label, inner) => {
+                                    ui.menu_button(label, |ui| {
+                                        for entry in inner {
+                                            match entry {
+                                                Entry::Item(action, label, _) => {
+                                                    if ui.button(label).clicked() {
+                                                        chosen = Some(action);
+                                                        ui.close();
+                                                    }
+                                                }
+                                                _ => {
+                                                    ui.separator();
+                                                }
+                                            }
+                                        }
+                                    });
                                 }
                                 Entry::Item(action, label, shortcut) => {
                                     let mut button = egui::Button::new(label);
@@ -199,7 +255,7 @@ mod tests {
     fn every_command_of_the_system_menu_is_in_the_window_menu() {
         let offered: HashSet<MenuAction> = menus(&KO)
             .into_iter()
-            .flat_map(|(_, entries)| entries)
+            .flat_map(|(_, entries)| flat(entries))
             .filter_map(|entry| match entry {
                 Entry::Item(action, ..) => Some(action),
                 _ => None,
@@ -238,6 +294,15 @@ mod tests {
             A::SongToggleFavorite,
             A::SongShowInFinder,
             A::SongInfo,
+            A::StopAfterCurrent,
+            A::SeekForward,
+            A::SeekBack,
+            A::SleepTimer(0),
+            A::SleepTimer(15),
+            A::SleepTimer(30),
+            A::SleepTimer(45),
+            A::SleepTimer(60),
+            A::SleepTimer(90),
         ];
         for action in all {
             assert!(offered.contains(&action), "{action:?} is missing");
@@ -247,7 +312,7 @@ mod tests {
         assert_eq!(menus(&KO).len(), menus(&EN).len());
         for (title, entries) in menus(&EN) {
             assert!(!title.is_empty());
-            for entry in entries {
+            for entry in flat(entries) {
                 if let Entry::Item(_, label, _) | Entry::Quit(label, _) = entry {
                     assert!(!label.is_empty());
                 }

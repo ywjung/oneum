@@ -13,9 +13,25 @@ pub(super) enum Dialog {
         tracks: Vec<TrackId>,
         focus: bool,
     },
+    /// Name a smart playlist: a new one for `query`, or `original` under a new name.
+    SmartPlaylist {
+        name: String,
+        query: String,
+        original: Option<String>,
+        focus: bool,
+    },
 }
 
 impl Dialog {
+    pub(super) fn smart_playlist(name: &str, query: String, original: Option<String>) -> Self {
+        Self::SmartPlaylist {
+            name: crate::app::settings::tidy_text(name, crate::app::settings::MAX_SMART_NAME_CHARS),
+            query,
+            original,
+            focus: true,
+        }
+    }
+
     pub(super) fn new_playlist(default_name: &str, tracks: Vec<TrackId>) -> Self {
         Self::NewPlaylist {
             name: default_name.to_string(),
@@ -61,6 +77,7 @@ impl OneumApp {
                     s.remove_from_library,
                 ),
                 Dialog::NewPlaylist { .. } => (s.new_playlist, String::new(), s.ok),
+                Dialog::SmartPlaylist { query, .. } => (s.smart_playlist, query.clone(), s.ok),
             };
             ui.label(
                 RichText::new(title)
@@ -69,9 +86,21 @@ impl OneumApp {
             );
             ui.add_space(6.0);
             let mut can_confirm = true;
-            if let Dialog::NewPlaylist { name, focus, .. } = &mut dialog {
+            if let Dialog::SmartPlaylist { .. } = &dialog {
+                // What is being named: the search itself.
+                ui.label(RichText::new(&body).monospace().weak());
+                ui.add_space(4.0);
+            }
+            let hint = if matches!(dialog, Dialog::SmartPlaylist { .. }) {
+                s.smart_name
+            } else {
+                s.playlist_name
+            };
+            if let Dialog::NewPlaylist { name, focus, .. }
+            | Dialog::SmartPlaylist { name, focus, .. } = &mut dialog
+            {
                 let edit = egui::TextEdit::singleline(name)
-                    .hint_text(s.playlist_name)
+                    .hint_text(hint)
                     .desired_width(f32::INFINITY);
                 let response = ui.add(edit);
                 response.widget_info(|| {
@@ -99,7 +128,10 @@ impl OneumApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The button that acts is filled: red when it takes something away.
                 let dark = ui.visuals().dark_mode;
-                let destructive = !matches!(dialog, Dialog::NewPlaylist { .. });
+                let destructive = !matches!(
+                    dialog,
+                    Dialog::NewPlaylist { .. } | Dialog::SmartPlaylist { .. }
+                );
                 let (fill, ink) = if destructive {
                     (
                         egui::Color32::from_rgb(0xD6, 0x45, 0x45),
@@ -156,6 +188,39 @@ impl OneumApp {
             Dialog::RemoveTracks(tracks) => {
                 library.remove_tracks(&tracks);
                 Ok(())
+            }
+            Dialog::SmartPlaylist {
+                name,
+                query,
+                original,
+                ..
+            } => {
+                use crate::app::settings::{MAX_SMART_NAME_CHARS, MAX_SMART_PLAYLISTS, tidy_text};
+                let name = tidy_text(&name, MAX_SMART_NAME_CHARS);
+                if name.is_empty() {
+                    return;
+                }
+                let list = &mut self.settings.smart_playlists;
+                match original {
+                    // Renamed: it keeps its place; another one of that name gives way.
+                    Some(old) => {
+                        list.retain(|p| p.name != name || p.name == old);
+                        if let Some(smart) = list.iter_mut().find(|p| p.name == old) {
+                            smart.name = name.clone();
+                        }
+                    }
+                    None => {
+                        list.retain(|p| p.name != name);
+                        if list.len() < MAX_SMART_PLAYLISTS {
+                            list.push(crate::app::settings::SmartPlaylist {
+                                name: name.clone(),
+                                query,
+                            });
+                        }
+                    }
+                }
+                self.go(Nav::Smart(name));
+                return;
             }
             Dialog::NewPlaylist { name, tracks, .. } => {
                 library.create_playlist(&name).and_then(|id| {
