@@ -61,6 +61,21 @@ pub struct Track {
 }
 
 impl Track {
+    /// The sample rate playback runs at: the file's own, except for DSD, which plays as
+    /// the PCM it is converted to.
+    pub fn playback_rate(&self) -> u32 {
+        if self.codec.starts_with("DSD") {
+            crate::audio::dsd::pcm_rate(self.sample_rate).unwrap_or(self.sample_rate)
+        } else {
+            self.sample_rate
+        }
+    }
+
+    /// True for formats that keep the recording as it was made: FLAC, ALAC, PCM, DSD.
+    pub fn is_lossless(&self) -> bool {
+        matches!(self.codec.as_str(), "FLAC" | "ALAC" | "PCM") || self.codec.starts_with("DSD")
+    }
+
     /// The values volume leveling works with: the file's tags, and where a gain is
     /// missing there, what the app measured. A gain always comes with the peak from
     /// the same source.

@@ -41,12 +41,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "ogg", "oga",
+    "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "ogg", "oga", "dsf",
+    "dff", "mka", "webm",
 ];
 const PLAYLIST_EXTENSIONS: &[&str] = &["m3u8", "m3u"];
 const VOLUME_STEP: f32 = 0.05;
 /// How far the "skip ahead/back" commands move within a song.
 const SEEK_STEP_MS: i64 = 5_000;
+/// After a failed attempt to save the settings, how long until the next one.
+const SETTINGS_RETRY: Duration = Duration::from_secs(10);
 /// The player thread answers within a fraction of a second, or a few seconds while an
 /// output device switches its format. Silence for this long means it is stuck.
 const PLAYER_STUCK_AFTER: Duration = Duration::from_secs(12);
@@ -237,6 +240,9 @@ pub struct OneumApp {
 
     snapshot: Arc<LibrarySnapshot>,
     lib_generation: u64,
+    /// The library's artist names by their folded form, and the library generation
+    /// they were collected for (the info panel looks credits up in it every frame).
+    artist_names: Option<(u64, Arc<HashMap<String, String>>)>,
     /// Bumped by the library when a cover it could not deliver has been regenerated.
     art_generation: u64,
     playlists: Vec<PlaylistInfo>,
@@ -371,6 +377,7 @@ impl OneumApp {
             spectrum: spectrum::Spectrum::default(),
             snapshot: core.library.snapshot(),
             lib_generation: core.library.generation(),
+            artist_names: None,
             art_generation: core.library.art_generation(),
             playlists: core.library.playlists(),
             playlists_generation: core.library.playlists_generation(),
@@ -925,8 +932,20 @@ impl OneumApp {
     }
 
     fn go_back(&mut self) {
-        if let Some(previous) = self.history.pop() {
+        while let Some(previous) = self.history.pop() {
+            // A smart playlist renamed or deleted since is passed over: going back to
+            // it would show an empty list under a name that is no longer there.
+            if let Nav::Smart(name) = &previous
+                && !self
+                    .settings
+                    .smart_playlists
+                    .iter()
+                    .any(|p| &p.name == name)
+            {
+                continue;
+            }
             self.nav = previous;
+            return;
         }
     }
 
@@ -1314,6 +1333,7 @@ impl OneumApp {
             }
             Action::DeleteSmart(name) => {
                 self.settings.smart_playlists.retain(|p| p.name != name);
+                self.views.remove(&Nav::Smart(name.clone()));
                 if self.nav == Nav::Smart(name) {
                     self.go(Nav::Songs);
                 }
@@ -1383,13 +1403,18 @@ impl OneumApp {
     fn persist_settings(&mut self) {
         self.last_settings_save = Instant::now();
         if self.settings != self.saved_settings {
-            if let Err(e) = crate::storage::settings::save_json_atomic(
+            match crate::storage::settings::save_json_atomic(
                 &self.core.paths.settings_file(),
                 &self.settings,
             ) {
-                tracing::warn!("could not save settings: {e}");
+                Ok(()) => self.saved_settings = self.settings.clone(),
+                // Kept as unsaved, and tried again a little later (a full disk, a
+                // folder made read-only): not every frame, and not given up on.
+                Err(e) => {
+                    tracing::warn!("could not save settings: {e}");
+                    self.last_settings_save = Instant::now() + SETTINGS_RETRY;
+                }
             }
-            self.saved_settings = self.settings.clone();
         }
     }
 

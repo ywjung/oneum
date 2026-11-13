@@ -517,8 +517,14 @@ fn unsupported_codecs_are_counted_not_added() {
         );
         expected_unsupported += 1;
     }
-    if has_encoder("adpcm_ms") {
-        ffmpeg_audio(&music.join("adpcm.wav"), &["-c:a", "adpcm_ms"], &[], None);
+    if has_encoder("libopus") {
+        // Opus in WebM: the container is read, the codec is not played.
+        ffmpeg_audio(
+            &music.join("opus.webm"),
+            &["-c:a", "libopus", "-ar", "48000"],
+            &[("title", "Opus")],
+            None,
+        );
         expected_unsupported += 1;
     }
     // AAC that goes by the same name as what plays, but that the decoder refuses:
@@ -2099,4 +2105,154 @@ fn korean_tags_in_the_old_code_page_are_read_as_korean() {
     // Searchable the way Korean titles are, initial consonants included.
     let found = library.snapshot().search("ㅂㅍㅈ");
     assert_eq!(found.len(), 1);
+}
+
+/// The ID3v2 tag a DSD file carries, made with the tag library.
+fn id3_tag(title: &str, artist: &str, album: &str) -> Vec<u8> {
+    use lofty::config::WriteOptions;
+    use lofty::id3::v2::Id3v2Tag;
+    use lofty::tag::{Accessor, TagExt};
+    let mut tag = Id3v2Tag::new();
+    tag.set_title(title.into());
+    tag.set_artist(artist.into());
+    tag.set_album(album.into());
+    tag.set_track(3);
+    let mut bytes = Vec::new();
+    tag.dump_to(&mut bytes, WriteOptions::default()).unwrap();
+    bytes
+}
+
+/// Formats that play since DSD, Matroska and ADPCM were added: each is in the library
+/// as what it is, with its tags, its length and (DSD) its own rate.
+#[test]
+fn dsd_matroska_and_adpcm_are_added_as_what_they_are() {
+    use oneum::audio::dsd::encode::{Modulator, dff, dsf};
+    let env = TestEnv::new();
+    let music = env.music();
+    // Two seconds of DSD64 and one of DSD128, stereo, with tags.
+    let bits = |rate: u32, seconds: f64| {
+        let samples = (f64::from(rate) * seconds) as u64;
+        let mut m = Modulator::new();
+        for n in 0..samples {
+            m.push(0.4 * (2.0 * std::f64::consts::PI * 440.0 * n as f64 / f64::from(rate)).sin());
+        }
+        (m.finish(), samples)
+    };
+    let (b64, n64) = bits(2_822_400, 2.0);
+    let tag = id3_tag("밤의 노래", "Pianist", "SACD Album");
+    fs::write(
+        music.join("one.dsf"),
+        dsf(2_822_400, &[b64.clone(), b64.clone()], n64, Some(&tag)),
+    )
+    .unwrap();
+    fs::write(
+        music.join("two.dff"),
+        dff(
+            2_822_400,
+            &[b64.clone(), b64],
+            Some(&id3_tag("Two", "Pianist", "SACD Album")),
+        ),
+    )
+    .unwrap();
+    let (b128, n128) = bits(5_644_800, 1.0);
+    fs::write(
+        music.join("untagged.dsf"),
+        dsf(5_644_800, &[b128.clone(), b128], n128, None),
+    )
+    .unwrap();
+    let mut expected = vec!["Two", "untagged", "밤의 노래"];
+    if ffmpeg_or_skip("dsd_matroska_and_adpcm_are_added_as_what_they_are (Matroska, ADPCM)") {
+        // ffmpeg puts a Matroska file's title in the segment header, not in its tags,
+        // so this one is known by its file name; artist and album are album-level tags.
+        ffmpeg_audio(
+            &music.join("In Matroska.mka"),
+            &["-c:a", "flac"],
+            &[
+                ("title", "Segment title"),
+                ("artist", "Band"),
+                ("album", "Live"),
+            ],
+            None,
+        );
+        ffmpeg_audio(
+            &music.join("ima.wav"),
+            &["-c:a", "adpcm_ima_wav"],
+            &[],
+            None,
+        );
+        ffmpeg_audio(&music.join("ms.wav"), &["-c:a", "adpcm_ms"], &[], None);
+        expected.extend(["In Matroska", "ima", "ms"]);
+        if let Some(vorbis) = vorbis_args() {
+            ffmpeg_audio(&music.join("In WebM.webm"), &vorbis, &[], None);
+            expected.push("In WebM");
+        }
+    }
+    let (library, _) = env.open_scanned();
+    let mut want: Vec<String> = expected.iter().map(|t| t.to_string()).collect();
+    want.sort();
+    assert_eq!(titles(&library), want);
+    assert_eq!(library.scan_status().unsupported, 0);
+
+    let one = by_title(&library, "밤의 노래");
+    assert_eq!(
+        (one.codec.as_str(), one.container.as_str()),
+        ("DSD64", "DSF")
+    );
+    assert_eq!(
+        (one.artist.as_str(), one.album.as_str()),
+        ("Pianist", "SACD Album")
+    );
+    assert_eq!(one.track_no, Some(3));
+    assert_eq!(one.sample_rate, 2_822_400);
+    assert_eq!(one.playback_rate(), 88_200);
+    assert_eq!(one.bit_depth, Some(1));
+    assert_eq!(one.channels, 2);
+    assert!(
+        (1_990..=2_000).contains(&one.duration_ms),
+        "{}",
+        one.duration_ms
+    );
+    assert!(one.is_lossless());
+    let two = by_title(&library, "Two");
+    assert_eq!(
+        (two.codec.as_str(), two.container.as_str()),
+        ("DSD64", "DSDIFF")
+    );
+    let fast = by_title(&library, "untagged");
+    assert_eq!(
+        (fast.codec.as_str(), fast.sample_rate),
+        ("DSD128", 5_644_800)
+    );
+    assert_eq!(fast.playback_rate(), 88_200);
+    assert!((990..=1_000).contains(&fast.duration_ms));
+
+    if expected.contains(&"ima") {
+        let mka = by_title(&library, "In Matroska");
+        assert_eq!(
+            (mka.codec.as_str(), mka.container.as_str()),
+            ("FLAC", "Matroska")
+        );
+        assert_eq!((mka.artist.as_str(), mka.album.as_str()), ("Band", "Live"));
+        assert_eq!(mka.album_artist, "Band");
+        assert!(
+            (990..=1_010).contains(&mka.duration_ms),
+            "{}",
+            mka.duration_ms
+        );
+        for name in ["ima", "ms"] {
+            let wav = by_title(&library, name);
+            assert_eq!(
+                (wav.codec.as_str(), wav.container.as_str()),
+                ("ADPCM", "WAV")
+            );
+            assert!(!wav.is_lossless());
+        }
+    }
+    if expected.contains(&"In WebM") {
+        let webm = by_title(&library, "In WebM");
+        assert_eq!(
+            (webm.codec.as_str(), webm.container.as_str()),
+            ("Vorbis", "WebM")
+        );
+    }
 }

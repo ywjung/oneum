@@ -1,32 +1,50 @@
 //! The user guide, shown inside the app.
 //!
-//! The text is `docs/USER_GUIDE.md`, compiled into the binary, so the guide is the same
-//! document that is kept with the source and needs no file next to the app. It is
-//! written in the little Markdown that `markdown.rs` understands and draws.
+//! The text is `docs/USER_GUIDE.md` (Korean) or `docs/USER_GUIDE.en.md` (English),
+//! compiled into the binary, so the guide is the same document that is kept with the
+//! source and needs no file next to the app. The one in the app's language is shown.
+//! Both are written in the little Markdown that `markdown.rs` understands and draws,
+//! and have the same sections in the same order.
 use super::icons::Icon;
 use super::markdown::{self, Block, parse};
 use super::{OneumApp, theme, widgets};
+use crate::i18n::Lang;
 use eframe::egui::{self, Align, FontId, Layout, RichText, Sense};
 use std::sync::OnceLock;
 
-const GUIDE_MARKDOWN: &str = include_str!("../../docs/USER_GUIDE.md");
+const GUIDE_KO: &str = include_str!("../../docs/USER_GUIDE.md");
+const GUIDE_EN: &str = include_str!("../../docs/USER_GUIDE.en.md");
 /// What is different on Windows; put in front of the second section there.
-const WINDOWS_NOTES: &str = include_str!("../../docs/USER_GUIDE_WINDOWS.md");
+const WINDOWS_NOTES_KO: &str = include_str!("../../docs/USER_GUIDE_WINDOWS.md");
+const WINDOWS_NOTES_EN: &str = include_str!("../../docs/USER_GUIDE_WINDOWS.en.md");
 
-/// The guide as Markdown for this system. The guide is written for the Mac; for Windows
-/// the key symbols are spelled out for a PC keyboard, Finder becomes File Explorer, and
-/// a section on what differs is added after "getting started".
-pub(super) fn guide_markdown(windows: bool) -> String {
+/// The guide as Markdown for this system, in `lang`. The guide is written for the Mac;
+/// for Windows the key symbols are spelled out for a PC keyboard, Finder becomes File
+/// Explorer, and a section on what differs is added after "getting started".
+pub(super) fn guide_markdown(lang: Lang, windows: bool) -> String {
+    let (guide, notes) = match lang {
+        Lang::Ko => (GUIDE_KO, WINDOWS_NOTES_KO),
+        Lang::En => (GUIDE_EN, WINDOWS_NOTES_EN),
+    };
     if !windows {
-        return GUIDE_MARKDOWN.to_string();
+        return guide.to_string();
     }
-    let text = crate::platform::pc_key_names(GUIDE_MARKDOWN).replace("Finder", "파일 탐색기");
+    let text = crate::platform::pc_key_names(guide);
+    // The command keeps the name the menu gives it there; elsewhere it is the program.
+    let text = match lang {
+        Lang::Ko => text
+            .replace("Finder에서 보기", "탐색기에서 보기")
+            .replace("Finder", "파일 탐색기"),
+        Lang::En => text
+            .replace("Show in Finder", "Show in Explorer")
+            .replace("Finder", "File Explorer"),
+    };
     // After "getting started", i.e. in front of the third "## ".
     let third = text
         .match_indices("\n## ")
         .nth(2)
         .map_or(text.len(), |(at, _)| at + 1);
-    format!("{}{}\n{}", &text[..third], WINDOWS_NOTES, &text[third..])
+    format!("{}{}\n{}", &text[..third], notes, &text[third..])
 }
 
 const CONTENTS_WIDTH: f32 = 168.0;
@@ -38,15 +56,21 @@ const LOOK: markdown::Look = markdown::Look {
     heading_gap: 18.0,
 };
 
-/// The guide, parsed once.
-fn guide() -> &'static [Block] {
-    static GUIDE: OnceLock<Vec<Block>> = OnceLock::new();
-    GUIDE.get_or_init(|| parse(&guide_markdown(cfg!(windows))))
+/// The guide in `lang`, parsed once.
+fn guide(lang: Lang) -> &'static [Block] {
+    static KO: OnceLock<Vec<Block>> = OnceLock::new();
+    static EN: OnceLock<Vec<Block>> = OnceLock::new();
+    let cell = match lang {
+        Lang::Ko => &KO,
+        Lang::En => &EN,
+    };
+    cell.get_or_init(|| parse(&guide_markdown(lang, cfg!(windows))))
 }
 
-/// Section headings of the guide, in order (for the contents column and for tests).
-pub(super) fn sections() -> Vec<&'static str> {
-    guide()
+/// Section headings of the guide in `lang`, in order (for the contents column and for
+/// tests).
+pub(super) fn sections(lang: Lang) -> Vec<&'static str> {
+    guide(lang)
         .iter()
         .filter_map(|b| match b {
             Block::Heading(text) => Some(text.as_str()),
@@ -186,7 +210,9 @@ impl OneumApp {
                                 .show(ui, |ui| {
                                     ui.add_space(12.0);
                                     ui.spacing_mut().item_spacing.y = 2.0;
-                                    for (index, section) in sections().into_iter().enumerate() {
+                                    for (index, section) in
+                                        sections(self.lang).into_iter().enumerate()
+                                    {
                                         if contents_entry(ui, section).clicked() {
                                             jump_to = Some(index + 1);
                                         }
@@ -236,7 +262,7 @@ impl OneumApp {
 
     /// The text of the guide. `jump` scrolls to section `n` (1-based).
     fn guide_body(&self, ui: &mut egui::Ui, jump: Option<usize>) {
-        markdown::show(ui, guide(), LOOK, |ui, section| {
+        markdown::show(ui, guide(self.lang), LOOK, |ui, section| {
             if jump == Some(section) {
                 ui.scroll_to_cursor(Some(Align::TOP));
             }
@@ -252,95 +278,207 @@ mod tests {
         spans.iter().map(|s| s.text.as_str()).collect()
     }
 
-    /// The Windows edition: PC key names, File Explorer, and the section on differences
-    /// as the second one. It parses as cleanly as the Mac edition.
-    #[test]
-    fn the_windows_guide_speaks_of_a_pc() {
-        let markdown = guide_markdown(true);
-        assert!(!markdown.contains('⌘') && !markdown.contains('⇧') && !markdown.contains('⌥'));
-        assert!(markdown.contains("Ctrl+F") && markdown.contains("Ctrl+Shift+U"));
-        assert!(!markdown.contains("Finder") && markdown.contains("파일 탐색기"));
-        let blocks = parse(&markdown);
-        let headings: Vec<&str> = blocks
+    fn headings(blocks: &[Block]) -> Vec<&str> {
+        blocks
             .iter()
             .filter_map(|b| match b {
                 Block::Heading(t) => Some(t.as_str()),
                 _ => None,
             })
-            .collect();
-        assert_eq!(headings[0], "OnEum이라는 이름");
-        assert_eq!(headings[1], "시작하기");
-        assert_eq!(headings[2], "Windows에서 다른 점");
-        assert_eq!(headings[3], "화면");
-        let mac = parse(&guide_markdown(false));
-        let mac_headings = mac
-            .iter()
-            .filter(|b| matches!(b, Block::Heading(_)))
-            .count();
-        assert_eq!(headings.len(), mac_headings + 1);
-        // Same number of tables, none of them broken by the rewriting.
-        let tables = |blocks: &[Block]| {
-            blocks
-                .iter()
-                .filter(|b| {
-                    matches!(b, Block::Table { head, rows }
-                        if rows.iter().all(|r| r.len() == head.len()))
-                })
-                .count()
-        };
-        assert_eq!(tables(&blocks), 3);
-        assert_eq!(tables(&mac), 3);
+            .collect()
     }
 
-    /// The guide that ships: everything in it is understood, nothing is left as markup.
+    /// Tables whose rows all have as many cells as their head.
+    fn tables(blocks: &[Block]) -> usize {
+        blocks
+            .iter()
+            .filter(|b| {
+                matches!(b, Block::Table { head, rows }
+                    if rows.iter().all(|r| r.len() == head.len()))
+            })
+            .count()
+    }
+
+    /// The Windows edition: PC key names, File Explorer, and the section on differences
+    /// as the third one. It parses as cleanly as the Mac edition, in both languages.
     #[test]
-    fn the_real_guide_is_fully_understood() {
-        let blocks = guide();
-        let titles = blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Title(_)))
-            .count();
-        assert_eq!(titles, 1);
-        let markdown = guide_markdown(cfg!(windows));
-        let headings = markdown.lines().filter(|l| l.starts_with("## ")).count();
-        assert!(headings >= 8);
-        assert_eq!(sections().len(), headings);
-        let tables = blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Table { .. }))
-            .count();
-        assert_eq!(tables, 3, "shortcuts, output quality, troubleshooting");
-        let mut texts: Vec<String> = Vec::new();
-        for block in blocks {
-            match block {
-                Block::Title(t) | Block::Heading(t) => texts.push(t.clone()),
-                Block::Paragraph(s) | Block::Item { text: s, .. } => texts.push(plain(s)),
-                Block::Table { head, rows } => {
-                    // Every row has as many cells as the head.
-                    assert!(rows.iter().all(|r| r.len() == head.len()), "ragged table");
-                    texts.extend(head.iter().chain(rows.iter().flatten()).map(|c| plain(c)));
+    fn the_windows_guide_speaks_of_a_pc() {
+        for (lang, explorer, show_in, differences) in [
+            (
+                Lang::Ko,
+                "파일 탐색기",
+                "탐색기에서 보기",
+                "Windows에서 다른 점",
+            ),
+            (
+                Lang::En,
+                "File Explorer",
+                "Show in Explorer",
+                "What Is Different on Windows",
+            ),
+        ] {
+            let markdown = guide_markdown(lang, true);
+            assert!(!markdown.contains('⌘') && !markdown.contains('⇧') && !markdown.contains('⌥'));
+            assert!(markdown.contains("Ctrl+F") && markdown.contains("Ctrl+Shift+U"));
+            assert!(!markdown.contains("Finder"), "{lang:?}");
+            assert!(
+                markdown.contains(explorer) && markdown.contains(show_in),
+                "{lang:?}"
+            );
+            let blocks = parse(&markdown);
+            let windows = headings(&blocks);
+            assert_eq!(windows[2], differences);
+            let mac = parse(&guide_markdown(lang, false));
+            let mac_headings = headings(&mac);
+            assert_eq!(windows.len(), mac_headings.len() + 1);
+            // The other headings are the Mac ones, with the keys named for a PC.
+            let pc: Vec<String> = mac_headings
+                .iter()
+                .map(|h| crate::platform::pc_key_names(h))
+                .collect();
+            assert_eq!(windows[..2], pc[..2]);
+            assert_eq!(windows[3..], pc[2..]);
+            // Same number of tables, none of them broken by the rewriting.
+            assert_eq!(tables(&blocks), 3);
+            assert_eq!(tables(&mac), 3);
+        }
+    }
+
+    /// The guides that ship: everything in them is understood, nothing is left as
+    /// markup, and what a reader looks for is there.
+    #[test]
+    fn the_real_guides_are_fully_understood() {
+        for (lang, needles) in [
+            (
+                Lang::Ko,
+                [
+                    "온음",
+                    "시작하기",
+                    "단축키",
+                    "VU 미터",
+                    "출력 품질",
+                    "문제가 생겼을 때",
+                ],
+            ),
+            (
+                Lang::En,
+                [
+                    "온음",
+                    "Getting Started",
+                    "Keyboard Shortcuts",
+                    "VU Meter",
+                    "Output Quality",
+                    "Troubleshooting",
+                ],
+            ),
+        ] {
+            let blocks = guide(lang);
+            let titles = blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Title(_)))
+                .count();
+            assert_eq!(titles, 1);
+            let markdown = guide_markdown(lang, cfg!(windows));
+            let count = markdown.lines().filter(|l| l.starts_with("## ")).count();
+            assert!(count >= 8);
+            assert_eq!(sections(lang).len(), count);
+            let all_tables = blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Table { .. }))
+                .count();
+            assert_eq!(all_tables, 3, "shortcuts, output quality, troubleshooting");
+            assert_eq!(tables(blocks), 3, "ragged table in {lang:?}");
+            let mut texts: Vec<String> = Vec::new();
+            for block in blocks {
+                match block {
+                    Block::Title(t) | Block::Heading(t) => texts.push(t.clone()),
+                    Block::Paragraph(s) | Block::Item { text: s, .. } => texts.push(plain(s)),
+                    Block::Table { head, rows } => {
+                        texts.extend(head.iter().chain(rows.iter().flatten()).map(|c| plain(c)))
+                    }
                 }
             }
+            for text in &texts {
+                assert!(!text.trim().is_empty(), "empty block");
+                assert!(
+                    !text.contains("**") && !text.contains('`') && !text.starts_with('#'),
+                    "markup left in: {text}"
+                );
+                assert!(!text.starts_with('|') && !text.starts_with("- "), "{text}");
+            }
+            let all = texts.join("\n");
+            for needle in needles {
+                assert!(all.contains(needle), "{needle} is missing in {lang:?}");
+            }
         }
-        for text in &texts {
-            assert!(!text.trim().is_empty(), "empty block");
-            assert!(
-                !text.contains("**") && !text.contains('`') && !text.starts_with('#'),
-                "markup left in: {text}"
-            );
-            assert!(!text.starts_with('|') && !text.starts_with("- "), "{text}");
-        }
-        // Things a reader looks for are there.
-        let all = texts.join("\n");
-        for needle in [
-            "온음",
-            "시작하기",
-            "단축키",
-            "VU 미터",
-            "출력 품질",
-            "문제가 생겼을 때",
+    }
+
+    /// The two guides tell the same thing: the same sections in the same order, and
+    /// as many points and table rows in each section.
+    #[test]
+    fn the_english_guide_follows_the_korean_one() {
+        // Per section: (items, table rows).
+        let outline = |lang: Lang| {
+            let mut sections: Vec<(usize, usize)> = Vec::new();
+            for block in guide(lang) {
+                match block {
+                    Block::Heading(_) => sections.push((0, 0)),
+                    Block::Item { .. } => {
+                        if let Some(last) = sections.last_mut() {
+                            last.0 += 1;
+                        }
+                    }
+                    Block::Table { rows, .. } => {
+                        if let Some(last) = sections.last_mut() {
+                            last.1 += rows.len();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            sections
+        };
+        assert_eq!(outline(Lang::En), outline(Lang::Ko));
+        assert_eq!(sections(Lang::En).len(), sections(Lang::Ko).len());
+        // Shortcuts are the same keys.
+        let keys = |lang: Lang| -> Vec<String> {
+            guide(lang)
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Table { rows, .. } => Some(rows),
+                    _ => None,
+                })
+                .nth(1)
+                .expect("the shortcuts table")
+                .iter()
+                .map(|row| plain(&row[0]))
+                .collect()
+        };
+        assert_eq!(keys(Lang::En), keys(Lang::Ko));
+    }
+
+    /// Korean in the English guide only where it is meant: the name and what it means,
+    /// a search by Korean initials, and the language's own name in the settings.
+    #[test]
+    fn the_english_guide_is_english() {
+        let allowed = ["온음", "온", "ㅇㅇㅇ", "아이유", "한국어"];
+        for markdown in [
+            guide_markdown(Lang::En, false),
+            guide_markdown(Lang::En, true),
         ] {
-            assert!(all.contains(needle), "{needle} is missing");
+            let korean = |c: char| matches!(c, '\u{AC00}'..='\u{D7A3}' | '\u{3131}'..='\u{318E}');
+            let mut word = String::new();
+            for c in markdown.chars().chain([' ']) {
+                if korean(c) {
+                    word.push(c);
+                } else if !word.is_empty() {
+                    assert!(
+                        allowed.contains(&word.as_str()),
+                        "Korean in the English guide: {word}"
+                    );
+                    word.clear();
+                }
+            }
         }
     }
 }

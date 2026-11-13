@@ -25,7 +25,7 @@ automation = []
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
 egui_extras = { version = "0.37", default-features = false }
 cpal = "0.18"
-symphonia = { version = "0.6", default-features = false, features = ["opt-simd", "all-meta", "flac", "mp1", "mp2", "mp3", "wav", "aiff", "pcm", "aac", "alac", "isomp4", "caf", "ogg", "vorbis"] }
+symphonia = { version = "0.6", default-features = false, features = ["opt-simd", "all-meta", "flac", "mp1", "mp2", "mp3", "wav", "aiff", "pcm", "aac", "alac", "isomp4", "caf", "ogg", "vorbis", "mkv", "adpcm"] }
 # Without "id3v2_compression_support": a compressed ID3v2 frame can unpack to gigabytes
 # (the reader does not limit it), and such frames are next to unknown in real files.
 # 0.25.5 does not build without the feature; see [patch.crates-io] and vendor/lofty.

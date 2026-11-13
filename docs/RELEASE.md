@@ -6,7 +6,7 @@
 | 단계 | 상태 |
 |---|---|
 | 재현 가능한 빌드·번들·DMG | 완료 (`scripts/package.sh --dmg`) |
-| ad-hoc 서명, `codesign --verify` | 완료 |
+| ad-hoc 서명(하드닝 런타임 포함), `codesign --verify` | 완료 |
 | 별도 위치에 설치해 실행 | 완료 (docs/TESTING.md "패키지 검증") |
 | Developer ID 서명 + Hardened Runtime | **검증 대기** — 인증서 없음 |
 | 공증(notarytool), stapling, `spctl` 평가 | **검증 대기** — Apple 계정 자격 증명 없음 |

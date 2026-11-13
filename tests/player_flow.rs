@@ -1928,3 +1928,32 @@ fn a_correction_profile_is_applied_and_named() {
     assert_eq!(after.state, PlayState::Playing);
     assert_eq!(rig.feeds(), 1, "the feed was not restarted");
 }
+
+/// The song marked "stop after this song" cannot be played (its drive is gone): it is
+/// over at once, so playback stops there as it would have at its end, with the next
+/// song ready. Before, the mark went with the skipped song and the queue played on.
+#[test]
+fn stop_after_a_song_that_cannot_be_played_stops_there() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(play(&[A, OFFLINE, B], 0));
+    rig.send(Command::Pause);
+    rig.send(Command::Next);
+    rig.wait("the unplayable song is current, paused", |s| {
+        s.state == PlayState::Paused && Rig::track(s) == Some(OFFLINE)
+    });
+    rig.send(Command::SetStopAfterCurrent(true));
+    rig.wait("marked", |s| s.stop_after_current);
+    rig.send(Command::Play);
+    let stopped = rig.wait("stopped with the next song ready", |s| {
+        s.state == PlayState::Paused && Rig::track(s) == Some(B)
+    });
+    assert!(!stopped.stop_after_current);
+    assert_eq!(stopped.position_ms, 0);
+    std::thread::sleep(Duration::from_millis(300));
+    let later = rig.player.snapshot();
+    assert_eq!(later.state, PlayState::Paused, "nothing started on its own");
+    assert!(!rig.host.plays().contains(&B));
+    rig.send(Command::Play);
+    rig.wait("the rest of the queue", |s| s.state == PlayState::Ended);
+    assert!(rig.host.plays().contains(&B));
+}

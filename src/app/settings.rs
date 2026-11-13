@@ -60,16 +60,19 @@ pub struct Settings {
     pub crossfeed: Crossfeed,
     /// Parametric correction profiles that were imported (headphone corrections), in
     /// the order they were imported.
+    #[serde(deserialize_with = "lenient_list")]
     pub corrections: Vec<PeqProfile>,
     /// Name of the profile that is applied; `None`: none.
     pub correction: Option<String>,
     /// Radio: when the queue runs out, go on with songs like the last one (off by default).
     pub radio: bool,
     /// The equalizer presets the user has saved, in the order they were saved.
+    #[serde(deserialize_with = "lenient_list")]
     pub eq_presets: Vec<EqPreset>,
     pub show_format_column: bool,
     pub list_columns: ListColumns,
     /// Searches kept as smart playlists, in the order they were made.
+    #[serde(deserialize_with = "lenient_list")]
     pub smart_playlists: Vec<SmartPlaylist>,
     pub right_panel: RightPanel,
     /// Show the VU meter deck above the player bar.
@@ -92,6 +95,23 @@ pub const MAX_CORRECTIONS: usize = 30;
 pub const MAX_SMART_PLAYLISTS: usize = 100;
 pub const MAX_SMART_NAME_CHARS: usize = 60;
 pub const MAX_SMART_QUERY_CHARS: usize = 300;
+
+/// A list read one entry at a time: an entry this build cannot read (damaged, or of a
+/// kind a later version added) is left out instead of costing the whole file, and with
+/// it every other setting. Something that is not a list at all reads as an empty one.
+fn lenient_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
+            .collect(),
+        _ => Vec::new(),
+    })
+}
 
 /// A name or a search as it is kept: one line, without control characters, cut at `max`.
 pub fn tidy_text(text: &str, max: usize) -> String {
@@ -375,5 +395,28 @@ mod tests {
             shadowed.active_correction().map(|p| p.preamp_db),
             Some(-1.0)
         );
+    }
+
+    /// One entry this build cannot read (damaged, or a filter kind of a later version)
+    /// costs that entry, not the whole file.
+    #[test]
+    fn an_entry_that_cannot_be_read_is_left_out_and_the_rest_kept() {
+        let json = r#"{
+            "theme": "Light",
+            "smart_playlists": [{"name": "Late"}, {"name": "Good", "query": "year:2020"}],
+            "corrections": [
+                {"name": "Future", "preamp_db": -3.0,
+                 "filters": [{"kind": "Notch", "hz": 50.0, "gain_db": 0.0, "q": 1.0}]},
+                {"name": "Phones", "preamp_db": -3.0, "filters": []}
+            ],
+            "eq_presets": 7
+        }"#;
+        let s: Settings = serde_json::from_str(json).expect("still parses");
+        assert_eq!(s.theme, ThemeChoice::Light);
+        assert_eq!(s.smart_playlists.len(), 1);
+        assert_eq!(s.smart_playlists[0].name, "Good");
+        assert_eq!(s.corrections.len(), 1);
+        assert_eq!(s.corrections[0].name, "Phones");
+        assert!(s.eq_presets.is_empty());
     }
 }

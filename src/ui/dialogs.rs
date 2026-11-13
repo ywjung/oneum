@@ -208,6 +208,9 @@ impl OneumApp {
                         if let Some(smart) = list.iter_mut().find(|p| p.name == old) {
                             smart.name = name.clone();
                         }
+                        if old != name {
+                            self.views.remove(&Nav::Smart(old));
+                        }
                     }
                     None => {
                         list.retain(|p| p.name != name);

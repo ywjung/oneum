@@ -1,5 +1,7 @@
 //! Application start-up, wiring and shutdown.
 pub mod host;
+#[cfg(test)]
+mod hostile;
 pub mod logging;
 pub mod paths;
 pub mod settings;

@@ -2,8 +2,12 @@
 //!
 //! Files are selected by extension and then verified by content: the container/codec
 //! reported here is what the file really is, and anything the audio engine cannot play
-//! (DRM-protected MP4, Opus-in-Ogg, compressed WAV/AIFF …) is reported
-//! as unsupported instead of being added to the library.
+//! (DRM-protected MP4, Opus-in-Ogg, compressed WAV/AIFF the decoder does not know …) is
+//! reported as unsupported instead of being added to the library.
+//!
+//! Two kinds of file are read without lofty's audio parsing: DSD (DSF and DSDIFF), whose
+//! headers are read by `audio::dsd` and whose ID3v2 tag is handed to lofty on its own,
+//! and Matroska/WebM, whose properties come from the decoder and tags from Symphonia.
 use crate::model::ReplayGainTags;
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
@@ -22,9 +26,66 @@ use std::path::Path;
 
 /// Extensions the scanner looks at. `m4p` is listed only so that protected purchases are
 /// counted as unsupported rather than silently ignored.
-const AUDIO_EXTENSIONS: [&str; 13] = [
+const AUDIO_EXTENSIONS: [&str; 17] = [
     "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "m4p", "ogg", "oga",
+    "dsf", "dff", "mka", "webm",
 ];
+
+/// What reading one file's tags and properties may cost: bytes read from the file and
+/// calls on it. A real file needs a few megabytes and a few hundred calls (a large
+/// cover, a long sample table); a damaged one can make the tag library walk it in tiny
+/// steps (a FLAC whose metadata runs into zeros reads as millions of empty blocks, a
+/// file of zeros is searched to its end). Past either limit the file is not read.
+const MAX_READ_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_READ_CALLS: u32 = 100_000;
+
+/// A file with a limit on what reading it may cost (see [`MAX_READ_BYTES`]).
+struct Budget<R> {
+    inner: R,
+    bytes_left: u64,
+    calls_left: u32,
+}
+
+impl<R> Budget<R> {
+    fn new(inner: R) -> Self {
+        Budget {
+            inner,
+            bytes_left: MAX_READ_BYTES,
+            calls_left: MAX_READ_CALLS,
+        }
+    }
+
+    fn spend(&mut self) -> std::io::Result<()> {
+        if self.calls_left == 0 || self.bytes_left == 0 {
+            return Err(std::io::Error::other(
+                "reading this file costs more than any music file needs",
+            ));
+        }
+        self.calls_left -= 1;
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for Budget<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.spend()?;
+        let n = self.inner.read(buf)?;
+        self.bytes_left = self.bytes_left.saturating_sub(n as u64);
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Budget<R> {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.spend()?;
+        self.inner.seek(to)
+    }
+}
+
+/// The first four bytes of a Matroska (and WebM) file: an EBML header.
+const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+/// WAVE format tags of the ADPCM kinds the decoder plays (Microsoft, IMA).
+const WAVE_FORMAT_ADPCM: [u16; 2] = [0x0002, 0x0011];
 
 /// WAVE format tags the PCM decoder handles: integer PCM, IEEE float, A-law, µ-law.
 const WAVE_FORMAT_PCM: u16 = 1;
@@ -164,9 +225,187 @@ pub(crate) fn read_without_tags(path: &Path) -> Result<FileTags, ReadError> {
     read_file(path, false, false)
 }
 
+/// What the audio of a file is, apart from its tags.
+struct Audio {
+    sample_rate: u32,
+    channels: u8,
+    duration_ms: u64,
+    bit_depth: Option<u8>,
+    bitrate_kbps: Option<u32>,
+}
+
+/// A DSF or DSDIFF file: the header by `audio::dsd`, the tags from its ID3v2 tag, read
+/// by lofty as the tag at the head of an otherwise empty MPEG file. The sample rate
+/// recorded is the DSD rate; playback runs at the PCM rate it converts to.
+fn read_dsd(
+    path: &Path,
+    reader: &mut BufReader<Budget<File>>,
+    want_picture: bool,
+    want_tags: bool,
+) -> Result<FileTags, ReadError> {
+    use crate::audio::dsd;
+    let info = dsd::read_info(reader).map_err(|e| match e.kind {
+        crate::audio::PlaybackErrorKind::Unsupported => ReadError::Unsupported(e.detail),
+        _ => ReadError::Failed(e.detail),
+    })?;
+    let audio = Audio {
+        sample_rate: info.dsd_rate,
+        channels: u8::try_from(info.channels()).unwrap_or(u8::MAX),
+        duration_ms: info.duration_ms(),
+        bit_depth: Some(1),
+        bitrate_kbps: Some(info.bitrate_kbps()),
+    };
+    let codec = dsd_codec_name(info.dsd_rate);
+    let container = match info.container {
+        dsd::Container::Dsf => "DSF",
+        dsd::Container::Dsdiff => "DSDIFF",
+    };
+    let id3 = if want_tags || want_picture {
+        dsd::read_tag(reader, &info)
+    } else {
+        None
+    };
+    let tagged = id3.and_then(|mut bytes| {
+        // Room after the tag for lofty's look at the end of the "file".
+        bytes.resize(bytes.len() + 256, 0);
+        let options = ParseOptions::new()
+            .read_properties(false)
+            .read_cover_art(want_picture)
+            .read_tags(true);
+        MpegFile::read_from(&mut std::io::Cursor::new(bytes), options)
+            .ok()
+            .map(TaggedFile::from)
+    });
+    let tags: Vec<&Tag> = tagged
+        .as_ref()
+        .map_or(Vec::new(), |t| t.tags().iter().collect());
+    Ok(file_tags(
+        path,
+        &tags,
+        audio,
+        codec,
+        container,
+        want_picture,
+    ))
+}
+
+/// The name a DSD rate is known by, as a codec name ("DSD64" …).
+fn dsd_codec_name(dsd_rate: u32) -> &'static str {
+    match crate::audio::dsd::rate_name(dsd_rate).as_str() {
+        "DSD64" => "DSD64",
+        "DSD128" => "DSD128",
+        "DSD256" => "DSD256",
+        "DSD512" => "DSD512",
+        "DSD1024" => "DSD1024",
+        _ => "DSD",
+    }
+}
+
+/// A file whose audio lofty does not parse (Matroska, WebM, a WAV it refuses): what the
+/// decoder says about it, and the tags Symphonia finds. Refused as unsupported when the
+/// decoder cannot play it (Opus in WebM, say).
+fn read_by_decoder(
+    path: &Path,
+    container: &'static str,
+    want_picture: bool,
+    want_tags: bool,
+) -> Result<FileTags, ReadError> {
+    use crate::audio::PlaybackErrorKind;
+    let refused = |e: crate::audio::PlaybackError| match e.kind {
+        PlaybackErrorKind::Unsupported => ReadError::Unsupported(e.detail),
+        _ => ReadError::Failed(e.detail),
+    };
+    let mut decoder = crate::audio::decoder::TrackDecoder::open(path).map_err(refused)?;
+    decoder.next(&mut Vec::new()).map_err(refused)?;
+    let info = decoder.info().clone();
+    let codec = match info.codec.as_str() {
+        "flac" => "FLAC",
+        "alac" => "ALAC",
+        "aac" => "AAC",
+        "mp3" => "MP3",
+        "mp2" => "MP2",
+        "mp1" => "MP1",
+        "vorbis" => "Vorbis",
+        c if c.starts_with("pcm") => "PCM",
+        c if c.starts_with("adpcm") => "ADPCM",
+        other => return Err(ReadError::Unsupported(format!("{container} with {other}"))),
+    };
+    let rate = info.sample_rate.max(1);
+    let audio = Audio {
+        sample_rate: info.sample_rate,
+        channels: u8::try_from(info.channels).unwrap_or(u8::MAX),
+        duration_ms: info
+            .total_frames
+            .map_or(0, |f| f.saturating_mul(1_000) / u64::from(rate)),
+        bit_depth: None,
+        bitrate_kbps: None,
+    };
+    let found = if want_tags || want_picture {
+        crate::audio::decoder::read_media_tags(path)
+    } else {
+        Default::default()
+    };
+    let replaygain = ReplayGainTags {
+        track_gain_db: found.replaygain[0].as_deref().and_then(parse_gain_db),
+        track_peak: found.replaygain[1].as_deref().and_then(parse_peak),
+        album_gain_db: found.replaygain[2].as_deref().and_then(parse_gain_db),
+        album_peak: found.replaygain[3].as_deref().and_then(parse_peak),
+    };
+    let mut title = clean(&found.title);
+    if title.is_empty() {
+        title = file_title(path);
+    }
+    Ok(FileTags {
+        title,
+        artist: clean(&found.artist),
+        album_artist: clean(&found.album_artist),
+        album: clean(&found.album),
+        compilation: found.compilation,
+        disc_no: found.disc_no,
+        track_no: found.track_no,
+        year: parse_year(&found.date),
+        genre: clean(&found.genre),
+        duration_ms: audio.duration_ms,
+        codec,
+        container,
+        sample_rate: audio.sample_rate,
+        channels: audio.channels,
+        bit_depth: audio.bit_depth,
+        bitrate_kbps: audio.bitrate_kbps,
+        replaygain,
+        picture: if want_picture { found.picture } else { None },
+    })
+}
+
+/// The title of a file without tags: its name.
+fn file_title(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTags, ReadError> {
+    // Only a regular file: a pipe of that name would never deliver its first byte.
+    if !std::fs::metadata(path).map_err(failed)?.is_file() {
+        return Err(ReadError::Failed("not a regular file".into()));
+    }
     let file = File::open(path).map_err(failed)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(Budget::new(file));
+
+    // Recognised by content before lofty is asked.
+    let mut magic = [0u8; 4];
+    let got = reader.read(&mut magic).map_err(failed)?;
+    reader.seek(SeekFrom::Start(0)).map_err(failed)?;
+    if got == 4 && crate::audio::dsd::is_dsd_magic(&magic) {
+        return read_dsd(path, &mut reader, want_picture, want_tags);
+    }
+    if got == 4 && magic == EBML_MAGIC {
+        let webm = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("webm"));
+        let container = if webm { "WebM" } else { "Matroska" };
+        return read_by_decoder(path, container, want_picture, want_tags);
+    }
 
     let guessed = Probe::new(&mut reader)
         .guess_file_type()
@@ -220,20 +459,31 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
             let file = match WavFile::read_from(&mut reader, options) {
                 Ok(file) => file,
                 Err(err) => {
-                    // lofty rejects some compressed WAVs outright (e.g. 4-bit ADPCM);
-                    // report those as unsupported rather than as broken files.
-                    return Err(match wav_format_tag(&mut reader) {
-                        Some(tag) if !wav_tag_is_pcm(tag) => unsupported_wav(tag),
-                        _ => failed(err),
-                    });
+                    // lofty rejects some compressed WAVs outright (e.g. 4-bit ADPCM):
+                    // the decoder may still play them; if not, they are unsupported
+                    // rather than broken.
+                    return match wav_format_tag(&mut reader) {
+                        Some(tag) if WAVE_FORMAT_ADPCM.contains(&tag) => {
+                            read_by_decoder(path, "WAV", want_picture, want_tags)
+                        }
+                        Some(tag) if !wav_tag_is_pcm(tag) => Err(unsupported_wav(tag)),
+                        _ => Err(failed(err)),
+                    };
                 }
             };
-            match file.properties().format() {
-                WavFormat::PCM | WavFormat::IEEE_FLOAT => {}
-                WavFormat::Other(tag) if wav_tag_is_pcm(*tag) => {}
+            let codec = match file.properties().format() {
+                WavFormat::PCM | WavFormat::IEEE_FLOAT => "PCM",
+                WavFormat::Other(tag) if wav_tag_is_pcm(*tag) => "PCM",
+                // ADPCM plays if the decoder takes this variant of it.
+                WavFormat::Other(tag)
+                    if WAVE_FORMAT_ADPCM.contains(tag)
+                        && crate::audio::decoder::can_play(path).is_ok() =>
+                {
+                    "ADPCM"
+                }
                 WavFormat::Other(tag) => return Err(unsupported_wav(*tag)),
-            }
-            (file.into(), "PCM", "WAV")
+            };
+            (file.into(), codec, "WAV")
         }
         FileType::Aiff => {
             let file = AiffFile::read_from(&mut reader, options).map_err(failed)?;
@@ -299,12 +549,16 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
     if sample_rate == 0 || channels == 0 {
         return Err(ReadError::Failed("no audio stream found".into()));
     }
-    let duration_ms = u64::try_from(properties.duration().as_millis()).unwrap_or(u64::MAX);
-    let bit_depth = properties.bit_depth().filter(|&bits| bits > 0);
-    let bitrate_kbps = properties
-        .audio_bitrate()
-        .filter(|&kbps| kbps > 0)
-        .or(properties.overall_bitrate().filter(|&kbps| kbps > 0));
+    let audio = Audio {
+        sample_rate,
+        channels,
+        duration_ms: u64::try_from(properties.duration().as_millis()).unwrap_or(u64::MAX),
+        bit_depth: properties.bit_depth().filter(|&bits| bits > 0),
+        bitrate_kbps: properties
+            .audio_bitrate()
+            .filter(|&kbps| kbps > 0)
+            .or(properties.overall_bitrate().filter(|&kbps| kbps > 0)),
+    };
 
     // Primary tag first (e.g. ID3v2 before ID3v1), then whatever else the file carries.
     let mut tags: Vec<&Tag> = Vec::new();
@@ -317,12 +571,29 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
         }
     }
 
+    Ok(file_tags(
+        path,
+        &tags,
+        audio,
+        codec,
+        container,
+        want_picture,
+    ))
+}
+
+/// The song as the library keeps it: what its tags say and what its audio is.
+fn file_tags(
+    path: &Path,
+    tags: &[&Tag],
+    audio: Audio,
+    codec: &'static str,
+    container: &'static str,
+    want_picture: bool,
+) -> FileTags {
+    let tags = tags.to_vec();
     let mut title = first_text(&tags, ItemKey::TrackTitle);
     if title.is_empty() {
-        title = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        title = file_title(path);
     }
     let compilation = tags.iter().any(|tag| {
         tag.get_string(ItemKey::FlagCompilation)
@@ -340,7 +611,7 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
         None
     };
 
-    Ok(FileTags {
+    FileTags {
         title,
         artist: joined_text(&tags, ItemKey::TrackArtist),
         album_artist: joined_text(&tags, ItemKey::AlbumArtist),
@@ -357,16 +628,16 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
         .into_iter()
         .find_map(|key| first_parsed(&tags, key, parse_year)),
         genre: joined_text(&tags, ItemKey::Genre),
-        duration_ms,
+        duration_ms: audio.duration_ms,
         codec,
         container,
-        sample_rate,
-        channels,
-        bit_depth,
-        bitrate_kbps,
+        sample_rate: audio.sample_rate,
+        channels: audio.channels,
+        bit_depth: audio.bit_depth,
+        bitrate_kbps: audio.bitrate_kbps,
         replaygain,
         picture,
-    })
+    }
 }
 
 /// Reads only the embedded cover of a file (used to regenerate an evicted cache entry).
@@ -679,5 +950,99 @@ mod tests {
             Err(ReadError::Failed(_)) => {}
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
+            .join(name);
+        std::fs::read(path).expect("fixture")
+    }
+
+    /// A FLAC whose metadata runs into zeros (what a crash or a failed copy leaves) reads
+    /// as millions of empty metadata blocks to the tag library. It is refused at once
+    /// instead of holding the scan: before the read budget, 4 MB took about 2.5 s and
+    /// 100 GB hours.
+    #[test]
+    fn a_flac_that_runs_into_zeros_is_refused_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let flac = fixture("gap_a.flac");
+        let mut header = flac[..42].to_vec();
+        header[4] &= 0x7F; // STREAMINFO not the last block: the zeros are "blocks"
+        let path = dir.path().join("zeros.flac");
+        let mut bytes = header.clone();
+        bytes.resize(4 * 1024 * 1024, 0);
+        std::fs::write(&path, &bytes).unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(read_tags(&path, false), Err(ReadError::Failed(_))));
+        assert!(matches!(
+            read_without_tags(&path),
+            Err(ReadError::Failed(_))
+        ));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        // A sparse file of a hundred gigabytes, the same.
+        let path = dir.path().join("sparse.flac");
+        let file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut &file, &header).unwrap();
+        file.set_len(100 * 1024 * 1024 * 1024).unwrap();
+        let started = std::time::Instant::now();
+        assert!(read_tags(&path, false).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // The real file still reads.
+        let real = dir.path().join("real.flac");
+        std::fs::write(&real, &flac).unwrap();
+        assert_eq!(read_tags(&real, true).unwrap().codec, "FLAC");
+    }
+
+    /// The budget: what a music file needs passes, endless small steps do not.
+    #[test]
+    fn the_read_budget_stops_endless_small_steps() {
+        let mut budget = Budget::new(std::io::Cursor::new(vec![0u8; 1024]));
+        let mut byte = [0u8; 1];
+        let mut steps = 0;
+        while budget.seek(SeekFrom::Start(0)).is_ok() && budget.read(&mut byte).is_ok() {
+            steps += 1;
+        }
+        assert_eq!(steps, MAX_READ_CALLS / 2);
+        let mut budget = Budget::new(std::io::repeat(0));
+        let mut big = vec![0u8; 1 << 20];
+        let mut read = 0u64;
+        while let Ok(n) = budget.read(&mut big) {
+            read += n as u64;
+        }
+        assert_eq!(read, MAX_READ_BYTES);
+    }
+
+    /// A pipe named like a song would never deliver its first byte: it is not opened.
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_named_like_a_song_is_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.flac");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (done, result) = std::sync::mpsc::channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let tags = read_tags(&p, false).is_err();
+            let measured = crate::audio::loudness::measure_file(
+                &p,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .is_err();
+            done.send((tags, measured))
+        });
+        let (tags, measured) = result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("came back");
+        assert!(tags && measured);
     }
 }

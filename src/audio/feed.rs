@@ -501,6 +501,9 @@ impl Worker {
         let mut peq_version = self.params.peq.version();
         let mut corrector = Corrector::new(out_rate, self.params.peq.get().as_deref());
         let mut gain_now;
+        // The next track's decoder when it was opened early: a DSD track's last frames
+        // are computed with the beginning of the one after it.
+        let mut opened: Option<Result<TrackDecoder, PlaybackError>> = None;
 
         'tracks: loop {
             self.current = (req.item_id, req.track_id);
@@ -510,13 +513,18 @@ impl Worker {
                 track_id: req.track_id,
                 error,
             };
-            let mut dec = match self.open_decoder(&req) {
+            let opening = match opened.take() {
+                Some(early) => early,
+                None => self.open_decoder(&req),
+            };
+            let mut dec = match opening {
                 Ok(d) => d,
                 Err(e) => {
                     self.send(fail(e));
                     break 'tracks;
                 }
             };
+            dec.defer_tail();
             let info = dec.info().clone();
             if start_ms > 0 {
                 let frame = start_ms.saturating_mul(u64::from(info.sample_rate)) / 1000;
@@ -537,6 +545,7 @@ impl Worker {
                         eq.process(&mut resampled);
                         corrector.process(&mut resampled);
                         crossfeed.process(&mut resampled);
+                        sanitize(&mut resampled);
                         match self.push_limited(&mut limiter, &resampled, &mut limited) {
                             Some(frames) => written += frames,
                             None => return false,
@@ -576,6 +585,8 @@ impl Worker {
             // A different track is a different signal: its gain applies from its first sample.
             gain_now = replaygain_factor(&req.replaygain, &self.params.rg.get());
             let ramp_step = 1.0 / (GAIN_RAMP_SECONDS * info.sample_rate as f32);
+            // What follows, when it had to be known before this track's end (see above).
+            let mut followed: Option<Option<TrackRequest>> = None;
 
             loop {
                 if self.cancelled() {
@@ -587,66 +598,25 @@ impl Worker {
                     "test: decoder panic"
                 );
                 self.preload_next();
+                let mut last = false;
                 match dec.next(&mut decoded) {
-                    Ok(true) => {
-                        stereo.clear();
-                        to_stereo(&decoded, info.channels, &mut stereo);
-                        // Settings may change while playing: ramp towards the new gain.
-                        let target = replaygain_factor(&req.replaygain, &self.params.rg.get());
-                        if (gain_now - target).abs() > f32::EPSILON {
-                            for frame in stereo.as_chunks_mut::<2>().0 {
-                                if gain_now < target {
-                                    gain_now = (gain_now + ramp_step).min(target);
-                                } else if gain_now > target {
-                                    gain_now = (gain_now - ramp_step).max(target);
-                                }
-                                frame[0] *= gain_now;
-                                frame[1] *= gain_now;
-                            }
-                        } else if gain_now != 1.0 {
-                            for s in &mut stereo {
-                                *s *= gain_now;
-                            }
-                        }
-                        let ready = match resampler.as_mut() {
-                            Some(rs) => {
-                                resampled.clear();
-                                if let Err(detail) = rs.process(&stereo, &mut resampled) {
-                                    self.send(fail(PlaybackError {
-                                        kind: PlaybackErrorKind::Corrupt,
-                                        detail,
-                                    }));
-                                    break 'tracks;
-                                }
-                                &mut resampled
-                            }
-                            None => &mut stereo,
+                    Ok(true) => {}
+                    Ok(false) if dec.holds_tail() => {
+                        // DSD: the last frames depend on what follows. When that is
+                        // DSD of the same kind, the two convert as one stream.
+                        let next = self.wait_next();
+                        let mut early = next.as_ref().map(|n| self.open_decoder(n));
+                        let following = match early.as_mut() {
+                            Some(Ok(d)) => Some(d),
+                            _ => None,
                         };
-                        // The settings may change while playing: the equalizer glides.
-                        let version = self.params.eq.version();
-                        if version != eq_version {
-                            eq_version = version;
-                            eq.set(self.params.eq.get());
+                        if let Err(e) = dec.finish(following, &mut decoded) {
+                            self.send(fail(e));
+                            break 'tracks;
                         }
-                        // A sample that the gain or the rate conversion pushed out
-                        // of the number range must not get into the filters (it
-                        // would stay in them), and what leaves them must be numbers.
-                        sanitize(ready);
-                        eq.process(ready);
-                        let version = self.params.peq.version();
-                        if version != peq_version {
-                            peq_version = version;
-                            corrector.set(self.params.peq.get().as_deref());
-                        }
-                        corrector.process(ready);
-                        crossfeed.set(crossfeed_now(&self.params));
-                        crossfeed.process(ready);
-                        sanitize(ready);
-                        match self.push_limited(&mut limiter, ready, &mut limited) {
-                            Some(frames) => written += frames,
-                            None => return false,
-                        }
-                        self.written.store(written, Ordering::Relaxed);
+                        followed = Some(next);
+                        opened = early;
+                        last = true;
                     }
                     Ok(false) => break,
                     Err(e) => {
@@ -654,8 +624,75 @@ impl Worker {
                         break 'tracks;
                     }
                 }
+                if !decoded.is_empty() {
+                    stereo.clear();
+                    to_stereo(&decoded, info.channels, &mut stereo);
+                    // Settings may change while playing: ramp towards the new gain.
+                    let target = replaygain_factor(&req.replaygain, &self.params.rg.get());
+                    if (gain_now - target).abs() > f32::EPSILON {
+                        for frame in stereo.as_chunks_mut::<2>().0 {
+                            if gain_now < target {
+                                gain_now = (gain_now + ramp_step).min(target);
+                            } else if gain_now > target {
+                                gain_now = (gain_now - ramp_step).max(target);
+                            }
+                            frame[0] *= gain_now;
+                            frame[1] *= gain_now;
+                        }
+                    } else if gain_now != 1.0 {
+                        for s in &mut stereo {
+                            *s *= gain_now;
+                        }
+                    }
+                    let ready = match resampler.as_mut() {
+                        Some(rs) => {
+                            resampled.clear();
+                            if let Err(detail) = rs.process(&stereo, &mut resampled) {
+                                self.send(fail(PlaybackError {
+                                    kind: PlaybackErrorKind::Corrupt,
+                                    detail,
+                                }));
+                                break 'tracks;
+                            }
+                            &mut resampled
+                        }
+                        None => &mut stereo,
+                    };
+                    // The settings may change while playing: the equalizer glides.
+                    let version = self.params.eq.version();
+                    if version != eq_version {
+                        eq_version = version;
+                        eq.set(self.params.eq.get());
+                    }
+                    // A sample that the gain or the rate conversion pushed out
+                    // of the number range must not get into the filters (it
+                    // would stay in them), and what leaves them must be numbers.
+                    sanitize(ready);
+                    eq.process(ready);
+                    let version = self.params.peq.version();
+                    if version != peq_version {
+                        peq_version = version;
+                        corrector.set(self.params.peq.get().as_deref());
+                    }
+                    corrector.process(ready);
+                    crossfeed.set(crossfeed_now(&self.params));
+                    crossfeed.process(ready);
+                    sanitize(ready);
+                    match self.push_limited(&mut limiter, ready, &mut limited) {
+                        Some(frames) => written += frames,
+                        None => return false,
+                    }
+                    self.written.store(written, Ordering::Relaxed);
+                }
+                if last {
+                    break;
+                }
             }
-            match self.wait_next() {
+            let next = match followed.take() {
+                Some(next) => next,
+                None => self.wait_next(),
+            };
+            match next {
                 Some(next) => {
                     req = next;
                     start_ms = 0;
@@ -670,6 +707,7 @@ impl Worker {
                 eq.process(&mut resampled);
                 corrector.process(&mut resampled);
                 crossfeed.process(&mut resampled);
+                sanitize(&mut resampled);
                 match self.push_limited(&mut limiter, &resampled, &mut limited) {
                     Some(frames) => written += frames,
                     None => return false,

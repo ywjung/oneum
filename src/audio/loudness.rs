@@ -203,6 +203,14 @@ pub fn measure_file(
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<Option<Measurement>, PlaybackError> {
+    // Only a regular file: a pipe put in a song's place would never deliver anything,
+    // and the worker would wait for it for ever.
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return Err(PlaybackError {
+            kind: super::PlaybackErrorKind::FileUnreadable,
+            detail: "not a regular file".into(),
+        });
+    }
     let mut decoder = TrackDecoder::open(path)?;
     let (rate, channels) = {
         let info = decoder.info();

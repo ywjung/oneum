@@ -4,10 +4,13 @@
 //! See `docs/ARCHITECTURE.md` ("오디오 경로") for the design and threading rules.
 pub mod crossfeed;
 pub mod decoder;
+pub mod dsd;
 pub mod dsp;
 pub mod engine;
 pub mod eq;
 pub mod feed;
+#[cfg(test)]
+mod hostile;
 pub mod limiter;
 pub mod loudness;
 pub mod mp4_edit;

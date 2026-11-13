@@ -76,6 +76,8 @@ fn path_summary(stages: &[Stage]) -> PathSummary {
 /// What decides the stages of the signal path (see [`path_stages`]).
 struct PathInputs<'a> {
     s: &'a crate::i18n::Strings,
+    /// For DSD: the one-bit rate, converted to `source_rate` before anything else.
+    dsd_rate: Option<u32>,
     source_rate: u32,
     out_rate: u32,
     channels: usize,
@@ -115,6 +117,17 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
             detail,
         });
     };
+    if let Some(dsd_rate) = input.dsd_rate {
+        add(
+            StageKind::Conversion,
+            s.info_proc_dsd,
+            format!(
+                "{} → {} Hz",
+                group_digits(dsd_rate as usize),
+                group_digits(input.source_rate as usize)
+            ),
+        );
+    }
     if input.channels != 2 {
         add(
             StageKind::Conversion,
@@ -262,6 +275,28 @@ fn folded(text: &str) -> String {
     text.trim().to_lowercase()
 }
 
+impl OneumApp {
+    /// The library's artists by their folded name, for looking names up in: collected
+    /// once per change of the library, not once per frame. Of names that fold alike,
+    /// the first in the library's order is the one kept.
+    fn artist_names(&mut self) -> std::sync::Arc<std::collections::HashMap<String, String>> {
+        match &self.artist_names {
+            Some((generation, names)) if *generation == self.lib_generation => names.clone(),
+            _ => {
+                let mut names = std::collections::HashMap::new();
+                for artist in self.snapshot.artists().iter() {
+                    names
+                        .entry(folded(&artist.name))
+                        .or_insert_with(|| artist.name.clone());
+                }
+                let names = std::sync::Arc::new(names);
+                self.artist_names = Some((self.lib_generation, names.clone()));
+                names
+            }
+        }
+    }
+}
+
 /// Other tracks in the library that are the same song as `track`: the same title by
 /// the same artist (another album, another mastering, another format). The best
 /// sounding first: lossless before lossy, then the higher sample rate and bit depth.
@@ -273,7 +308,7 @@ fn other_versions(
     if title.is_empty() || artist.is_empty() {
         return Vec::new();
     }
-    let lossless = |t: &crate::model::Track| matches!(t.codec.as_str(), "FLAC" | "ALAC" | "PCM");
+    let lossless = |t: &crate::model::Track| t.is_lossless();
     let mut same: Vec<&crate::model::Track> = tracks
         .iter()
         .map(|t| &**t)
@@ -1171,7 +1206,8 @@ impl OneumApp {
         let track = self.track(current.track_id)?;
         let hz = |rate: u32| format!("{} Hz", group_digits(rate as usize));
 
-        let mut source_format = hz(source.sample_rate);
+        // DSD: the file's own rate (what plays is the PCM it is converted to).
+        let mut source_format = hz(source.dsd_rate.unwrap_or(source.sample_rate));
         if let Some(bits) = track.bit_depth {
             source_format = format!("{source_format} · {bits} bit");
         }
@@ -1197,6 +1233,7 @@ impl OneumApp {
         });
         let stages = path_stages(&PathInputs {
             s,
+            dsd_rate: source.dsd_rate,
             source_rate: source.sample_rate,
             out_rate,
             channels: source.channels,
@@ -1893,18 +1930,12 @@ impl OneumApp {
             .unwrap_or_default();
         // The library's own spelling of a name, if it has an artist of that name:
         // only such names are links, so that a link always leads somewhere.
-        let artists: Vec<String> = self
-            .snapshot
-            .artists()
-            .iter()
-            .map(|artist| artist.name.clone())
-            .collect();
+        let artists = self.artist_names();
         let in_library = move |name: &str| {
             let wanted = folded(name);
-            artists
-                .iter()
-                .find(|known| !wanted.is_empty() && folded(known) == wanted)
-                .cloned()
+            (!wanted.is_empty())
+                .then(|| artists.get(&wanted).cloned())
+                .flatten()
         };
         egui::ScrollArea::vertical()
             .id_salt("info")
@@ -2214,6 +2245,7 @@ mod tests {
     fn plain_path() -> PathInputs<'static> {
         PathInputs {
             s: &KO,
+            dsd_rate: None,
             source_rate: 44_100,
             out_rate: 44_100,
             channels: 2,

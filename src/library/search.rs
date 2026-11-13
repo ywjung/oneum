@@ -310,12 +310,10 @@ impl PreparedQuery {
                             year_range(value).map(|(from, to)| Filter::Plays(from, to))
                         }
                         Subject::Favorite => yes_or_no(value).map(Filter::Favorite),
-                        Subject::Added => {
-                            time_span(value).map(|span| Filter::AddedSince(now - span))
-                        }
-                        Subject::Played => {
-                            time_span(value).map(|span| Filter::PlayedSince(now - span))
-                        }
+                        Subject::Added => time_span(value)
+                            .map(|span| Filter::AddedSince(now.saturating_sub(span))),
+                        Subject::Played => time_span(value)
+                            .map(|span| Filter::PlayedSince(now.saturating_sub(span))),
                         Subject::Text(_) => None,
                     };
                     filters.push(filter.unwrap_or(Filter::Never));

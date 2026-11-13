@@ -9,6 +9,8 @@
 //! [`Library::rescan`] and [`Library::start_watching`].
 mod art;
 pub mod details;
+#[cfg(test)]
+mod hostile;
 mod ident;
 mod legacy;
 mod loudness;
@@ -360,6 +362,9 @@ struct ArtJobs {
 
 /// Upper bound of queued artwork regenerations; older requests are dropped beyond it.
 const ART_QUEUE_LIMIT: usize = 64;
+
+/// How long quitting waits for the library's threads together.
+const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
 
 type Notifier = Arc<dyn Fn() + Send + Sync>;
 
@@ -1323,9 +1328,25 @@ impl Library {
         self.inner.art_wake.notify_all();
         let handles = std::mem::take(&mut *lock(&self.inner.threads));
         let current = std::thread::current().id();
+        // Waited for, but not without end: a thread in the middle of reading a file on
+        // a network volume that went away does not come back until the system gives
+        // up on it, and quitting must not wait for that. Such a thread holds no lock
+        // (none is held across reading a file) and ends with the process.
+        let deadline = std::time::Instant::now() + SHUTDOWN_PATIENCE;
         for handle in handles {
-            if handle.thread().id() != current {
+            if handle.thread().id() == current {
+                continue;
+            }
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if handle.is_finished() {
                 let _ = handle.join();
+            } else {
+                tracing::warn!(
+                    thread = handle.thread().name().unwrap_or("?"),
+                    "a library thread did not stop; leaving it"
+                );
             }
         }
         if let Err(err) = lock(&self.inner.db).checkpoint() {
@@ -2128,5 +2149,25 @@ mod tests {
         assert_send_sync::<PreparedQuery>();
         assert_send_sync::<ScanStatus>();
         assert_send_sync::<LibraryError>();
+    }
+
+    /// A thread that does not come back (reading from a network volume that went away)
+    /// does not keep the app from quitting.
+    #[test]
+    fn quitting_does_not_wait_for_ever_for_a_thread_that_is_stuck() {
+        let (_dir, library, _) = library_with_one_track();
+        let (release, stuck) = std::sync::mpsc::channel::<()>();
+        library.inner.spawn("stuck", move |_| {
+            let _ = stuck.recv();
+        });
+        let started = std::time::Instant::now();
+        library.shutdown();
+        let waited = started.elapsed();
+        assert!(waited >= SHUTDOWN_PATIENCE, "it was waited for: {waited:?}");
+        assert!(
+            waited < SHUTDOWN_PATIENCE + Duration::from_secs(2),
+            "{waited:?}"
+        );
+        drop(release);
     }
 }

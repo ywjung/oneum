@@ -1,4 +1,6 @@
-//! Demuxing and decoding of one audio file with Symphonia.
+//! Demuxing and decoding of one audio file: with Symphonia, or for DSD with
+//! [`super::dsd`].
+use super::dsd::DsdDecoder;
 use super::mp4_edit::{self, Trim};
 use super::source::FileInMemory;
 use super::{PlaybackError, PlaybackErrorKind};
@@ -31,9 +33,22 @@ pub struct SourceInfo {
     pub has_gapless_info: bool,
     /// True when the file is played from memory (see `source.rs`).
     pub in_memory: bool,
+    /// For DSD: the one-bit rate of the file (`sample_rate` is the PCM it is converted to).
+    pub dsd_rate: Option<u32>,
 }
 
+/// Decodes one file into PCM.
 pub struct TrackDecoder {
+    inner: Inner,
+}
+
+enum Inner {
+    Media(Box<MediaDecoder>),
+    Dsd(Box<DsdDecoder>, SourceInfo),
+}
+
+/// What Symphonia decodes.
+struct MediaDecoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
@@ -47,7 +62,7 @@ pub struct TrackDecoder {
     drop_until: Option<u64>,
     consecutive_errors: u32,
     /// Corrupt packets skipped so far (reported for diagnostics).
-    pub skipped_packets: u32,
+    skipped_packets: u32,
 }
 
 fn err(kind: PlaybackErrorKind, detail: impl Into<String>) -> PlaybackError {
@@ -105,25 +120,220 @@ pub fn can_play(path: &Path) -> Result<(), PlaybackError> {
     decoder.next(&mut first).map(|_| ())
 }
 
+/// ID3v2 tags in front of the audio looked past before giving up (one is usual, two
+/// happen; more is not music).
+const MAX_LEADING_TAGS: usize = 16;
+
+/// A source seen from `start` on.
+struct FromOffset {
+    inner: Box<dyn MediaSource>,
+    start: u64,
+}
+
+impl std::io::Read for FromOffset {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl std::io::Seek for FromOffset {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let at = match to {
+            SeekFrom::Start(n) => self
+                .inner
+                .seek(SeekFrom::Start(self.start.saturating_add(n)))?,
+            other => self.inner.seek(other)?,
+        };
+        if at < self.start {
+            // Not before the start of what is shown.
+            self.inner.seek(SeekFrom::Start(self.start))?;
+            return Ok(0);
+        }
+        Ok(at - self.start)
+    }
+}
+
+impl MediaSource for FromOffset {
+    fn is_seekable(&self) -> bool {
+        self.inner.is_seekable()
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.inner
+            .byte_len()
+            .map(|len| len.saturating_sub(self.start))
+    }
+}
+
+/// The source with the ID3v2 tags at its start left out. Playback takes a song's tags
+/// from the library and never from the demuxer, which would read every frame of a tag
+/// into memory: a crafted tag of a million small frames is hundreds of megabytes there.
+fn after_leading_tags(mut source: Box<dyn MediaSource>) -> Box<dyn MediaSource> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut start = 0u64;
+    for _ in 0..MAX_LEADING_TAGS {
+        let mut header = [0u8; 10];
+        if source.seek(SeekFrom::Start(start)).is_err() || source.read_exact(&mut header).is_err() {
+            break;
+        }
+        let size = &header[6..10];
+        let is_tag = &header[..3] == b"ID3"
+            && header[3] < 0xFF
+            && header[4] < 0xFF
+            && size.iter().all(|b| b & 0x80 == 0);
+        if !is_tag {
+            break;
+        }
+        let len = size.iter().fold(0u64, |n, b| n << 7 | u64::from(*b));
+        let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+        start += 10 + len + footer;
+    }
+    if source.seek(SeekFrom::Start(start)).is_err() {
+        start = 0;
+        let _ = source.seek(SeekFrom::Start(0));
+    }
+    if start == 0 {
+        return source;
+    }
+    Box::new(FromOffset {
+        inner: source,
+        start,
+    })
+}
+
+/// True if what `reader` holds starts like a DSD file. Leaves it at the start.
+fn starts_as_dsd<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Result<bool, PlaybackError> {
+    let mut magic = [0u8; 4];
+    let read = std::io::Read::read(reader, &mut magic).map_err(|e| map_file_error(&e))?;
+    std::io::Seek::rewind(reader).map_err(|e| map_file_error(&e))?;
+    Ok(read == 4 && super::dsd::is_dsd_magic(&magic))
+}
+
+fn dsd_info(decoder: &DsdDecoder, in_memory: bool) -> SourceInfo {
+    let info = decoder.info();
+    SourceInfo {
+        sample_rate: info.pcm_rate(),
+        channels: info.out_channels,
+        total_frames: Some(info.frames()),
+        codec: "dsd".into(),
+        has_gapless_info: true,
+        in_memory,
+        dsd_rate: Some(info.dsd_rate),
+    }
+}
+
 impl TrackDecoder {
     /// Opens `path`, reading from the file as decoding goes.
     pub fn open(path: &Path) -> Result<Self, PlaybackError> {
-        let file = std::fs::File::open(path).map_err(|e| map_file_error(&e))?;
-        Self::from_source(path, Box::new(file), false)
+        let mut file = std::fs::File::open(path).map_err(|e| map_file_error(&e))?;
+        let inner = if starts_as_dsd(&mut file)? {
+            let decoder = DsdDecoder::new(Box::new(file))?;
+            let info = dsd_info(&decoder, false);
+            Inner::Dsd(Box::new(decoder), info)
+        } else {
+            Inner::Media(Box::new(MediaDecoder::from_source(
+                path,
+                Box::new(file),
+                false,
+            )?))
+        };
+        Ok(TrackDecoder { inner })
     }
 
     /// Opens a file that is being loaded into memory (memory playback).
     pub fn open_in_memory(file: FileInMemory) -> Result<Self, PlaybackError> {
         let path = file.path().to_path_buf();
-        Self::from_source(&path, Box::new(file.into_source()), true)
+        let mut source = file.into_source();
+        let inner = if starts_as_dsd(&mut source)? {
+            let decoder = DsdDecoder::from_memory(source)?;
+            let info = dsd_info(&decoder, true);
+            Inner::Dsd(Box::new(decoder), info)
+        } else {
+            Inner::Media(Box::new(MediaDecoder::from_source(
+                &path,
+                Box::new(source),
+                true,
+            )?))
+        };
+        Ok(TrackDecoder { inner })
     }
 
+    pub fn info(&self) -> &SourceInfo {
+        match &self.inner {
+            Inner::Media(m) => &m.info,
+            Inner::Dsd(_, info) => info,
+        }
+    }
+
+    /// Seeks so that the next decoded frame is `frame` (in source frames). Seeking past
+    /// the end leaves the decoder at end of stream.
+    pub fn seek(&mut self, frame: u64) -> Result<(), PlaybackError> {
+        match &mut self.inner {
+            Inner::Media(m) => m.seek(frame),
+            Inner::Dsd(d, _) => d.seek(frame),
+        }
+    }
+
+    /// Decodes the next stretch into `out` (cleared first) as interleaved f32 at the
+    /// source channel count. Returns `Ok(false)` at end of stream.
+    pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool, PlaybackError> {
+        match &mut self.inner {
+            Inner::Media(m) => m.next(out),
+            Inner::Dsd(d, _) => d.next(out),
+        }
+    }
+
+    /// Corrupt packets skipped so far (reported for diagnostics).
+    pub fn skipped_packets(&self) -> u32 {
+        match &self.inner {
+            Inner::Media(m) => m.skipped_packets,
+            Inner::Dsd(..) => 0,
+        }
+    }
+
+    /// For playback: the last frames of a DSD file depend on what follows it, so they
+    /// are held when the file runs out (`next` says "end", [`TrackDecoder::holds_tail`]
+    /// says there is more) until [`TrackDecoder::finish`] is told what follows. Other
+    /// files are not affected.
+    pub fn defer_tail(&mut self) {
+        if let Inner::Dsd(d, _) = &mut self.inner {
+            d.defer_tail(true);
+        }
+    }
+
+    /// True when frames are held for [`TrackDecoder::finish`].
+    pub fn holds_tail(&self) -> bool {
+        matches!(&self.inner, Inner::Dsd(d, _) if d.holds_tail())
+    }
+
+    /// The held frames, into `out`: computed on into `following` when it is DSD that
+    /// continues this file (which then starts from where this one leaves off), with
+    /// silence otherwise.
+    pub fn finish(
+        &mut self,
+        following: Option<&mut TrackDecoder>,
+        out: &mut Vec<f32>,
+    ) -> Result<(), PlaybackError> {
+        out.clear();
+        let Inner::Dsd(d, _) = &mut self.inner else {
+            return Ok(());
+        };
+        let next = following.and_then(|f| match &mut f.inner {
+            Inner::Dsd(next, _) => Some(next.as_mut()),
+            Inner::Media(_) => None,
+        });
+        d.finish(next, out)
+    }
+}
+
+impl MediaDecoder {
     fn from_source(
         path: &Path,
         source: Box<dyn MediaSource>,
         in_memory: bool,
     ) -> Result<Self, PlaybackError> {
-        let mss = MediaSourceStream::new(source, Default::default());
+        let mss = MediaSourceStream::new(after_leading_tags(source), Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
@@ -168,13 +378,33 @@ impl TrackDecoder {
             .map(|c| c.count())
             .filter(|c| (1..=MAX_CHANNELS).contains(c))
             .ok_or_else(|| err(PlaybackErrorKind::Unsupported, "unusable channel layout"))?;
+        // A container that knows only its own length (Matroska): the frames from that.
+        let total_frames = total_frames.or_else(|| {
+            let media = format.media_info();
+            let (base, length) = (media.time_base?, media.duration?);
+            let frames =
+                i128::from(length.get()) * i128::from(base.numer.get()) * i128::from(sample_rate)
+                    / i128::from(base.denom.get());
+            u64::try_from(frames).ok().filter(|f| *f > 0)
+        });
         let codec = decoder.codec_info().short_name.to_string();
         // AAC's priming and padding: the reader passes them on as audio. What the file
         // says about them is read here and applied while decoding.
         let trim = (codec == "aac" && !has_gapless_info)
             .then(|| std::fs::File::open(path).ok())
             .flatten()
-            .and_then(|file| mp4_edit::read(std::io::BufReader::new(file), sample_rate));
+            .and_then(|file| mp4_edit::read(std::io::BufReader::new(file), sample_rate))
+            // A note that claims more music than the track holds is wrong about the
+            // length shown and sought in: the track's own length (less the priming) wins.
+            .map(
+                |trim| match total_frames.map(|n| n.saturating_sub(trim.delay)) {
+                    Some(held) if held > 0 && trim.valid > held => Trim {
+                        valid: held,
+                        ..trim
+                    },
+                    _ => trim,
+                },
+            );
         let (total_frames, has_gapless_info) = match trim {
             Some(trim) => (Some(trim.valid), true),
             None => (total_frames, has_gapless_info),
@@ -191,16 +421,13 @@ impl TrackDecoder {
                 codec,
                 has_gapless_info,
                 in_memory,
+                dsd_rate: None,
             },
             trim,
             drop_until: None,
             consecutive_errors: 0,
             skipped_packets: 0,
         })
-    }
-
-    pub fn info(&self) -> &SourceInfo {
-        &self.info
     }
 
     /// Converts a track timestamp to a source frame index.
@@ -221,7 +448,7 @@ impl TrackDecoder {
     /// The reader is positioned a little before the target and the surplus is dropped by
     /// timestamp while decoding. This gives codecs that need a warm-up packet after a
     /// reset (Vorbis, MP3 bit reservoir) valid audio at the target.
-    pub fn seek(&mut self, frame: u64) -> Result<(), PlaybackError> {
+    fn seek(&mut self, frame: u64) -> Result<(), PlaybackError> {
         // Positions are counted in the music; the decoded stream has the priming in front.
         let frame = frame.saturating_add(self.trim.map_or(0, |t| t.delay));
         let preroll = u64::from(self.info.sample_rate) / 8;
@@ -255,7 +482,7 @@ impl TrackDecoder {
 
     /// Decodes the next packet into `out` (cleared first) as interleaved f32 at the source
     /// channel count. Returns `Ok(false)` at end of stream. Damaged packets are skipped.
-    pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool, PlaybackError> {
+    fn next(&mut self, out: &mut Vec<f32>) -> Result<bool, PlaybackError> {
         out.clear();
         loop {
             if self.drop_until == Some(u64::MAX) {
@@ -374,4 +601,121 @@ mod tests {
         sanitize(&mut wild);
         assert_eq!(wild, [64.0, -64.0, 2.5, -63.9, 64.0]);
     }
+}
+
+/// Tags of a container read through Symphonia: for files the tag library does not know
+/// (Matroska, WebM). Text values only, as they are written.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct MediaTags {
+    pub title: String,
+    pub artist: String,
+    pub album_artist: String,
+    pub album: String,
+    pub genre: String,
+    pub date: String,
+    pub track_no: Option<u32>,
+    pub disc_no: Option<u32>,
+    pub compilation: bool,
+    /// Track gain, track peak, album gain, album peak, as written.
+    pub replaygain: [Option<String>; 4],
+    pub picture: Option<Vec<u8>>,
+}
+
+/// Reads the tags of `path` with Symphonia (the newest revision, the file's own and its
+/// audio track's). Nothing for a file it cannot open.
+pub(crate) fn read_media_tags(path: &Path) -> MediaTags {
+    use symphonia::core::meta::{StandardTag, StandardVisualKey, Tag};
+    let mut tags = MediaTags::default();
+    let Ok(file) = std::fs::File::open(path) else {
+        return tags;
+    };
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let Ok(mut format) = symphonia::default::get_probe().probe(
+        &hint,
+        mss,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+    ) else {
+        return tags;
+    };
+    let mut metadata = format.metadata();
+    let Some(revision) = metadata.skip_to_latest() else {
+        return tags;
+    };
+    let mut all: Vec<&Tag> = revision.media.tags.iter().collect();
+    let mut visuals: Vec<_> = revision.media.visuals.iter().collect();
+    for track in &revision.per_track {
+        all.extend(&track.metadata.tags);
+        visuals.extend(&track.metadata.visuals);
+    }
+    let set = |slot: &mut String, value: &str| {
+        if slot.is_empty() {
+            *slot = value.to_string();
+        }
+    };
+    for tag in all {
+        // Matroska names its tags by level: "ALBUM@ARTIST", "TRACK@TITLE"; the album
+        // level's title is the album and its artist the album artist.
+        let (level, name) = match tag.raw.key.split_once('@') {
+            Some((level, name)) => (level.to_ascii_uppercase(), name.to_ascii_uppercase()),
+            None => (String::new(), tag.raw.key.to_ascii_uppercase()),
+        };
+        let album_level = level == "ALBUM";
+        let text = tag.raw.value.to_string();
+        match (&tag.std, name.as_str()) {
+            (_, "TITLE") if album_level => set(&mut tags.album, &text),
+            (_, "ARTIST") if album_level => set(&mut tags.album_artist, &text),
+            (Some(StandardTag::TrackTitle(v)), _) => set(&mut tags.title, v),
+            (_, "TITLE") => set(&mut tags.title, &text),
+            (Some(StandardTag::Artist(v)), _) => set(&mut tags.artist, v),
+            (_, "ARTIST") => set(&mut tags.artist, &text),
+            (Some(StandardTag::AlbumArtist(v)), _) => set(&mut tags.album_artist, v),
+            (Some(StandardTag::Album(v)), _) => set(&mut tags.album, v),
+            (_, "ALBUM") => set(&mut tags.album, &text),
+            (Some(StandardTag::Genre(v)), _) => set(&mut tags.genre, v),
+            (_, "GENRE") => set(&mut tags.genre, &text),
+            (Some(StandardTag::RecordingDate(v) | StandardTag::ReleaseDate(v)), _) => {
+                set(&mut tags.date, v)
+            }
+            (_, "DATE_RECORDED" | "DATE_RELEASED" | "DATE") => set(&mut tags.date, &text),
+            (Some(StandardTag::TrackNumber(n)), _) => {
+                tags.track_no = tags.track_no.or(u32::try_from(*n).ok())
+            }
+            (_, "PART_NUMBER") if !album_level => {
+                tags.track_no = tags.track_no.or(text.trim().parse().ok())
+            }
+            (Some(StandardTag::DiscNumber(n)), _) => {
+                tags.disc_no = tags.disc_no.or(u32::try_from(*n).ok())
+            }
+            (Some(StandardTag::CompilationFlag(on)), _) => tags.compilation |= *on,
+            (Some(StandardTag::ReplayGainTrackGain(v)), _) => {
+                tags.replaygain[0].get_or_insert_with(|| v.to_string());
+            }
+            (Some(StandardTag::ReplayGainTrackPeak(v)), _) => {
+                tags.replaygain[1].get_or_insert_with(|| v.to_string());
+            }
+            (Some(StandardTag::ReplayGainAlbumGain(v)), _) => {
+                tags.replaygain[2].get_or_insert_with(|| v.to_string());
+            }
+            (Some(StandardTag::ReplayGainAlbumPeak(v)), _) => {
+                tags.replaygain[3].get_or_insert_with(|| v.to_string());
+            }
+            _ => {}
+        }
+    }
+    // A file tagged at the album level only: its artist is the album's.
+    if tags.artist.is_empty() {
+        tags.artist = tags.album_artist.clone();
+    }
+    // The front cover if one is marked as such, else the first picture.
+    tags.picture = visuals
+        .iter()
+        .find(|v| v.usage == Some(StandardVisualKey::FrontCover))
+        .or(visuals.first())
+        .map(|v| v.data.to_vec());
+    tags
 }

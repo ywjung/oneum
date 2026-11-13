@@ -6,7 +6,7 @@ own license. The full license texts come with the app in the file
 `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
 next to the program).
 
-Crates: 253
+Crates: 255
 
 ## License summary
 
@@ -14,7 +14,7 @@ Crates: 253
 - `MIT` — 37
 - `Zlib OR Apache-2.0 OR MIT` — 22
 - `Apache-2.0 OR MIT` — 20
-- `MPL-2.0` — 14
+- `MPL-2.0` — 16
 - `MIT/Apache-2.0` — 11
 - `Apache-2.0` — 6
 - `MIT OR Apache-2.0 OR Zlib` — 5
@@ -243,6 +243,7 @@ Notes:
 | symphonia-bundle-flac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-bundle-mp3 | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-codec-aac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-codec-adpcm | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-codec-alac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-codec-pcm | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-codec-vorbis | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
@@ -250,6 +251,7 @@ Notes:
 | symphonia-core | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-format-caf | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-format-isomp4 | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-format-mkv | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-format-ogg | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-format-riff | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-metadata | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |

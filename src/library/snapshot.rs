@@ -95,7 +95,7 @@ impl TrackIndex {
     fn field_contains(&self, field: Field, term: &Term, track: &Track) -> bool {
         let text = term.text.as_str();
         if field == Field::Format {
-            let lossless = matches!(track.codec.as_str(), "FLAC" | "ALAC" | "PCM");
+            let lossless = track.is_lossless();
             return match text {
                 "lossless" | "무손실" => lossless,
                 "lossy" | "손실" => !lossless,
@@ -598,12 +598,14 @@ fn sort_keyed<K: Ord>(indices: &mut [u32], ascending: bool, key: impl Fn(u32) ->
 fn codec_order(codec: &str) -> u8 {
     match codec {
         "AAC" => 0,
-        "ALAC" => 1,
-        "FLAC" => 2,
-        "MP3" => 3,
-        "PCM" => 4,
-        "Vorbis" => 5,
-        _ => 6,
+        "ADPCM" => 1,
+        "ALAC" => 2,
+        c if c.starts_with("DSD") => 3,
+        "FLAC" => 4,
+        "MP3" => 5,
+        "PCM" => 6,
+        "Vorbis" => 7,
+        _ => 8,
     }
 }
 

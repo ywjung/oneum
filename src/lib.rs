@@ -9,4 +9,6 @@ pub mod model;
 pub mod platform;
 pub mod playback;
 pub mod storage;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod ui;

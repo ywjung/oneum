@@ -27,6 +27,9 @@ const POSITION_PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// The sleep timer turns the volume down over its last seconds instead of cutting off.
 const SLEEP_FADE: Duration = Duration::from_secs(5);
+/// After the sleep timer's pause, how long the volume stays down: past the renderer's
+/// own short fade-out, so that the volume coming back up is not heard as a tick.
+const SLEEP_RESTORE_AFTER: Duration = Duration::from_millis(120);
 const QUEUE_SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 /// Playback stops after this many tracks in a row could not be played.
 pub const MAX_CONSECUTIVE_FAILURES: usize = 10;
@@ -570,6 +573,9 @@ struct Player<H: PlayerHost> {
     stop_after: Option<ItemId>,
     /// Sleep timer: when to pause.
     sleep_at: Option<Instant>,
+    /// When the volume the sleep timer faded out is to be set back (see
+    /// [`SLEEP_RESTORE_AFTER`]).
+    sleep_restore_at: Option<Instant>,
     /// While set: audio decoded with processing that has since been switched off is
     /// still being played (see `review_processed`).
     processed_until: Option<Instant>,
@@ -650,6 +656,7 @@ impl<H: PlayerHost> Player<H> {
             radio: config.radio,
             stop_after: None,
             sleep_at: None,
+            sleep_restore_at: None,
             processed_until: None,
             notice: None,
             notice_seq: 0,
@@ -681,6 +688,7 @@ impl<H: PlayerHost> Player<H> {
                 .sleep_at
                 .is_some_and(|at| at.saturating_duration_since(Instant::now()) <= SLEEP_FADE);
             let busy = fading
+                || self.sleep_restore_at.is_some()
                 || self.chain.is_some()
                     && (self.want_playing
                         || matches!(self.state, PlayState::Loading | PlayState::Seeking));
@@ -986,12 +994,18 @@ impl<H: PlayerHost> Player<H> {
     /// Sleep timer: fades the sound out over the last seconds, then pauses. The volume
     /// the user set is left as it is, and is what the next "play" starts with.
     fn follow_sleep_timer(&mut self) {
+        if self.sleep_restore_at.is_some_and(|at| Instant::now() >= at) {
+            self.sleep_restore_at = None;
+            self.engine.set_volume(self.volume);
+        }
         let Some(at) = self.sleep_at else { return };
         let left = at.saturating_duration_since(Instant::now());
         if left.is_zero() {
             self.sleep_at = None;
             self.pause();
-            self.engine.set_volume(self.volume);
+            // Not at once: the pause fades its last milliseconds out, and a volume rising
+            // meanwhile would turn them into a tick.
+            self.sleep_restore_at = Some(Instant::now() + SLEEP_RESTORE_AFTER);
             self.dirty = true;
         } else if left < SLEEP_FADE {
             let fraction = left.as_secs_f32() / SLEEP_FADE.as_secs_f32();
@@ -1124,6 +1138,14 @@ impl<H: PlayerHost> Player<H> {
                         self.end_of_queue();
                         return;
                     }
+                    // "Stop after this song" and the song cannot be played: it is over,
+                    // so playback stops here as it would have at its end.
+                    if self.stop_after == Some(item.id) {
+                        self.stop_after = None;
+                        self.halt();
+                        self.save_session(false);
+                        return;
+                    }
                     start_ms = 0;
                 }
             }
@@ -1219,6 +1241,7 @@ impl<H: PlayerHost> Player<H> {
             Command::SetSleepTimer(after) => {
                 self.sleep_at = after.map(|after| Instant::now() + after);
                 // Switched off (or set anew) in the middle of the fade: full volume again.
+                self.sleep_restore_at = None;
                 self.engine.set_volume(self.volume);
                 self.dirty = true;
             }
@@ -1267,6 +1290,7 @@ impl<H: PlayerHost> Player<H> {
                     self.volume
                 };
                 self.volume = volume;
+                self.sleep_restore_at = None;
                 self.engine.set_volume(volume);
                 self.dirty = true;
             }

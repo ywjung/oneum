@@ -12,6 +12,8 @@ use std::path::Path;
 const MAX_SIDECAR_BYTES: u64 = 512 * 1024;
 /// Lyrics longer than this are cut (a tag that holds a whole book).
 const MAX_CHARS: usize = 60_000;
+/// How much of a tag or file is looked at for lyrics at all.
+const MAX_RAW_CHARS: usize = 200_000;
 
 /// One line of lyrics and when it is sung.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,11 @@ pub struct Lyrics {
 
 impl Lyrics {
     fn from_raw(raw: &str) -> Option<Self> {
+        // A tag can hold megabytes; no song's words do.
+        let raw = match raw.char_indices().nth(MAX_RAW_CHARS) {
+            Some((at, _)) => &raw[..at],
+            None => raw,
+        };
         Some(Self {
             plain: clean(raw)?,
             timed: timed(raw),
@@ -81,10 +88,15 @@ pub(crate) fn from_tags(file: &TaggedFile) -> Option<Lyrics> {
 pub(crate) fn from_sidecar(path: &Path) -> Option<Lyrics> {
     use std::io::Read;
     ["lrc", "txt"].into_iter().find_map(|extension| {
-        // Opened once and asked about through the handle, so that what is checked
-        // is what is read: only a regular file (a pipe of that name would never
-        // finish), and never more than the limit however the file grows meanwhile.
-        let file = std::fs::File::open(path.with_extension(extension)).ok()?;
+        // Only a regular file: opening a pipe of that name would wait for someone to
+        // write to it, so the kind is looked at before the file is opened. Then it is
+        // opened once and asked again through the handle, so that what is checked is
+        // what is read, and never more than the limit however the file grows meanwhile.
+        let sidecar = path.with_extension(extension);
+        if !std::fs::metadata(&sidecar).ok()?.is_file() {
+            return None;
+        }
+        let file = std::fs::File::open(sidecar).ok()?;
         let meta = file.metadata().ok()?;
         if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_SIDECAR_BYTES {
             return None;
@@ -159,11 +171,16 @@ fn without_word_stamps(text: &str) -> String {
     while let Some(open) = rest.find('<') {
         let (before, after) = rest.split_at(open);
         out.push_str(before);
-        match after[1..].split_once('>') {
-            Some((inside, tail)) if stamp_ms(inside).is_some() => rest = tail,
+        let inner = &after[1..];
+        // A stamp is a dozen characters: the closing bracket is looked for that far
+        // and no farther (a line of nothing but "<" would otherwise be searched to its
+        // end once for each of them).
+        let close = inner.bytes().take(MAX_STAMP_BYTES).position(|b| b == b'>');
+        match close {
+            Some(close) if stamp_ms(&inner[..close]).is_some() => rest = &inner[close + 1..],
             _ => {
                 out.push('<');
-                rest = &after[1..];
+                rest = inner;
             }
         }
     }
@@ -175,6 +192,12 @@ fn without_word_stamps(text: &str) -> String {
 const MIN_TIMED_LINES: usize = 2;
 /// More lines than any song has; a file that claims more is cut here.
 const MAX_TIMED_LINES: usize = 5_000;
+/// More time stamps than one line is ever sung at, and more text than one line has.
+/// Every stamp gets the line's text, so the two together bound what the lines take.
+const MAX_STAMPS_PER_LINE: usize = 64;
+const MAX_LINE_CHARS: usize = 500;
+/// The longest a time stamp's inside is taken to be (`1:02:03.456` is eleven bytes).
+const MAX_STAMP_BYTES: usize = 16;
 
 /// The lines of synchronised lyrics with their times, in the order they are sung.
 /// `None` when the text carries no time stamps.
@@ -194,7 +217,9 @@ pub(crate) fn timed(raw: &str) -> Option<Vec<TimedLine>> {
                 break;
             };
             if let Some(at) = stamp_ms(tag) {
-                stamps.push(at);
+                if stamps.len() < MAX_STAMPS_PER_LINE {
+                    stamps.push(at);
+                }
                 rest = after.trim_start();
             } else {
                 if stamps.is_empty()
@@ -210,7 +235,10 @@ pub(crate) fn timed(raw: &str) -> Option<Vec<TimedLine>> {
         if stamps.is_empty() {
             continue;
         }
-        let text = without_word_stamps(rest);
+        let text: String = without_word_stamps(rest)
+            .chars()
+            .take(MAX_LINE_CHARS)
+            .collect();
         for at_ms in stamps {
             if lines.len() < MAX_TIMED_LINES {
                 lines.push(TimedLine {
@@ -471,5 +499,61 @@ mod tests {
             std::fs::write(song.with_extension("txt"), "다른 가사").expect("write");
             assert_eq!(plain(&song).as_deref(), Some("첫 줄\n둘째 줄"), "{name}");
         }
+    }
+
+    /// Every stamp on a line gets the line's words. A line with thousands of stamps
+    /// and half a megabyte of words would be gigabytes: both are bounded.
+    #[test]
+    fn a_line_with_thousands_of_time_stamps_and_endless_words_stays_small() {
+        let raw = format!(
+            "{}{}\n[00:01.00]second\n",
+            "[0:0]".repeat(5_000),
+            "word ".repeat(100_000)
+        );
+        let lines = timed(&raw).expect("timed");
+        assert_eq!(lines.len(), MAX_STAMPS_PER_LINE + 1);
+        let held: usize = lines.iter().map(|l| l.text.len()).sum();
+        assert!(held <= (MAX_STAMPS_PER_LINE + 1) * MAX_LINE_CHARS, "{held}");
+        // What is looked at of a tag is bounded as well.
+        let lyrics = Lyrics::from_raw(&"la\n".repeat(1_000_000)).expect("lyrics");
+        assert!(lyrics.plain.len() <= MAX_RAW_CHARS);
+    }
+
+    /// The closing bracket of a word stamp is looked for a few bytes ahead, not to the
+    /// end of the line once for every opening one.
+    #[test]
+    fn a_line_of_opening_brackets_is_read_in_no_time() {
+        let started = std::time::Instant::now();
+        let brackets = "<".repeat(400_000);
+        assert_eq!(without_word_stamps(&brackets).len(), 400_000);
+        assert_eq!(without_word_stamps(&format!("{brackets}>")).len(), 400_001);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        // Word stamps are still taken out, and what merely looks like one is kept.
+        assert_eq!(without_word_stamps("<00:01.00>la <00:02.50>la"), "la la");
+        assert_eq!(without_word_stamps("a < b > c <3"), "a < b > c <3");
+        assert_eq!(
+            without_word_stamps("<한글 가사가 여기에 길게 이어진다>"),
+            "<한글 가사가 여기에 길게 이어진다>"
+        );
+    }
+
+    /// A pipe named like the lyrics file: opening it would wait for a writer for ever.
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_in_the_place_of_the_lyrics_file_is_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let song = dir.path().join("Song.flac");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("Song.lrc"))
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        std::fs::write(dir.path().join("Song.txt"), "words in the text file\n").unwrap();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done.send(from_sidecar(&song).map(|l| l.plain)));
+        let found = result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading the lyrics came back");
+        assert_eq!(found.as_deref(), Some("words in the text file"));
     }
 }

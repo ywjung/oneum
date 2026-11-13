@@ -9,6 +9,7 @@
 //! too large to be one (a folder of loose files), are measured one by one.
 use super::{Inner, lock};
 use crate::audio::loudness::{Measurement, gain_db, integrated, measure_file};
+use crate::audio::{PlaybackError, PlaybackErrorKind};
 use crate::model::{ReplayGainTags, TrackId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -251,7 +252,8 @@ impl Inner {
                             break;
                         };
                         let group = &groups[g];
-                        let measured = match measure_file(&group.jobs[j].path, &job.cancel) {
+                        let path = &group.jobs[j].path;
+                        let measured = match guarded(|| measure_file(path, &job.cancel)) {
                             Ok(Some(measurement)) => Some(measurement),
                             // Cancelled in the middle of the file: not a result.
                             Ok(None) => break,
@@ -326,6 +328,18 @@ pub(crate) fn start(inner: &Arc<Inner>) -> bool {
         inner.run_loudness();
     });
     true
+}
+
+/// Runs a measurement so that a decoder that panics on a damaged file costs that file
+/// only: the worker goes on, the file is counted as not measured, and its album is
+/// still committed. (Playback and the scan guard their decoding the same way.)
+fn guarded<T>(measure: impl FnOnce() -> Result<T, PlaybackError>) -> Result<T, PlaybackError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(measure)).unwrap_or_else(|_| {
+        Err(PlaybackError {
+            kind: PlaybackErrorKind::Corrupt,
+            detail: "decoder panicked".into(),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -441,5 +455,17 @@ mod tests {
                 .album_gain_db,
             None
         );
+    }
+
+    #[test]
+    fn a_decoder_that_panics_is_one_file_not_measured() {
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = guarded::<()>(|| panic!("index out of bounds in a decoder"));
+        std::panic::set_hook(quiet);
+        let error = outcome.expect_err("a failure, not a panic");
+        assert_eq!(error.kind, PlaybackErrorKind::Corrupt);
+        // What does not panic comes through as it is.
+        assert_eq!(guarded(|| Ok(7)), Ok(7));
     }
 }

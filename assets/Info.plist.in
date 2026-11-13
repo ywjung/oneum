@@ -43,6 +43,9 @@
         <string>com.apple.m4a-audio</string>
         <string>public.mpeg-4-audio</string>
         <string>org.xiph.ogg-audio</string>
+        <string>app.oneum.dsf-audio</string>
+        <string>app.oneum.dsdiff-audio</string>
+        <string>org.matroska.mka</string>
       </array>
     </dict>
     <dict>
@@ -58,6 +61,32 @@
       <key>LSHandlerRank</key><string>None</string>
       <key>LSItemContentTypes</key>
       <array><string>public.folder</string></array>
+    </dict>
+  </array>
+  <!-- Audio formats macOS has no type for. Declared as imported, so that a type another
+       app declares for the same extension takes precedence. -->
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>app.oneum.dsf-audio</string>
+      <key>UTTypeDescription</key><string>DSD Stream File</string>
+      <key>UTTypeConformsTo</key><array><string>public.audio</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>dsf</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key><string>app.oneum.dsdiff-audio</string>
+      <key>UTTypeDescription</key><string>DSDIFF Audio</string>
+      <key>UTTypeConformsTo</key><array><string>public.audio</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>dff</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key><string>org.matroska.mka</string>
+      <key>UTTypeDescription</key><string>Matroska Audio</string>
+      <key>UTTypeConformsTo</key><array><string>public.audio</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>mka</string></array></dict>
     </dict>
   </array>
 </dict>

@@ -34,6 +34,14 @@ macro_rules! strings {
         pub struct Strings { $( pub $name: &'static str, )* }
         pub static KO: Strings = Strings { $( $name: $ko, )* };
         pub static EN: Strings = Strings { $( $name: $en, )* };
+
+        #[cfg(test)]
+        impl Strings {
+            /// Every string with its name, for tests over the whole table.
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![ $( (stringify!($name), self.$name), )* ]
+            }
+        }
     };
 }
 
@@ -294,6 +302,7 @@ strings! {
     info_proc_volume: "앱 볼륨", "App volume";
     info_proc_channels: "채널 변환", "Channel mapping";
     info_proc_dither: "디더", "Dither";
+    info_proc_dsd: "DSD → PCM 변환", "DSD to PCM";
     info_proc_limiter: "피크 보호", "Peak protection";
     info_proc_eq: "이퀄라이저", "Equalizer";
     info_signal_path: "신호 경로", "Signal Path";
@@ -920,6 +929,44 @@ mod tests {
                     && !s.notice_device_lost.is_empty()
                     && !s.menu_quit.is_empty()
             );
+        }
+    }
+
+    /// With the language set to English, every text of the app is English: the table
+    /// has no Korean on its English side (the language's own name is not in it: the
+    /// settings show "한국어" as it is), and neither do the sentences built from it.
+    #[test]
+    fn the_english_text_is_english() {
+        let korean = |text: &str| {
+            text.chars()
+                .any(|c| matches!(c, '\u{AC00}'..='\u{D7A3}' | '\u{3131}'..='\u{318E}'))
+        };
+        let all = EN.all();
+        assert_eq!(all.len(), KO.all().len());
+        assert!(all.len() > 400);
+        for (name, text) in all {
+            assert!(!korean(text), "{name}: {text}");
+            assert!(!text.is_empty(), "{name}");
+        }
+        let en = Lang::En;
+        for text in [
+            en.song_count(3),
+            en.album_count(2),
+            en.artist_count(1),
+            en.scan_progress(1_234),
+            en.loudness_waiting(10),
+            en.correction_imported("HD 800 S"),
+            en.correction_summary(10, -6.2, 1.5),
+            en.correction_unsupported("LP"),
+            en.correction_malformed("Filter 1: ON"),
+            en.selected_count(4),
+            en.playlist_exported(5),
+            en.folder_added("Music"),
+            en.scan_finished(20, 1, 2),
+            en.added_to_queue(2),
+            en.added_to_playlist(2, "Mix"),
+        ] {
+            assert!(!korean(&text), "{text}");
         }
     }
 }

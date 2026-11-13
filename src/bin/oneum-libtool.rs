@@ -55,7 +55,11 @@ fn loudness(paths: &[&str]) -> Result<(), String> {
             }
         } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
             let e = e.to_ascii_lowercase();
-            ["flac", "mp3", "m4a", "wav", "aiff", "aif", "ogg", "mp2"].contains(&e.as_str())
+            [
+                "flac", "mp3", "m4a", "wav", "aiff", "aif", "ogg", "mp2", "dsf", "dff", "mka",
+                "webm",
+            ]
+            .contains(&e.as_str())
         }) {
             out.push(path.to_path_buf());
         }

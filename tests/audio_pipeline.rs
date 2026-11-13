@@ -815,7 +815,7 @@ fn real_flac_files_decode_and_join_exactly() {
         while dec.next(&mut buf).expect("file decodes") {
             all.extend_from_slice(&buf);
         }
-        assert_eq!(dec.skipped_packets, 0, "no damaged packets expected");
+        assert_eq!(dec.skipped_packets(), 0, "no damaged packets expected");
         (info.sample_rate, info.channels, all)
     };
 
@@ -1660,4 +1660,320 @@ fn multichannel_files_are_mixed_down_as_documented_and_measured_as_played() {
             "{name}: {file:.2} LUFS here, {theirs:.1} LUFS by ffmpeg"
         );
     }
+}
+
+/// DSD files from one continuous stream, cut in two (`a` ends on a whole PCM frame),
+/// and the stream whole: written to a temporary folder.
+fn dsd_pair(dir: &std::path::Path, hz: f64) -> (PathBuf, PathBuf, PathBuf, u64) {
+    use oneum::audio::dsd::encode::{Modulator, dff, dsf};
+    let rate = 2_822_400u32;
+    let samples_a: u64 = 32 * 30_000; // 30,000 PCM frames
+    let samples_b: u64 = 1_200_000;
+    let mut m = Modulator::new();
+    for n in 0..samples_a + samples_b {
+        m.push(0.45 * (2.0 * std::f64::consts::PI * hz * n as f64 / f64::from(rate)).sin());
+    }
+    let bits = m.finish();
+    let cut = (samples_a / 8) as usize;
+    let (a, b) = (bits[..cut].to_vec(), bits[cut..].to_vec());
+    let paths = (dir.join("a.dsf"), dir.join("b.dff"), dir.join("whole.dsf"));
+    std::fs::write(&paths.0, dsf(rate, &[a.clone(), a], samples_a, None)).unwrap();
+    std::fs::write(&paths.1, dff(rate, &[b.clone(), b], None)).unwrap();
+    std::fs::write(
+        &paths.2,
+        dsf(rate, &[bits.clone(), bits], samples_a + samples_b, None),
+    )
+    .unwrap();
+    (paths.0, paths.1, paths.2, samples_a / 32)
+}
+
+/// Two DSD songs in a row play as the one stream they were cut from: the decode thread
+/// gives the first song's last frames the second song's first bits, and the second
+/// song starts from the first one's history. At the device's rate (88.2 kHz), through
+/// the resampler (48 kHz) and from memory.
+#[test]
+fn dsd_songs_in_a_row_play_as_one_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, whole, frames_a) = dsd_pair(dir.path(), 1_000.0);
+    let names = [a.to_str().unwrap(), b.to_str().unwrap()];
+    let one = [whole.to_str().unwrap()];
+    for rate in [88_200, 48_000] {
+        let joined = play(&names, rate);
+        let reference = play(&one, rate);
+        assert_eq!(joined.underruns, 0);
+        assert_eq!(
+            joined.frames(),
+            reference.frames(),
+            "{rate}: no frames added or lost"
+        );
+        let boundary = if rate == 88_200 {
+            frames_a
+        } else {
+            // The resampler counts the boundary in output frames.
+            joined.started()[1].1
+        };
+        assert_eq!(joined.started()[0], (1, 0));
+        assert_eq!(joined.started()[1].0, 2);
+        if rate == 88_200 {
+            assert_eq!(joined.started()[1].1, boundary);
+        }
+        let diff = max_abs_diff(
+            &joined.pcm[FADE_GUARD * 2..],
+            &reference.pcm[FADE_GUARD * 2..],
+        );
+        assert!(diff < 1e-6, "{rate}: {diff} off the continuous stream");
+        // The level is the stream's, across the boundary too.
+        let at = boundary as usize * 2;
+        let around = &joined.pcm[at - 2_000..at + 2_000];
+        let peak = around.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!((peak - 0.45).abs() < 0.01, "{rate}: {peak}");
+    }
+    let from_memory = play_from_memory(&names, 88_200, 0);
+    let reference = play(&one, 88_200);
+    let diff = max_abs_diff(
+        &from_memory.pcm[FADE_GUARD * 2..],
+        &reference.pcm[FADE_GUARD * 2..],
+    );
+    assert!(diff < 1e-6, "memory playback: {diff}");
+}
+
+/// A DSD song followed by a PCM song, or alone, ends as decoding it alone does (its
+/// last frames completed with silence), and seeking into a DSD song lands on the frame.
+#[test]
+fn dsd_ends_cleanly_before_other_music_and_seeks_to_the_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, _, _, frames_a) = dsd_pair(dir.path(), 2_000.0);
+    let mut alone = TrackDecoder::open(&a).unwrap();
+    let mut expected = Vec::new();
+    let mut chunk = Vec::new();
+    while alone.next(&mut chunk).unwrap() {
+        expected.extend_from_slice(&chunk);
+    }
+    assert_eq!(expected.len() as u64, 2 * frames_a);
+    let wav = fixture("tone_48k.wav");
+    let played = play(&[a.to_str().unwrap(), wav.to_str().unwrap()], 88_200);
+    assert_eq!(played.started()[1], (2, frames_a));
+    let diff = max_abs_diff(
+        &played.pcm[FADE_GUARD * 2..frames_a as usize * 2],
+        &expected[FADE_GUARD * 2..],
+    );
+    assert!(diff < 1e-6, "{diff}");
+    // From 0.2 s in.
+    let seeked = play_at(
+        &[a.to_str().unwrap()],
+        88_200,
+        200,
+        ReplayGainSettings::default(),
+        ReplayGainTags::default(),
+        1.0,
+    );
+    let from = 88_200 / 5;
+    assert_eq!(seeked.frames() as u64, frames_a - from as u64);
+    // A seek fades in; at 88.2 kHz the fade covers twice the frames it does at 44.1.
+    let guard = 2 * FADE_GUARD;
+    let diff = max_abs_diff(&seeked.pcm[guard * 2..], &expected[(from + guard) * 2..]);
+    assert!(diff < 1e-6, "seek: {diff}");
+}
+
+/// Against an independent decoder: ffmpeg's DSD decoder (another filter design) reads
+/// the same DSF and DSDIFF files to the same tones, at the same level, at the same time
+/// and in the same channels. Skipped without ffmpeg.
+#[test]
+fn dsd_agrees_with_ffmpegs_decoder() {
+    use oneum::audio::dsd::encode::{Modulator, dff, dsf};
+    use std::process::Command;
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("note: dsd_agrees_with_ffmpegs_decoder skipped: no ffmpeg");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rate = 2_822_400u32;
+    let samples = u64::from(rate); // one second
+    let tone = |hz: f64, level: f64| {
+        let mut m = Modulator::new();
+        for n in 0..samples {
+            m.push(level * (2.0 * std::f64::consts::PI * hz * n as f64 / f64::from(rate)).sin());
+        }
+        m.finish()
+    };
+    let (left, right) = (tone(1_000.0, 0.45), tone(5_000.0, 0.2));
+    for (name, bytes) in [
+        (
+            "x.dsf",
+            dsf(rate, &[left.clone(), right.clone()], samples, None),
+        ),
+        ("x.dff", dff(rate, &[left.clone(), right.clone()], None)),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let out = dir.path().join(format!("{name}.f32"));
+        let status = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&path)
+            .args(["-ar", "88200", "-f", "f32le", "-c:a", "pcm_f32le"])
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(status.success(), "ffmpeg reads {name}");
+        let theirs: Vec<f32> = std::fs::read(&out)
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let mut ours = Vec::new();
+        let mut dec = TrackDecoder::open(&path).unwrap();
+        let mut chunk = Vec::new();
+        while dec.next(&mut chunk).unwrap() {
+            ours.extend_from_slice(&chunk);
+        }
+        // Amplitude and phase of a tone in one channel, over the middle half second.
+        let measure = |pcm: &[f32], channel: usize, hz: f64| {
+            let w = 2.0 * std::f64::consts::PI * hz / 88_200.0;
+            let (mut s, mut c) = (0.0, 0.0);
+            let range = 22_050..66_150;
+            for n in range.clone() {
+                let y = f64::from(pcm[n * 2 + channel]);
+                s += y * (w * n as f64).sin();
+                c += y * (w * n as f64).cos();
+            }
+            let len = range.len() as f64;
+            let (a, b) = (2.0 * s / len, 2.0 * c / len);
+            (a.hypot(b), b.atan2(a))
+        };
+        let mut delays = Vec::new();
+        for (channel, hz, level) in [(0, 1_000.0, 0.45), (1, 5_000.0, 0.2)] {
+            let (ours_amp, ours_phase) = measure(&ours, channel, hz);
+            let (their_amp, their_phase) = measure(&theirs, channel, hz);
+            let db = 20.0 * (ours_amp / their_amp).log10();
+            let us = (ours_phase - their_phase) / (2.0 * std::f64::consts::PI * hz) * 1e6;
+            println!(
+                "REPORT {name} channel {channel}: ours {ours_amp:.4}, ffmpeg {their_amp:.4} \
+                 ({db:+.3} dB), time {us:+.2} µs"
+            );
+            assert!(
+                (ours_amp - level).abs() < 0.005,
+                "{name} {channel}: {ours_amp}"
+            );
+            assert!(db.abs() < 0.1, "{name} {channel}: {db} dB from ffmpeg");
+            // Ours is in time with the signal that was encoded (a sine starting at
+            // phase 0); ffmpeg's decoder leaves its filter's delay in (about 14 µs),
+            // the same for every frequency, and the same polarity.
+            let ours_us = ours_phase / (2.0 * std::f64::consts::PI * hz) * 1e6;
+            assert!(
+                ours_us.abs() < 1.0,
+                "{name} {channel}: {ours_us} µs from the signal"
+            );
+            assert!(
+                (5.0..25.0).contains(&us),
+                "{name} {channel}: {us} µs from ffmpeg"
+            );
+            delays.push(us);
+            // The other channel's tone is not in this one.
+            let (leak, _) = measure(&theirs, 1 - channel, hz);
+            assert!(
+                leak < 1e-3,
+                "{name}: ffmpeg sees channel {channel} elsewhere"
+            );
+        }
+        // A plain delay: the same at 1 and at 5 kHz.
+        assert!((delays[0] - delays[1]).abs() < 0.5, "{name}: {delays:?}");
+    }
+}
+
+/// Writes DSD files for trying the app by hand: `ONEUM_DSD_OUT=<folder>`.
+#[test]
+#[ignore = "writes files for a manual check"]
+fn write_dsd_files_for_a_manual_check() {
+    use oneum::audio::dsd::encode::{Modulator, dff, dsf};
+    let Some(dir) = std::env::var_os("ONEUM_DSD_OUT").map(PathBuf::from) else {
+        return;
+    };
+    let rate = 2_822_400u32;
+    let samples = u64::from(rate) * 20;
+    let mut m = Modulator::new();
+    for n in 0..samples {
+        let t = n as f64 / f64::from(rate);
+        m.push(0.3 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+    }
+    let bits = m.finish();
+    let half = (samples / 2 / 8) as usize;
+    std::fs::write(
+        dir.join("01 First.dsf"),
+        dsf(
+            rate,
+            &[bits[..half].to_vec(), bits[..half].to_vec()],
+            samples / 2,
+            None,
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("02 Second.dff"),
+        dff(rate, &[bits[half..].to_vec(), bits[half..].to_vec()], None),
+    )
+    .unwrap();
+}
+
+/// Playback hands the demuxer the stream after the ID3v2 tags in front (tags come from
+/// the library): a file with a huge tag of tiny frames, several tags in a row, or a tag
+/// with a footer plays the same samples and seeks to the same frames as without them.
+#[test]
+fn the_tags_in_front_of_an_mp3_are_looked_past() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = std::fs::read(fixture("gap_a.mp3")).unwrap();
+    let syncsafe = |n: usize| {
+        [
+            (n >> 21) as u8 & 0x7F,
+            (n >> 14) as u8 & 0x7F,
+            (n >> 7) as u8 & 0x7F,
+            n as u8 & 0x7F,
+        ]
+    };
+    let tag = |frames: usize, footer: bool| {
+        let body: Vec<u8> = (0..frames)
+            .flat_map(|i| {
+                let mut f = b"TXXX".to_vec();
+                f.extend(syncsafe(6));
+                f.extend([0, 0, 0, b'k', 0, b'0' + (i % 10) as u8, b'v', 0]);
+                f
+            })
+            .collect();
+        let mut t = b"ID3\x04\x00".to_vec();
+        t.push(if footer { 0x10 } else { 0 });
+        t.extend(syncsafe(body.len()));
+        t.extend(&body);
+        if footer {
+            t.extend(b"3DI\x04\x00\x10");
+            t.extend(syncsafe(body.len()));
+        }
+        t
+    };
+    let mut tagged = tag(200_000, false);
+    tagged.extend(tag(3, true));
+    tagged.extend(tag(1, false));
+    tagged.extend(&plain);
+    let path = dir.path().join("tagged.mp3");
+    std::fs::write(&path, &tagged).unwrap();
+    let decode = |p: &std::path::Path, seek: Option<u64>| {
+        let mut d = TrackDecoder::open(p).unwrap();
+        if let Some(frame) = seek {
+            d.seek(frame).unwrap();
+        }
+        let mut all = Vec::new();
+        let mut chunk = Vec::new();
+        while d.next(&mut chunk).unwrap() {
+            all.extend_from_slice(&chunk);
+        }
+        (d.info().total_frames, all)
+    };
+    let (_, _, reference) = decode_all("gap_a.mp3");
+    let (frames, samples) = decode(&path, None);
+    assert_eq!(samples, reference);
+    assert_eq!(frames, decode(&fixture("gap_a.mp3"), None).0);
+    assert_eq!(
+        decode(&path, Some(20_000)).1,
+        decode(&fixture("gap_a.mp3"), Some(20_000)).1
+    );
 }

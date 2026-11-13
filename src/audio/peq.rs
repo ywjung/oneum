@@ -32,6 +32,15 @@ pub const MAX_NAME_CHARS: usize = 60;
 /// Largest file that is read as a profile.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 const GAIN_LIMIT_DB: f32 = 30.0;
+/// The most a profile may make any frequency louder, preamp and filters together. A
+/// correction lowers more than it lifts (its preamp makes room for its boosts); this
+/// leaves room for one that does not, and stops a file that is no correction at all
+/// from driving everything into the limiter.
+const MAX_NET_BOOST_DB: f32 = 12.0;
+/// The sample rates the limit is worked out at (the response differs a little by rate).
+const BOUND_RATES: [u32; 4] = [44_100, 48_000, 96_000, 192_000];
+/// How much of an unknown filter type's name is kept for the message about it.
+const MAX_KIND_CHARS: usize = 12;
 const FADE_SECONDS: f64 = 0.04;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,7 +154,10 @@ impl PeqProfile {
                     Some("PK" | "PEQ") => PeqKind::Peak,
                     Some("LSC") => PeqKind::LowShelf,
                     Some("HSC") => PeqKind::HighShelf,
-                    Some(other) => return Err(PeqError::UnsupportedFilter(other.to_string())),
+                    Some(other) => {
+                        let shown = other.chars().take(MAX_KIND_CHARS).collect();
+                        return Err(PeqError::UnsupportedFilter(shown));
+                    }
                     None => return Err(malformed()),
                 };
                 let filter = PeqFilter {
@@ -183,13 +195,21 @@ impl PeqProfile {
             .collect::<String>()
             .trim()
             .to_string();
-        self.preamp_db = finite(self.preamp_db, 0.0).clamp(-GAIN_LIMIT_DB, 12.0);
+        self.preamp_db = finite(self.preamp_db, 0.0).clamp(-GAIN_LIMIT_DB, MAX_NET_BOOST_DB);
         self.filters.truncate(MAX_FILTERS);
         for f in &mut self.filters {
             f.hz = finite(f.hz, 1_000.0).clamp(10.0, 24_000.0);
             f.gain_db = finite(f.gain_db, 0.0).clamp(-GAIN_LIMIT_DB, GAIN_LIMIT_DB);
             f.q = finite(f.q, 0.707).clamp(0.05, 30.0);
         }
+        // Filters add up: each within its limit, thirty-two of them on one frequency
+        // are hundreds of decibels. Whatever the filters do together, nothing comes out
+        // more than the limit louder than it went in: the preamp gives way.
+        let boost = BOUND_RATES
+            .into_iter()
+            .map(|rate| self.boost_db(rate))
+            .fold(0.0, f64::max);
+        self.preamp_db = self.preamp_db.min(MAX_NET_BOOST_DB - boost as f32);
         self
     }
 
@@ -201,10 +221,31 @@ impl PeqProfile {
     /// The largest boost anywhere in the response, preamp included, in dB (what the
     /// preamp has to make room for).
     pub fn peak_db(&self, rate: u32) -> f32 {
-        (0..=240)
-            .map(|i| 20.0 * (1_000f32).powf(i as f32 / 240.0))
-            .map(|hz| self.response_db(rate, hz))
-            .fold(f32::MIN, f32::max)
+        (f64::from(self.preamp_db) + self.boost_db(rate)) as f32
+    }
+
+    /// The largest gain of the filters together (without the preamp) anywhere from
+    /// 20 Hz to 20 kHz, in dB. Looked for on a fine grid and at every filter's own
+    /// frequency, where a narrow filter has its peak.
+    fn boost_db(&self, rate: u32) -> f64 {
+        let rate = f64::from(rate.max(1));
+        let biquads: Vec<Biquad> = self
+            .filters
+            .iter()
+            .filter_map(|f| Biquad::design(f, rate))
+            .collect();
+        if biquads.is_empty() {
+            return 0.0;
+        }
+        let grid = (0..=240).map(|i| 20.0 * 1_000f64.powf(f64::from(i) / 240.0));
+        let centres = self.filters.iter().map(|f| f64::from(f.hz));
+        grid.chain(centres)
+            .filter(|hz| *hz < rate / 2.0)
+            .map(|hz| {
+                let w = 2.0 * PI * hz / rate;
+                biquads.iter().map(|b| b.gain_db(w)).sum::<f64>()
+            })
+            .fold(f64::MIN, f64::max)
     }
 
     /// Gain of the whole profile at `hz`, in dB.
@@ -375,6 +416,9 @@ pub struct Corrector {
     /// Share of `current` in the output during a cross-fade (1 = all of it).
     mix: f64,
     fade_step: f64,
+    /// A change that came while another was being faded: made when that fade is over
+    /// (`Some(None)`: switch off).
+    pending: Option<Option<Chain>>,
 }
 
 impl Corrector {
@@ -389,6 +433,7 @@ impl Corrector {
             // A feed starts at its setting: there is nothing before it to fade from.
             mix: 1.0,
             fade_step: 1.0 / (FADE_SECONDS * rate),
+            pending: None,
         }
     }
 
@@ -397,13 +442,21 @@ impl Corrector {
         let next = profile
             .filter(|p| !p.is_flat())
             .map(|p| Chain::new(p, self.rate));
-        if next.is_none() && self.current.is_none() && self.previous.is_none() {
+        if self.mix < 1.0 {
+            // A fade started over from where this one has got to would jump: the new
+            // setting waits for it to end (40 ms at most), the latest one winning.
+            self.pending = Some(next);
             return;
         }
-        // In the middle of a fade the sound being left is the one that is heard more.
-        if self.mix >= 0.5 || self.previous.is_none() {
-            self.previous = self.current.take();
+        self.fade_to(next);
+    }
+
+    fn fade_to(&mut self, next: Option<Chain>) {
+        // Outside a fade there is no `previous`: nothing to fade from or to.
+        if next.is_none() && self.current.is_none() {
+            return;
         }
+        self.previous = self.current.take();
         self.current = next;
         self.mix = 0.0;
     }
@@ -440,6 +493,9 @@ impl Corrector {
                 self.mix = (self.mix + self.fade_step).min(1.0);
                 if self.mix >= 1.0 {
                     self.previous = None;
+                    if let Some(next) = self.pending.take() {
+                        self.fade_to(next);
+                    }
                 }
             }
         }
@@ -565,7 +621,9 @@ mod tests {
         }
         .sanitized();
         assert!(wild.name.chars().count() <= MAX_NAME_CHARS && !wild.name.contains('\n'));
-        assert_eq!(wild.preamp_db, 0.0);
+        // Not a number became 0 dB, and then gave way to what the filters add up to.
+        assert!(wild.preamp_db.is_finite() && wild.preamp_db < 0.0);
+        assert!(wild.peak_db(192_000) <= MAX_NET_BOOST_DB + 0.01);
         assert_eq!(wild.filters.len(), MAX_FILTERS);
         assert_eq!(
             (
@@ -841,5 +899,91 @@ mod tests {
                 q: 4.36
             }
         );
+    }
+
+    /// Each filter is within its limit; together they may not be. A file of boosts
+    /// stacked on one frequency is read, and plays no louder than the limit.
+    #[test]
+    fn filters_that_add_up_are_held_to_the_limit_by_the_preamp() {
+        let stacked: String = (1..=32)
+            .map(|i| format!("Filter {i}: ON PK Fc 1000 Hz Gain 30 dB Q 30\n"))
+            .collect();
+        let profile = PeqProfile::parse("Stack", &format!("Preamp: 12 dB\n{stacked}")).unwrap();
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            let peak = profile.peak_db(rate);
+            assert!(peak <= MAX_NET_BOOST_DB + 0.01, "{peak} dB at {rate}");
+            // The peak of so narrow a stack lies between the points of any grid: it is
+            // found at the filters' own frequency.
+            assert!((profile.response_db(rate, 1_000.0) - peak).abs() < 0.01);
+        }
+        // What comes out of a full-scale tone at that frequency is no more than the
+        // limit above full scale (the peak protection that follows takes that off).
+        let mut corrector = Corrector::new(48_000, Some(&profile));
+        let mut tone: Vec<f32> = (0..48_000)
+            .flat_map(|i| {
+                let s = (2.0 * PI * 1_000.0 * f64::from(i) / 48_000.0).sin() as f32;
+                [s, s]
+            })
+            .collect();
+        corrector.process(&mut tone);
+        let loudest = tone.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(loudest.is_finite() && loudest <= 4.1, "{loudest}");
+
+        // Tidying again changes nothing, and a real correction is left as it is.
+        assert_eq!(profile.clone().sanitized(), profile);
+        let real = PeqProfile::parse(
+            "Real",
+            "Preamp: -6.2 dB\nFilter 1: ON LSC Fc 105 Hz Gain 6.6 dB Q 0.70\n",
+        )
+        .unwrap();
+        assert_eq!(real.preamp_db, -6.2);
+        // A boost without a preamp is allowed up to the limit.
+        let bare = PeqProfile::parse("Bare", "Filter 1: ON PK Fc 1000 Hz Gain 9 dB Q 1\n").unwrap();
+        assert_eq!(bare.preamp_db, 0.0);
+    }
+
+    #[test]
+    fn the_name_of_an_unknown_filter_is_reported_short() {
+        let text = format!(
+            "Filter 1: ON {} Fc 100 Hz Gain 1 dB Q 1\n",
+            "X".repeat(60_000)
+        );
+        match PeqProfile::parse("x", &text) {
+            Err(PeqError::UnsupportedFilter(kind)) => assert_eq!(kind.len(), MAX_KIND_CHARS),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Profiles changed faster than a fade lasts: each change waits for the fade before
+    /// it, so the sound glides from one to the next and never jumps.
+    #[test]
+    fn changes_quicker_than_the_fade_glide_and_the_last_one_wins() {
+        let rate = 48_000;
+        let a = PeqProfile::parse("A", "Preamp: -12 dB\n").unwrap();
+        let b = PeqProfile::parse("B", "Preamp: 6 dB\n").unwrap();
+        let mut corrector = Corrector::new(rate, Some(&a));
+        let mut last = None::<f32>;
+        let mut largest_step = 0f32;
+        // A steady signal in blocks of 2 ms; the profile changes every 6 ms.
+        for block in 0..200 {
+            if block % 3 == 0 && block < 60 {
+                let next = [Some(&b), None, Some(&a), Some(&b)][(block / 3) % 4];
+                corrector.set(next);
+            }
+            let mut samples = vec![0.5f32; 2 * 96];
+            corrector.process(&mut samples);
+            for frame in samples.chunks(2) {
+                if let Some(previous) = last {
+                    largest_step = largest_step.max((frame[0] - previous).abs());
+                }
+                last = Some(frame[0]);
+            }
+        }
+        // A 40 ms fade between -12 and +6 dB moves 0.5 x (2.0 - 0.25) over 1,920
+        // frames: under 0.001 a frame. A fade started over would jump by far more.
+        assert!(largest_step < 0.002, "{largest_step}");
+        // The last change was to B: that is where it ends.
+        let expected = 0.5 * 10f32.powf(6.0 / 20.0);
+        assert!((last.unwrap() - expected).abs() < 1e-4, "{last:?}");
     }
 }

@@ -147,8 +147,10 @@ fn resolve(line: &str, base_dir: &Path) -> Option<PathBuf> {
     if !absolute.exists() && line.contains('\\') {
         // Playlists written on Windows use backslashes for relative paths.
         let converted = line.replace('\\', "/");
-        let candidate = lexical_normalize(&base_dir.join(converted));
-        if candidate.exists() {
+        // Checked like the line itself before the disk is asked: with the slashes
+        // turned, "..\..\net\host" is a path that leads off this machine.
+        let candidate = local_only(lexical_normalize(&base_dir.join(converted)), base_dir);
+        if let Some(candidate) = candidate.filter(|c| c.exists()) {
             return Some(candidate);
         }
     }
@@ -432,5 +434,31 @@ mod tests {
             PathBuf::from("/a/c/d")
         );
         assert_eq!(lexical_normalize(Path::new("/../a")), PathBuf::from("/a"));
+    }
+
+    /// With its backslashes turned, a relative line can climb out and name the
+    /// automounter's folder. It is not looked for there.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_path_does_not_lead_off_this_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let up = "..\\".repeat(dir.path().components().count() + 2);
+        let line = format!("{up}net\\host\\share\\a.mp3");
+        let entries = parse(&line, dir.path());
+        assert_eq!(entries.len(), 1);
+        let path = entries[0].path.as_ref().expect("a local name");
+        assert!(path.starts_with(dir.path()), "{path:?}");
+        // Checked without the disk: the turned path is one that is refused.
+        let turned = lexical_normalize(&dir.path().join(line.replace('\\', "/")));
+        assert!(turned.starts_with("/net/host"), "{turned:?}");
+        assert!(local_only(turned, dir.path()).is_none());
+        // The ordinary case still works: a Windows playlist next to its music.
+        std::fs::create_dir_all(dir.path().join("Album")).unwrap();
+        std::fs::write(dir.path().join("Album").join("a.mp3"), b"x").unwrap();
+        let entries = parse("Album\\a.mp3", dir.path());
+        assert_eq!(
+            entries[0].path.as_deref(),
+            Some(dir.path().join("Album").join("a.mp3").as_path())
+        );
     }
 }

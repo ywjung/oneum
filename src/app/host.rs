@@ -40,7 +40,7 @@ impl PlayerHost for LibraryHost {
             replaygain: t.leveling(),
             duration_ms: t.duration_ms,
             available: t.available,
-            sample_rate: t.sample_rate,
+            sample_rate: t.playback_rate(),
             bit_depth: t.bit_depth,
         })
     }

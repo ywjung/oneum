@@ -8,15 +8,28 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Largest state file that is read. The app writes a few kilobytes (at its limits, a
+/// few hundred); something far larger under that name is not its file, and is treated
+/// like one that does not parse rather than loaded into memory whole.
+const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Loads `path` as JSON. Missing or corrupt files yield `T::default()`.
 pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
-    let bytes = match fs::read(path) {
+    let read = || -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        // One more byte than is allowed: its presence says the file is too large.
+        File::open(path)?
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    let bytes = match read() {
         Ok(bytes) => bytes,
         Err(err) => {
             if err.kind() != io::ErrorKind::NotFound {
@@ -25,7 +38,12 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
             return T::default();
         }
     };
-    match serde_json::from_slice(&bytes) {
+    let parsed: Result<T, String> = if bytes.len() as u64 > MAX_BYTES {
+        Err(format!("larger than {MAX_BYTES} bytes"))
+    } else {
+        serde_json::from_slice(&bytes).map_err(|err| err.to_string())
+    };
+    match parsed {
         Ok(value) => value,
         Err(err) => {
             let aside = with_suffix(path, ".corrupt");
@@ -110,6 +128,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let loaded: Sample = load_json(&dir.path().join("settings.json"));
         assert_eq!(loaded, Sample::default());
+    }
+
+    #[test]
+    fn a_file_far_larger_than_the_app_writes_is_set_aside_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // Valid JSON, so that only its size can be the reason.
+        let huge = format!(
+            r#"{{"volume":0.5,"name":"{}"}}"#,
+            "a".repeat(MAX_BYTES as usize)
+        );
+        fs::write(&path, huge).unwrap();
+        assert_eq!(load_json::<Sample>(&path), Sample::default());
+        assert!(!path.exists());
+        assert!(with_suffix(&path, ".corrupt").exists());
+        // Just under the limit is read.
+        let large = format!(
+            r#"{{"volume":0.5,"name":"{}"}}"#,
+            "a".repeat(MAX_BYTES as usize - 100)
+        );
+        fs::write(&path, large).unwrap();
+        assert_eq!(load_json::<Sample>(&path).volume, 0.5);
     }
 
     #[test]

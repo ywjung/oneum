@@ -121,6 +121,10 @@ impl PeakLimiter {
 
     /// Takes one frame in; gives the frame from `lookahead` frames ago out, if any.
     fn step(&mut self, frame: [f32; 2]) -> Option<[f32; 2]> {
+        // What is not a number is silence: a gain cannot bring it into range (infinity
+        // times the gain it asks for, zero, is not a number either).
+        let number = |sample: f32| if sample.is_finite() { sample } else { 0.0 };
+        let frame = [number(frame[0]), number(frame[1])];
         let n = self.taken;
         let peak = frame[0].abs().max(frame[1].abs());
         let need = if peak > 1.0 { 1.0 / peak } else { 1.0 };
@@ -377,5 +381,21 @@ mod tests {
         assert_eq!(out.len(), input.len());
         assert!(peak(&out) <= 1.0);
         assert!(out[0] <= 0.25 && out[0] > 0.1);
+    }
+
+    /// Infinity asks for a gain of zero, and zero times infinity is not a number: such
+    /// samples go in as silence, and the music around them comes out as it was.
+    #[test]
+    fn what_is_not_a_number_comes_out_as_silence() {
+        let mut input = vec![0.25f32; 2 * 4_000];
+        input[2_000] = f32::INFINITY;
+        input[2_001] = f32::NEG_INFINITY;
+        input[4_000] = f32::NAN;
+        let (out, limited) = run(&input, 512);
+        assert_eq!(out.len(), input.len());
+        assert!(out.iter().all(|s| s.is_finite()));
+        assert_eq!(limited, 0, "nothing was above full scale");
+        assert_eq!((out[2_000], out[2_001], out[4_000]), (0.0, 0.0, 0.0));
+        assert_eq!(out.iter().filter(|s| **s == 0.25).count(), input.len() - 3);
     }
 }

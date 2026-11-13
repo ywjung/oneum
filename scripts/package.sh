@@ -6,8 +6,8 @@
 #   scripts/package.sh --dmg        also create the disk image and checksums
 #
 # Signing: set ONEUM_SIGN_IDENTITY to a "Developer ID Application: …" identity to sign
-# with the hardened runtime. Without it the bundle is ad-hoc signed (runs locally, is
-# not notarizable). See docs/RELEASE.md.
+# with it. Without it the bundle is ad-hoc signed (runs locally, is not notarizable).
+# Both ways the hardened runtime is on. See docs/RELEASE.md.
 set -eu
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -75,8 +75,10 @@ if [ -n "${ONEUM_SIGN_IDENTITY:-}" ]; then
   codesign --force --timestamp --options runtime --sign "$ONEUM_SIGN_IDENTITY" "$APP"
   echo "signed with: $ONEUM_SIGN_IDENTITY (hardened runtime)"
 else
-  codesign --force --sign - "$APP"
-  echo "ad-hoc signed (no Developer ID identity given)"
+  # Ad-hoc, but with the hardened runtime as well: the app needs none of what it
+  # switches off (injected libraries, code made at run time, being debugged).
+  codesign --force --options runtime --sign - "$APP"
+  echo "ad-hoc signed with the hardened runtime (no Developer ID identity given)"
 fi
 codesign --verify --strict "$APP"
 echo "built $APP  (version $VERSION, build $BUILD, $ARCH, $PROFILE)"
