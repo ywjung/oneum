@@ -7,7 +7,8 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - **From a Mac**: connect the iPhone with a cable, choose it in Finder, and drag music folders onto **OnEum** in the **Files** tab.
 - **In OnEum**: **Settings → Library → Import Files** (or **Import Folder**) copies music from elsewhere, such as iCloud Drive, into OnEum's folder. A folder in iCloud Drive has to have its files downloaded to the iPhone first.
 
-- Music that was added appears when OnEum is opened again. To read it at once, press **Settings → Library → Rescan**.
+- Music that was added appears by itself within half a minute or so while OnEum is on the screen. To read it at once, press **Settings → Library → Rescan**.
+- **Link Folder**: **Settings → Library → Link Folder** reads a folder in iCloud Drive or on a drive that is plugged in where it is, without copying. After plugging a drive in again, press **Rescan**. Of the songs in iCloud Drive only those downloaded to the iPhone are read. **Unlink** leaves the files as they are.
 - A music file in another app can also be opened with **Share → OnEum**.
 - OnEum only reads music files. It never changes or deletes files or their tags. Favourites, play counts and playlists are kept inside OnEum only.
 - No account and no internet connection are needed.
@@ -19,6 +20,8 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - **‹** at the top left goes back to the page before. So does a swipe to the right from the left edge of the screen.
 - In a long list, hold the right edge of the screen and drag up or down to move through it quickly.
 - **The bar above the tabs**: the song that is playing. Press it to open the player on the whole screen.
+- **Searching inside a list**: the magnifier at the top right of a list (songs, albums, artists, a playlist and so on) searches in that list only. Press the magnifier again to end the search.
+- **Landscape**: turn the iPhone on its side and the screen turns with it. The player has the cover at the left and the buttons at the right, and the bar of the song that is playing moves beside the tabs.
 
 ## Listening
 - Pressing a song in a list puts the whole list into the queue and plays from that song. **Play** and **Shuffle** above a list start from the top or in a shuffled order.
@@ -28,9 +31,10 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - The three buttons at the top right of the player choose what is shown in the cover's place: **Lyrics · VU Meter · Up Next**. Pressing the same button again brings the cover back.
 - **Lyrics**: the lyrics in the file's tags or in an .lrc file of the same name. With time stamps the line being sung is followed, and pressing a line plays from there.
 - **VU Meter**: needles for the loudness of the left and right channel, a spectrum, and the file's format with the path the sound takes.
-- **Up Next**: press a song to play from it; ⋯ removes it from the queue. Drag the **≡** handle at the right of a song to move it. **Save** keeps the queue as a playlist, **Clear Queue** empties it.
+- **Up Next**: press a song to play from it; ⋯ removes it from the queue. Drag the **≡** handle at the right of a song to move it. **Save** keeps the queue as a playlist, **Clear Queue** empties it. Press **Select** and choose several songs: **Selected Songs…** moves them to the top, adds them to a playlist or takes them out of the queue, all at once.
 - A menu that ⋯ brought up closes when you press outside it or pull its handle down.
 - **Sleep Timer** and **Stop After Current Song** are under ⋯ of the song that is playing. While one is on it is shown at the bottom of the player; press those words to switch it off.
+- **Show in Songs**, under ⋯ of the song that is playing, opens the song list at the place of that song.
 - **Song Info** (under ⋯ of a song): album, artist and genres (press one to go there), track number, length, format, leveling values, what the file check found, play count, what the file names besides (the label, and credits such as composer, lyricist and conductor), other versions of the same song in the library, and for the song that is playing the signal path.
 - Press the time at the right of the position to switch between the whole length and the time left. Press the speaker at the left of the volume to mute; press it again for the volume as it was.
 - Playback goes on with the screen off and while another app is used. The lock screen, Control Center and the buttons of headphones play, pause and skip.
@@ -56,12 +60,15 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - **Settings → Library → Import Playlist** reads an M3U8 file. A playlist that lies in OnEum's folder finds the music files beside it.
 
 ## Settings
-- **Library**: where the music is, Rescan, importing files, folders and playlists, and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.
+- **Library**: where the music is, Rescan, importing files, folders and playlists, linking folders, and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.
+- **Importing an Apple Music library** (Settings → Library): save an XML file on the Mac with **File → Library → Export Library** in Apple Music, move it to the iPhone and choose it: play counts, last played, date added, loved songs and playlists are brought over. Songs are found by the folder they are in and their file name, so this fits songs whose folders were copied from the Mac as they are. Music files are not changed.
+- **Output at the song's sample rate** (Settings → Playback): when on, OnEum asks the iPhone for the sample rate of each song, and where the iPhone agrees the sound goes out without conversion. The built-in output follows between 44.1 kHz and 48 kHz, a USB DAC as far as that DAC goes. Where it does not follow, the sound is converted as usual. How the sound goes out just now is in the signal path of Song Info.
 - **Playback**: volume leveling (ReplayGain) and the analysis of songs without tags, shuffle by album, resuming long tracks, crossfeed, headphone correction (34 built-in profiles and correction files), radio, memory playback.
 - **Equalizer**: ten bands and presets. Double-tap a slider to return it to 0 dB.
 - **General**: language and appearance (light · dark · system).
 
 ## What differs from the Mac and Windows versions
-- The iPhone decides where the sound goes and at which sample rate. There is no choice of output device, no output at the song's sample rate and no exclusive output.
+- The iPhone decides where the sound goes. There is no choice of output device and no exclusive output. The iPhone decides the sample rate too; **Output at the song's sample rate** asks it for one.
 - There is no menu bar and there are no keyboard shortcuts, no Show in Finder, and nothing can be dragged onto a window. The columns of a list cannot be chosen either (what they show is in Song Info).
-- An Apple Music library cannot be imported. That file finds songs by where they are on a Mac, which the songs put on an iPhone cannot be matched to.
+- When an Apple Music library is imported, a Mac finds the songs by where their files are; on an iPhone they are elsewhere, so they are found by their folder and file name. Where the same folder and file name occur more than once, that song is skipped.
+- There are no screens made for the iPad. On an iPad it runs as an iPhone app.

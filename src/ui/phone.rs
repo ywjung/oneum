@@ -108,6 +108,8 @@ enum Sheet {
     Sort(Nav),
     /// What can be done with the songs chosen in this list.
     Selection(Nav),
+    /// What can be done with the entries chosen in the queue.
+    QueueSelection,
 }
 
 /// A row that is being carried to another place in its list.
@@ -149,6 +151,8 @@ struct Transition {
 const TRANSITION: f32 = 0.30;
 /// How long a sheet takes to go back down, in seconds.
 const SHEET_FALL: f32 = 0.20;
+/// The most a sheet is wide (in points).
+const SHEET_WIDTH: f32 = 520.0;
 /// How long the player and a sheet take to come up.
 const RISE: f32 = 0.30;
 
@@ -201,6 +205,14 @@ pub(super) struct Phone {
     /// The smart playlist whose search was put into the search field to be changed:
     /// saving the search offers its name again.
     editing_smart: Option<String>,
+    /// The list whose own search field is shown (it is also shown while it holds a
+    /// search), and whether that field is to get the keyboard.
+    searching: Option<Nav>,
+    focus_list_search: bool,
+    /// A song to bring into view in the list of this view when it is next drawn.
+    reveal: Option<(Nav, TrackId)>,
+    /// Several entries of the queue are being chosen.
+    queue_selecting: bool,
 }
 
 impl Phone {
@@ -233,6 +245,10 @@ impl Phone {
             selecting: None,
             reorder: None,
             editing_smart: None,
+            searching: None,
+            focus_list_search: false,
+            reveal: None,
+            queue_selecting: false,
         }
     }
 
@@ -258,6 +274,7 @@ impl Phone {
         self.stack().push(page);
         self.selecting = None;
         self.reorder = None;
+        self.searching = None;
         self.transition = Some(Transition {
             other: was,
             forward: true,
@@ -281,6 +298,7 @@ impl Phone {
         self.back_dragging = false;
         self.selecting = None;
         self.reorder = None;
+        self.searching = None;
     }
 
     /// Shows another tab (or the first page of the one that is open).
@@ -311,6 +329,8 @@ impl Phone {
             "search_rows": self.search_rows.len(),
             "moving": self.transition.is_some(),
             "selecting": self.selecting.as_ref().map(|nav| format!("{nav:?}")),
+            "searching": self.searching.as_ref().map(|nav| format!("{nav:?}")),
+            "queue_selecting": self.queue_selecting,
             "carrying": self.reorder.map(|carried| (carried.from, carried.to)),
         })
     }
@@ -611,26 +631,62 @@ impl OneumApp {
         let keyboard = crate::platform::window::keyboard_height();
         // Under the player once it is all the way up, nothing needs drawing.
         if up < 1.0 || self.phone.player_drag > 0.0 {
+            // Both bars run from edge to edge; what is on them keeps to the safe part
+            // (a phone on its side has its camera at one end).
             let tab_bar = Rect::from_min_max(pos2(full.left(), safe.bottom() - TAB_BAR), full.max);
-            let mini = (self.player.current.is_some() && keyboard <= 0.0).then(|| {
+            let playing = self.player.current.is_some() && keyboard <= 0.0;
+            // A screen that lies on its side has little height: there the song that
+            // plays shares the line of the tabs instead of lying above it.
+            let beside = playing && full.width() > full.height();
+            let split = safe.left() + safe.width() * 0.5;
+            let tabs = if beside {
                 Rect::from_min_max(
-                    pos2(full.left(), tab_bar.top() - MINI),
-                    pos2(full.right(), tab_bar.top()),
+                    pos2(safe.left(), tab_bar.top()),
+                    pos2(split, tab_bar.bottom()),
                 )
+            } else {
+                Rect::from_x_y_ranges(safe.x_range(), tab_bar.y_range())
+            };
+            let mini = playing.then(|| {
+                let rect = if beside {
+                    Rect::from_min_max(
+                        pos2(split, tab_bar.top()),
+                        pos2(full.right(), tab_bar.top() + TAB_BAR),
+                    )
+                } else {
+                    Rect::from_min_max(
+                        pos2(full.left(), tab_bar.top() - MINI),
+                        pos2(full.right(), tab_bar.top()),
+                    )
+                };
+                let inner = Rect::from_min_max(
+                    pos2(rect.left().max(safe.left()), rect.top()),
+                    pos2(safe.right(), rect.bottom()),
+                );
+                (rect, inner)
             });
             let content_bottom = if keyboard > 0.0 {
                 full.bottom() - keyboard
+            } else if beside {
+                tab_bar.top()
             } else {
-                mini.map_or(tab_bar.top(), |mini| mini.top())
+                mini.map_or(tab_bar.top(), |(mini, _)| mini.top())
             };
             above_bars = content_bottom;
             let pages = Rect::from_min_max(safe.min, pos2(safe.right(), content_bottom));
             self.phone_pages(ui, pages, &mut actions);
-            if let Some(mini) = mini {
-                self.phone_mini_player(ui, mini);
-            }
             if keyboard <= 0.0 {
-                self.phone_tab_bar(ui, tab_bar);
+                self.phone_tab_bar(ui, tab_bar, tabs);
+            }
+            if let Some((mini, inner)) = mini {
+                self.phone_mini_player(ui, mini, inner);
+                if beside {
+                    ui.painter().vline(
+                        split,
+                        mini.y_range(),
+                        egui::Stroke::new(1.0, widgets::divider_color(ui)),
+                    );
+                }
             }
         }
         let meters = up > 0.0 && self.phone.player_view == PlayerView::Meters;
@@ -647,6 +703,13 @@ impl OneumApp {
         } else {
             self.phone.player_drag = 0.0;
             self.phone.player_dragging = false;
+        }
+        if !(self.phone.player_open && self.phone.player_view == PlayerView::Queue)
+            && self.phone.queue_selecting
+        {
+            // Choosing entries of the queue ends with the queue being put away.
+            self.phone.queue_selecting = false;
+            self.queue_selection.clear();
         }
         if !meters {
             // Needles and columns fall back to rest while nobody looks at them.
@@ -936,6 +999,12 @@ impl OneumApp {
             left = back.right();
         }
         let mut right = header.right() - 4.0;
+        // A list can be searched where it is, as the search field of a desk does for
+        // the view that is open.
+        let searchable = match &page {
+            Some(Page::List(nav)) => edit::searchable(nav).then_some(nav),
+            _ => None,
+        };
         let more: Option<Sheet> = match &page {
             Some(Page::List(Nav::Playlist(id))) => Some(Sheet::Playlist(*id)),
             Some(Page::List(Nav::Smart(name))) => Some(Sheet::Smart(name.clone())),
@@ -988,6 +1057,35 @@ impl OneumApp {
             }
             right = button.left();
         }
+        if let Some(nav) = searchable {
+            let centre = pos2(right - TOUCH / 2.0, header.center().y);
+            let on = self.phone.searching.as_ref() == Some(nav);
+            let color = if on {
+                ui.visuals().strong_text_color()
+            } else {
+                theme::accent(ui.visuals().dark_mode)
+            };
+            if bar_button(
+                ui,
+                "phone-page-search",
+                centre,
+                Icon::Search,
+                s.phone_search_here,
+                color,
+            ) {
+                if on {
+                    // Put away, and with it what it was looking for.
+                    self.phone.searching = None;
+                    if let Some(state) = self.views.get_mut(nav) {
+                        state.query.clear();
+                    }
+                } else {
+                    self.phone.searching = Some(nav.clone());
+                    self.phone.focus_list_search = true;
+                }
+            }
+            right -= TOUCH;
+        }
         let size = if page.is_none() { 26.0 } else { 18.0 };
         let title_rect =
             Rect::from_min_max(pos2(left, header.top()), pos2(right - 4.0, header.bottom()));
@@ -1012,6 +1110,9 @@ impl OneumApp {
                 .layout(Layout::top_down(Align::Min)),
         );
         body.set_clip_rect(content.intersect(clip));
+        if let Some(nav) = searchable {
+            self.phone_list_search(&mut body, nav);
+        }
         match page.clone() {
             None => match self.phone.tab {
                 Tab::Library => self.phone_library(&mut body, actions),
@@ -1312,7 +1413,11 @@ impl OneumApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         if rows.is_empty() {
-                            self.empty_list_message(ui, nav, false);
+                            let searched = self
+                                .views
+                                .get(nav)
+                                .is_some_and(|state| !state.query.trim().is_empty());
+                            self.empty_list_message(ui, nav, searched);
                         }
                         self.phone_album_grid(ui, &rows, actions);
                     });
@@ -1324,7 +1429,11 @@ impl OneumApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         if rows.is_empty() {
-                            self.empty_list_message(ui, nav, false);
+                            let searched = self
+                                .views
+                                .get(nav)
+                                .is_some_and(|state| !state.query.trim().is_empty());
+                            self.empty_list_message(ui, nav, searched);
                         }
                         self.phone_artist_rows(ui, &rows, actions);
                     });
@@ -1358,15 +1467,28 @@ impl OneumApp {
                     });
             }
             _ => {
-                egui::ScrollArea::vertical()
+                let mut area = egui::ScrollArea::vertical()
                     .id_salt(("phone-list", nav))
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        self.phone_list_head(ui, nav, &rows, actions);
-                        self.phone_track_rows(ui, nav, &rows, actions);
-                        ui.add_space(12.0);
-                    });
+                    .auto_shrink(false);
+                // A song that was asked for is brought into view once, with a row or
+                // two before it (what is above the rows is about as tall as that).
+                if self.phone.reveal.as_ref().is_some_and(|(of, _)| of == nav)
+                    && let Some((_, wanted)) = self.phone.reveal.take()
+                    && let Some(index) = rows.iter().position(|row| {
+                        self.snapshot
+                            .tracks
+                            .get(row.idx as usize)
+                            .is_some_and(|track| track.id == wanted)
+                    })
+                {
+                    area = area.vertical_scroll_offset(index as f32 * ROW);
+                }
+                area.show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    self.phone_list_head(ui, nav, &rows, actions);
+                    self.phone_track_rows(ui, nav, &rows, actions);
+                    ui.add_space(12.0);
+                });
             }
         }
         if let Some(state) = self.views.get_mut(nav) {
@@ -1444,7 +1566,11 @@ impl OneumApp {
                     .as_ref()
                     .is_some_and(|(_, _, entries)| !entries.is_empty());
             if !folders_inside {
-                self.empty_list_message(ui, nav, false);
+                let searched = self
+                    .views
+                    .get(nav)
+                    .is_some_and(|state| !state.query.trim().is_empty());
+                self.empty_list_message(ui, nav, searched);
             }
             return;
         }
@@ -2209,6 +2335,21 @@ impl OneumApp {
         let mut import_folder = false;
         let mut rescan = false;
         let mut show_damaged = false;
+        let mut import_apple = false;
+        let mut link_folder = false;
+        let mut unlink: Option<(i64, String)> = None;
+        // The folders that are used where they are: every music folder but the app's
+        // own.
+        let own = crate::platform::PHONE
+            .then(crate::app::paths::AppPaths::phone_music_dir)
+            .flatten();
+        let linked: Vec<_> = self
+            .core
+            .library
+            .roots()
+            .into_iter()
+            .filter(|root| Some(&root.path) != own.as_ref())
+            .collect();
         egui::ScrollArea::vertical()
             .id_salt("phone-library-settings")
             .auto_shrink(false)
@@ -2274,10 +2415,62 @@ impl OneumApp {
                                 }
                             });
                         });
+                        // Folders that are read where they are.
+                        ui.add_space(14.0);
+                        widgets::section_title(ui, s.phone_linked_folders);
+                        widgets::card(ui, |ui| {
+                            for root in &linked {
+                                let name = root.path.file_name().map_or_else(
+                                    || root.path.display().to_string(),
+                                    |name| name.to_string_lossy().into_owned(),
+                                );
+                                let state = if root.online {
+                                    self.lang.song_count(root.track_count)
+                                } else {
+                                    s.folder_offline.to_string()
+                                };
+                                ui.push_id(("phone-linked", root.id), |ui| {
+                                    widgets::setting_row(ui, &name, Some(&state), true, |ui| {
+                                        if ui.button(s.phone_unlink).clicked() {
+                                            unlink =
+                                                Some((root.id, root.path.display().to_string()));
+                                        }
+                                    });
+                                });
+                                widgets::row_divider(ui);
+                            }
+                            widgets::setting_row(
+                                ui,
+                                s.phone_link_folder,
+                                Some(s.phone_link_folder_desc),
+                                true,
+                                |ui| {
+                                    if ui.button(s.phone_link_folder).clicked() {
+                                        link_folder = true;
+                                    }
+                                },
+                            );
+                        });
+                        widgets::section_note(ui, s.phone_linked_hint);
                         // Reading every file to the end to see that it is whole, as on
                         // a desk. The damaged ones are shown in the search tab.
                         ui.add_space(18.0);
                         show_damaged = self.check_card(ui);
+                        // What Apple Music knew: play counts, favourites, playlists.
+                        ui.add_space(14.0);
+                        widgets::section_title(ui, s.import_title);
+                        widgets::card(ui, |ui| {
+                            widgets::setting_row(
+                                ui,
+                                s.apple_import_row,
+                                Some(s.apple_import_desc),
+                                true,
+                                |ui| {
+                                    import_apple = ui.button(s.apple_import_button).clicked();
+                                },
+                            );
+                        });
+                        widgets::section_note(ui, s.phone_apple_import_hint);
                     });
                 });
                 ui.add_space(16.0);
@@ -2285,13 +2478,25 @@ impl OneumApp {
         if show_damaged {
             self.phone_show_search("check:damaged");
         }
+        if import_apple {
+            self.pick_apple_library();
+        }
         if import_files {
             self.import_music(crate::platform::PickKind::Files);
         }
         if import_folder {
             self.import_music(crate::platform::PickKind::Folder);
         }
+        if link_folder {
+            self.link_folder();
+        }
+        if let Some((id, path)) = unlink {
+            self.dialog = Some(super::dialogs::Dialog::RemoveFolder(id, path));
+        }
         if rescan {
+            // A drive that was plugged in since the app started: its linked folders
+            // can be read again from here on.
+            crate::platform::files::reach_linked_folders();
             self.announce_scan = true;
             self.core.library.rescan();
         }
@@ -2299,7 +2504,8 @@ impl OneumApp {
 
     // ----- the bars at the bottom -------------------------------------------------------
 
-    fn phone_tab_bar(&mut self, ui: &mut Ui, rect: Rect) {
+    /// The tabs: `rect` is the bar, `inner` the part of it they share out.
+    fn phone_tab_bar(&mut self, ui: &mut Ui, rect: Rect, inner: Rect) {
         let s = self.s();
         ui.painter().rect_filled(rect, 0.0, theme::chrome_fill(ui));
         ui.painter().hline(
@@ -2308,7 +2514,7 @@ impl OneumApp {
             egui::Stroke::new(1.0, widgets::divider_color(ui)),
         );
         let dark = ui.visuals().dark_mode;
-        let width = rect.width() / TABS.len() as f32;
+        let width = inner.width() / TABS.len() as f32;
         for (index, tab) in TABS.into_iter().enumerate() {
             let (icon, label) = match tab {
                 Tab::Library => (Icon::Note, s.phone_library),
@@ -2317,7 +2523,7 @@ impl OneumApp {
                 Tab::Settings => (Icon::Gear, s.settings),
             };
             let cell = Rect::from_min_size(
-                pos2(rect.left() + index as f32 * width, rect.top()),
+                pos2(inner.left() + index as f32 * width, rect.top()),
                 vec2(width, TAB_BAR),
             );
             let response = ui.interact(
@@ -2356,7 +2562,9 @@ impl OneumApp {
     }
 
     /// The bar of the playing song: tap it for the whole player.
-    fn phone_mini_player(&mut self, ui: &mut Ui, rect: Rect) {
+    /// The song that plays, as a bar: `rect` is the bar, `inner` the part of it that
+    /// what is on it keeps to.
+    fn phone_mini_player(&mut self, ui: &mut Ui, rect: Rect, inner: Rect) {
         let s = self.s();
         let Some(current) = self.player.current else {
             return;
@@ -2384,7 +2592,7 @@ impl OneumApp {
             egui::WidgetInfo::labeled(egui::Role::Button, true, s.phone_now_playing)
         });
         let art = Rect::from_min_size(
-            pos2(rect.left() + SIDE, rect.center().y - 22.0),
+            pos2(inner.left() + SIDE, rect.center().y - 22.0),
             egui::Vec2::splat(44.0),
         );
         let texture = self
@@ -2397,7 +2605,7 @@ impl OneumApp {
             PlayState::Playing | PlayState::Loading | PlayState::Seeking
         );
         let next = Rect::from_center_size(
-            pos2(rect.right() - SIDE - 16.0, rect.center().y),
+            pos2(inner.right() - SIDE - 16.0, rect.center().y),
             egui::Vec2::splat(TOUCH),
         );
         let play = next.translate(vec2(-TOUCH - 4.0, 0.0));
@@ -2500,15 +2708,39 @@ impl OneumApp {
         let body = Rect::from_min_max(pos2(safe.left(), header.bottom()), safe.max);
         // Below the cover: the song, the seek bar, the buttons, the volume.
         let controls = 292.0;
-        let side = (body.width() - 2.0 * 28.0)
-            .min(body.height() - controls - 16.0)
-            .max(120.0);
-        // What the screen has to spare is shared out above and below the cover.
-        let spare = (body.height() - controls - 16.0 - side).max(0.0);
-        let art = Rect::from_center_size(
-            pos2(body.center().x, body.top() + 8.0 + spare * 0.3 + side / 2.0),
-            egui::Vec2::splat(side),
-        );
+        // A screen that is wider than it is tall (a phone on its side) has no room for
+        // them below the cover: there the cover stands at the left and they beside it.
+        let wide = body.width() > body.height() * 1.25;
+        let (art, column) = if wide {
+            let side = (body.height() - 2.0 * 14.0)
+                .min(body.width() * 0.42)
+                .max(120.0);
+            let art = Rect::from_center_size(
+                pos2(body.left() + 28.0 + side / 2.0, body.center().y),
+                egui::Vec2::splat(side),
+            );
+            let top = (body.center().y - controls / 2.0).max(body.top());
+            let column = Rect::from_min_max(
+                pos2(art.right() + 28.0, top),
+                pos2(body.right() - 28.0, body.bottom()),
+            );
+            (art, column)
+        } else {
+            let side = (body.width() - 2.0 * 28.0)
+                .min(body.height() - controls - 16.0)
+                .max(120.0);
+            // What the screen has to spare is shared out above and below the cover.
+            let spare = (body.height() - controls - 16.0 - side).max(0.0);
+            let art = Rect::from_center_size(
+                pos2(body.center().x, body.top() + 8.0 + spare * 0.3 + side / 2.0),
+                egui::Vec2::splat(side),
+            );
+            let column = Rect::from_min_max(
+                pos2(body.left() + 28.0, art.bottom() + 16.0 + spare * 0.3),
+                pos2(body.right() - 28.0, body.bottom()),
+            );
+            (art, column)
+        };
 
         // Pulled down by its bar (or by the cover), the player goes away. This lies
         // under the buttons of the bar: a sensor for dragging that lay over them would
@@ -2638,10 +2870,6 @@ impl OneumApp {
             }
         }
 
-        let column = Rect::from_min_max(
-            pos2(body.left() + 28.0, art.bottom() + 16.0 + spare * 0.3),
-            pos2(body.right() - 28.0, body.bottom()),
-        );
         let mut column_ui = ui.new_child(
             UiBuilder::new()
                 .id_salt("phone-player-controls")
@@ -3231,15 +3459,32 @@ impl OneumApp {
         }
         let mut clear = false;
         let mut keep = false;
+        // While entries are being chosen a tap chooses, and the bar offers what to do
+        // with the chosen ones.
+        self.queue_selection
+            .retain(|id| queue.iter().any(|item| item.id == *id));
+        let selecting = self.phone.queue_selecting;
+        let accent = theme::accent(ui.visuals().dark_mode);
+        let mut toggle_selecting = false;
+        let mut act = false;
         ui.horizontal(|ui| {
             ui.add_space(SIDE);
-            ui.label(
-                RichText::new(self.lang.song_count(queue.len()))
-                    .font(font(13.5))
-                    .color(theme::dim(ui)),
-            );
+            let count = if selecting {
+                self.lang.selected_count(self.queue_selection.len())
+            } else {
+                self.lang.song_count(queue.len())
+            };
+            ui.label(RichText::new(count).font(font(13.5)).color(theme::dim(ui)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(SIDE);
+                ui.add_space(SIDE - 6.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if selecting {
+                    toggle_selecting = edit::word_button(ui, s.phone_done, accent);
+                    act = edit::word_button(ui, s.phone_selected_songs, accent);
+                    return;
+                }
+                toggle_selecting = edit::word_button(ui, s.phone_select, accent);
+                ui.add_space(4.0);
                 if ui
                     .add(egui::Button::new(
                         RichText::new(s.clear_queue).font(font(14.0)),
@@ -3285,7 +3530,19 @@ impl OneumApp {
                 });
                 let dark = ui.visuals().dark_mode;
                 let is_current = current == Some(item.id);
-                if self.is_carried("queue", index) {
+                let chosen = self.queue_selection.contains(&item.id);
+                if selecting {
+                    if response.clicked() && !self.queue_selection.remove(&item.id) {
+                        self.queue_selection.insert(item.id);
+                    }
+                    if is_current {
+                        ui.painter().rect_filled(
+                            rect,
+                            0.0,
+                            theme::accent(dark).gamma_multiply(if dark { 0.16 } else { 0.10 }),
+                        );
+                    }
+                } else if self.is_carried("queue", index) {
                     ui.painter().rect_filled(
                         rect,
                         0.0,
@@ -3298,8 +3555,13 @@ impl OneumApp {
                         theme::accent(dark).gamma_multiply(if dark { 0.16 } else { 0.10 }),
                     );
                 }
+                let mut left = rect.left() + SIDE;
+                if selecting {
+                    choice_circle(ui, pos2(left + 12.0, rect.center().y), chosen);
+                    left += 36.0;
+                }
                 let art = Rect::from_min_size(
-                    pos2(rect.left() + SIDE, rect.center().y - 23.0),
+                    pos2(left, rect.center().y - 23.0),
                     egui::Vec2::splat(46.0),
                 );
                 let texture = self.art.get(track.art_id.as_deref(), false);
@@ -3309,10 +3571,15 @@ impl OneumApp {
                     pos2(rect.right() - SIDE - TOUCH - 34.0, rect.top()),
                     pos2(rect.right() - SIDE - TOUCH, rect.bottom()),
                 );
-                self.reorder_grip(ui, "queue", index, grip);
+                let text_right = if selecting {
+                    rect.right() - SIDE
+                } else {
+                    self.reorder_grip(ui, "queue", index, grip);
+                    grip.left()
+                };
                 let text = Rect::from_min_max(
                     pos2(art.right() + 12.0, rect.top()),
-                    pos2(grip.left(), rect.bottom()),
+                    pos2(text_right, rect.bottom()),
                 );
                 let color = if is_current {
                     theme::accent(dark)
@@ -3330,6 +3597,9 @@ impl OneumApp {
                     ),
                 );
                 row_line(ui, art.right() + 12.0);
+                if selecting {
+                    return;
+                }
                 if more_button(ui, s.phone_more, rect) || response.long_touched() {
                     self.phone.sheet = Some(Sheet::Track {
                         track: track.id,
@@ -3357,6 +3627,17 @@ impl OneumApp {
         if keep {
             let tracks = queue.iter().map(|item| item.track).collect();
             self.dialog = Some(Dialog::new_playlist(s.untitled_playlist, tracks));
+        }
+        if toggle_selecting {
+            self.phone.queue_selecting = !selecting;
+            self.queue_selection.clear();
+        }
+        if act {
+            if self.queue_selection.is_empty() {
+                self.info_toast(s.phone_nothing_selected);
+            } else {
+                self.phone.sheet = Some(Sheet::QueueSelection);
+            }
         }
     }
 
@@ -3514,12 +3795,15 @@ impl OneumApp {
             420.0
         };
         let lowered = (1.0 - up) * height + self.phone.sheet_drag;
+        // As wide as the screen when that is narrow; on a wide one (a phone on its
+        // side) a sheet of that width would be mostly empty.
+        let width = safe.width().min(SHEET_WIDTH);
         let shown = egui::Area::new(egui::Id::unique("phone-sheet"))
             .order(egui::Order::Foreground)
             .constrain(false)
             .fade_in(false)
             .pivot(Align2::CENTER_BOTTOM)
-            .fixed_pos(pos2(full.center().x, full.bottom() + lowered))
+            .fixed_pos(pos2(safe.center().x, full.bottom() + lowered))
             .show(ctx, |ui| {
                 ui.set_clip_rect(full);
                 if leaving {
@@ -3535,11 +3819,11 @@ impl OneumApp {
                         se: 0,
                     })
                     .show(ui, |ui| {
-                        ui.set_width(full.width());
+                        ui.set_width(width);
                         ui.spacing_mut().item_spacing.y = 0.0;
                         // The handle at the top: pull it down and the sheet goes.
                         let (handle, pull) =
-                            ui.allocate_exact_size(vec2(full.width(), 26.0), Sense::drag());
+                            ui.allocate_exact_size(vec2(width, 26.0), Sense::drag());
                         ui.painter().rect_filled(
                             Rect::from_center_size(handle.center(), vec2(38.0, 5.0)),
                             3.0,
@@ -3562,7 +3846,7 @@ impl OneumApp {
                             .id_salt("phone-sheet-items")
                             .max_height(limit)
                             .show(ui, |ui| {
-                                ui.set_width(full.width());
+                                ui.set_width(width);
                                 if self.phone_sheet_items(ui, &sheet, actions) {
                                     close = true;
                                 }
@@ -3699,6 +3983,15 @@ impl OneumApp {
                     return false;
                 }
                 if self.player.current.map(|c| c.track_id) == Some(track.id) {
+                    // Where it is among all songs (on a desk: a click on its title).
+                    if Self::sheet_item(ui, Icon::Note, s.phone_show_in_songs, false) {
+                        if let Some(state) = self.views.get_mut(&Nav::Songs) {
+                            state.query.clear();
+                        }
+                        self.phone.reveal = Some((Nav::Songs, track.id));
+                        actions.push(Action::Go(Nav::Songs));
+                        return true;
+                    }
                     let on = self.player.stop_after_current;
                     if Self::sheet_item(ui, Icon::Pause, s.menu_stop_after_current, on) {
                         self.core.player.send(Command::SetStopAfterCurrent(!on));
@@ -3824,6 +4117,7 @@ impl OneumApp {
             }
             Sheet::Sort(nav) => self.phone_sort_items(ui, nav),
             Sheet::Selection(nav) => self.phone_selection_items(ui, nav, actions),
+            Sheet::QueueSelection => self.phone_queue_selection_items(ui),
             Sheet::Playlist(id) => {
                 let Some(playlist) = self.playlists.iter().find(|p| p.id == *id).cloned() else {
                     return true;

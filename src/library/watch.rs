@@ -9,6 +9,12 @@
 //! the watcher itself could not be created (it is tried again), when the system refused
 //! to watch a folder, and for folders on network shares, where the system does not see
 //! changes made from other computers.
+//!
+//! On a phone there are no file events worth having. The only kind there (kqueue) takes
+//! an open file for every file and folder it watches, and an app may hold only a few
+//! hundred: a library of some hundred songs would leave none for playing them. So no
+//! watcher is made there, and the folders are looked through again every half minute
+//! while the app is in front (a look that finds nothing changed only lists them).
 use super::{Inner, lock, tags};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -41,15 +47,25 @@ struct Timing {
     /// system's event stream takes a moment to start, and what changed between the
     /// scan that came with the folder and that moment is reported by nobody.
     watch_settle: Duration,
+    /// Whether file events are asked for at all (see the top of this file).
+    file_events: bool,
 }
+
+/// True on a phone: folders are not watched but looked through again now and then.
+const POLLED_ONLY: bool = cfg!(target_os = "ios");
 
 const TIMING: Timing = Timing {
     coalesce: Duration::from_secs(2),
     online_check: Duration::from_secs(5),
     watcher_retry: Duration::from_secs(30),
-    unwatched_rescan: Duration::from_secs(5 * 60),
+    unwatched_rescan: if POLLED_ONLY {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(5 * 60)
+    },
     remote_rescan: Duration::from_secs(30 * 60),
     watch_settle: Duration::from_secs(3),
+    file_events: !POLLED_ONLY,
 };
 
 pub(crate) enum WatchMsg {
@@ -121,7 +137,8 @@ fn run(
         }
 
         if reconcile_now || last_check.is_none_or(|at| at.elapsed() >= timing.online_check) {
-            if watcher.is_none()
+            if timing.file_events
+                && watcher.is_none()
                 && watcher_tried.is_none_or(|at| at.elapsed() >= timing.watcher_retry)
             {
                 watcher_tried = Some(Instant::now());
@@ -209,6 +226,11 @@ impl Polled {
                 crate::platform::finder::is_on_local_volume(path) == Some(false)
             });
             if let Some(interval) = rescan_interval(remote, watched.contains_key(id), timing) {
+                // Not while the app is out of sight (a phone that plays with its screen
+                // off): what changed meanwhile is seen when it comes back in front.
+                if !crate::platform::lifecycle::in_foreground() {
+                    continue;
+                }
                 match self.since.entry(*id) {
                     // Just seen: the scan that comes with a folder (added, back online)
                     // covers the present.
@@ -552,6 +574,7 @@ mod tests {
             unwatched_rescan: Duration::from_millis(200),
             remote_rescan: Duration::from_millis(200),
             watch_settle: Duration::from_millis(200),
+            file_events: true,
         };
         let attempts = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel();

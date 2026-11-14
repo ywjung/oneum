@@ -3507,3 +3507,83 @@ fn a_library_follows_its_folder_when_that_moves() {
     assert_eq!(library.debug_tag_reads(), 0);
     assert_eq!(library.snapshot().len(), 4);
 }
+
+/// A music folder outside the app's own (one linked on an iPhone and found again by its
+/// bookmark) that was renamed since the last run: the library is told where it was and
+/// where it is, and keeps the songs with what is known about them. Nothing is read
+/// again. A folder that is not one of the library's is not followed, and one whose new
+/// place is a music folder already is left as it was.
+#[test]
+fn a_library_follows_a_music_folder_that_was_moved() {
+    use oneum::library::LibraryPaths;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("Application/A");
+    let paths = || LibraryPaths {
+        data_dir: home.join("Library/data"),
+        cache_dir: home.join("Library/cache"),
+    };
+    let own = home.join("Documents");
+    write_tagged_wav(&own.join("Album/one.wav"), 1000, "One", "Band", "Album");
+    let linked = dir.path().join("Drive/Music");
+    write_tagged_wav(&linked.join("Live/two.wav"), 1000, "Two", "Band", "Live");
+    write_tagged_wav(
+        &linked.join("Live/three.wav"),
+        1000,
+        "Three",
+        "Band",
+        "Live",
+    );
+
+    let ids = {
+        let (library, _) = Library::open_in_home(paths(), &home).unwrap();
+        library.add_folder(&own).unwrap();
+        library.add_folder(&linked).unwrap();
+        wait_scan(&library);
+        assert_eq!(titles(&library), ["One", "Three", "Two"]);
+        let ids: Vec<_> = ["One", "Two", "Three"]
+            .iter()
+            .map(|title| by_title(&library, title).id)
+            .collect();
+        library.set_favorite(&ids[1..2], true).unwrap();
+        library.shutdown();
+        ids
+    };
+
+    let renamed = dir.path().join("Drive/Records");
+    fs::rename(&linked, &renamed).unwrap();
+    // A folder the library does not know is not followed (and does no harm).
+    let moves = [
+        (linked.clone(), renamed.clone()),
+        (dir.path().join("Drive/Other"), dir.path().join("Drive/New")),
+    ];
+    let (library, _) = Library::open_following(paths(), &home, &moves).unwrap();
+    let snapshot = library.snapshot();
+    for (title, id) in ["One", "Two", "Three"].iter().zip(&ids) {
+        let track = snapshot
+            .get(*id)
+            .unwrap_or_else(|| panic!("{title} is gone"));
+        assert_eq!(&track.title, title);
+        assert!(track.file().exists(), "{}", track.path.display());
+    }
+    assert!(snapshot.get(ids[1]).unwrap().path.starts_with(&renamed));
+    assert!(snapshot.get(ids[1]).unwrap().favorite);
+    assert!(snapshot.get(ids[0]).unwrap().path.starts_with(&own));
+    let mut roots: Vec<_> = library.roots().into_iter().map(|root| root.path).collect();
+    roots.sort();
+    let mut expected = vec![own.clone(), renamed.clone()];
+    expected.sort();
+    assert_eq!(roots, expected);
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), 0, "nothing is read again");
+    assert_eq!(titles(&library), ["One", "Three", "Two"]);
+    library.shutdown();
+
+    // Its new place is a music folder already: it cannot be followed there, and the
+    // library opens as it was.
+    let (library, _) =
+        Library::open_following(paths(), &home, &[(renamed.clone(), own.clone())]).unwrap();
+    let mut roots: Vec<_> = library.roots().into_iter().map(|root| root.path).collect();
+    roots.sort();
+    assert_eq!(roots, expected);
+    assert_eq!(library.snapshot().len(), 3);
+}

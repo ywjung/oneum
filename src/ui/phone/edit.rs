@@ -8,6 +8,7 @@ use super::{Reorder, SIDE, Sheet, font, held, pill_button};
 use crate::i18n::Strings;
 use crate::library::SortKey;
 use crate::model::TrackId;
+use crate::playback::Command;
 use eframe::egui::{self, Align, Align2, Layout, Rect, RichText, Sense, Ui, pos2, vec2};
 
 /// The orders a list of songs can be put in, with what each is called.
@@ -43,6 +44,12 @@ pub(super) fn sortable(nav: &Nav) -> bool {
     )
 }
 
+/// Whether the list of this view has a search field of its own (the search tab looks
+/// through the whole library; this narrows what one view shows).
+pub(super) fn searchable(nav: &Nav) -> bool {
+    !matches!(nav, Nav::Stats | Nav::Recent)
+}
+
 /// Whether several songs of this list can be chosen at once.
 pub(super) fn selectable(nav: &Nav) -> bool {
     matches!(
@@ -65,6 +72,36 @@ pub(super) fn drop_place(from: usize, to: usize) -> Option<(usize, usize)> {
         return None;
     }
     Some((from, if to > from { to - 1 } else { to }))
+}
+
+/// A word to tap, with room for a finger around it. True when it was tapped.
+pub(super) fn word_button(ui: &mut Ui, label: &str, color: egui::Color32) -> bool {
+    let text = RichText::new(label)
+        .font(theme::semibold(14.5))
+        .color(color);
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let size = vec2(galley.size().x + 16.0, 36.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let color = if held(ui, &response) {
+        color.gamma_multiply(0.6)
+    } else {
+        color
+    };
+    ui.painter().galley(
+        pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+    response.clicked()
 }
 
 /// What marks a line of a sheet as the choice that is on.
@@ -131,6 +168,111 @@ impl OneumApp {
         }
     }
 
+    /// The search field of the list of `nav`, between the page's bar and the list. It
+    /// is there while it was asked for or holds a search: what a list shows is never
+    /// narrowed without the field that says by what.
+    pub(super) fn phone_list_search(&mut self, ui: &mut Ui, nav: &Nav) {
+        let s = self.s();
+        let asked_for = self.phone.searching.as_ref() == Some(nav);
+        let holds = self
+            .views
+            .get(nav)
+            .is_some_and(|state| !state.query.is_empty());
+        if !asked_for && !holds {
+            return;
+        }
+        let (outer, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
+        let field = outer.shrink2(vec2(SIDE, 2.0));
+        ui.painter()
+            .rect_filled(field, 12.0, ui.visuals().faint_bg_color);
+        let mut field_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("phone-list-search")
+                .max_rect(field.shrink2(vec2(10.0, 0.0)))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let mut put_away = false;
+        {
+            let ui = &mut field_ui;
+            let (icon, _) = ui.allocate_exact_size(egui::Vec2::splat(18.0), Sense::hover());
+            icons::paint(
+                ui.painter(),
+                icon,
+                Icon::Search,
+                ui.visuals().weak_text_color(),
+            );
+            let room = ui.available_width() - 40.0;
+            let state = self.views.entry(nav.clone()).or_default();
+            let edit = egui::TextEdit::singleline(&mut state.query)
+                .hint_text(s.phone_search_here_hint)
+                .font(font(17.0))
+                .frame(egui::Frame::NONE)
+                .align(Align2::LEFT_CENTER)
+                .desired_width(room);
+            let response = ui.add(edit);
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::TextInput, true, s.phone_search_here)
+            });
+            if std::mem::take(&mut self.phone.focus_list_search) {
+                response.request_focus();
+            }
+            if super::super::widgets::icon_button(ui, Icon::Close, s.clear_search, 32.0, false)
+                .clicked()
+            {
+                put_away = true;
+            }
+        }
+        ui.add_space(4.0);
+        if put_away {
+            self.phone.searching = None;
+            if let Some(state) = self.views.get_mut(nav) {
+                state.query.clear();
+            }
+        }
+    }
+
+    /// The sheet of what can be done with the entries chosen in the queue. True when
+    /// it is done with.
+    pub(super) fn phone_queue_selection_items(&mut self, ui: &mut Ui) -> bool {
+        let s = self.s();
+        // In the order they play, with the songs they are.
+        let chosen: Vec<(u64, TrackId)> = self
+            .player
+            .queue
+            .iter()
+            .filter(|item| self.queue_selection.contains(&item.id))
+            .map(|item| (item.id, item.track))
+            .collect();
+        if chosen.is_empty() {
+            return true;
+        }
+        Self::sheet_heading(ui, &self.lang.selected_count(chosen.len()), "");
+        let ids: Vec<u64> = chosen.iter().map(|(id, _)| *id).collect();
+        let done = |app: &mut Self| {
+            app.queue_selection.clear();
+            app.phone.queue_selecting = false;
+        };
+        if Self::sheet_item(ui, Icon::Play, s.move_to_top, false) {
+            self.core
+                .player
+                .send(Command::MoveItems { ids, to_index: 0 });
+            done(self);
+            return true;
+        }
+        if Self::sheet_item(ui, Icon::Playlist, s.add_to_playlist, false) {
+            let tracks = chosen.iter().map(|(_, track)| *track).collect();
+            self.phone.sheet = Some(Sheet::AddToPlaylist(tracks));
+            done(self);
+            return false;
+        }
+        if Self::sheet_item(ui, Icon::Trash, s.remove_from_queue, true) {
+            self.core.player.send(Command::RemoveItems(ids));
+            done(self);
+            return true;
+        }
+        false
+    }
+
     /// The line above a list's songs: how many there are and how long they play, and at
     /// its right the ways to put them in another order and to choose several of them.
     pub(super) fn phone_list_tools(&mut self, ui: &mut Ui, nav: &Nav, rows: &[Row]) {
@@ -160,36 +302,7 @@ impl OneumApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(SIDE - 6.0);
                 ui.spacing_mut().item_spacing.x = 6.0;
-                // Words to tap, each with room for a finger around it.
-                let button = |ui: &mut Ui, label: &str| {
-                    let text = RichText::new(label)
-                        .font(theme::semibold(14.5))
-                        .color(accent);
-                    let galley = egui::WidgetText::from(text).into_galley(
-                        ui,
-                        Some(egui::TextWrapMode::Extend),
-                        f32::INFINITY,
-                        egui::TextStyle::Button,
-                    );
-                    let size = vec2(galley.size().x + 16.0, 36.0);
-                    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-                    response
-                        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-                    let color = if held(ui, &response) {
-                        accent.gamma_multiply(0.6)
-                    } else {
-                        accent
-                    };
-                    ui.painter().galley(
-                        pos2(
-                            rect.center().x - galley.size().x / 2.0,
-                            rect.center().y - galley.size().y / 2.0,
-                        ),
-                        galley,
-                        color,
-                    );
-                    response.clicked()
-                };
+                let button = |ui: &mut Ui, label: &str| word_button(ui, label, accent);
                 if selecting {
                     end = button(ui, s.phone_done);
                 } else {

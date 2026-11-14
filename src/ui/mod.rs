@@ -1258,7 +1258,15 @@ impl OneumApp {
         self.edit(move |library| {
             Some(match library.add_folder(&path) {
                 Ok(_) => AppEvent::FolderAdded(path),
-                Err(error) => AppEvent::EditFailed(error),
+                Err(error) => {
+                    // On a phone the folder was linked as it was chosen: a link that
+                    // nothing uses is dropped (not the one of a folder that is in the
+                    // library already).
+                    if !matches!(error, crate::library::LibraryError::AlreadyAdded) {
+                        files::forget_linked_folder(&path);
+                    }
+                    AppEvent::EditFailed(error)
+                }
             })
         });
     }
@@ -1289,6 +1297,11 @@ impl OneumApp {
             // The phone screens on a desk: music is used where it is.
             PickFor::ImportMusic => self.open_paths(paths),
             PickFor::MusicFolder => {
+                // On a phone the folder was linked as it was chosen: nothing comes
+                // back if the system did not let it be kept.
+                if paths.is_empty() && crate::platform::PHONE {
+                    self.warn_toast(self.s().phone_link_failed);
+                }
                 for folder in paths {
                     self.add_folder(folder);
                 }
@@ -1326,6 +1339,15 @@ impl OneumApp {
     /// app's folder.
     fn import_music(&mut self, kind: PickKind) {
         self.pick(PickFor::ImportMusic, PickRequest::new(kind));
+    }
+
+    /// On a phone: asks for a folder of music to use where it is (in iCloud Drive, on
+    /// a drive that is plugged in), without a copy.
+    fn link_folder(&mut self) {
+        self.pick(
+            PickFor::MusicFolder,
+            PickRequest::new(PickKind::FolderInPlace),
+        );
     }
 
     fn pick_files(&mut self) {
@@ -1430,13 +1452,18 @@ impl OneumApp {
 
     /// Takes over an Apple Music library export, off the UI thread.
     fn import_apple_library(&mut self, file: PathBuf) {
+        // The export names files where they are on the Mac it was made on. On a phone
+        // the music is a copy of them: songs are found by the end of their path there.
+        let elsewhere = self.phone_mode;
         let library = self.core.library.clone();
         let tx = self.events_tx.clone();
         let core = self.core.clone();
         let spawned = std::thread::Builder::new()
             .name("oneum-apple-import".into())
             .spawn(move || {
-                let _ = tx.send(AppEvent::AppleImported(library.import_apple_music(&file)));
+                let _ = tx.send(AppEvent::AppleImported(
+                    library.import_apple_music_from(&file, elsewhere),
+                ));
                 core.request_repaint();
             });
         if spawned.is_err() {

@@ -104,6 +104,19 @@ spare = max(body - 308 - side, 0)
 controls = top + 50 + 8 + side + 16 + 0.6 * spare
 print(f"PLAY_X={28 + step * 2.5:.0f} NEXT_X={28 + step * 3.5:.0f} PLAY_Y={controls + 156:.0f}")
 print(f"COVER_Y={top + 50 + 8 + 0.3 * spare + side / 2:.0f}")
+# The "more" button beside the title of the song that plays, and in the sheet it puts
+# up (eleven lines under a heading, more than the sheet shows at once on most phones:
+# then it is as tall as it may be and its lines are counted from the top) the line
+# that shows the song in the song list, the eighth.
+print(f"MORE_X={w - 42:.0f} MORE_Y={controls + 26:.0f}")
+shown = min(52 + 52 * 11, max((bottom - top) * 0.72, 200))
+sheet_top = full - (26 + shown + 8 + (full - bottom))
+print(f"IN_SONGS={sheet_top + 26 + 52 + 26 + 52 * 7:.0f}")
+# The queue: the words at the right of its first line, and its rows.
+print(f"QUEUE_TOOLS={top + 67:.0f} QUEUE_SELECT={w - 31:.0f} QUEUE_CHOSEN={w - 97:.0f}")
+print(f"QUEUE2={top + 127 + 124:.0f} QUEUE3={top + 127 + 186:.0f}")
+# The first switch of the playback settings.
+print(f"SWITCH_X={w - 57:.0f} SWITCH0={top + 146:.0f}")
 # The buttons at the right of a bar: the last one, and two of the views of the player.
 print(f"RIGHT={w - 28:.0f} VIEW_METERS={w - 70:.0f} VIEW_LYRICS={w - 112:.0f}")
 PY
@@ -184,6 +197,11 @@ check n1.json 'p["sheet"] is not None and p["sheet"].startswith("Album(")' "a lo
 check n2.json 'd["pinned"] == 1 and p["page"] is None' "the album is pinned"
 check n3.json 'p["page"].startswith("List(Album(")' "the pin at the top of the library leads to it"
 check n4.json 'd["pinned"] == 0 and p["sheet"] is None' "and it is unpinned again"
+# The magnifier at the top of a list searches in that list; again, and the search is over.
+ui "tap 200 $MENU1" 'wait 900' "tap $RIGHT $HEAD" 'wait 500' 'text abbey' 'wait 800' 'dump k1.json' \
+   "tap $RIGHT $HEAD" 'wait 600' 'dump k2.json' "tap 26 $HEAD" 'wait 600'
+check k1.json 'p["searching"] == "Albums" and d["rows"] == 1' "a search inside the albums leaves the one that matches"
+check k2.json 'p["searching"] is None and d["rows"] == 7' "and all of them are back when it is put away"
 
 echo "== playback"
 ui "click 200 $MENU0" 'wait 500' "click 150 $SONG0" 'wait 1500' 'dump p1.json'
@@ -215,6 +233,25 @@ if not ok:
     print("      ", a[:4], b[:4])
 sys.exit(0 if ok else 1)
 PY
+# Two entries that are not playing are chosen and taken out together.
+ui "tap $QUEUE_SELECT $QUEUE_TOOLS" 'wait 500' "tap 200 $QUEUE2" "tap 200 $QUEUE3" 'wait 400' 'dump qs1.json' \
+   "tap $QUEUE_CHOSEN $QUEUE_TOOLS" 'wait 700' 'dump qs2.json' "tap 200 $SHEET_UP0" 'wait 900' 'dump qs3.json'
+check qs1.json 'p["queue_selecting"] and d["queue_selected"] == 2' "two entries of the queue are chosen"
+check qs2.json 'p["sheet"] == "QueueSelection"' "what can be done with them comes up"
+python3 - "$PROFILE/q2.json" "$PROFILE/qs3.json" <<'PY'
+import json, sys
+before, after = (json.load(open(f)) for f in sys.argv[1:3])
+ok = (
+    after["queue_len"] == before["queue_len"] - 2
+    and after["queue"][:2] == before["queue"][:2] and after["queue"][2] == before["queue"][4]
+    and after["current"] == before["current"] and after["state"] == "Playing"
+    and not after["phone"]["queue_selecting"] and after["queue_selected"] == 0
+)
+print(("  ok   " if ok else "  FAIL ") + "they leave the queue together, the song that is on plays on, and choosing ends")
+if not ok:
+    print("      ", before["queue_len"], before["queue"][:5], after["queue_len"], after["queue"][:5], after["phone"])
+sys.exit(0 if ok else 1)
+PY
 ui "tap $VIEW_METERS $HEAD" 'wait 1200' 'dump v1.json' "tap $VIEW_LYRICS $HEAD" 'wait 600' 'dump v2.json' \
    "tap $VIEW_LYRICS $HEAD" 'wait 500' 'dump v3.json'
 check v1.json 'p["player_view"] == "Meters" and d["meter"]["position"][0] > 0' "the VU meters follow what is playing"
@@ -224,6 +261,12 @@ ui "click 28 $HEAD" 'wait 600' 'dump p9.json'
 check p9.json 'not p["player_open"]' "the player closes"
 ui "tap 150 $MINI" 'wait 700' "swipe 200 $COVER_Y 200 $((COVER_Y + 300)) 12" 'wait 700' 'dump p10.json'
 check p10.json 'not p["player_open"] and d["state"] == "Playing"' "pulled down by its cover, the player goes away and the music plays on"
+# From the first page of the library: the song that plays is shown in the song list.
+ui "tap 26 $HEAD" 'wait 600' 'dump w0.json' "tap 150 $MINI" 'wait 700' "tap $MORE_X $MORE_Y" 'wait 700' 'dump w1.json' \
+   "tap 200 $IN_SONGS" 'wait 900' 'dump w2.json'
+check w0.json 'p["page"] is None' "back on the first page of the library"
+check w1.json 'p["player_open"] and p["sheet"] is not None and p["sheet"].startswith("Track")' "the more button of the player puts up the song's sheet"
+check w2.json 'not p["player_open"] and p["sheet"] is None and p["page"] == "List(Songs)" and d["state"] == "Playing"' "its line for the song list puts the player away and opens the songs"
 
 echo "== search"
 ui "click $TAB_SEARCH $TABS" 'wait 500' 'dump s0.json' "tap 150 $((TOP + 72))" 'wait 500' 'text 꽃' 'wait 600' 'dump s1.json' "click 150 $((TOP + 50 + 4 + 44 + 8 + 32 + 8 + 31))" 'wait 1200' 'dump s2.json'
@@ -244,6 +287,18 @@ echo "== settings"
 ui "click $TAB_SETTINGS $TABS" 'wait 500' "click 200 $MENU1" 'wait 600' 'dump t1.json' "click 26 $HEAD" 'wait 600' "click 200 $MENU5" 'wait 600' 'dump t2.json'
 check t1.json 'p["page"] == "Settings(Playback)"' "the playback settings open"
 check t2.json 'p["page"] == "Settings(About)"' "the about page opens"
+
+echo "== output at the song's sample rate"
+# The first switch of the playback settings; then a 48 kHz file and a 44.1 kHz one.
+ui "click 26 $HEAD" 'wait 600' "click 200 $MENU1" 'wait 600' 'dump h0.json' "tap $SWITCH_X $SWITCH0" 'wait 500' 'dump h1.json' \
+   "click $TAB_SEARCH $TABS" 'wait 600' "tap $((W - 42)) $((TOP + 72))" 'wait 400' "tap 150 $((TOP + 72))" 'wait 400' 'text 48k' 'wait 700' \
+   "click 150 $((TOP + 50 + 4 + 44 + 8 + 32 + 8 + 31))" 'wait 2000' 'dump h2.json' \
+   "tap $((W - 42)) $((TOP + 72))" 'wait 400' "tap 150 $((TOP + 72))" 'wait 400' 'text 꽃' 'wait 700' \
+   "click 150 $((TOP + 50 + 4 + 44 + 8 + 32 + 8 + 31))" 'wait 2000' 'dump h3.json'
+check h0.json 'not d["output_options"]["match_sample_rate"]' "output at the song's sample rate is off to begin with"
+check h1.json 'd["output_options"]["match_sample_rate"]' "its switch turns it on"
+check h2.json 'd["state"] == "Playing" and d["output_rate"] == 48000 and d["underruns"] == 0' "a 48 kHz song goes out at 48 kHz"
+check h3.json 'd["state"] == "Playing" and d["output_rate"] == 44100 and d["underruns"] == 0' "and a 44.1 kHz song at 44.1 kHz again"
 
 echo "== restart"
 ui 'wait 300' 'dump r0.json'
@@ -268,5 +323,17 @@ ui 'volume 0' 'wait 1500' 'dump m1.json'
 check m1.json 'd["library_tracks"] == 20 and not d["scan_running"]' "the library followed: 20 tracks"
 ROOTS=$(sqlite3 "$AFTER/Library/Application Support/OnEum/library.db" 'select count(*) from roots; select count(*) from tracks where available = 0;' | tr '\n' ' ')
 [ "$ROOTS" = "1 0 " ] && echo "  ok   one music folder, every track available" || { echo "  FAIL roots/unavailable: $ROOTS"; exit 1; }
+
+echo "== music put into the folder while the app runs"
+# The folder is looked into every half minute while the app is in front.
+cp "$MUSIC/tone_48k.flac" "$AFTER/Documents/dropped.flac"
+i=0
+while [ $i -lt 12 ]; do
+  sleep 5
+  ui 'dump f1.json'
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["library_tracks"] == 21 else 1)' "$PROFILE/f1.json" && break
+  i=$((i + 1))
+done
+check f1.json 'd["library_tracks"] == 21' "a file put into the Documents folder is found without being asked for"
 
 echo "SMOKE TEST PASSED (iPhone Simulator)"

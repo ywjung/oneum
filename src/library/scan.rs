@@ -241,14 +241,27 @@ pub(crate) fn run_scan_thread(inner: Arc<Inner>) {
             }
             Next::Idle => {
                 let c = &inner.counters;
-                tracing::info!(
-                    files = c.files_found.load(Ordering::Relaxed),
-                    added = c.tracks_added.load(Ordering::Relaxed),
-                    updated = c.tracks_updated.load(Ordering::Relaxed),
-                    unsupported = c.unsupported.load(Ordering::Relaxed),
-                    errors = c.errors.load(Ordering::Relaxed),
-                    "library scan finished"
+                let (files, added, updated, unsupported, errors) = (
+                    c.files_found.load(Ordering::Relaxed),
+                    c.tracks_added.load(Ordering::Relaxed),
+                    c.tracks_updated.load(Ordering::Relaxed),
+                    c.unsupported.load(Ordering::Relaxed),
+                    c.errors.load(Ordering::Relaxed),
                 );
+                // On a phone the folders are looked through again every half minute
+                // (see `watch`): a look that brought nothing is not worth a line.
+                if cfg!(target_os = "ios") && added == 0 && updated == 0 {
+                    tracing::debug!(files, unsupported, errors, "library scan finished");
+                } else {
+                    tracing::info!(
+                        files,
+                        added,
+                        updated,
+                        unsupported,
+                        errors,
+                        "library scan finished"
+                    );
+                }
                 // Covers that could not be regenerated may be available now.
                 lock(&inner.art_jobs).failed.clear();
                 inner.scan.changed.notify_all();

@@ -105,11 +105,19 @@ impl OneumApp {
         let modal = modal.show(ctx, |ui| {
             ui.set_width(width);
             let (title, body, confirm) = match &dialog {
-                Dialog::RemoveFolder(_, path) => (
-                    s.confirm_remove_folder_title,
-                    format!("{path}\n\n{}", s.confirm_remove_folder_body),
-                    s.remove_folder,
-                ),
+                Dialog::RemoveFolder(_, path) => {
+                    // On a phone the path is a long one inside the system's folders:
+                    // the folder's name says more.
+                    let shown = std::path::Path::new(path)
+                        .file_name()
+                        .filter(|_| self.phone_mode)
+                        .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+                    (
+                        s.confirm_remove_folder_title,
+                        format!("{shown}\n\n{}", s.confirm_remove_folder_body),
+                        s.remove_folder,
+                    )
+                }
                 Dialog::DeletePlaylist(_, name) => (
                     s.confirm_delete_playlist_title,
                     format!("“{name}”\n\n{}", s.confirm_delete_playlist_body),
@@ -234,14 +242,19 @@ impl OneumApp {
     fn confirm(&mut self, dialog: Dialog) {
         let library = self.core.library.clone();
         let result = match dialog {
-            Dialog::RemoveFolder(id, _) => {
+            Dialog::RemoveFolder(id, path) => {
                 // Removing a large folder deletes many rows: keep it off the UI thread.
                 // If it cannot be removed (the folder then stays), the window says so.
                 let (events, core) = (self.events_tx.clone(), self.core.clone());
                 let spawned = std::thread::Builder::new()
                     .name("oneum-remove-folder".into())
-                    .spawn(move || {
-                        if let Err(error) = library.remove_folder(id) {
+                    .spawn(move || match library.remove_folder(id) {
+                        // A folder that was linked on a phone: the right to read it
+                        // is not needed any more.
+                        Ok(_) => crate::platform::files::forget_linked_folder(
+                            std::path::Path::new(&path),
+                        ),
+                        Err(error) => {
                             tracing::warn!("removing a music folder failed: {error}");
                             let _ = events.send(AppEvent::EditFailed(error));
                             core.request_repaint();

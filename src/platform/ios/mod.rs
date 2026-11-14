@@ -19,7 +19,7 @@ mod scene;
 pub mod sound;
 
 pub use super::apple::{decode_cp949, locale, nowplaying, pump_main_loop, run_on_main, system};
-pub use super::no_device as device;
+pub mod device;
 
 use objc2::MainThreadMarker;
 use objc2_foundation::{NSDictionary, NSString, NSURL};

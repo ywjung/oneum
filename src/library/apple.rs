@@ -3,7 +3,8 @@
 //! last played, when it was added and whether it was loved; and the playlists the user
 //! made (not the built-in ones, folders or smart playlists). Songs are matched to the
 //! library by their file's location.
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// The largest file read (a library of hundreds of thousands of songs stays below it).
 pub(crate) const MAX_FILE_BYTES: u64 = 1 << 30;
@@ -143,6 +144,64 @@ pub fn parse(xml: &str) -> Option<AppleLibrary> {
         }
     }
     Some(library)
+}
+
+/// Finds the songs of an export among files that lie elsewhere than the export says:
+/// a library that was copied to another computer or to a phone keeps the folders its
+/// files are in (artist, album) and their names, not the place those folders were in.
+///
+/// A song is taken for the file whose last three parts (two folders and the name) are
+/// the same, or failing that the last two; never for the name alone, and only where
+/// that end belongs to exactly one song of the export and one file here (two discs
+/// with a "01 Intro" in folders of the same name stay unmatched rather than guessed).
+/// Letter case and the way accents and Hangul are composed do not count.
+pub fn match_by_tail<A: Copy + Eq + std::hash::Hash, B: Copy + Eq + std::hash::Hash>(
+    export: &[(A, &Path)],
+    files: &[(B, &Path)],
+) -> HashMap<A, B> {
+    use unicode_normalization::UnicodeNormalization;
+    let tail = |path: &Path, parts: usize| -> Option<String> {
+        let all: Vec<String> = path
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(part) => Some(
+                    part.to_string_lossy()
+                        .nfc()
+                        .collect::<String>()
+                        .to_lowercase(),
+                ),
+                _ => None,
+            })
+            .collect();
+        (all.len() >= parts).then(|| all[all.len() - parts..].join("/"))
+    };
+    let mut found: HashMap<A, B> = HashMap::new();
+    let mut taken: std::collections::HashSet<B> = std::collections::HashSet::new();
+    for parts in [3, 2] {
+        let mut theirs: HashMap<String, Vec<A>> = HashMap::new();
+        for (id, path) in export {
+            if !found.contains_key(id)
+                && let Some(key) = tail(path, parts)
+            {
+                theirs.entry(key).or_default().push(*id);
+            }
+        }
+        let mut ours: HashMap<String, Vec<B>> = HashMap::new();
+        for (id, path) in files {
+            if !taken.contains(id)
+                && let Some(key) = tail(path, parts)
+            {
+                ours.entry(key).or_default().push(*id);
+            }
+        }
+        for (key, songs) in theirs {
+            if let ([song], Some([file])) = (songs.as_slice(), ours.get(&key).map(Vec::as_slice)) {
+                found.insert(*song, *file);
+                taken.insert(*file);
+            }
+        }
+    }
+    found
 }
 
 /// `file:///Users/me/Music/a%20b.mp3` (or `file://localhost/…`) as a path. Other
@@ -462,6 +521,50 @@ mod tests {
                 items: vec![102, 101],
             }]
         );
+    }
+
+    #[test]
+    fn songs_copied_elsewhere_are_found_by_the_end_of_their_path() {
+        let mac = |rest: &str| PathBuf::from(format!("/Users/me/Music/Media/{rest}"));
+        let phone = |rest: &str| PathBuf::from(format!("/var/mobile/Documents/{rest}"));
+        let export = [
+            (1, mac("IU/Flower Bookmark/01 Song.m4a")),
+            // Another case, and Hangul written in parts as a Mac's disk keeps it.
+            (2, mac("Beatles/Abbey Road/02 SOMETHING.mp3")),
+            (
+                3,
+                mac("\u{1112}\u{1161}\u{11ab}/\u{1100}\u{1161}\u{11bc}/03.flac"),
+            ),
+            // In two albums of the same name here: not guessed.
+            (4, mac("Various/Hits/01 Intro.mp3")),
+            // Not here at all.
+            (5, mac("Gone/Album/09.mp3")),
+            // The artist folder has another name here: the album and file still say it.
+            (6, mac("Nova Lane/Late Night/05 Drive.flac")),
+        ];
+        let files = [
+            (10, phone("IU/Flower Bookmark/01 Song.m4a")),
+            (20, phone("Beatles/Abbey Road/02 Something.mp3")),
+            (30, phone("한/강/03.flac")),
+            (40, phone("Various/Hits/01 Intro.mp3")),
+            (41, phone("Backup/Various/Hits/01 Intro.mp3")),
+            (60, phone("Lane, Nova/Late Night/05 Drive.flac")),
+            (70, phone("01 Song.m4a")),
+        ];
+        let export: Vec<(i32, &Path)> = export.iter().map(|(id, p)| (*id, p.as_path())).collect();
+        let files: Vec<(i32, &Path)> = files.iter().map(|(id, p)| (*id, p.as_path())).collect();
+        let found = match_by_tail(&export, &files);
+        assert_eq!(found.get(&1), Some(&10));
+        assert_eq!(found.get(&2), Some(&20));
+        assert_eq!(found.get(&3), Some(&30));
+        assert_eq!(found.get(&4), None, "two files end the same way");
+        assert_eq!(found.get(&5), None);
+        assert_eq!(found.get(&6), Some(&60));
+        assert_eq!(found.len(), 4);
+        // A file's name alone is never enough.
+        let lone = [(1, Path::new("/Users/me/Music/01 Song.m4a"))];
+        let named = [(70, Path::new("/var/mobile/Documents/Other/01 Song.m4a"))];
+        assert!(match_by_tail(&lone, &named).is_empty());
     }
 
     #[test]

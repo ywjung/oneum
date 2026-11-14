@@ -4,12 +4,20 @@
 //! elsewhere is brought in: music goes into the Documents folder (where the library
 //! looks), anything else that is only read once goes into the temporary folder. What
 //! already lies in the container is used where it is.
+//!
+//! A folder can also be linked: used where it is (in iCloud Drive, on a drive that is
+//! plugged in), without a copy. The system lets the app read a folder the user chose
+//! for as long as the app runs; a bookmark made then brings that right back on later
+//! runs. The bookmarks are kept in the app's data folder.
 use super::{run_on_main, scene};
 use crate::platform::{PickKind, PickRequest};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class};
-use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSString, NSURL};
+use objc2_foundation::{
+    NSArray, NSData, NSObject, NSObjectProtocol, NSString, NSURL, NSURLBookmarkCreationOptions,
+    NSURLBookmarkResolutionOptions,
+};
 use objc2_ui_kit::{UIDocumentPickerDelegate, UIDocumentPickerViewController};
 use objc2_uniform_type_identifiers::{UTType, UTTypeFolder, UTTypeItem};
 use std::cell::RefCell;
@@ -23,6 +31,8 @@ enum Keep {
     Music,
     /// In the temporary folder: it is read once (a playlist, a correction file).
     Scratch,
+    /// Where it is: a folder of music that is linked, not copied.
+    InPlace,
 }
 
 /// The folder inside Documents that single files are brought into.
@@ -98,7 +108,7 @@ fn present(kind: &PickKind, done: Done) {
         tracing::warn!("no view to show the document picker from");
         return;
     };
-    let folder = matches!(kind, PickKind::Folder);
+    let folder = matches!(kind, PickKind::Folder | PickKind::FolderInPlace);
     // SAFETY: constants the UniformTypeIdentifiers framework defines.
     let kind_of_thing: &UTType = unsafe { if folder { UTTypeFolder } else { UTTypeItem } };
     let types = NSArray::from_slice(&[kind_of_thing]);
@@ -122,10 +132,10 @@ fn present(kind: &PickKind, done: Done) {
             .clone()
     });
     picker.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    let keep = if matches!(kind, PickKind::File) {
-        Keep::Scratch
-    } else {
-        Keep::Music
+    let keep = match kind {
+        PickKind::File => Keep::Scratch,
+        PickKind::FolderInPlace => Keep::InPlace,
+        _ => Keep::Music,
     };
     if let Ok(mut pending) = PENDING.lock() {
         *pending = Some((keep, done));
@@ -140,7 +150,13 @@ fn chosen(urls: Vec<Retained<NSURL>>) {
         return;
     };
     let bring_in = move || {
-        let paths: Vec<PathBuf> = urls.iter().filter_map(|url| bring(url, keep)).collect();
+        let paths: Vec<PathBuf> = urls
+            .iter()
+            .filter_map(|url| match keep {
+                Keep::InPlace => link(url),
+                _ => bring(url, keep),
+            })
+            .collect();
         run_on_main(move || done(paths));
     };
     // The closure is moved into the thread; without one the work is not done at all
@@ -207,8 +223,8 @@ fn bring(url: &NSURL, keep: Keep) -> Option<PathBuf> {
     let scoped = unsafe { url.startAccessingSecurityScopedResource() };
     let into = match keep {
         Keep::Scratch => temporary.join("OnEum-import"),
-        Keep::Music if path.is_dir() => documents.clone(),
-        Keep::Music => documents.join(IMPORTED),
+        Keep::Music | Keep::InPlace if path.is_dir() => documents.clone(),
+        Keep::Music | Keep::InPlace => documents.join(IMPORTED),
     };
     let copied = free_name(&into, path.file_name()?).and_then(|to| {
         copy_tree(&path, &to)
@@ -221,6 +237,230 @@ fn bring(url: &NSURL, keep: Keep) -> Option<PathBuf> {
         unsafe { url.stopAccessingSecurityScopedResource() };
     }
     copied
+}
+
+// ----- linked folders -------------------------------------------------------------------
+
+/// A folder outside the container that is used where it is: where it was when it was
+/// linked, and the bookmark (as hexadecimal digits) that gives the right to read it.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct LinkedFolder {
+    path: String,
+    bookmark: String,
+}
+
+/// The app's data folder, told once at start-up (see [`restore_linked_folders`]).
+static DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The file the links are kept in.
+fn links_file() -> Option<PathBuf> {
+    Some(DATA_DIR.get()?.join("linked-folders.json"))
+}
+
+/// Whether two paths name one folder: spelled alike, or alike once the system has
+/// resolved them (`/var` is `/private/var` on a phone).
+fn same_place(one: &Path, other: &Path) -> bool {
+    one == other
+        || matches!(
+            (std::fs::canonicalize(one), std::fs::canonicalize(other)),
+            (Ok(one), Ok(other)) if one == other
+        )
+}
+
+fn load_links() -> Vec<LinkedFolder> {
+    links_file()
+        .and_then(|file| std::fs::read(file).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_links(links: &[LinkedFolder]) {
+    let Some(file) = links_file() else {
+        return;
+    };
+    let written = serde_json::to_vec_pretty(links)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| {
+            if let Some(folder) = file.parent() {
+                std::fs::create_dir_all(folder)?;
+            }
+            // Whole or not at all: a half-written list would lose every link.
+            let scratch = file.with_extension("json.new");
+            std::fs::write(&scratch, bytes)?;
+            std::fs::rename(&scratch, &file)
+        });
+    if let Err(error) = written {
+        tracing::warn!("cannot keep the linked folders: {error}");
+    }
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
+}
+
+fn from_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
+/// A bookmark for `url`, which the app has the right to read just now.
+fn bookmark_of(url: &NSURL) -> Option<String> {
+    let made = url.bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+        NSURLBookmarkCreationOptions::MinimalBookmark,
+        None,
+        None,
+    );
+    match made {
+        Ok(data) => Some(to_hex(&data.to_vec())),
+        Err(error) => {
+            tracing::warn!("cannot keep the right to read a folder: {error}");
+            None
+        }
+    }
+}
+
+/// Links the folder at `url`: the app goes on reading it where it is, now and (by the
+/// bookmark kept for it) on later runs. A folder of the app's own needs no link.
+fn link(url: &NSURL) -> Option<PathBuf> {
+    let path = PathBuf::from(url.path()?.to_string());
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    if is_inside(&path, &home) {
+        return Some(spelled_below(&path, &home));
+    }
+    // The right to read it lasts while the app runs: it is not given back, since the
+    // library reads the folder from now on.
+    // SAFETY: a plain call on a URL the picker handed over.
+    if !unsafe { url.startAccessingSecurityScopedResource() } {
+        tracing::warn!(
+            "the system did not let the folder be read: {}",
+            path.display()
+        );
+    }
+    let bookmark = bookmark_of(url)?;
+    let mut links = load_links();
+    links.retain(|link| !same_place(Path::new(&link.path), &path));
+    let spelled = path.to_string_lossy().into_owned();
+    lock(&REACHED).push(spelled.clone());
+    links.push(LinkedFolder {
+        path: spelled,
+        bookmark,
+    });
+    save_links(&links);
+    Some(path)
+}
+
+/// The linked folders the app has been given the right to read in this run (as they
+/// are spelled in the links file).
+static REACHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Locks a mutex whether or not a thread panicked while holding it: what these hold
+/// stays usable.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Asks the system for the right to read a linked folder again. Says where the folder
+/// is now and, if its bookmark has aged, a fresh one; `None` while it cannot be reached
+/// (a drive that is not plugged in, a folder that was deleted).
+fn reach(link: &LinkedFolder) -> Option<(PathBuf, Option<String>)> {
+    let bytes = from_hex(&link.bookmark)?;
+    let data = NSData::with_bytes(&bytes);
+    let mut stale = objc2::runtime::Bool::NO;
+    // SAFETY: `stale` is a valid place for the answer for the length of the call.
+    let resolved = unsafe {
+        NSURL::URLByResolvingBookmarkData_options_relativeToURL_bookmarkDataIsStale_error(
+            &data,
+            NSURLBookmarkResolutionOptions(0),
+            None,
+            &mut stale,
+        )
+    };
+    let url = match resolved {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::warn!("a linked folder cannot be reached: {error}");
+            return None;
+        }
+    };
+    // SAFETY: a plain call; the right is kept for as long as the app runs.
+    if !unsafe { url.startAccessingSecurityScopedResource() } {
+        tracing::warn!("the system did not let a linked folder be read");
+    }
+    let now = PathBuf::from(url.path()?.to_string());
+    // A bookmark that has aged is made anew while the folder can be reached.
+    let fresh = stale.as_bool().then(|| bookmark_of(&url)).flatten();
+    lock(&REACHED).push(link.path.clone());
+    Some((now, fresh))
+}
+
+/// Brings back the right to read the folders that were linked on earlier runs. Called
+/// once, before the library looks into its folders; `data_dir` is the app's data
+/// folder, where the links are kept. Says for each where it was and where it is now
+/// (`None`: it cannot be reached, as a drive that is not plugged in).
+pub fn restore_linked_folders(data_dir: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let _ = DATA_DIR.set(data_dir.to_path_buf());
+    let mut links = load_links();
+    let mut changed = false;
+    let mut found = Vec::new();
+    for link in &mut links {
+        let was = PathBuf::from(&link.path);
+        let Some((now, fresh)) = reach(link) else {
+            found.push((was, None));
+            continue;
+        };
+        if let Some(fresh) = fresh {
+            link.bookmark = fresh;
+            changed = true;
+        }
+        // A folder that was moved is kept under its new place (the library follows).
+        if now != was {
+            let mut reached = lock(&REACHED);
+            reached.retain(|path| *path != link.path);
+            link.path = now.to_string_lossy().into_owned();
+            reached.push(link.path.clone());
+            changed = true;
+        }
+        found.push((was, Some(now)));
+    }
+    if changed {
+        save_links(&links);
+    }
+    found
+}
+
+/// Tries again to reach the linked folders that could not be reached so far in this
+/// run (a drive that was plugged in after the app started). Says whether one was
+/// reached. One that was moved meanwhile is followed the next time the app starts.
+pub fn reach_linked_folders() -> bool {
+    let mut any = false;
+    for link in load_links() {
+        if lock(&REACHED).contains(&link.path) {
+            continue;
+        }
+        any |= reach(&link).is_some();
+    }
+    any
+}
+
+/// Forgets the link to `folder` (it was taken out of the library).
+pub fn forget_linked_folder(folder: &Path) {
+    let mut links = load_links();
+    let before = links.len();
+    links.retain(|link| !same_place(Path::new(&link.path), folder));
+    if links.len() != before {
+        save_links(&links);
+    }
 }
 
 /// Whether `path` lies in `folder` (both as the system resolves them: the container is

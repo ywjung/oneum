@@ -70,6 +70,10 @@ pub struct PickRequest {
 pub enum PickKind {
     /// A folder.
     Folder,
+    /// A folder that is to be used where it is. On a desk that is what choosing a
+    /// folder means anyway; on a phone, where a chosen folder is otherwise copied into
+    /// the app's own, the app keeps the right to read this one instead.
+    FolderInPlace,
     /// One or more files.
     Files,
     /// One file.
@@ -174,6 +178,10 @@ pub const CLOSE_HIDES_WINDOW: bool = cfg!(target_os = "macos");
 /// True where the output device's sample rate and exclusive access can be controlled
 /// (the "match the song's sample rate" and "exclusive access" options).
 pub const DEVICE_CONTROL: bool = cfg!(target_os = "macos");
+
+/// True where the output can at least be asked to run at a song's sample rate: on a
+/// Mac the device is set to it, on an iPhone the system is asked and decides.
+pub const RATE_CONTROL: bool = cfg!(any(target_os = "macos", target_os = "ios"));
 
 /// A path as the bytes that are stored in the database. On Unix these are the path's own
 /// bytes, whatever they are. Windows paths are UTF-16: they are stored as UTF-8, and a

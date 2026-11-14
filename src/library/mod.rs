@@ -1224,7 +1224,7 @@ impl Library {
     /// Opens (or creates) the library. Loads all tracks and builds the first snapshot
     /// before returning; no scan is started.
     pub fn open(paths: LibraryPaths) -> Result<(Arc<Library>, OpenReport), LibraryError> {
-        Self::open_with_home(paths, None)
+        Self::open_with_home(paths, None, &[])
     }
 
     /// [`Library::open`] where the music lies in a folder that moves (`home`: the
@@ -1235,12 +1235,26 @@ impl Library {
         paths: LibraryPaths,
         home: &Path,
     ) -> Result<(Arc<Library>, OpenReport), LibraryError> {
-        Self::open_with_home(paths, Some(home))
+        Self::open_with_home(paths, Some(home), &[])
+    }
+
+    /// [`Library::open_in_home`] where music folders outside `home` may have been moved
+    /// too (`moved`: where each was, and where it is now). Those are folders the system
+    /// can still tell after a move: the ones linked on an iPhone. What is known about
+    /// their songs stays with them. A folder that cannot be followed (something is
+    /// known at its new place already) is left as it was.
+    pub fn open_following(
+        paths: LibraryPaths,
+        home: &Path,
+        moved: &[(PathBuf, PathBuf)],
+    ) -> Result<(Arc<Library>, OpenReport), LibraryError> {
+        Self::open_with_home(paths, Some(home), moved)
     }
 
     fn open_with_home(
         paths: LibraryPaths,
         home: Option<&Path>,
+        moved_folders: &[(PathBuf, PathBuf)],
     ) -> Result<(Arc<Library>, OpenReport), LibraryError> {
         fs::create_dir_all(&paths.data_dir)?;
         if let Err(err) = fs::create_dir_all(&paths.cache_dir) {
@@ -1255,6 +1269,20 @@ impl Library {
                     moved,
                     "the library's folder has moved: its paths were brought along"
                 );
+            }
+        }
+        for (before, now) in moved_folders {
+            match db.follow_folder(before, now, SHEETS_READ_KEY) {
+                Ok(0) => {}
+                Ok(moved) => {
+                    tracing::info!(
+                        moved,
+                        "a music folder was moved: its paths were brought along"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!("a music folder that was moved cannot be followed: {error}");
+                }
             }
         }
         let report = OpenReport {
@@ -2342,6 +2370,19 @@ impl Library {
     /// Unicode normalisation); songs not in the library are counted, not added. Counts
     /// are merged, not added up: importing twice changes nothing more. Blocking.
     pub fn import_apple_music(&self, file: &Path) -> Result<AppleImport, LibraryError> {
+        self.import_apple_music_from(file, false)
+    }
+
+    /// [`Self::import_apple_music`] for a library whose files may lie elsewhere than
+    /// the export says. With `elsewhere`, a song that is not found at its place is
+    /// looked for by the end of its path (the folders it lies in and its name, see
+    /// [`apple::match_by_tail`]): on a phone the music is a copy of what the export,
+    /// made on a computer, describes.
+    pub fn import_apple_music_from(
+        &self,
+        file: &Path,
+        elsewhere: bool,
+    ) -> Result<AppleImport, LibraryError> {
         let not_export = || {
             LibraryError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -2361,7 +2402,7 @@ impl Library {
                 .iter()
                 .map(|(p, &id)| (p.to_string_lossy().nfc().collect(), id))
                 .collect();
-            export
+            let mut found: HashMap<i64, TrackId> = export
                 .tracks
                 .iter()
                 .filter_map(|t| {
@@ -2371,7 +2412,24 @@ impl Library {
                     })?;
                     Some((t.id, id))
                 })
-                .collect()
+                .collect();
+            if elsewhere {
+                let taken: HashSet<TrackId> = found.values().copied().collect();
+                let theirs: Vec<(i64, &Path)> = export
+                    .tracks
+                    .iter()
+                    .filter(|t| !found.contains_key(&t.id))
+                    .map(|t| (t.id, t.path.as_path()))
+                    .collect();
+                let ours: Vec<(TrackId, &Path)> = state
+                    .by_path
+                    .iter()
+                    .filter(|(_, id)| !taken.contains(id))
+                    .map(|(path, &id)| (id, path.as_path()))
+                    .collect();
+                found.extend(apple::match_by_tail(&theirs, &ours));
+            }
+            found
         };
         let rows: Vec<crate::storage::db::ListeningRow> = export
             .tracks

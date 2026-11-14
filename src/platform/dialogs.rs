@@ -14,7 +14,9 @@ pub fn pick(request: PickRequest, done: impl FnOnce(Vec<PathBuf>) + Send + 'stat
         dialog = dialog.add_filter(name, extensions);
     }
     let picked = match request.kind {
-        PickKind::Folder => dialog.pick_folder().map(|folder| vec![folder]),
+        PickKind::Folder | PickKind::FolderInPlace => {
+            dialog.pick_folder().map(|folder| vec![folder])
+        }
         PickKind::Files => dialog.pick_files(),
         PickKind::File => dialog.pick_file().map(|file| vec![file]),
         PickKind::SaveAs(name) => dialog
@@ -29,3 +31,20 @@ pub fn pick(request: PickRequest, done: impl FnOnce(Vec<PathBuf>) + Send + 'stat
 
 /// A file written for the user (`PickKind::SaveAs`) is where they asked for it already.
 pub fn hand_out(_file: &Path) {}
+
+/// Folders outside the app's reach that were linked on an earlier run (a phone's way of
+/// using a folder where it is): none on a desk, where every folder can be read.
+pub fn restore_linked_folders(
+    _data_dir: &std::path::Path,
+) -> Vec<(std::path::PathBuf, Option<std::path::PathBuf>)> {
+    Vec::new()
+}
+
+/// Tries again to reach linked folders that could not be reached: nothing to do on a
+/// desk.
+pub fn reach_linked_folders() -> bool {
+    false
+}
+
+/// Forgets the right to read a linked folder (see [`restore_linked_folders`]).
+pub fn forget_linked_folder(_folder: &std::path::Path) {}

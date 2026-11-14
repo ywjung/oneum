@@ -707,3 +707,79 @@ fn an_apple_music_library_export_is_taken_over() {
     fs::write(&file, "<html></html>").unwrap();
     assert!(library.import_apple_music(&file).is_err());
 }
+
+/// An export made on another computer names files where they are there. A library
+/// whose music was copied from that computer (a phone's) finds its songs by the folders
+/// they are in and their names; asked to go by the place alone, it finds none.
+#[test]
+fn an_apple_music_export_from_another_computer_is_matched_by_folder_and_name() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    // The same folders and file names, below a music folder that is not here.
+    let elsewhere = |id: TrackId| {
+        let path = library.track(id).unwrap().path.clone();
+        let parts: Vec<String> = path
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let mut url = String::from("file:///Users/someone/Music/Media/Artist/");
+        for (index, part) in parts.iter().rev().enumerate() {
+            if index > 0 {
+                url.push('/');
+            }
+            for byte in part.bytes() {
+                if byte.is_ascii_alphanumeric() || b"-_.".contains(&byte) {
+                    url.push(byte as char);
+                } else {
+                    url.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+        url
+    };
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Tracks</key><dict>
+<key>1</key><dict><key>Track ID</key><integer>1</integer><key>Play Count</key><integer>9</integer>
+  <key>Location</key><string>{}</string></dict>
+<key>2</key><dict><key>Track ID</key><integer>2</integer><key>Loved</key><true/>
+  <key>Location</key><string>{}</string></dict>
+<key>3</key><dict><key>Track ID</key><integer>3</integer><key>Play Count</key><integer>3</integer>
+  <key>Location</key><string>file:///Users/someone/Music/Media/Artist/Nowhere/gone.mp3</string></dict>
+</dict><key>Playlists</key><array>
+<dict><key>Name</key><string>Mac에서</string><key>Playlist Items</key><array>
+  <dict><key>Track ID</key><integer>2</integer></dict><dict><key>Track ID</key><integer>1</integer></dict>
+  <dict><key>Track ID</key><integer>3</integer></dict></array></dict>
+</array></dict></plist>"#,
+        elsewhere(ids[0]),
+        elsewhere(ids[1]),
+    );
+    let file = env.dir.path().join("Library.xml");
+    fs::write(&file, xml).unwrap();
+
+    // By the place alone (as on the computer the export was made on): nothing is here.
+    let by_place = library.import_apple_music(&file).expect("imports");
+    assert_eq!(
+        (by_place.matched, by_place.unmatched, by_place.playlists),
+        (0, 3, 0)
+    );
+    assert_eq!(library.track(ids[0]).unwrap().play_count, 0);
+
+    let result = library
+        .import_apple_music_from(&file, true)
+        .expect("imports");
+    assert_eq!(
+        (result.matched, result.unmatched, result.playlists),
+        (2, 1, 1)
+    );
+    assert_eq!(library.track(ids[0]).unwrap().play_count, 9);
+    assert!(library.track(ids[1]).unwrap().favorite);
+    let playlist = library
+        .playlists()
+        .into_iter()
+        .find(|p| p.name == "Mac에서")
+        .expect("playlist made");
+    assert_eq!(track_ids(&library, playlist.id), [ids[1], ids[0]]);
+}

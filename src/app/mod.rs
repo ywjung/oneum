@@ -263,13 +263,31 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .filter(|_| platform::PHONE);
+    // Folders that were linked on a phone (used where they are): the right to read
+    // them has to be there before the library looks into them, and one that was moved
+    // since is followed to its new place.
+    let linked = platform::files::restore_linked_folders(&paths.data_dir);
+    let moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = linked
+        .iter()
+        .filter_map(|(was, now)| Some((was.clone(), now.clone()?)))
+        .filter(|(was, now)| was != now)
+        .collect();
     let (library, open_report) = match &home {
-        Some(home) => Library::open_in_home(library_paths, home)?,
+        Some(home) => Library::open_following(library_paths, home, &moved)?,
         None => Library::open(library_paths)?,
     };
 
     if platform::PHONE {
         add_phone_music_folder(&library);
+    }
+    // A linked folder that was moved and could not be followed is at least read at
+    // its new place.
+    for (_, now) in &moved {
+        if !library.roots().iter().any(|root| root.path == *now)
+            && let Err(error) = library.add_folder(now)
+        {
+            tracing::warn!("cannot add a linked folder at its new place: {error}");
+        }
     }
 
     // The player host needs a way back to the core for change notifications; the core

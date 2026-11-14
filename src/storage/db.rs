@@ -1137,47 +1137,46 @@ impl Db {
             self.kv_set(HOME_KEY, &now)?;
             return Ok(0);
         };
-        // What follows `before` in a path below it (or nothing, for the folder itself).
-        let below = |path: &[u8]| -> Option<Vec<u8>> {
-            let rest = path.strip_prefix(before.as_bytes())?;
-            (rest.is_empty() || rest[0] == b'/').then(|| [now.as_bytes(), rest].concat())
-        };
         let tx = self.conn.transaction()?;
-        let mut moved = 0;
-        for table in ["roots", "tracks"] {
-            let rows: Vec<(i64, Vec<u8>)> = tx
-                .prepare(&format!("SELECT id, path FROM {table}"))?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<SqlResult<_>>()?;
-            let mut update = tx.prepare(&format!("UPDATE {table} SET path = ?2 WHERE id = ?1"))?;
-            for (id, path) in rows {
-                if let Some(path) = below(&path) {
-                    update.execute(params![id, path])?;
-                    moved += 1;
-                }
-            }
-        }
-        let sheets: Option<String> = tx
-            .query_row(
-                "SELECT value FROM kv WHERE key = ?1",
-                params![sheets_key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(mut records) = sheets
-            .and_then(|json| serde_json::from_str::<Vec<(String, serde_json::Value)>>(&json).ok())
-        {
-            for (key, _) in &mut records {
-                if let Some(path) = below(key.as_bytes()).and_then(|p| String::from_utf8(p).ok()) {
-                    *key = path;
-                    moved += 1;
-                }
-            }
-            if let Ok(json) = serde_json::to_string(&records) {
-                tx.execute(KV_UPSERT_SQL, params![sheets_key, json])?;
-            }
-        }
+        let moved = rewrite_below(&tx, &before, &now, sheets_key)?;
         tx.execute(KV_UPSERT_SQL, params![HOME_KEY, now])?;
+        tx.commit()?;
+        Ok(moved)
+    }
+
+    /// Follows a music folder that was moved or renamed: every path at or below
+    /// `before` is rewritten to lie at or below `now`, as [`Db::follow_home`] does for
+    /// the folder the library lives in. For a folder the system can still tell after it
+    /// was moved (one linked on an iPhone, found again by its bookmark).
+    ///
+    /// Nothing happens unless `before` is a music folder of the library. If something
+    /// is already known at the new place (the folder was added there as well) this
+    /// fails and nothing is changed.
+    ///
+    /// Returns how many paths were rewritten.
+    pub fn follow_folder(
+        &mut self,
+        before: &Path,
+        now: &Path,
+        sheets_key: &str,
+    ) -> SqlResult<usize> {
+        let text = |path: &Path| path.to_str().map(|p| p.trim_end_matches('/').to_string());
+        let (Some(before), Some(now)) = (text(before), text(now)) else {
+            return Ok(0);
+        };
+        if before.is_empty() || now.is_empty() || before == now {
+            return Ok(0);
+        }
+        let tx = self.conn.transaction()?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM roots WHERE path = ?1)",
+            params![before.as_bytes()],
+            |row| row.get(0),
+        )?;
+        if !known {
+            return Ok(0);
+        }
+        let moved = rewrite_below(&tx, &before, &now, sheets_key)?;
         tx.commit()?;
         Ok(moved)
     }
@@ -1405,6 +1404,57 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// Rewrites every path at or below the folder `before` to lie at or below `now`: music
+/// folders, tracks, and the record of read CUE sheets (the JSON under `sheets_key`, a
+/// list of pairs keyed by path). Returns how many paths were rewritten.
+fn rewrite_below(
+    tx: &rusqlite::Transaction<'_>,
+    before: &str,
+    now: &str,
+    sheets_key: &str,
+) -> SqlResult<usize> {
+    // What follows `before` in a path below it (or nothing, for the folder itself).
+    let below = |path: &[u8]| -> Option<Vec<u8>> {
+        let rest = path.strip_prefix(before.as_bytes())?;
+        (rest.is_empty() || rest[0] == b'/').then(|| [now.as_bytes(), rest].concat())
+    };
+    let mut moved = 0;
+    for table in ["roots", "tracks"] {
+        let rows: Vec<(i64, Vec<u8>)> = tx
+            .prepare(&format!("SELECT id, path FROM {table}"))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<SqlResult<_>>()?;
+        let mut update = tx.prepare(&format!("UPDATE {table} SET path = ?2 WHERE id = ?1"))?;
+        for (id, path) in rows {
+            if let Some(path) = below(&path) {
+                update.execute(params![id, path])?;
+                moved += 1;
+            }
+        }
+    }
+    let sheets: Option<String> = tx
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![sheets_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(mut records) =
+        sheets.and_then(|json| serde_json::from_str::<Vec<(String, serde_json::Value)>>(&json).ok())
+    {
+        for (key, _) in &mut records {
+            if let Some(path) = below(key.as_bytes()).and_then(|p| String::from_utf8(p).ok()) {
+                *key = path;
+                moved += 1;
+            }
+        }
+        if let Ok(json) = serde_json::to_string(&records) {
+            tx.execute(KV_UPSERT_SQL, params![sheets_key, json])?;
+        }
+    }
+    Ok(moved)
 }
 
 /// The `kv` key of the folder the library moves with (see [`Db::follow_home`]).

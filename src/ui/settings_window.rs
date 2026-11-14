@@ -623,7 +623,24 @@ impl OneumApp {
                     s.out_macos_only
                 })
             };
-            if !phone {
+            if phone {
+                // The system is asked for the song's rate and decides: the built-in
+                // output follows between 44.1 and 48 kHz, a USB DAC as far as it can.
+                widgets::setting_row(
+                    ui,
+                    s.out_match_rate,
+                    Some(s.phone_match_rate_desc),
+                    crate::platform::RATE_CONTROL,
+                    |ui| {
+                        widgets::toggle(
+                            ui,
+                            &mut self.settings.output.match_sample_rate,
+                            s.out_match_rate,
+                        );
+                    },
+                );
+                widgets::row_divider(ui);
+            } else {
                 widgets::setting_row(
                     ui,
                     s.out_match_rate,
@@ -653,7 +670,9 @@ impl OneumApp {
                 widgets::toggle(ui, &mut self.settings.output.memory_playback, s.out_memory);
             });
         });
-        if !phone {
+        if phone {
+            widgets::section_note(ui, s.phone_quality_hint);
+        } else {
             widgets::section_note(ui, s.out_quality_hint);
         }
         if self.settings.output != before {
