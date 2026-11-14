@@ -71,7 +71,7 @@
 7. 음량 보정을 귀로 확인한다: `dist/listening/leveling-ab.wav`(없으면 `oneum-libtool leveled <폴더> --ab <파일>`로 다시 만든다)를 듣거나, 음량 보정을 켜고 여러 앨범을 이어 듣는다. 출력의 음량을 잰 결과는 docs/TESTING.md "보정된 출력의 음량".
    5만 곡 분석은 3분의 1에서 멈췄으므로(문제는 없었음) 끝까지 한 번 돌린다.
 8. 새 단축키(⌥⌘→, ⌥⌘←, ⌘⇧.)를 실제 키보드로 눌러 본다.
-9. 저장소는 https://github.com/ywjung/oneum 에 올릴 준비가 되어 있다(원격 `github`, 2026-11-14). 올린 뒤 `.github/workflows/ci.yml`이 실제로 도는지 확인한다(아직 한 번도 실행되지 않음 — Windows 러너에서의 빌드·테스트·실행 확인이 처음 돌게 된다).
+9. 저장소는 https://github.com/ywjung/oneum 에 올릴 준비가 되어 있다(원격 `github`, 2026-11-15: 작성자 정보 통일, main에 머지, 새 클론에서 빌드·테스트 확인 — docs/RELEASE.md "현재 상태"). `git push -u github main`으로 올린다. 올린 뒤 `.github/workflows/ci.yml`이 실제로 도는지 확인한다(아직 한 번도 실행되지 않음 — Windows 러너에서의 빌드·테스트·실행 확인이 처음 돌게 된다).
 10. APE: 검증용 APE 파일(또는 Monkey's Audio 인코더)이 생기면 `ape-decoder`를 붙이고 ffmpeg의 APE 디코더와 샘플 단위로 대조한다.
 11. CUE 시트: 리핑 프로그램(EAC·XLD 등)이 만든 실제 "파일 하나짜리" 시트와 이미지가 생기면 앱에 넣어 곡 수·길이·이어 재생을 확인한다(docs/TESTING.md "다섯 번째").
 
