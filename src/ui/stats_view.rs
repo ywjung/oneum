@@ -96,7 +96,12 @@ impl OneumApp {
 
     pub(super) fn stats_view(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let s = self.s();
-        self.view_title(ui, s.stats, None);
+        // On a phone the page's own bar says where one is, and the lists stand below
+        // each other: two of them do not fit side by side.
+        let touch = theme::touch(ui.ctx());
+        if !touch {
+            self.view_title(ui, s.stats, None);
+        }
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             widgets::segmented(
@@ -140,63 +145,69 @@ impl OneumApp {
                 });
                 ui.add_space(10.0);
                 if listening.plays > 0 {
-                    ui.columns(2, |columns| {
-                        top_list(
-                            &mut columns[0],
-                            s.top_artists,
-                            listening.top_artists.iter().map(|(name, n)| {
-                                (
-                                    name.clone(),
-                                    *n,
-                                    Some(Action::Go(Nav::Artist(name.clone()))),
-                                )
-                            }),
-                            lang,
-                            actions,
-                        );
-                        top_list(
-                            &mut columns[1],
-                            s.top_albums,
-                            listening.top_albums.iter().map(|(key, title, artist, n)| {
-                                let name = if artist.is_empty() {
-                                    title.clone()
-                                } else {
-                                    format!("{title} — {artist}")
-                                };
-                                (name, *n, Some(Action::Go(Nav::Album(*key))))
-                            }),
-                            lang,
-                            actions,
-                        );
-                    });
-                    ui.add_space(10.0);
                     let snapshot = self.snapshot.clone();
-                    ui.columns(2, |columns| {
-                        top_list(
-                            &mut columns[0],
-                            s.top_songs,
-                            listening.top_songs.iter().filter_map(|(id, n)| {
-                                let track = snapshot.get(*id)?;
-                                let name = if track.artist.is_empty() {
-                                    track.title.clone()
-                                } else {
-                                    format!("{} — {}", track.title, track.artist)
-                                };
-                                Some((name, *n, Some(Action::ShowInfo(*id))))
-                            }),
-                            lang,
-                            actions,
-                        );
-                        top_list(
-                            &mut columns[1],
-                            s.top_genres,
-                            listening.top_genres.iter().map(|(name, n)| {
-                                (name.clone(), *n, Some(Action::Go(Nav::Genre(name.clone()))))
-                            }),
-                            lang,
-                            actions,
-                        );
+                    let artists = listening.top_artists.iter().map(|(name, n)| {
+                        (
+                            name.clone(),
+                            *n,
+                            Some(Action::Go(Nav::Artist(name.clone()))),
+                        )
                     });
+                    let albums = listening.top_albums.iter().map(|(key, title, artist, n)| {
+                        let name = if artist.is_empty() {
+                            title.clone()
+                        } else {
+                            format!("{title} — {artist}")
+                        };
+                        (name, *n, Some(Action::Go(Nav::Album(*key))))
+                    });
+                    let songs = listening.top_songs.iter().filter_map(|(id, n)| {
+                        let track = snapshot.get(*id)?;
+                        let name = if track.artist.is_empty() {
+                            track.title.clone()
+                        } else {
+                            format!("{} — {}", track.title, track.artist)
+                        };
+                        Some((name, *n, Some(Action::ShowInfo(*id))))
+                    });
+                    let genres = listening.top_genres.iter().map(|(name, n)| {
+                        (name.clone(), *n, Some(Action::Go(Nav::Genre(name.clone()))))
+                    });
+                    if touch {
+                        // Below each other, and only those that have something to say.
+                        if !listening.top_artists.is_empty() {
+                            top_list(ui, s.top_artists, artists, lang, true, actions);
+                            ui.add_space(14.0);
+                        }
+                        if !listening.top_albums.is_empty() {
+                            top_list(ui, s.top_albums, albums, lang, true, actions);
+                            ui.add_space(14.0);
+                        }
+                        if !listening.top_songs.is_empty() {
+                            top_list(ui, s.top_songs, songs, lang, true, actions);
+                            ui.add_space(14.0);
+                        }
+                        if !listening.top_genres.is_empty() {
+                            top_list(ui, s.top_genres, genres, lang, true, actions);
+                        }
+                    } else {
+                        ui.columns(2, |columns| {
+                            top_list(
+                                &mut columns[0],
+                                s.top_artists,
+                                artists,
+                                lang,
+                                false,
+                                actions,
+                            );
+                            top_list(&mut columns[1], s.top_albums, albums, lang, false, actions);
+                        });
+                        ui.add_space(10.0);
+                        ui.columns(2, |columns| {
+                            top_list(&mut columns[0], s.top_songs, songs, lang, false, actions);
+                            top_list(&mut columns[1], s.top_genres, genres, lang, false, actions);
+                        });
+                    }
                     ui.add_space(14.0);
                 }
                 widgets::section_title(ui, s.stats_library);
@@ -256,7 +267,14 @@ impl OneumApp {
                     }
                     ui.add_space(8.0);
                 });
-                widgets::section_note(ui, s.stats_note);
+                widgets::section_note(
+                    ui,
+                    if touch {
+                        s.phone_stats_note
+                    } else {
+                        s.stats_note
+                    },
+                );
             });
     }
 }
@@ -267,13 +285,23 @@ fn top_list(
     title: &str,
     entries: impl Iterator<Item = (String, usize, Option<Action>)>,
     lang: crate::i18n::Lang,
+    touch: bool,
     actions: &mut Vec<Action>,
 ) {
     let dim = theme::dim(ui);
-    ui.label(RichText::new(title).font(theme::semibold(12.0)).color(dim));
+    let title_size = if touch { 13.5 } else { 12.0 };
+    ui.label(
+        RichText::new(title)
+            .font(theme::semibold(title_size))
+            .color(dim),
+    );
     ui.add_space(2.0);
     for (rank, (name, plays, action)) in entries.enumerate() {
         ui.horizontal(|ui| {
+            if touch {
+                // Tall enough to hit with a finger.
+                ui.set_min_height(38.0);
+            }
             ui.label(
                 RichText::new(format!("{:>2}", rank + 1))
                     .monospace()

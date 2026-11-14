@@ -124,12 +124,13 @@ pub fn truncated(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response {
 
 /// A small heading above a group of settings.
 pub fn section_title(ui: &mut Ui, text: &str) {
+    let size = if theme::touch(ui.ctx()) { 13.5 } else { 12.0 };
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(text)
-                .font(theme::semibold(12.0))
+                .font(theme::semibold(size))
                 .color(theme::dim(ui)),
         );
     });
@@ -200,6 +201,9 @@ pub fn setting_row(
     enabled: bool,
     add_control: impl FnOnce(&mut Ui),
 ) {
+    if theme::touch(ui.ctx()) {
+        return setting_row_touch(ui, title, description, enabled, add_control);
+    }
     let height = if description.is_some() { 54.0 } else { 42.0 };
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
@@ -241,6 +245,98 @@ pub fn setting_row(
     }
 }
 
+/// [`setting_row`] on a phone: larger text, the explanation in full (wrapped, not cut
+/// off), and a control that would leave the text less than half the width goes below
+/// the text instead of beside it.
+fn setting_row_touch(
+    ui: &mut Ui,
+    title: &str,
+    description: Option<&str>,
+    enabled: bool,
+    add_control: impl FnOnce(&mut Ui),
+) {
+    const MIN_HEIGHT: f32 = 54.0;
+    const CONTROL_HEIGHT: f32 = 40.0;
+    let width = ui.available_width();
+    // How wide the control was when it was last drawn: it is laid out before the text
+    // can be, and what it needs decides where the text goes.
+    let id = ui.scope_id().with(("setting-row", title));
+    let known: Option<f32> = ui.data(|data| data.get_temp(id));
+    let below = known.is_some_and(|control| control > width * 0.5);
+    let text_width = if below {
+        width
+    } else {
+        (width - known.unwrap_or(60.0) - 14.0).max(80.0)
+    };
+    let title_color = if enabled {
+        ui.visuals().strong_text_color()
+    } else {
+        theme::dim(ui)
+    };
+    let title_galley = ui.painter().layout(
+        title.to_string(),
+        egui::FontId::proportional(16.0),
+        title_color,
+        text_width,
+    );
+    let description_galley = description.filter(|d| !d.is_empty()).map(|description| {
+        ui.painter().layout(
+            description.to_string(),
+            egui::FontId::proportional(13.0),
+            theme::dim(ui),
+            text_width,
+        )
+    });
+    let text_height = title_galley.size().y
+        + description_galley
+            .as_ref()
+            .map_or(0.0, |galley| galley.size().y + 3.0);
+    let height = if below {
+        text_height + 10.0 + CONTROL_HEIGHT + 20.0
+    } else {
+        (text_height + 20.0).max(MIN_HEIGHT)
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let text_top = if below {
+        rect.top() + 10.0
+    } else {
+        rect.center().y - text_height / 2.0
+    };
+    let title_height = title_galley.size().y;
+    ui.painter()
+        .galley(egui::pos2(rect.left(), text_top), title_galley, title_color);
+    if let Some(galley) = description_galley {
+        ui.painter().galley(
+            egui::pos2(rect.left(), text_top + title_height + 3.0),
+            galley,
+            theme::dim(ui),
+        );
+    }
+    let control_rect = if below {
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - 10.0 - CONTROL_HEIGHT),
+            egui::pos2(rect.right(), rect.bottom() - 10.0),
+        )
+    } else {
+        rect
+    };
+    let mut control_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(control_rect)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    if !enabled {
+        control_ui.disable();
+    }
+    add_control(&mut control_ui);
+    let used = control_ui.min_rect().width().min(width);
+    if known.is_none_or(|known| (known - used).abs() > 0.5) {
+        ui.data_mut(|data| data.insert_temp(id, used));
+        // Laid out for another width: once more with what is known now.
+        ui.ctx().request_repaint();
+    }
+}
+
 /// A row of mutually exclusive choices drawn as one control (like a macOS segmented
 /// control). Returns true when the choice changed. Each segment is a radio button for
 /// assistive technology and can be reached with Tab.
@@ -250,20 +346,30 @@ pub fn segmented<T: PartialEq + Copy>(
     current: &mut T,
     options: &[(T, &str)],
 ) -> bool {
-    const HEIGHT: f32 = 28.0;
-    const PAD: f32 = 13.0;
+    let touch = theme::touch(ui.ctx());
+    let (height, pad) = if touch { (38.0, 14.0) } else { (28.0, 13.0) };
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let widths: Vec<f32> = options
+    let mut widths: Vec<f32> = options
         .iter()
         .map(|(_, label)| {
             let galley =
                 ui.painter()
                     .layout_no_wrap((*label).to_string(), font.clone(), Color32::WHITE);
-            (galley.size().x + PAD * 2.0).max(48.0)
+            (galley.size().x + pad * 2.0).max(48.0)
         })
         .collect();
-    let total: f32 = widths.iter().sum::<f32>() + 4.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(total, HEIGHT), Sense::hover());
+    let mut total: f32 = widths.iter().sum::<f32>() + 4.0;
+    // On a narrow screen the segments give up padding, all by the same share, rather
+    // than run off the side.
+    let room = ui.available_width();
+    if touch && total > room && room > 0.0 {
+        let scale = (room - 4.0) / (total - 4.0);
+        for width in &mut widths {
+            *width *= scale;
+        }
+        total = room;
+    }
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(total, height), Sense::hover());
     let visuals = ui.visuals().clone();
     let dark = visuals.dark_mode;
     let track = if dark {
@@ -277,7 +383,7 @@ pub fn segmented<T: PartialEq + Copy>(
     for (index, ((value, label), width)) in options.iter().zip(&widths).enumerate() {
         let seg = egui::Rect::from_min_size(
             egui::pos2(x, rect.top() + 2.0),
-            egui::vec2(*width, HEIGHT - 4.0),
+            egui::vec2(*width, height - 4.0),
         );
         x += width;
         let response = ui.interact(seg, ui.scope_id().with((id_salt, index)), Sense::click());
@@ -332,7 +438,12 @@ pub fn segmented<T: PartialEq + Copy>(
 /// An on/off switch. `label` names it for assistive technology (the visible title is
 /// drawn by the row it sits in).
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(38.0, 22.0), Sense::click());
+    let size = if theme::touch(ui.ctx()) {
+        egui::vec2(51.0, 31.0)
+    } else {
+        egui::vec2(38.0, 22.0)
+    };
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
@@ -359,18 +470,22 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         if !enabled {
             fill = fill.gamma_multiply(0.5);
         }
-        ui.painter().rect_filled(rect, 11.0, fill);
+        let half = rect.height() / 2.0;
+        ui.painter().rect_filled(rect, half, fill);
         if response.has_focus() {
             ui.painter().rect_stroke(
                 rect.expand(2.0),
-                13.0,
+                half + 2.0,
                 visuals.selection.stroke,
                 egui::StrokeKind::Outside,
             );
         }
-        let knob_x = rect.left() + 11.0 + (rect.width() - 22.0) * t;
-        ui.painter()
-            .circle_filled(egui::pos2(knob_x, rect.center().y), 9.0, Color32::WHITE);
+        let knob_x = rect.left() + half + (rect.width() - rect.height()) * t;
+        ui.painter().circle_filled(
+            egui::pos2(knob_x, rect.center().y),
+            half - 2.0,
+            Color32::WHITE,
+        );
     }
     response
 }

@@ -40,6 +40,14 @@ pub enum Icon {
     Forward,
     /// "Put away": closes a sheet that came up from below.
     Down,
+    /// The words of a song.
+    Lyrics,
+    /// A pushpin: kept at the top.
+    Pin,
+    /// A tick: chosen.
+    Check,
+    /// Three bars to take hold of a row by and carry it elsewhere.
+    Grip,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -206,6 +214,49 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 vec![p(0.20, 0.36), p(0.5, 0.66), p(0.80, 0.36)],
                 stroke,
             ));
+        }
+        Icon::Lyrics => {
+            // A speech bubble with two lines of words in it.
+            painter.add(Shape::closed_line(
+                vec![
+                    p(0.14, 0.18),
+                    p(0.86, 0.18),
+                    p(0.86, 0.68),
+                    p(0.46, 0.68),
+                    p(0.28, 0.86),
+                    p(0.28, 0.68),
+                    p(0.14, 0.68),
+                ],
+                stroke,
+            ));
+            painter.line_segment([p(0.28, 0.36), p(0.72, 0.36)], stroke);
+            painter.line_segment([p(0.28, 0.51), p(0.60, 0.51)], stroke);
+        }
+        Icon::Pin => {
+            // Head, collar and needle.
+            painter.add(Shape::closed_line(
+                vec![
+                    p(0.34, 0.12),
+                    p(0.66, 0.12),
+                    p(0.61, 0.44),
+                    p(0.76, 0.60),
+                    p(0.24, 0.60),
+                    p(0.39, 0.44),
+                ],
+                stroke,
+            ));
+            painter.line_segment([p(0.5, 0.60), p(0.5, 0.90)], stroke);
+        }
+        Icon::Check => {
+            painter.add(Shape::line(
+                vec![p(0.18, 0.52), p(0.42, 0.76), p(0.84, 0.26)],
+                stroke,
+            ));
+        }
+        Icon::Grip => {
+            for y in [0.32, 0.5, 0.68] {
+                painter.line_segment([p(0.18, y), p(0.82, y)], stroke);
+            }
         }
         Icon::More => {
             for x in [0.22, 0.5, 0.78] {

@@ -2194,6 +2194,12 @@ impl OneumApp {
                 .map_or(0, |(_, _, entries)| entries.len())
         );
         state["shuffle_by_album"] = serde_json::json!(self.settings.shuffle_by_album);
+        let (textures, pending, uploads) = self.art.counts();
+        state["art"] = serde_json::json!({
+            "textures": textures,
+            "pending": pending,
+            "uploads": uploads,
+        });
         if self.phone_mode {
             state["phone"] = self.phone.describe();
             let (full, safe) = (ctx.viewport_rect(), ctx.content_rect());

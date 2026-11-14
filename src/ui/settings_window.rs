@@ -428,7 +428,10 @@ impl OneumApp {
         });
 
         ui.add_space(18.0);
-        self.check_card(ui);
+        if self.check_card(ui) {
+            self.settings_open = false;
+            self.show_search(super::Nav::Songs, "check:damaged");
+        }
 
         ui.add_space(14.0);
         widgets::section_title(ui, s.import_title);
@@ -453,7 +456,8 @@ impl OneumApp {
     }
 
     /// The file check: start or stop it, what it found, and the way to the damaged files.
-    fn check_card(&mut self, ui: &mut egui::Ui) {
+    /// True when the damaged files were asked for: where they are shown is the caller's.
+    pub(super) fn check_card(&mut self, ui: &mut egui::Ui) -> bool {
         let s = self.s();
         let library = self.core.library.clone();
         let status = library.check_status();
@@ -547,10 +551,7 @@ impl OneumApp {
             }
         });
         widgets::section_note(ui, s.check_hint);
-        if show_damaged {
-            self.settings_open = false;
-            self.show_search(super::Nav::Songs, "check:damaged");
-        }
+        show_damaged
     }
 
     /// Which output device to play on.

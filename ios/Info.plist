@@ -41,6 +41,9 @@
   </dict>
   <key>UISupportedInterfaceOrientations</key>
   <array><string>UIInterfaceOrientationPortrait</string></array>
+  <!-- Lets the screen run at its full rate (120 Hz on a Pro) while the app draws:
+       without this an app that draws with Metal is held to 60 Hz on an iPhone. -->
+  <key>CADisableMinimumFrameDurationOnPhone</key><true/>
   <key>UIStatusBarStyle</key><string>UIStatusBarStyleDefault</string>
   <key>UIViewControllerBasedStatusBarAppearance</key><true/>
   <!-- Music keeps playing with the screen off and while another app is in front. -->

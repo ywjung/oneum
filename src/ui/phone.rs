@@ -11,7 +11,10 @@
 use super::dialogs::Dialog;
 use super::icons::{self, Icon};
 use super::lists::{self, Rediscover};
-use super::{Action, Nav, OneumApp, Row, ToastAction, next_repeat, theme, widgets};
+use super::{
+    Action, Nav, OneumApp, Row, ToastAction, meter, next_repeat, spectrum, theme, widgets,
+};
+use crate::app::settings::{MAX_PINS, Pin};
 use crate::i18n::format_time;
 use crate::model::{Track, TrackId};
 use crate::playback::{Command, PlayState, RepeatMode};
@@ -21,6 +24,9 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod edit;
+mod info;
 
 /// Height of the bar at the top of a page: where one is and the way back.
 const HEADER: f32 = 50.0;
@@ -96,6 +102,59 @@ enum Sheet {
     /// The sleep timer's choices.
     Sleep,
     Info(TrackId),
+    Artist(String),
+    Genre(String),
+    /// The orders the songs of this list can be put in.
+    Sort(Nav),
+    /// What can be done with the songs chosen in this list.
+    Selection(Nav),
+}
+
+/// A row that is being carried to another place in its list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reorder {
+    /// Which list: its name as given to [`virtual_rows`].
+    list: &'static str,
+    /// Where the row was, and the gap it would go to if it were let go of now (0 is
+    /// before the first row).
+    from: usize,
+    to: usize,
+}
+
+/// What the player shows in the place of the cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PlayerView {
+    #[default]
+    Cover,
+    /// The VU meters and the spectrum, with where the sound comes from and goes to.
+    Meters,
+    Lyrics,
+    Queue,
+}
+
+/// A change of page that is being shown: the new page slides in over the old one, or
+/// off it when going back.
+struct Transition {
+    /// The other page of the two: the one left behind going forward, the one that is
+    /// leaving going back. `None` is the first page of the tab.
+    other: Option<Page>,
+    forward: bool,
+    started: Instant,
+    /// How far it had come when it began (a page dragged back and let go is part of
+    /// the way already).
+    from: f32,
+}
+
+/// How long a page takes to slide in or out, in seconds.
+const TRANSITION: f32 = 0.30;
+/// How long a sheet takes to go back down, in seconds.
+const SHEET_FALL: f32 = 0.20;
+/// How long the player and a sheet take to come up.
+const RISE: f32 = 0.30;
+
+/// Fast at first, slowing into place.
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
 /// The state of the phone screens.
@@ -104,7 +163,7 @@ pub(super) struct Phone {
     /// The pages above the first one of each tab, in the order of [`TABS`].
     stacks: [Vec<Page>; 4],
     player_open: bool,
-    queue_open: bool,
+    player_view: PlayerView,
     sheet: Option<Sheet>,
     query: String,
     search_kind: SearchKind,
@@ -112,8 +171,36 @@ pub(super) struct Phone {
     /// What `search_rows` was made from: library and playlist generations, query, kind.
     search_built: Option<(u64, u64, String, SearchKind)>,
     focus_search: bool,
+    /// How far the search results were scrolled when last drawn.
+    search_offset: f32,
     /// The view the rest of the app last asked for (`OneumApp::go`), as it was followed.
     seen_nav: Nav,
+    /// How many favourites the library has: (library generation, count).
+    favorites: Option<(u64, usize)>,
+    transition: Option<Transition>,
+    /// How far the open page has been pulled back from the left edge, in points, and
+    /// whether a finger is still on it.
+    back_drag: f32,
+    back_dragging: bool,
+    /// How far the player has been pulled down.
+    player_drag: f32,
+    player_dragging: bool,
+    /// When the sheet that is up came up, how tall it was when last drawn, and how far
+    /// it has been pulled down.
+    sheet_since: Option<Instant>,
+    sheet_height: f32,
+    sheet_drag: f32,
+    sheet_dragging: bool,
+    /// Since when the sheet has been on its way down, and which one that was.
+    sheet_leaving: Option<(Instant, Sheet)>,
+    /// The line of the lyrics that was current when they were last drawn.
+    lyrics_line: Option<usize>,
+    /// The list in which several songs are being chosen.
+    selecting: Option<Nav>,
+    reorder: Option<Reorder>,
+    /// The smart playlist whose search was put into the search field to be changed:
+    /// saving the search offers its name again.
+    editing_smart: Option<String>,
 }
 
 impl Phone {
@@ -122,23 +209,92 @@ impl Phone {
             tab: Tab::Library,
             stacks: Default::default(),
             player_open: false,
-            queue_open: false,
+            player_view: PlayerView::default(),
             sheet: None,
             query: String::new(),
             search_kind: SearchKind::default(),
             search_rows: Vec::new(),
             search_built: None,
             focus_search: false,
+            search_offset: 0.0,
             seen_nav: Nav::Songs,
+            favorites: None,
+            transition: None,
+            back_drag: 0.0,
+            back_dragging: false,
+            player_drag: 0.0,
+            player_dragging: false,
+            sheet_since: None,
+            sheet_height: 0.0,
+            sheet_drag: 0.0,
+            sheet_dragging: false,
+            sheet_leaving: None,
+            lyrics_line: None,
+            selecting: None,
+            reorder: None,
+            editing_smart: None,
         }
     }
 
+    fn tab_index(&self) -> usize {
+        TABS.iter().position(|t| *t == self.tab).unwrap_or(0)
+    }
+
     fn stack(&mut self) -> &mut Vec<Page> {
-        &mut self.stacks[TABS.iter().position(|t| *t == self.tab).unwrap_or(0)]
+        let index = self.tab_index();
+        &mut self.stacks[index]
     }
 
     fn page(&self) -> Option<&Page> {
-        self.stacks[TABS.iter().position(|t| *t == self.tab).unwrap_or(0)].last()
+        self.stacks[self.tab_index()].last()
+    }
+
+    /// Puts `page` above the ones of the open tab; it slides in.
+    fn push(&mut self, page: Page) {
+        let was = self.page().cloned();
+        if was.as_ref() == Some(&page) {
+            return;
+        }
+        self.stack().push(page);
+        self.selecting = None;
+        self.reorder = None;
+        self.transition = Some(Transition {
+            other: was,
+            forward: true,
+            started: Instant::now(),
+            from: 0.0,
+        });
+    }
+
+    /// Goes back a page; the one that is left slides off. `from` is how far it has
+    /// been pulled off already (0 for the back button).
+    fn pop(&mut self, from: f32) {
+        if let Some(page) = self.stack().pop() {
+            self.transition = Some(Transition {
+                other: Some(page),
+                forward: false,
+                started: Instant::now(),
+                from: from.clamp(0.0, 1.0),
+            });
+        }
+        self.back_drag = 0.0;
+        self.back_dragging = false;
+        self.selecting = None;
+        self.reorder = None;
+    }
+
+    /// Shows another tab (or the first page of the one that is open).
+    fn show_tab(&mut self, tab: Tab) {
+        if self.tab == tab {
+            self.stack().clear();
+        } else {
+            self.tab = tab;
+        }
+        self.transition = None;
+        self.back_drag = 0.0;
+        self.back_dragging = false;
+        self.selecting = None;
+        self.reorder = None;
     }
 
     /// What is on screen, for verification dumps.
@@ -148,10 +304,14 @@ impl Phone {
             "page": self.page().map(|page| format!("{page:?}")),
             "depth": self.stacks.iter().map(Vec::len).collect::<Vec<_>>(),
             "player_open": self.player_open,
-            "queue_open": self.queue_open,
+            "player_view": format!("{:?}", self.player_view),
+            "queue_open": self.player_view == PlayerView::Queue,
             "sheet": self.sheet.as_ref().map(|sheet| format!("{sheet:?}")),
             "query": self.query,
             "search_rows": self.search_rows.len(),
+            "moving": self.transition.is_some(),
+            "selecting": self.selecting.as_ref().map(|nav| format!("{nav:?}")),
+            "carrying": self.reorder.map(|carried| (carried.from, carried.to)),
         })
     }
 }
@@ -161,13 +321,14 @@ impl Phone {
 ///
 /// `list` names the list: two lists on one page (the folders of a folder above its
 /// songs, playlists above smart playlists) must not share the ids of their rows.
+/// Returns where the rows are, all of them (also those out of view).
 fn virtual_rows(
     ui: &mut Ui,
     list: &'static str,
     count: usize,
     height: f32,
     mut row: impl FnMut(&mut Ui, usize),
-) {
+) -> Rect {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, count as f32 * height), Sense::hover());
     let clip = ui.clip_rect();
@@ -186,6 +347,78 @@ fn virtual_rows(
         );
         row(&mut child, index);
     }
+    rect
+}
+
+/// What a page or a sheet that was pulled aside and let go has left of `pulled` in this
+/// frame on its way back to where it was (asks for the next frame until it is there).
+fn settle(ctx: &egui::Context, pulled: f32) -> f32 {
+    let dt = ctx.input(|i| i.stable_dt).min(0.05);
+    let left = pulled * (-dt * 18.0).exp();
+    if left < 0.5 {
+        0.0
+    } else {
+        ctx.request_repaint();
+        left
+    }
+}
+
+/// Darkens `rect` a little: a page that another one lies over.
+fn shade(ui: &Ui, rect: Rect, amount: f32) {
+    let alpha = (amount.clamp(0.0, 1.0) * 255.0) as u8;
+    if alpha > 0 {
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_black_alpha(alpha));
+    }
+}
+
+/// A button of the bar at the top of a page or of the player: an icon in a square a
+/// finger can hit. True when it was tapped.
+fn bar_button(
+    ui: &mut Ui,
+    id_salt: &'static str,
+    centre: egui::Pos2,
+    icon: Icon,
+    label: &str,
+    color: Color32,
+) -> bool {
+    let rect = Rect::from_center_size(centre, egui::Vec2::splat(TOUCH));
+    let response = ui.interact(rect, ui.scope_id().with(id_salt), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let color = if held(ui, &response) {
+        color.gamma_multiply(0.6)
+    } else {
+        color
+    };
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(centre, egui::Vec2::splat(23.0)),
+        icon,
+        color,
+    );
+    response.clicked()
+}
+
+/// True while a finger rests on what `response` is of: after a moment, because a touch
+/// that begins a scroll must not light a row up, and only until the finger moves away.
+fn held(ui: &Ui, response: &egui::Response) -> bool {
+    if !response.is_pointer_button_down_on() {
+        return false;
+    }
+    let (origin, at, since, now) = ui.input(|i| {
+        (
+            i.pointer.press_origin(),
+            i.pointer.interact_pos(),
+            i.pointer.press_start_time(),
+            i.time,
+        )
+    });
+    let moved = matches!((origin, at), (Some(a), Some(b)) if (b - a).length() > 6.0);
+    let rested = since.is_some_and(|since| now - since > 0.07);
+    if !moved && !rested {
+        ui.ctx().request_repaint_after(Duration::from_millis(40));
+    }
+    !moved && rested
 }
 
 /// A row that can be tapped: the response of the whole row, and whether the finger
@@ -193,7 +426,7 @@ fn virtual_rows(
 fn row_response(ui: &mut Ui, id_salt: &'static str) -> egui::Response {
     let rect = ui.max_rect();
     let response = ui.interact(rect, ui.scope_id().with(id_salt), Sense::click());
-    if response.is_pointer_button_down_on() {
+    if held(ui, &response) {
         ui.painter()
             .rect_filled(rect, 0.0, ui.visuals().widgets.hovered.weak_bg_fill);
     }
@@ -294,6 +527,55 @@ fn pill_button(ui: &mut Ui, icon: Icon, label: &str, width: f32, filled: bool) -
     response
 }
 
+/// A small heading above a group of rows.
+fn small_heading(ui: &mut Ui, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    ui.painter().text(
+        pos2(rect.left() + SIDE, rect.bottom() - 9.0),
+        Align2::LEFT_CENTER,
+        text,
+        theme::semibold(13.0),
+        theme::dim(ui),
+    );
+}
+
+/// The sheet of what can be done with what a pin leads to.
+fn pin_sheet(pin: &Pin) -> Sheet {
+    match pin {
+        Pin::Album(key) => Sheet::Album(*key),
+        Pin::Artist(name) => Sheet::Artist(name.clone()),
+        Pin::Genre(name) => Sheet::Genre(name.clone()),
+        Pin::Playlist(id) => Sheet::Playlist(*id),
+        Pin::Smart(name) => Sheet::Smart(name.clone()),
+    }
+}
+
+/// The circle at the left of a row while songs are being chosen: empty, or filled
+/// with a tick.
+fn choice_circle(ui: &Ui, centre: egui::Pos2, on: bool) {
+    let accent = theme::accent(ui.visuals().dark_mode);
+    if on {
+        ui.painter().circle_filled(centre, 11.0, accent);
+        let ink = if ui.visuals().dark_mode {
+            Color32::from_rgb(0x14, 0x14, 0x18)
+        } else {
+            Color32::WHITE
+        };
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(centre, egui::Vec2::splat(14.0)),
+            Icon::Check,
+            ink,
+        );
+    } else {
+        ui.painter().circle_stroke(
+            centre,
+            11.0,
+            egui::Stroke::new(1.5, ui.visuals().weak_text_color()),
+        );
+    }
+}
+
 /// What a song row says below its title.
 fn artist_line<'a>(track: &'a Track, unknown: &'a str) -> &'a str {
     if track.artist.is_empty() {
@@ -316,13 +598,19 @@ impl OneumApp {
         if self.player.current.is_none() {
             self.phone.player_open = false;
         }
+        // How far up the player is: 0 put away, 1 over the whole screen.
+        let up = ctx.animate_bool_with_time_and_easing(
+            egui::Id::unique("phone-player-up"),
+            self.phone.player_open,
+            RISE,
+            ease_out,
+        );
         let mut above_bars = safe.bottom();
         // The on-screen keyboard covers the lower end of the screen: while it is up
         // the page ends above it, and the bars it would cover are left out.
         let keyboard = crate::platform::window::keyboard_height();
-        if self.phone.player_open {
-            self.phone_player(ui, safe, &mut actions);
-        } else {
+        // Under the player once it is all the way up, nothing needs drawing.
+        if up < 1.0 || self.phone.player_drag > 0.0 {
             let tab_bar = Rect::from_min_max(pos2(full.left(), safe.bottom() - TAB_BAR), full.max);
             let mini = (self.player.current.is_some() && keyboard <= 0.0).then(|| {
                 Rect::from_min_max(
@@ -336,18 +624,34 @@ impl OneumApp {
                 mini.map_or(tab_bar.top(), |mini| mini.top())
             };
             above_bars = content_bottom;
-            let header = Rect::from_min_max(safe.min, pos2(safe.right(), safe.top() + HEADER));
-            let content = Rect::from_min_max(
-                pos2(safe.left(), header.bottom()),
-                pos2(safe.right(), content_bottom),
-            );
-            self.phone_page(ui, header, content, &mut actions);
+            let pages = Rect::from_min_max(safe.min, pos2(safe.right(), content_bottom));
+            self.phone_pages(ui, pages, &mut actions);
             if let Some(mini) = mini {
                 self.phone_mini_player(ui, mini);
             }
             if keyboard <= 0.0 {
                 self.phone_tab_bar(ui, tab_bar);
             }
+        }
+        let meters = up > 0.0 && self.phone.player_view == PlayerView::Meters;
+        if up > 0.0 {
+            // Let go of without closing: it settles back.
+            if !self.phone.player_dragging && self.phone.player_drag > 0.0 {
+                self.phone.player_drag = settle(&ctx, self.phone.player_drag);
+            }
+            let offset = (1.0 - up) * full.height() + self.phone.player_drag * up;
+            // What is behind the player goes dark as it comes up.
+            shade(ui, full, 0.4 * (1.0 - offset / full.height()));
+            self.phone_player(ui, full, safe, offset, &mut actions);
+            above_bars = safe.bottom();
+        } else {
+            self.phone.player_drag = 0.0;
+            self.phone.player_dragging = false;
+        }
+        if !meters {
+            // Needles and columns fall back to rest while nobody looks at them.
+            self.meter.suspend();
+            self.spectrum.suspend();
         }
         self.phone_toast(&ctx, safe, above_bars);
         self.phone_sheet(&ctx, &mut actions);
@@ -356,25 +660,53 @@ impl OneumApp {
             match action {
                 Action::Go(nav) => self.phone_open(nav),
                 Action::ShowInfo(track) => self.phone.sheet = Some(Sheet::Info(track)),
+                // On a desk the search of a smart playlist goes into the search field
+                // of the song list; here, into the search tab.
+                Action::EditSmart(name) => {
+                    if let Some(query) = self
+                        .settings
+                        .smart_playlists
+                        .iter()
+                        .find(|p| p.name == name)
+                        .map(|p| p.query.clone())
+                    {
+                        self.phone_show_search(&query);
+                        self.phone.editing_smart = Some(name);
+                    }
+                }
                 other => self.apply(other),
             }
         }
     }
 
+    /// Shows the songs that `query` finds, in the search tab.
+    fn phone_show_search(&mut self, query: &str) {
+        self.phone.player_open = false;
+        self.phone.show_tab(Tab::Search);
+        self.phone.stack().clear();
+        self.phone.query = query.to_string();
+        self.phone.search_kind = SearchKind::Songs;
+        self.phone.editing_smart = None;
+    }
+
     /// Shows `nav` as a page above the ones of the tab it belongs to.
     fn phone_open(&mut self, nav: Nav) {
         self.phone.player_open = false;
-        self.phone.sheet = None;
+        // A sheet that is up goes back down (rather than vanishing) while the page
+        // comes in.
+        if let Some(sheet) = self.phone.sheet.clone()
+            && self.phone.sheet_leaving.is_none()
+        {
+            self.phone.sheet_leaving = Some((Instant::now(), sheet));
+        }
         if matches!(nav, Nav::Playlist(_) | Nav::Smart(_)) {
-            self.phone.tab = Tab::Playlists;
+            if self.phone.tab != Tab::Playlists {
+                self.phone.show_tab(Tab::Playlists);
+            }
         } else if self.phone.tab == Tab::Settings || self.phone.tab == Tab::Playlists {
-            self.phone.tab = Tab::Library;
+            self.phone.show_tab(Tab::Library);
         }
-        let page = Page::List(nav.clone());
-        let stack = self.phone.stack();
-        if stack.last() != Some(&page) {
-            stack.push(page);
-        }
+        self.phone.push(Page::List(nav.clone()));
         self.nav = nav.clone();
         self.phone.seen_nav = nav;
     }
@@ -410,9 +742,159 @@ impl OneumApp {
 
     // ----- pages ------------------------------------------------------------------------
 
-    fn phone_page(&mut self, ui: &mut Ui, header: Rect, content: Rect, actions: &mut Vec<Action>) {
-        let s = self.s();
+    /// The pages of the open tab in `area`: the open one, and while it slides in or out
+    /// (or is pulled back with a finger) the other one beside it.
+    fn phone_pages(&mut self, ui: &mut Ui, area: Rect, actions: &mut Vec<Action>) {
+        let ctx = ui.ctx().clone();
+        let tab = self.phone.tab_index();
+        let depth = self.phone.stacks[tab].len();
         let page = self.phone.page().cloned();
+        let width = area.width();
+        // Pulled back and let go without going back: it settles where it was.
+        if !self.phone.back_dragging && self.phone.back_drag > 0.0 {
+            self.phone.back_drag = settle(&ctx, self.phone.back_drag);
+        }
+        // Where a page change that is under way has come to.
+        let mut moving: Option<(Option<Page>, bool, f32)> = None;
+        if let Some(transition) = &self.phone.transition {
+            let time = transition.started.elapsed().as_secs_f32() / TRANSITION;
+            if time >= 1.0 {
+                self.phone.transition = None;
+            } else {
+                let t = transition.from + (1.0 - transition.from) * ease_out(time);
+                moving = Some((transition.other.clone(), transition.forward, t));
+                ctx.request_repaint();
+            }
+        }
+        // The page underneath is a third of the way to the side and a little darker.
+        let under = |t: f32| area.translate(vec2(-0.3 * width * t, 0.0));
+        let ground = Rect::from_min_max(pos2(area.left(), ctx.viewport_rect().top()), area.max);
+        match moving {
+            Some((other, true, t)) => {
+                self.phone_page(
+                    ui,
+                    (tab, depth.saturating_sub(1)),
+                    &other,
+                    under(t),
+                    area,
+                    actions,
+                );
+                shade(ui, ground, 0.12 * t);
+                let over = area.translate(vec2(width * (1.0 - t), 0.0));
+                self.phone_page(ui, (tab, depth), &page, over, area, actions);
+            }
+            Some((other, false, t)) => {
+                self.phone_page(ui, (tab, depth), &page, under(1.0 - t), area, actions);
+                shade(ui, ground, 0.12 * (1.0 - t));
+                let over = area.translate(vec2(width * t, 0.0));
+                self.phone_page(ui, (tab, depth + 1), &other, over, area, actions);
+            }
+            None if self.phone.back_drag > 0.0 && depth > 0 => {
+                let t = (self.phone.back_drag / width).clamp(0.0, 1.0);
+                let beneath = depth
+                    .checked_sub(2)
+                    .and_then(|index| self.phone.stacks[tab].get(index))
+                    .cloned();
+                self.phone_page(
+                    ui,
+                    (tab, depth - 1),
+                    &beneath,
+                    under(1.0 - t),
+                    area,
+                    actions,
+                );
+                shade(ui, ground, 0.12 * (1.0 - t));
+                let over = area.translate(vec2(self.phone.back_drag, 0.0));
+                self.phone_page(ui, (tab, depth), &page, over, area, actions);
+            }
+            None => self.phone_page(ui, (tab, depth), &page, area, area, actions),
+        }
+
+        // A finger pulling from the left edge takes the page back with it. This is read
+        // from the pointer itself: a widget over the page would keep taps from what is
+        // under it, and one below it would lose the pull to the list.
+        let depth = self.phone.stacks[tab].len();
+        let free = depth > 0
+            && self.phone.transition.is_none()
+            && self.phone.sheet.is_none()
+            && !self.phone.player_open
+            && self.dialog.is_none();
+        let (origin, at, down, speed) = ui.input(|i| {
+            (
+                i.pointer.press_origin(),
+                i.pointer.latest_pos(),
+                i.pointer.primary_down(),
+                i.pointer.velocity().x,
+            )
+        });
+        if !free {
+            self.phone.back_dragging = false;
+            self.phone.back_drag = 0.0;
+        } else if down {
+            if let (Some(origin), Some(at)) = (origin, at) {
+                let pulled = at - origin;
+                let from_edge = origin.x <= area.left() + 24.0 && area.contains(origin);
+                if !self.phone.back_dragging
+                    && from_edge
+                    && pulled.x > 10.0
+                    && pulled.x > pulled.y.abs()
+                {
+                    self.phone.back_dragging = true;
+                }
+                if self.phone.back_dragging {
+                    self.phone.back_drag = pulled.x.clamp(0.0, width);
+                    ctx.request_repaint();
+                }
+            }
+        } else if self.phone.back_dragging {
+            self.phone.back_dragging = false;
+            if self.phone.back_drag > width * 0.33 || speed > 500.0 {
+                let from = self.phone.back_drag / width;
+                self.phone.pop(from);
+            }
+        }
+    }
+
+    /// One page, drawn in `area` (which may be partly off the screen while the page
+    /// slides) and cut off at `clip`. `place` is the tab and how deep in its stack the
+    /// page is: what the page keeps (how far a list is scrolled) is kept under that, so
+    /// it is the same whether the page is the open one or the one beside it.
+    fn phone_page(
+        &mut self,
+        ui: &mut Ui,
+        place: (usize, usize),
+        page: &Option<Page>,
+        area: Rect,
+        clip: Rect,
+        actions: &mut Vec<Action>,
+    ) {
+        let s = self.s();
+        let mut page_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt(("phone-page", place.0, place.1))
+                .max_rect(area),
+        );
+        page_ui.set_clip_rect(area.intersect(clip));
+        let ui = &mut page_ui;
+        // The page's ground reaches up behind the status bar.
+        let top = ui.ctx().viewport_rect().top();
+        let ground = Rect::from_min_max(pos2(area.left(), top), area.max);
+        let ground_clip = Rect::from_min_max(pos2(clip.left(), top), clip.max);
+        let painter = ui.painter_at(ground_clip);
+        painter.rect_filled(ground, 0.0, ui.visuals().panel_fill);
+        if area.left() > clip.left() + 0.5 {
+            // The edge of a page that lies over another: a soft shadow to its left.
+            for step in 0..6 {
+                let x = area.left() - step as f32 * 3.0;
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(x - 3.0, top), pos2(x, area.bottom())),
+                    0.0,
+                    Color32::from_black_alpha(14_u8.saturating_sub(step * 2)),
+                );
+            }
+        }
+        let header = Rect::from_min_max(area.min, pos2(area.right(), area.top() + HEADER));
+        let content = Rect::from_min_max(pos2(area.left(), header.bottom()), area.max);
         let title: String = match &page {
             None => match self.phone.tab {
                 Tab::Library => s.phone_library.into(),
@@ -448,7 +930,7 @@ impl OneumApp {
                 theme::accent(ui.visuals().dark_mode),
             );
             if response.clicked() {
-                self.phone.stack().pop();
+                self.phone.pop(0.0);
                 return;
             }
             left = back.right();
@@ -529,8 +1011,8 @@ impl OneumApp {
                 .max_rect(content)
                 .layout(Layout::top_down(Align::Min)),
         );
-        body.set_clip_rect(content);
-        match page {
+        body.set_clip_rect(content.intersect(clip));
+        match page.clone() {
             None => match self.phone.tab {
                 Tab::Library => self.phone_library(&mut body, actions),
                 Tab::Search => self.phone_search(&mut body, actions),
@@ -588,7 +1070,16 @@ impl OneumApp {
             [only] => Nav::Folder(only.path.clone()),
             _ => Nav::Folder(std::path::PathBuf::new()),
         };
-        let favorites = self.snapshot.tracks.iter().filter(|t| t.favorite).count();
+        // Counted once for each state of the library, not in every frame.
+        let generation = self.lib_generation;
+        let favorites = match self.phone.favorites {
+            Some((counted_for, count)) if counted_for == generation => count,
+            _ => {
+                let count = self.snapshot.tracks.iter().filter(|t| t.favorite).count();
+                self.phone.favorites = Some((generation, count));
+                count
+            }
+        };
         let entries: [(Icon, &str, Option<usize>, Nav); 8] = [
             (
                 Icon::Note,
@@ -614,11 +1105,38 @@ impl OneumApp {
             (Icon::Folder, s.folders, None, folders),
             (Icon::Meter, s.stats, None, Nav::Stats),
         ];
+        // What was pinned comes first, as at the top of the sidebar on a desk.
+        let pins: Vec<(Pin, Icon, String)> = self
+            .live_pins()
+            .into_iter()
+            .filter_map(|pin| {
+                let (icon, name) = self.pin_target(&pin)?;
+                Some((pin, icon, name))
+            })
+            .collect();
         egui::ScrollArea::vertical()
             .id_salt("phone-library")
             .auto_shrink(false)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                if !pins.is_empty() {
+                    small_heading(ui, s.pinned);
+                    virtual_rows(ui, "pins", pins.len(), MENU_ROW, |ui, index| {
+                        let (pin, icon, name) = &pins[index];
+                        let rect = ui.max_rect();
+                        let tapped = self.phone_menu_row(ui, *icon, name, None, true);
+                        // A long press offers what can be done with it (unpinning too).
+                        let pressed = ui
+                            .interact(rect, ui.scope_id().with("menu"), Sense::click())
+                            .long_touched();
+                        if pressed {
+                            self.phone.sheet = Some(pin_sheet(pin));
+                        } else if tapped {
+                            actions.push(Action::Go(super::pin_nav(pin)));
+                        }
+                    });
+                    ui.add_space(14.0);
+                }
                 virtual_rows(ui, "library", entries.len(), MENU_ROW, |ui, index| {
                     let (icon, label, count, nav) = &entries[index];
                     let count = count.map(crate::i18n::group_digits);
@@ -777,18 +1295,15 @@ impl OneumApp {
             .unwrap_or_default();
         match nav {
             Nav::Stats => {
-                egui::ScrollArea::vertical()
-                    .id_salt("phone-stats")
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_space(SIDE - 4.0);
-                            ui.vertical(|ui| {
-                                ui.set_width(ui.available_width() - SIDE);
-                                self.stats_view(ui, actions);
-                            });
-                        });
-                    });
+                // The view scrolls by itself; here it only gets the page's margins.
+                let inside = ui.max_rect().shrink2(vec2(SIDE - 4.0, 0.0));
+                let mut stats_ui = ui.new_child(
+                    UiBuilder::new()
+                        .id_salt("phone-stats")
+                        .max_rect(inside)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                self.stats_view(&mut stats_ui, actions);
             }
             Nav::Albums | Nav::Artist(_) => {
                 egui::ScrollArea::vertical()
@@ -828,7 +1343,15 @@ impl OneumApp {
                                 return;
                             };
                             let count = self.lang.song_count(genre.songs);
-                            if self.phone_menu_row(ui, Icon::Tag, &genre.name, Some(&count), true) {
+                            let rect = ui.max_rect();
+                            let tapped =
+                                self.phone_menu_row(ui, Icon::Tag, &genre.name, Some(&count), true);
+                            let pressed = ui
+                                .interact(rect, ui.scope_id().with("menu"), Sense::click())
+                                .long_touched();
+                            if pressed {
+                                self.phone.sheet = Some(Sheet::Genre(genre.name.clone()));
+                            } else if tapped {
                                 actions.push(Action::Go(Nav::Genre(genre.name.clone())));
                             }
                         });
@@ -925,35 +1448,23 @@ impl OneumApp {
             }
             return;
         }
-        // Play, and play in a shuffled order.
+        // Play, and play in a shuffled order; while songs are being chosen, what to do
+        // with those instead.
         ui.add_space(10.0);
         let mut play = false;
         let mut shuffle = false;
-        ui.horizontal(|ui| {
-            ui.add_space(SIDE);
-            let width = (ui.available_width() - SIDE - 10.0) / 2.0;
-            ui.spacing_mut().item_spacing.x = 10.0;
-            play = pill_button(ui, Icon::Play, s.play, width, true).clicked();
-            shuffle = pill_button(ui, Icon::Shuffle, s.shuffle, width, false).clicked();
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(SIDE);
-            let total: u64 = rows
-                .iter()
-                .map(|row| self.snapshot.tracks[row.idx as usize].duration_ms)
-                .sum();
-            ui.label(
-                RichText::new(format!(
-                    "{} · {}",
-                    self.lang.song_count(rows.len()),
-                    self.lang.total_time(total)
-                ))
-                .font(font(13.0))
-                .color(theme::dim(ui)),
-            );
-        });
-        ui.add_space(6.0);
+        if self.phone.selecting.as_ref() == Some(nav) {
+            self.phone_selection_bar(ui, nav, rows);
+        } else {
+            ui.horizontal(|ui| {
+                ui.add_space(SIDE);
+                let width = (ui.available_width() - SIDE - 10.0) / 2.0;
+                ui.spacing_mut().item_spacing.x = 10.0;
+                play = pill_button(ui, Icon::Play, s.play, width, true).clicked();
+                shuffle = pill_button(ui, Icon::Shuffle, s.shuffle, width, false).clicked();
+            });
+        }
+        self.phone_list_tools(ui, nav, rows);
         if play || shuffle {
             let tracks: Vec<TrackId> = rows
                 .iter()
@@ -1033,7 +1544,22 @@ impl OneumApp {
             _ => None,
         };
         let snapshot = self.snapshot.clone();
-        virtual_rows(ui, "songs", rows.len(), ROW, |ui, index| {
+        // While songs are being chosen a tap chooses, and the rows offer nothing else.
+        let mut chosen = (self.phone.selecting.as_ref() == Some(nav)).then(|| {
+            self.views
+                .get_mut(nav)
+                .map(|state| std::mem::take(&mut state.selection))
+                .unwrap_or_default()
+        });
+        // The songs of a playlist are in the order they were put in: a row can be
+        // carried to another place (not while another order is shown).
+        let reorderable = playlist.is_some()
+            && chosen.is_none()
+            && self
+                .views
+                .get(nav)
+                .is_none_or(|state| state.sort.is_none() && state.query.is_empty());
+        let all_rows = virtual_rows(ui, "songs", rows.len(), ROW, |ui, index| {
             let row = rows[index];
             let Some(track) = snapshot.tracks.get(row.idx as usize) else {
                 return;
@@ -1043,8 +1569,23 @@ impl OneumApp {
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &track.title));
             let dark = ui.visuals().dark_mode;
+            if self.is_carried("songs", index) {
+                ui.painter().rect_filled(
+                    rect,
+                    0.0,
+                    theme::accent(dark).gamma_multiply(if dark { 0.20 } else { 0.12 }),
+                );
+            }
             let is_playing = playing == Some(track.id);
             let mut left = rect.left() + SIDE;
+            if let Some(chosen) = &chosen {
+                choice_circle(
+                    ui,
+                    pos2(left + 12.0, rect.center().y),
+                    chosen.contains(&row.key),
+                );
+                left += 36.0;
+            }
             if in_album {
                 // The place on the album instead of the cover they all share.
                 let number = track.track_no.map(|n| n.to_string()).unwrap_or_default();
@@ -1088,10 +1629,19 @@ impl OneumApp {
             } else {
                 format!("{} — {}", artist_line(track, s.unknown_artist), track.album)
             };
-            let text = Rect::from_min_max(
-                pos2(left, rect.top()),
-                pos2(rect.right() - SIDE - TOUCH, rect.bottom()),
-            );
+            // At the right: "more", and before it the handle a row is carried by.
+            let mut right = if chosen.is_some() {
+                rect.right() - SIDE
+            } else {
+                rect.right() - SIDE - TOUCH
+            };
+            if reorderable {
+                let grip =
+                    Rect::from_min_max(pos2(right - 34.0, rect.top()), pos2(right, rect.bottom()));
+                self.reorder_grip(ui, "songs", index, grip);
+                right = grip.left();
+            }
+            let text = Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom()));
             two_lines(
                 ui,
                 text,
@@ -1101,6 +1651,12 @@ impl OneumApp {
                 Some(RichText::new(below).font(font(13.5)).color(theme::dim(ui))),
             );
             row_line(ui, left);
+            if let Some(chosen) = &mut chosen {
+                if response.clicked() && !chosen.remove(&row.key) {
+                    chosen.insert(row.key);
+                }
+                return;
+            }
             let sheet = Sheet::Track {
                 track: track.id,
                 playlist: playlist.map(|id| (id, row.key as i64)),
@@ -1116,6 +1672,17 @@ impl OneumApp {
                 actions.push(Action::PlayTracks(tracks, index));
             }
         });
+        if let Some(chosen) = chosen
+            && let Some(state) = self.views.get_mut(nav)
+        {
+            state.selection = chosen;
+        }
+        if let Some(id) = playlist
+            && let Some((from, to)) = self.follow_reorder(ui, "songs", all_rows, ROW, rows.len())
+            && let Some(row) = rows.get(from)
+        {
+            actions.push(Action::MovePlaylistItems(id, vec![row.key as i64], to));
+        }
     }
 
     /// Albums, two to a row.
@@ -1158,9 +1725,11 @@ impl OneumApp {
                     response
                         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
                     let art = Rect::from_min_size(cell_rect.min, egui::Vec2::splat(cell));
-                    let texture = self.art.get(album.art_id.as_deref(), true);
+                    let texture = self
+                        .art
+                        .get_sized(album.art_id.as_deref(), super::art::ArtSize::Grid);
                     widgets::art(ui, art, texture, 10.0);
-                    if response.is_pointer_button_down_on() {
+                    if held(ui, &response) {
                         ui.painter()
                             .rect_filled(art, 10.0, Color32::from_black_alpha(60));
                     }
@@ -1258,7 +1827,9 @@ impl OneumApp {
                 ui.visuals().weak_text_color(),
             );
             row_line(ui, circle.x + 32.0);
-            if response.clicked() {
+            if response.long_touched() {
+                self.phone.sheet = Some(Sheet::Artist(artist.name.clone()));
+            } else if response.clicked() {
                 actions.push(Action::Go(Nav::Artist(artist.name.clone())));
             }
         });
@@ -1267,8 +1838,17 @@ impl OneumApp {
     /// The search tab: a field, what to look for, and what was found.
     fn phone_search(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let s = self.s();
+        // What is shown here are songs of the whole library: a list that is opened
+        // from here (a search kept as a smart playlist) is another view than this,
+        // also when it was the one looked at last.
+        self.nav = Nav::Songs;
+        self.phone.seen_nav = Nav::Songs;
         ui.add_space(4.0);
         let mut clear = false;
+        let mut save = false;
+        // A search for songs can be kept as a smart playlist, as on a desk.
+        let savable =
+            self.phone.search_kind == SearchKind::Songs && !self.phone.query.trim().is_empty();
         // The field: a rounded box with the looking glass, the text and a way to empty it.
         let (outer, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
         let field = outer.shrink2(vec2(SIDE, 0.0));
@@ -1294,11 +1874,13 @@ impl OneumApp {
                     0.0
                 } else {
                     40.0
-                };
+                }
+                - if savable { 40.0 } else { 0.0 };
             let edit = egui::TextEdit::singleline(&mut self.phone.query)
                 .hint_text(s.search_hint)
                 .font(font(17.0))
                 .frame(egui::Frame::NONE)
+                .align(Align2::LEFT_CENTER)
                 .desired_width(room);
             let response = ui.add(edit);
             response.widget_info(|| {
@@ -1306,6 +1888,10 @@ impl OneumApp {
             });
             if std::mem::take(&mut self.phone.focus_search) {
                 response.request_focus();
+            }
+            if savable && widgets::icon_button(ui, Icon::Plus, s.smart_save, 32.0, false).clicked()
+            {
+                save = true;
             }
             if !self.phone.query.is_empty()
                 && widgets::icon_button(ui, Icon::Close, s.clear_search, 32.0, false).clicked()
@@ -1316,6 +1902,27 @@ impl OneumApp {
         if clear {
             self.phone.query.clear();
             self.phone.focus_search = true;
+        }
+        if self.phone.query.is_empty() {
+            self.phone.editing_smart = None;
+        }
+        if save {
+            use crate::app::settings::{MAX_SMART_QUERY_CHARS, tidy_text};
+            let query = tidy_text(&self.phone.query, MAX_SMART_QUERY_CHARS);
+            // The search of a smart playlist that was brought here to be changed is
+            // offered its name again: saved under it, it takes the old one's place.
+            let name = self
+                .phone
+                .editing_smart
+                .clone()
+                .filter(|name| {
+                    self.settings
+                        .smart_playlists
+                        .iter()
+                        .any(|p| &p.name == name)
+                })
+                .unwrap_or_else(|| query.clone());
+            self.dialog = Some(Dialog::smart_playlist(&name, query, None));
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -1337,7 +1944,47 @@ impl OneumApp {
         if query.is_empty() {
             self.phone.search_rows.clear();
             self.phone.search_built = None;
-            widgets::empty_state(ui, Icon::Search, s.search_label, s.phone_search_prompt);
+            egui::ScrollArea::vertical()
+                .id_salt("phone-search-tips")
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(36.0);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(44.0), Sense::hover());
+                        icons::paint(
+                            ui.painter(),
+                            rect,
+                            Icon::Search,
+                            ui.visuals().weak_text_color(),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(s.phone_search_prompt)
+                                .font(font(16.0))
+                                .color(ui.visuals().strong_text_color()),
+                        );
+                    });
+                    // How a search is narrowed: what a pointer resting on the field
+                    // says on a desk.
+                    ui.add_space(22.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(SIDE + 6.0);
+                        ui.vertical(|ui| {
+                            ui.set_width(ui.available_width() - SIDE - 6.0);
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            for line in s.phone_search_tips.lines() {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(line).font(font(13.5)).color(theme::dim(ui)),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                        });
+                    });
+                    ui.add_space(16.0);
+                });
             return;
         }
         let kind = self.phone.search_kind;
@@ -1360,7 +2007,7 @@ impl OneumApp {
         if rows.is_empty() {
             widgets::empty_state(ui, Icon::Search, s.empty_search, s.empty_search_hint);
         } else {
-            egui::ScrollArea::vertical()
+            let shown = egui::ScrollArea::vertical()
                 .id_salt(("phone-search", kind))
                 .auto_shrink(false)
                 .show(ui, |ui| {
@@ -1372,6 +2019,18 @@ impl OneumApp {
                     }
                     ui.add_space(12.0);
                 });
+            // Moving the results with a finger puts the keyboard away: it covers half
+            // of them.
+            let offset = shown.state.clamped_offset().y;
+            if (offset - self.phone.search_offset).abs() > 2.0 && ui.input(|i| i.pointer.any_down())
+            {
+                ui.memory_mut(|memory| {
+                    if let Some(focused) = memory.focused() {
+                        memory.surrender_focus(focused);
+                    }
+                });
+            }
+            self.phone.search_offset = offset;
         }
         self.phone.search_rows = rows;
     }
@@ -1412,19 +2071,19 @@ impl OneumApp {
                     }
                 });
                 if !smart.is_empty() {
-                    ui.add_space(18.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(SIDE);
-                        ui.label(
-                            RichText::new(s.phone_smart)
-                                .font(theme::semibold(13.0))
-                                .color(theme::dim(ui)),
-                        );
-                    });
-                    ui.add_space(4.0);
+                    ui.add_space(8.0);
+                    small_heading(ui, s.phone_smart);
                     virtual_rows(ui, "smart", smart.len(), MENU_ROW, |ui, index| {
                         let playlist = &smart[index];
-                        if self.phone_menu_row(ui, Icon::Search, &playlist.name, None, true) {
+                        let rect = ui.max_rect();
+                        let tapped =
+                            self.phone_menu_row(ui, Icon::Search, &playlist.name, None, true);
+                        let pressed = ui
+                            .interact(rect, ui.scope_id().with("menu"), Sense::click())
+                            .long_touched();
+                        if pressed {
+                            self.phone.sheet = Some(Sheet::Smart(playlist.name.clone()));
+                        } else if tapped {
                             actions.push(Action::Go(Nav::Smart(playlist.name.clone())));
                         }
                     });
@@ -1457,7 +2116,7 @@ impl OneumApp {
                 });
             });
         if let Some(page) = open {
-            self.phone.stack().push(Page::Settings(page));
+            self.phone.push(Page::Settings(page));
         }
     }
 
@@ -1483,7 +2142,7 @@ impl OneumApp {
             return;
         }
         let before = self.settings.eq;
-        egui::ScrollArea::both()
+        egui::ScrollArea::vertical()
             .id_salt(("phone-settings-page", page as u8))
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -1506,19 +2165,28 @@ impl OneumApp {
                                 self.settings_about(ui);
                             }
                             SettingsPage::Equalizer => {
-                                ui.horizontal(|ui| {
-                                    widgets::toggle(ui, &mut self.settings.eq.enabled, s.equalizer);
+                                ui.set_width(width);
+                                widgets::card(ui, |ui| {
                                     let state = if self.settings.eq.enabled {
                                         s.eq_on
                                     } else {
                                         s.eq_off
                                     };
-                                    ui.label(RichText::new(state).color(theme::dim(ui)));
+                                    widgets::setting_row(
+                                        ui,
+                                        s.equalizer,
+                                        Some(state),
+                                        true,
+                                        |ui| {
+                                            widgets::toggle(
+                                                ui,
+                                                &mut self.settings.eq.enabled,
+                                                s.equalizer,
+                                            );
+                                        },
+                                    );
                                 });
-                                ui.add_space(12.0);
-                                // The sliders need the width they have on a desk; the
-                                // page scrolls sideways to them.
-                                ui.set_width(width.max(super::equalizer::WIDTH - 40.0));
+                                ui.add_space(14.0);
                                 self.equalizer_body(ui);
                             }
                             SettingsPage::Library | SettingsPage::Guide => {}
@@ -1540,6 +2208,7 @@ impl OneumApp {
         let mut import_files = false;
         let mut import_folder = false;
         let mut rescan = false;
+        let mut show_damaged = false;
         egui::ScrollArea::vertical()
             .id_salt("phone-library-settings")
             .auto_shrink(false)
@@ -1605,9 +2274,17 @@ impl OneumApp {
                                 }
                             });
                         });
+                        // Reading every file to the end to see that it is whole, as on
+                        // a desk. The damaged ones are shown in the search tab.
+                        ui.add_space(18.0);
+                        show_damaged = self.check_card(ui);
                     });
                 });
+                ui.add_space(16.0);
             });
+        if show_damaged {
+            self.phone_show_search("check:damaged");
+        }
         if import_files {
             self.import_music(crate::platform::PickKind::Files);
         }
@@ -1673,15 +2350,7 @@ impl OneumApp {
                 color,
             );
             if response.clicked() {
-                if selected {
-                    // The tab that is open already: back to its first page.
-                    self.phone.stack().clear();
-                } else {
-                    self.phone.tab = tab;
-                }
-                if tab == Tab::Search && self.phone.query.is_empty() {
-                    self.phone.focus_search = true;
-                }
+                self.phone.show_tab(tab);
             }
         }
     }
@@ -1786,112 +2455,191 @@ impl OneumApp {
         }
         if response.clicked() && !tapped_button {
             self.phone.player_open = true;
-            self.phone.queue_open = false;
+            self.phone.player_view = PlayerView::Cover;
         }
     }
 
     // ----- the player -------------------------------------------------------------------
 
-    /// The player on the whole screen.
-    fn phone_player(&mut self, ui: &mut Ui, safe: Rect, actions: &mut Vec<Action>) {
+    /// The player on the whole screen, `offset` points below where it rests (while it
+    /// comes up, goes away or is pulled down).
+    fn phone_player(
+        &mut self,
+        ui: &mut Ui,
+        full: Rect,
+        safe: Rect,
+        offset: f32,
+        actions: &mut Vec<Action>,
+    ) {
         let s = self.s();
         let Some(current) = self.player.current else {
             return;
         };
         let track = self.track(current.track_id).cloned();
+        let down = vec2(0.0, offset);
+        let area = full.translate(down);
+        let safe = safe.translate(down);
+        let mut player_ui = ui.new_child(UiBuilder::new().id_salt("phone-player").max_rect(area));
+        player_ui.set_clip_rect(full);
+        let ui = &mut player_ui;
         let dark = ui.visuals().dark_mode;
+        // On its way: rounded at the top, over what is behind it.
+        let corner = if offset > 0.5 { 20 } else { 0 };
+        ui.painter().rect_filled(
+            area,
+            egui::CornerRadius {
+                nw: corner,
+                ne: corner,
+                sw: 0,
+                se: 0,
+            },
+            ui.visuals().panel_fill,
+        );
 
-        // The bar at the top: put the player away, and the queue.
         let header = Rect::from_min_max(safe.min, pos2(safe.right(), safe.top() + HEADER));
-        let close = Rect::from_min_size(
-            pos2(header.left() + 6.0, header.center().y - TOUCH / 2.0),
-            egui::Vec2::splat(TOUCH),
+        let body = Rect::from_min_max(pos2(safe.left(), header.bottom()), safe.max);
+        // Below the cover: the song, the seek bar, the buttons, the volume.
+        let controls = 292.0;
+        let side = (body.width() - 2.0 * 28.0)
+            .min(body.height() - controls - 16.0)
+            .max(120.0);
+        // What the screen has to spare is shared out above and below the cover.
+        let spare = (body.height() - controls - 16.0 - side).max(0.0);
+        let art = Rect::from_center_size(
+            pos2(body.center().x, body.top() + 8.0 + spare * 0.3 + side / 2.0),
+            egui::Vec2::splat(side),
         );
-        let close_response = ui.interact(
-            close,
-            ui.scope_id().with("phone-player-close"),
-            Sense::click(),
-        );
-        close_response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, s.close));
-        icons::paint(
-            ui.painter(),
-            Rect::from_center_size(close.center(), egui::Vec2::splat(24.0)),
-            Icon::Down,
-            ui.visuals().strong_text_color(),
-        );
-        if close_response.clicked() {
-            self.phone.player_open = false;
-            return;
+
+        // Pulled down by its bar (or by the cover), the player goes away. This lies
+        // under the buttons of the bar: a sensor for dragging that lay over them would
+        // keep taps from them.
+        let mut grip = Rect::from_min_max(full.min.max(area.min), header.max);
+        if matches!(
+            self.phone.player_view,
+            PlayerView::Cover | PlayerView::Meters
+        ) {
+            grip = grip.union(art);
         }
-        let queue = Rect::from_min_size(
-            pos2(
-                header.right() - 6.0 - TOUCH,
-                header.center().y - TOUCH / 2.0,
+        let pull = ui.interact(grip, ui.scope_id().with("phone-player-pull"), Sense::drag());
+        if pull.dragged() {
+            self.phone.player_dragging = true;
+            self.phone.player_drag = (self.phone.player_drag + pull.drag_delta().y).max(0.0);
+        }
+        if pull.drag_stopped() {
+            self.phone.player_dragging = false;
+            let flung = ui.input(|i| i.pointer.velocity().y) > 700.0;
+            if self.phone.player_drag > 110.0 || flung {
+                self.phone.player_open = false;
+            }
+        }
+
+        // The bar at the top: put the player away, and what to show.
+        let strong = ui.visuals().strong_text_color();
+        if bar_button(
+            ui,
+            "phone-player-close",
+            pos2(header.left() + 6.0 + TOUCH / 2.0, header.center().y),
+            Icon::Down,
+            s.close,
+            strong,
+        ) {
+            self.phone.player_open = false;
+        }
+        let view = self.phone.player_view;
+        let choices = [
+            (
+                PlayerView::Queue,
+                Icon::Queue,
+                s.show_queue,
+                "phone-player-queue",
             ),
-            egui::Vec2::splat(TOUCH),
-        );
-        let queue_response = ui.interact(
-            queue,
-            ui.scope_id().with("phone-player-queue"),
-            Sense::click(),
-        );
-        queue_response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, s.show_queue));
-        icons::paint(
-            ui.painter(),
-            Rect::from_center_size(queue.center(), egui::Vec2::splat(24.0)),
-            Icon::Queue,
-            if self.phone.queue_open {
+            (
+                PlayerView::Meters,
+                Icon::Meter,
+                s.show_meter,
+                "phone-player-meters",
+            ),
+            (
+                PlayerView::Lyrics,
+                Icon::Lyrics,
+                s.info_lyrics,
+                "phone-player-lyrics",
+            ),
+        ];
+        for (index, (choice, icon, label, id_salt)) in choices.into_iter().enumerate() {
+            let centre = pos2(
+                header.right() - 6.0 - TOUCH / 2.0 - index as f32 * (TOUCH - 2.0),
+                header.center().y,
+            );
+            let color = if view == choice {
                 theme::accent(dark)
             } else {
-                ui.visuals().strong_text_color()
-            },
-        );
-        if queue_response.clicked() {
-            self.phone.queue_open = !self.phone.queue_open;
+                strong
+            };
+            if bar_button(ui, id_salt, centre, icon, label, color) {
+                // A second tap brings the cover back.
+                self.phone.player_view = if view == choice {
+                    PlayerView::Cover
+                } else {
+                    choice
+                };
+                if self.phone.player_view == PlayerView::Queue {
+                    self.queue_scroll_forced = true;
+                }
+                self.phone.lyrics_line = None;
+            }
         }
-        let heading = if self.phone.queue_open {
-            s.show_queue
-        } else {
-            s.phone_now_playing
+        let view = self.phone.player_view;
+        let heading = match view {
+            PlayerView::Cover => s.phone_now_playing,
+            PlayerView::Queue => s.show_queue,
+            PlayerView::Meters => s.show_meter,
+            PlayerView::Lyrics => s.info_lyrics,
         };
-        ui.painter().text(
-            header.center(),
-            Align2::CENTER_CENTER,
-            heading,
-            theme::semibold(16.0),
-            ui.visuals().strong_text_color(),
+        // To the left of the three buttons, as far as there is room.
+        let heading_right = header.right() - 6.0 - 3.0 * (TOUCH - 2.0) - 6.0;
+        let heading_left = header.left() + 6.0 + TOUCH + 4.0;
+        let mut heading_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    pos2(heading_left, header.top()),
+                    pos2(heading_right.max(heading_left + 20.0), header.bottom()),
+                ))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        heading_ui.add(
+            egui::Label::new(
+                RichText::new(heading)
+                    .font(theme::semibold(17.0))
+                    .color(strong),
+            )
+            .truncate(),
         );
 
-        let body = Rect::from_min_max(pos2(safe.left(), header.bottom()), safe.max);
-        if self.phone.queue_open {
+        if view == PlayerView::Queue {
             let mut queue_ui = ui.new_child(
                 UiBuilder::new()
                     .id_salt("phone-queue")
                     .max_rect(body)
                     .layout(Layout::top_down(Align::Min)),
             );
-            queue_ui.set_clip_rect(body);
+            queue_ui.set_clip_rect(body.intersect(full));
             self.phone_queue(&mut queue_ui);
             return;
         }
-
-        // Below the cover: the song, the seek bar, the buttons, the volume.
-        let controls = 292.0;
-        let side = (body.width() - 2.0 * 28.0)
-            .min(body.height() - controls - 16.0)
-            .max(120.0);
-        let art = Rect::from_center_size(
-            pos2(body.center().x, body.top() + 8.0 + side / 2.0),
-            egui::Vec2::splat(side),
-        );
-        let texture = self
-            .art
-            .get(track.as_ref().and_then(|t| t.art_id.as_deref()), true);
-        widgets::art(ui, art, texture, 14.0);
+        match view {
+            PlayerView::Meters => self.phone_meters(ui, art),
+            PlayerView::Lyrics => self.phone_lyrics(ui, art, track.as_ref(), full),
+            PlayerView::Cover | PlayerView::Queue => {
+                let texture = self
+                    .art
+                    .get(track.as_ref().and_then(|t| t.art_id.as_deref()), true);
+                widgets::art(ui, art, texture, 14.0);
+            }
+        }
 
         let column = Rect::from_min_max(
-            pos2(body.left() + 28.0, art.bottom() + 16.0),
+            pos2(body.left() + 28.0, art.bottom() + 16.0 + spare * 0.3),
             pos2(body.right() - 28.0, body.bottom()),
         );
         let mut column_ui = ui.new_child(
@@ -1998,6 +2746,233 @@ impl OneumApp {
         self.phone_volume(ui);
     }
 
+    /// The VU meters, the spectrum and where the sound comes from and goes to, in the
+    /// place of the cover.
+    fn phone_meters(&mut self, ui: &mut Ui, rect: Rect) {
+        let s = self.s();
+        let dark = ui.visuals().dark_mode;
+        ui.painter().rect_filled(rect, 14.0, meter::deck_fill(dark));
+        let inner = rect.shrink(12.0);
+        // The needles follow the music only while it is sounding; otherwise they fall
+        // back to rest.
+        let playing = self.player.state == PlayState::Playing;
+        let now = Instant::now();
+        let levels = playing.then(|| self.core.player.levels());
+        let mut busy = self.meter.update(levels, now);
+
+        let gap = 10.0;
+        let dial_width = (inner.width() - gap) / 2.0;
+        let dial_height = dial_width / meter::DIAL_ASPECT;
+        let names = [s.meter_left_name, s.meter_right_name];
+        let letters = [s.meter_left, s.meter_right];
+        for channel in 0..2 {
+            let dial = Rect::from_min_size(
+                pos2(
+                    inner.left() + channel as f32 * (dial_width + gap),
+                    inner.top(),
+                ),
+                vec2(dial_width, dial_height),
+            );
+            let response = ui.interact(
+                dial,
+                ui.scope_id().with(("phone-vu", channel)),
+                Sense::hover(),
+            );
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Meter, true, names[channel]));
+            meter::dial(
+                ui.painter(),
+                dial,
+                self.meter.needles[channel].position,
+                self.meter.peak_lit(channel),
+                letters[channel],
+                channel == 1,
+            );
+        }
+
+        // At the bottom: the file, and what it is played through.
+        let lines: Vec<String> = match self.signal_path() {
+            Some(path) => {
+                let mut source = format!("{} · {}", path.codec, path.source_format);
+                if path.in_memory {
+                    source.push_str(" · ");
+                    source.push_str(s.info_memory);
+                }
+                let mut output = format!("{} · {}", path.device, path.format);
+                for stage in &path.stages {
+                    output.push_str(" · ");
+                    output.push_str(&stage.name);
+                }
+                vec![source, output]
+            }
+            None => Vec::new(),
+        };
+        let readout = lines.len() as f32 * 18.0;
+        let mut y = inner.bottom() - readout;
+        for (index, line) in lines.iter().enumerate() {
+            let line_rect = Rect::from_min_max(
+                pos2(inner.left() + 2.0, y),
+                pos2(inner.right() - 2.0, y + 18.0),
+            );
+            let mut line_ui = ui.new_child(
+                UiBuilder::new()
+                    .id_salt(("phone-meter-line", index))
+                    .max_rect(line_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            line_ui.add(
+                egui::Label::new(RichText::new(line).font(font(12.0)).color(theme::dim(ui)))
+                    .truncate(),
+            );
+            y += 18.0;
+        }
+
+        // Between them: the spectrum, as tall as there is room for.
+        let spectrum_rect = Rect::from_min_max(
+            pos2(inner.left(), inner.top() + dial_height + 10.0),
+            pos2(inner.right(), inner.bottom() - readout - 8.0),
+        );
+        if spectrum_rect.height() >= 48.0 {
+            let levels = playing.then(|| {
+                let mut samples = [0f32; spectrum::MAX_SAMPLES];
+                self.core.player.scope_samples(&mut samples);
+                let rate = self.player.output_sample_rate.unwrap_or(0);
+                self.spectrum.analyse(&samples, rate)
+            });
+            busy |= self.spectrum.update(levels, now);
+            let response = ui.interact(
+                spectrum_rect,
+                ui.scope_id().with("phone-spectrum"),
+                Sense::hover(),
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Meter, true, s.spectrum_name)
+            });
+            spectrum::draw(
+                ui.painter(),
+                spectrum_rect,
+                &self.spectrum.bars,
+                &self.spectrum.caps,
+            );
+        } else {
+            self.spectrum.suspend();
+        }
+        if busy {
+            // Only while something moves.
+            ui.ctx().request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    /// The words of the song in the place of the cover; with time stamps, the line
+    /// that is being sung is brought to the middle and a tap on a line goes there.
+    fn phone_lyrics(&mut self, ui: &mut Ui, rect: Rect, track: Option<&Arc<Track>>, clip: Rect) {
+        let s = self.s();
+        ui.painter()
+            .rect_filled(rect, 14.0, ui.visuals().faint_bg_color);
+        let Some(track) = track else {
+            return;
+        };
+        let details = self.extras_of(track);
+        let inside = rect.shrink2(vec2(16.0, 12.0));
+        let mut words_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt("phone-lyrics")
+                .max_rect(inside)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        words_ui.set_clip_rect(inside.intersect(clip));
+        let ui = &mut words_ui;
+        // Still being read: nothing to say yet.
+        let Some(details) = details else {
+            return;
+        };
+        let Some(lyrics) = details.lyrics.as_ref() else {
+            widgets::empty_state(ui, Icon::Lyrics, s.phone_no_lyrics, s.phone_no_lyrics_hint);
+            return;
+        };
+        let position = self.player.position_now_ms();
+        let current = lyrics.line_at(position);
+        let line_changed = self.phone.lyrics_line != current;
+        self.phone.lyrics_line = current;
+        let dim = theme::dim(ui);
+        let strong = ui.visuals().strong_text_color();
+        let accent = theme::accent(ui.visuals().dark_mode);
+        let mut seek = None;
+        egui::ScrollArea::vertical()
+            .id_salt("phone-lyrics-words")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 9.0;
+                ui.set_width(ui.available_width());
+                let Some(lines) = lyrics.timed.as_ref() else {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&lyrics.plain).font(font(17.0)).color(strong),
+                        )
+                        .wrap(),
+                    );
+                    return;
+                };
+                for (index, line) in lines.iter().enumerate() {
+                    // A stamp without words is a pause in the singing.
+                    let words = if line.text.is_empty() {
+                        "♪"
+                    } else {
+                        &line.text
+                    };
+                    let is_current = current == Some(index);
+                    let sung = current.is_some_and(|now| index < now);
+                    let text = if is_current {
+                        RichText::new(words)
+                            .font(theme::semibold(20.0))
+                            .color(accent)
+                    } else if sung {
+                        RichText::new(words).font(font(17.0)).color(dim)
+                    } else {
+                        RichText::new(words)
+                            .font(font(17.0))
+                            .color(strong.gamma_multiply(0.85))
+                    };
+                    let response = ui.add(egui::Label::new(text).wrap().sense(Sense::click()));
+                    if is_current && line_changed {
+                        response.scroll_to_me(Some(Align::Center));
+                    }
+                    let mut tapped = response.clicked();
+                    // A translation or pronunciation of the same moment, under it.
+                    for also in &line.also {
+                        let color = if is_current {
+                            accent.gamma_multiply(0.75)
+                        } else {
+                            dim
+                        };
+                        tapped |= ui
+                            .add(
+                                egui::Label::new(RichText::new(also).font(font(14.0)).color(color))
+                                    .wrap()
+                                    .sense(Sense::click()),
+                            )
+                            .clicked();
+                    }
+                    if tapped {
+                        seek = Some(u64::from(line.at_ms));
+                    }
+                }
+            });
+        if let Some(position) = seek {
+            self.core.player.send(Command::SeekTo(position));
+        }
+        // Wake up for the next line rather than for the next quarter of a second.
+        if self.player.state == PlayState::Playing
+            && let Some(lines) = lyrics.timed.as_ref()
+            && let Some(line) = lines.get(current.map_or(0, |now| now + 1))
+        {
+            let wait = u64::from(line.at_ms)
+                .saturating_sub(position)
+                .clamp(20, 1000);
+            ui.ctx().request_repaint_after(Duration::from_millis(wait));
+        }
+    }
+
     /// The seek bar with the time gone and the time left.
     fn phone_seek_bar(&mut self, ui: &mut Ui) {
         let s = self.s();
@@ -2044,15 +3019,36 @@ impl OneumApp {
             font(12.5),
             dim,
         );
+        // At the right: the whole length or what is left of it; a tap changes which.
         let total_ms = current.map_or(0, |c| c.duration_ms);
-        let left = total_ms.saturating_sub((shown * 1000.0) as u64);
+        let remaining = self.settings.show_remaining_time;
+        let text = if remaining {
+            let left = total_ms.saturating_sub((shown * 1000.0) as u64);
+            format!("-{}", format_time(left))
+        } else {
+            format_time(total_ms)
+        };
         ui.painter().text(
             line.right_center(),
             Align2::RIGHT_CENTER,
-            format!("-{}", format_time(left)),
+            text,
             font(12.5),
             dim,
         );
+        let hit = Rect::from_min_max(
+            pos2(line.right() - 64.0, line.top() - 8.0),
+            pos2(line.right(), line.bottom() + 8.0),
+        );
+        let response = ui.interact(hit, ui.scope_id().with("phone-time"), Sense::click());
+        let label = if remaining {
+            s.phone_show_total
+        } else {
+            s.phone_show_left
+        };
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+        if response.clicked() {
+            self.settings.show_remaining_time = !remaining;
+        }
     }
 
     /// Shuffle, previous, play, next, repeat.
@@ -2158,9 +3154,19 @@ impl OneumApp {
     fn phone_volume(&mut self, ui: &mut Ui) {
         let s = self.s();
         let mut volume = self.player.volume;
+        let mut mute = false;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             let (icon, _) = ui.allocate_exact_size(egui::Vec2::splat(20.0), Sense::hover());
+            // The speaker silences the app, and brings the sound back as it was.
+            let speaker = ui.interact(
+                icon.expand(12.0),
+                ui.scope_id().with("phone-mute"),
+                Sense::click(),
+            );
+            let label = if volume <= 0.001 { s.unmute } else { s.mute };
+            speaker.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+            mute = speaker.clicked();
             icons::paint(
                 ui.painter(),
                 icon,
@@ -2182,31 +3188,36 @@ impl OneumApp {
                 self.player.volume = volume;
             }
         });
-        // What is set for this song or this evening, said in words.
-        let mut notes: Vec<String> = Vec::new();
-        if self.player.stop_after_current {
-            notes.push(s.stop_after_short.to_string());
+        if mute {
+            self.toggle_mute();
         }
-        if let Some(at) = self.player.sleep_at {
-            let left = at.saturating_duration_since(Instant::now()).as_secs();
-            notes.push(format!(
-                "{} {}:{:02}",
-                s.menu_sleep_timer,
-                left / 60,
-                left % 60
-            ));
-            ui.ctx().request_repaint_after(Duration::from_millis(500));
+        // What is set for this song or this evening, said in words; a tap on one
+        // switches it off, as on a desk.
+        let accent = theme::accent(ui.visuals().dark_mode);
+        let note = |ui: &mut Ui, text: String| {
+            ui.add(
+                egui::Label::new(RichText::new(text).font(font(13.5)).color(accent))
+                    .sense(Sense::click()),
+            )
+            .clicked()
+        };
+        if self.player.stop_after_current || self.player.sleep_at.is_some() {
+            ui.add_space(6.0);
         }
-        if !notes.is_empty() {
-            ui.add_space(8.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new(notes.join(" · "))
-                        .font(font(13.0))
-                        .color(theme::accent(ui.visuals().dark_mode)),
-                );
-            });
-        }
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            if self.player.stop_after_current && note(ui, s.stop_after_short.to_string()) {
+                self.core.player.send(Command::SetStopAfterCurrent(false));
+            }
+            if let Some(at) = self.player.sleep_at {
+                let left = at.saturating_duration_since(Instant::now()).as_secs();
+                let text = format!("{} {}:{:02}", s.menu_sleep_timer, left / 60, left % 60);
+                if note(ui, text) {
+                    self.core.player.send(Command::SetSleepTimer(None));
+                }
+                ui.ctx().request_repaint_after(Duration::from_millis(500));
+            }
+        });
     }
 
     /// The queue, in the player.
@@ -2219,6 +3230,7 @@ impl OneumApp {
             return;
         }
         let mut clear = false;
+        let mut keep = false;
         ui.horizontal(|ui| {
             ui.add_space(SIDE);
             ui.label(
@@ -2236,6 +3248,16 @@ impl OneumApp {
                 {
                     clear = true;
                 }
+                // The queue as it is, kept as a playlist.
+                let save = ui.add(egui::Button::new(
+                    RichText::new(s.queue_save).font(font(14.0)),
+                ));
+                save.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, s.queue_save_hint)
+                });
+                if save.clicked() {
+                    keep = true;
+                }
             });
         });
         ui.add_space(4.0);
@@ -2251,7 +3273,7 @@ impl OneumApp {
         }
         area.show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            virtual_rows(ui, "queue", queue.len(), ROW, |ui, index| {
+            let all_rows = virtual_rows(ui, "queue", queue.len(), ROW, |ui, index| {
                 let item = queue[index];
                 let Some(track) = snapshot.get(item.track) else {
                     return;
@@ -2263,7 +3285,13 @@ impl OneumApp {
                 });
                 let dark = ui.visuals().dark_mode;
                 let is_current = current == Some(item.id);
-                if is_current {
+                if self.is_carried("queue", index) {
+                    ui.painter().rect_filled(
+                        rect,
+                        0.0,
+                        theme::accent(dark).gamma_multiply(if dark { 0.28 } else { 0.18 }),
+                    );
+                } else if is_current {
                     ui.painter().rect_filled(
                         rect,
                         0.0,
@@ -2276,9 +3304,15 @@ impl OneumApp {
                 );
                 let texture = self.art.get(track.art_id.as_deref(), false);
                 widgets::art(ui, art, texture, 6.0);
+                // The handle by which the row is carried to another place in the queue.
+                let grip = Rect::from_min_max(
+                    pos2(rect.right() - SIDE - TOUCH - 34.0, rect.top()),
+                    pos2(rect.right() - SIDE - TOUCH, rect.bottom()),
+                );
+                self.reorder_grip(ui, "queue", index, grip);
                 let text = Rect::from_min_max(
                     pos2(art.right() + 12.0, rect.top()),
-                    pos2(rect.right() - SIDE - TOUCH, rect.bottom()),
+                    pos2(grip.left(), rect.bottom()),
                 );
                 let color = if is_current {
                     theme::accent(dark)
@@ -2306,10 +3340,23 @@ impl OneumApp {
                     self.core.player.send(Command::JumpTo(item.id));
                 }
             });
+            if let Some((from, to_index)) =
+                self.follow_reorder(ui, "queue", all_rows, ROW, queue.len())
+                && let Some(item) = queue.get(from)
+            {
+                self.core.player.send(Command::MoveItems {
+                    ids: vec![item.id],
+                    to_index,
+                });
+            }
             ui.add_space(12.0);
         });
         if clear {
             self.core.player.send(Command::ClearQueue);
+        }
+        if keep {
+            let tracks = queue.iter().map(|item| item.track).collect();
+            self.dialog = Some(Dialog::new_playlist(s.untitled_playlist, tracks));
         }
     }
 
@@ -2390,25 +3437,66 @@ impl OneumApp {
         }
     }
 
-    /// The sheet that is up, if one is.
+    /// The sheet that is up, if one is. It comes up from below, and goes back down at
+    /// a tap outside it, when it is pulled down by its handle, or once a line of it was
+    /// chosen.
     fn phone_sheet(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(sheet) = self.phone.sheet.clone() else {
+            self.phone.sheet_since = None;
+            self.phone.sheet_leaving = None;
+            self.phone.sheet_drag = 0.0;
             return;
         };
         let full = ctx.viewport_rect();
         let safe = ctx.content_rect();
         let dark = ctx.global_style().visuals.dark_mode;
-        // What is behind is dimmed; a tap there puts the sheet away.
+        if self
+            .phone
+            .sheet_leaving
+            .as_ref()
+            .is_some_and(|(_, leaving)| *leaving != sheet)
+        {
+            // Another sheet was asked for while one was going: that one comes up.
+            self.phone.sheet_leaving = None;
+            self.phone.sheet_since = Some(Instant::now());
+            self.phone.sheet_drag = 0.0;
+        }
+        let since = *self.phone.sheet_since.get_or_insert_with(Instant::now);
+        let mut up = ease_out(since.elapsed().as_secs_f32() / RISE);
+        if up < 1.0 {
+            ctx.request_repaint();
+        }
+        // On its way down: nothing on it answers any more, and then it is gone.
+        let leaving = match &self.phone.sheet_leaving {
+            Some((started, _)) => {
+                let gone = started.elapsed().as_secs_f32() / SHEET_FALL;
+                if gone >= 1.0 {
+                    self.phone.sheet = None;
+                    self.phone.sheet_since = None;
+                    self.phone.sheet_leaving = None;
+                    self.phone.sheet_drag = 0.0;
+                    return;
+                }
+                up *= 1.0 - gone * gone;
+                ctx.request_repaint();
+                true
+            }
+            None => false,
+        };
+        // What is behind is dimmed; a tap there puts the sheet away. (Neither area is
+        // kept inside the safe area: the dimming covers the whole screen and the sheet
+        // starts below its lower edge.)
+        let dim = (if dark { 150.0 } else { 90.0 }) * up;
         let backdrop = egui::Area::new(egui::Id::unique("phone-sheet-backdrop"))
             .order(egui::Order::Middle)
+            .constrain(false)
+            .fade_in(false)
             .fixed_pos(full.min)
             .show(ctx, |ui| {
+                ui.set_clip_rect(full);
                 let response = ui.allocate_rect(full, Sense::click());
-                ui.painter().rect_filled(
-                    full,
-                    0.0,
-                    Color32::from_black_alpha(if dark { 150 } else { 90 }),
-                );
+                ui.painter()
+                    .rect_filled(full, 0.0, Color32::from_black_alpha(dim as u8));
                 response.clicked()
             })
             .inner;
@@ -2419,11 +3507,25 @@ impl OneumApp {
         };
         let mut close = backdrop;
         let below_safe = full.bottom() - safe.bottom();
-        egui::Area::new(egui::Id::unique("phone-sheet"))
+        // Below the screen's edge by what has not come up yet and what it was pulled.
+        let height = if self.phone.sheet_height > 0.0 {
+            self.phone.sheet_height
+        } else {
+            420.0
+        };
+        let lowered = (1.0 - up) * height + self.phone.sheet_drag;
+        let shown = egui::Area::new(egui::Id::unique("phone-sheet"))
             .order(egui::Order::Foreground)
+            .constrain(false)
+            .fade_in(false)
             .pivot(Align2::CENTER_BOTTOM)
-            .fixed_pos(pos2(full.center().x, full.bottom()))
+            .fixed_pos(pos2(full.center().x, full.bottom() + lowered))
             .show(ctx, |ui| {
+                ui.set_clip_rect(full);
+                if leaving {
+                    ui.visuals_mut().disabled_alpha = 1.0;
+                    ui.disable();
+                }
                 egui::Frame::new()
                     .fill(fill)
                     .corner_radius(egui::CornerRadius {
@@ -2435,14 +3537,26 @@ impl OneumApp {
                     .show(ui, |ui| {
                         ui.set_width(full.width());
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        // The handle at the top.
-                        let (handle, _) =
-                            ui.allocate_exact_size(vec2(full.width(), 18.0), Sense::hover());
+                        // The handle at the top: pull it down and the sheet goes.
+                        let (handle, pull) =
+                            ui.allocate_exact_size(vec2(full.width(), 26.0), Sense::drag());
                         ui.painter().rect_filled(
                             Rect::from_center_size(handle.center(), vec2(38.0, 5.0)),
                             3.0,
                             widgets::divider_color(ui),
                         );
+                        if pull.dragged() {
+                            self.phone.sheet_dragging = true;
+                            self.phone.sheet_drag =
+                                (self.phone.sheet_drag + pull.drag_delta().y).max(0.0);
+                        }
+                        if pull.drag_stopped() {
+                            self.phone.sheet_dragging = false;
+                            let flung = ui.input(|i| i.pointer.velocity().y) > 600.0;
+                            if self.phone.sheet_drag > 70.0 || flung {
+                                close = true;
+                            }
+                        }
                         let limit = (safe.height() * 0.72).max(200.0);
                         egui::ScrollArea::vertical()
                             .id_salt("phone-sheet-items")
@@ -2456,9 +3570,16 @@ impl OneumApp {
                         ui.add_space(8.0 + below_safe);
                     });
             });
+        self.phone.sheet_height = shown.response.rect.height();
+        // Let go of without going away: it comes back up.
+        if !self.phone.sheet_dragging && !leaving && !close && self.phone.sheet_drag > 0.0 {
+            self.phone.sheet_drag = settle(ctx, self.phone.sheet_drag);
+        }
         // Another sheet may have been put up from this one: only this one goes.
-        if close && self.phone.sheet.as_ref() == Some(&sheet) {
-            self.phone.sheet = None;
+        if close && !leaving && self.phone.sheet.as_ref() == Some(&sheet) {
+            self.phone.sheet_leaving = Some((Instant::now(), sheet));
+            self.phone.sheet_dragging = false;
+            ctx.request_repaint();
         }
     }
 
@@ -2467,7 +3588,7 @@ impl OneumApp {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-        if response.is_pointer_button_down_on() {
+        if held(ui, &response) {
             ui.painter()
                 .rect_filled(rect, 0.0, ui.visuals().widgets.hovered.weak_bg_fill);
         }
@@ -2666,8 +3787,43 @@ impl OneumApp {
                     actions.push(Action::Go(Nav::Artist(album.artist.clone())));
                     return true;
                 }
-                false
+                self.sheet_pin_item(ui, Pin::Album(*key), actions)
             }
+            Sheet::Artist(name) => {
+                let Some(artist) = self.snapshot.artists().iter().find(|a| &a.name == name) else {
+                    return true;
+                };
+                let summary = self
+                    .lang
+                    .artist_summary(artist.albums.len(), artist.track_count);
+                let shown = if name.is_empty() {
+                    s.unknown_artist
+                } else {
+                    name.as_str()
+                };
+                Self::sheet_heading(ui, shown, &summary);
+                if let Some(close) =
+                    self.sheet_play_items(ui, actions, |app| app.phone_artist_tracks(name))
+                {
+                    return close;
+                }
+                self.sheet_pin_item(ui, Pin::Artist(name.clone()), actions)
+            }
+            Sheet::Genre(name) => {
+                Self::sheet_heading(ui, name, s.genres);
+                if let Some(close) = self.sheet_play_items(ui, actions, |app| {
+                    let rows = app.rows_for(&Nav::Genre(name.clone()), "");
+                    rows.iter()
+                        .filter_map(|row| app.snapshot.tracks.get(row.idx as usize))
+                        .map(|track| track.id)
+                        .collect()
+                }) {
+                    return close;
+                }
+                self.sheet_pin_item(ui, Pin::Genre(name.clone()), actions)
+            }
+            Sheet::Sort(nav) => self.phone_sort_items(ui, nav),
+            Sheet::Selection(nav) => self.phone_selection_items(ui, nav, actions),
             Sheet::Playlist(id) => {
                 let Some(playlist) = self.playlists.iter().find(|p| p.id == *id).cloned() else {
                     return true;
@@ -2677,6 +3833,20 @@ impl OneumApp {
                     &playlist.name,
                     &self.lang.song_count(playlist.item_count),
                 );
+                let id = playlist.id;
+                if let Some(close) = self.sheet_play_items(ui, actions, |app| {
+                    app.core
+                        .library
+                        .playlist_items(id)
+                        .into_iter()
+                        .map(|item| item.track_id)
+                        .collect()
+                }) {
+                    return close;
+                }
+                if self.sheet_pin_item(ui, Pin::Playlist(id), actions) {
+                    return true;
+                }
                 if Self::sheet_item(ui, Icon::Keyboard, s.rename, false) {
                     self.dialog = Some(Dialog::RenamePlaylist {
                         id: playlist.id,
@@ -2704,6 +3874,23 @@ impl OneumApp {
                     .map(|p| p.query.clone())
                     .unwrap_or_default();
                 Self::sheet_heading(ui, name, &query);
+                if let Some(close) = self.sheet_play_items(ui, actions, |app| {
+                    app.snapshot
+                        .search(&query)
+                        .into_iter()
+                        .filter_map(|index| app.snapshot.tracks.get(index as usize))
+                        .map(|track| track.id)
+                        .collect()
+                }) {
+                    return close;
+                }
+                if self.sheet_pin_item(ui, Pin::Smart(name.clone()), actions) {
+                    return true;
+                }
+                if Self::sheet_item(ui, Icon::Search, s.smart_edit, false) {
+                    actions.push(Action::EditSmart(name.clone()));
+                    return true;
+                }
                 if Self::sheet_item(ui, Icon::Keyboard, s.rename, false) {
                     actions.push(Action::RenameSmart(name.clone()));
                     return true;
@@ -2745,78 +3932,81 @@ impl OneumApp {
                     return true;
                 };
                 Self::sheet_heading(ui, &track.title, artist_line(&track, s.unknown_artist));
-                self.phone_info_lines(ui, &track);
-                false
+                self.phone_info(ui, &track, actions)
             }
         }
     }
 
-    /// What the library knows about a song, line by line.
-    fn phone_info_lines(&self, ui: &mut Ui, track: &Arc<Track>) {
+    /// The lines of a sheet that play or queue a group of songs: play, play next, add
+    /// to the queue, add to a playlist. Which songs is worked out only when one of the
+    /// lines is tapped. `None` while none is; else whether the sheet is done with.
+    fn sheet_play_items(
+        &mut self,
+        ui: &mut Ui,
+        actions: &mut Vec<Action>,
+        tracks: impl FnOnce(&mut Self) -> Vec<TrackId>,
+    ) -> Option<bool> {
         let s = self.s();
-        let mut lines: Vec<(&str, String)> = Vec::new();
-        if !track.album.is_empty() {
-            lines.push((s.col_album, track.album.clone()));
+        let play = Self::sheet_item(ui, Icon::Play, s.play_now, false);
+        let next = Self::sheet_item(ui, Icon::Play, s.play_next, false);
+        let enqueue = Self::sheet_item(ui, Icon::Queue, s.add_to_queue, false);
+        let add = Self::sheet_item(ui, Icon::Playlist, s.add_to_playlist, false);
+        if !(play || next || enqueue || add) {
+            return None;
         }
-        if !track.album_artist.is_empty() && track.album_artist != track.artist {
-            lines.push((s.info_album_artist, track.album_artist.clone()));
+        let tracks = tracks(self);
+        if tracks.is_empty() {
+            return Some(true);
         }
-        if let Some(year) = track.year {
-            lines.push((s.info_year, year.to_string()));
+        if play {
+            actions.push(Action::PlayTracks(tracks, 0));
+        } else if next {
+            actions.push(Action::PlayNext(tracks));
+        } else if enqueue {
+            self.info_toast(self.lang.added_to_queue(tracks.len()));
+            actions.push(Action::Enqueue(tracks));
+        } else {
+            self.phone.sheet = Some(Sheet::AddToPlaylist(tracks));
+            return Some(false);
         }
-        if !track.genre.is_empty() {
-            lines.push((s.info_genre, track.genre.clone()));
+        Some(true)
+    }
+
+    /// "Pin to Library" in a sheet, or "Unpin" for what is pinned. True when it was
+    /// tapped.
+    fn sheet_pin_item(&mut self, ui: &mut Ui, pin: Pin, actions: &mut Vec<Action>) -> bool {
+        let s = self.s();
+        let live = self.live_pins();
+        let pinned = live.contains(&super::shown_pin(&self.snapshot, &pin));
+        let label = if pinned { s.unpin } else { s.phone_pin };
+        if !Self::sheet_item(ui, Icon::Pin, label, false) {
+            return false;
         }
-        lines.push((s.col_duration, format_time(track.duration_ms)));
-        let mut format = track.codec.clone();
-        if track.sample_rate > 0 {
-            format.push_str(&format!(
-                " · {:.1} kHz",
-                f64::from(track.sample_rate) / 1000.0
-            ));
+        if !pinned && live.len() >= MAX_PINS {
+            self.warn_toast(s.phone_pins_full);
+        } else {
+            actions.push(Action::TogglePin(pin));
         }
-        if let Some(bits) = track.bit_depth {
-            format.push_str(&format!(" · {bits} bit"));
-        }
-        if let Some(kbps) = track.bitrate_kbps {
-            format.push_str(&format!(" · {kbps} kbps"));
-        }
-        lines.push((s.info_format, format));
-        lines.push((s.info_plays, track.play_count.to_string()));
-        let file = track
-            .file()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        lines.push((s.info_file, file));
-        for (name, value) in lines {
-            let (rect, _) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-            ui.painter().text(
-                pos2(rect.left() + SIDE + 4.0, rect.center().y),
-                Align2::LEFT_CENTER,
-                name,
-                font(14.0),
-                theme::dim(ui),
-            );
-            let value_rect = Rect::from_min_max(
-                pos2(rect.left() + 120.0, rect.top()),
-                pos2(rect.right() - SIDE, rect.bottom()),
-            );
-            let mut value_ui = ui.new_child(
-                UiBuilder::new()
-                    .id_salt(name)
-                    .max_rect(value_rect)
-                    .layout(Layout::right_to_left(Align::Center)),
-            );
-            value_ui.add(
-                egui::Label::new(
-                    RichText::new(value)
-                        .font(font(15.0))
-                        .color(ui.visuals().strong_text_color()),
-                )
-                .truncate(),
-            );
-        }
+        true
+    }
+
+    /// The songs of an artist, album by album.
+    fn phone_artist_tracks(&self, name: &str) -> Vec<TrackId> {
+        let snapshot = &self.snapshot;
+        snapshot
+            .artists()
+            .iter()
+            .find(|artist| artist.name == name)
+            .map(|artist| {
+                artist
+                    .albums
+                    .iter()
+                    .filter_map(|&index| snapshot.albums().get(index as usize))
+                    .flat_map(|album| album.tracks.iter())
+                    .filter_map(|&index| snapshot.tracks.get(index as usize))
+                    .map(|track| track.id)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }

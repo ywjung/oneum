@@ -7,6 +7,11 @@
 //! Commands (one per line, coordinates in points):
 //!   click X Y [cmd] [shift] · dclick X Y · rclick X Y · move X Y · drag X1 Y1 X2 Y2
 //!   scroll X Y DY · key NAME [cmd] [shift] [alt] · text STRING · wait MS
+//!   tap X Y · hold X Y [MS] · swipe X1 Y1 X2 Y2 [STEPS] (a finger on a touch screen:
+//!   touch events with the pointer events a touch screen sends along; a swipe moves
+//!   one step a frame, so it carries the speed that lets a list coast on)
+//!   finger down|move|up X Y (the parts of a gesture one by one, to look at the screen
+//!   while a finger is still on it)
 //!   shot FILE.png · dump FILE.json · open PATH · volume V · quit
 //!   oskey KEYCODE [cmd] [shift] [alt] (real OS key event; the app has to be the active one)
 //!   menukey KEYCODE [cmd] [shift] [alt] (the same key handed to the menu bar; works in the background)
@@ -84,6 +89,33 @@ fn button(pos: Pos2, button: PointerButton, pressed: bool, modifiers: Modifiers)
         button,
         pressed,
         modifiers,
+    }
+}
+
+/// What a touch screen sends for one finger at `pos`: the touch itself and the pointer
+/// event that stands for it (as `egui-winit` does for a real touch).
+fn touch(pos: Pos2, phase: egui::TouchPhase) -> Vec<Event> {
+    let none = Modifiers::default();
+    let finger = Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase,
+        pos,
+        force: None,
+    };
+    match phase {
+        egui::TouchPhase::Start => vec![
+            finger,
+            Event::PointerMoved(pos),
+            button(pos, PointerButton::Primary, true, none),
+        ],
+        egui::TouchPhase::Move => vec![finger, Event::PointerMoved(pos)],
+        egui::TouchPhase::End => vec![
+            finger,
+            button(pos, PointerButton::Primary, false, none),
+            Event::PointerGone,
+        ],
+        egui::TouchPhase::Cancel => vec![finger, Event::PointerGone],
     }
 }
 
@@ -195,6 +227,47 @@ impl Automation {
                     vec![button(b, PointerButton::Primary, false, none)],
                     none,
                 ));
+            }
+            Some("tap" | "hold") => {
+                let Some(p) = point(1) else { return };
+                self.steps
+                    .push_back(Step::Input(touch(p, egui::TouchPhase::Start), none));
+                if words[0] == "hold" {
+                    // Long enough for a long press unless told otherwise.
+                    self.steps
+                        .push_back(Step::Wait(num(3).map_or(1000, |ms| ms.max(0.0) as u64)));
+                }
+                self.steps
+                    .push_back(Step::Gesture(touch(p, egui::TouchPhase::End), none));
+            }
+            Some("finger") => {
+                let (Some(phase), Some(p)) = (words.get(1), point(2)) else {
+                    return;
+                };
+                let phase = match *phase {
+                    "down" => egui::TouchPhase::Start,
+                    "move" => egui::TouchPhase::Move,
+                    "up" => egui::TouchPhase::End,
+                    _ => return,
+                };
+                self.steps.push_back(Step::Input(touch(p, phase), none));
+            }
+            Some("swipe") => {
+                let (Some(a), Some(b)) = (point(1), point(3)) else {
+                    return;
+                };
+                let count = num(5).map_or(12, |n| (n as usize).clamp(1, 240));
+                self.steps
+                    .push_back(Step::Input(touch(a, egui::TouchPhase::Start), none));
+                for i in 1..=count {
+                    let t = i as f32 / count as f32;
+                    self.steps.push_back(Step::Input(
+                        touch(a + (b - a) * t, egui::TouchPhase::Move),
+                        none,
+                    ));
+                }
+                self.steps
+                    .push_back(Step::Input(touch(b, egui::TouchPhase::End), none));
             }
             Some("scroll") => {
                 let (Some(p), Some(dy)) = (point(1), num(3)) else {

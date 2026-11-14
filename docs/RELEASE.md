@@ -13,7 +13,8 @@
 | 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
-| iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`, Xcode 프로젝트로 기기용 릴리스 빌드(서명 제외) |
+| iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(56항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
+| 소스 공개 준비 | 준비됨(2026-11-14) — 원격 `github`(https://github.com/ywjung/oneum, 비어 있는 공개 저장소). 추적 파일과 지난 커밋의 내용에 비밀 값·개인 주소·홈 경로·서명 팀 ID·기기 식별자가 없음을 확인, 저장소 크기 약 5MB(가장 큰 파일 1MB), 오픈 소스 고지가 iPhone 빌드까지 포함, CI에 iPhone 린트 추가. 커밋 기록의 작성자 이름과 e-mail 주소는 push하면 그대로 공개된다. push와 CI 첫 실행은 **아직 하지 않음** |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기**. TestFlight·App Store는 범위 밖 |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.

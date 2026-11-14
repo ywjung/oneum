@@ -82,11 +82,30 @@ for i, name in enumerate(["LIBRARY", "SEARCH", "PLAYLISTS", "SETTINGS"]):
     print(f"TAB_{name}={w * (i + 0.5) / 4:.0f}")
 for i in range(8):
     print(f"MENU{i}={top + 50 + 54 * i + 27:.0f}")
-print(f"SONG0={top + 178:.0f} SONG1={top + 240:.0f}")
+# A song list: Play and Shuffle, the line with "Sort" and "Select", then the rows.
+print(f"SONG0={top + 173:.0f} SONG1={top + 235:.0f} SONG2={top + 297:.0f}")
+print(f"PILLS={top + 83:.0f} TOOLS={top + 123:.0f} SORT_X={w - 78:.0f} SELECT_X={w - 30:.0f}")
+# Lines of a sheet, counted from its last one (52 points each; the choices of the sort
+# sheet 50), above the room kept for the home indicator.
+full = s["full"][3]
+foot = full - 8 - (full - bottom)
+for i in range(8):
+    print(f"SHEET_UP{i}={foot - 26 - 52 * i:.0f}")
+for i in range(10):
+    print(f"CHOICE_UP{i}={foot - 25 - 50 * i:.0f}")
+# The handle a row is carried by, left of its "more" button.
+print(f"GRIP_X={w - 77:.0f}")
 step = (w - 56) / 5
-controls = top + 50 + 8 + min(w - 56, (bottom - top - 50) - 308) + 16
+# The player: the cover is as large as the screen has room for, and what is left over
+# is shared out above and below it.
+body = bottom - top - 50
+side = max(min(w - 56, body - 308), 120)
+spare = max(body - 308 - side, 0)
+controls = top + 50 + 8 + side + 16 + 0.6 * spare
 print(f"PLAY_X={28 + step * 2.5:.0f} NEXT_X={28 + step * 3.5:.0f} PLAY_Y={controls + 156:.0f}")
-print(f"RIGHT={w - 28:.0f}")
+print(f"COVER_Y={top + 50 + 8 + 0.3 * spare + side / 2:.0f}")
+# The buttons at the right of a bar: the last one, and two of the views of the player.
+print(f"RIGHT={w - 28:.0f} VIEW_METERS={w - 70:.0f} VIEW_LYRICS={w - 112:.0f}")
 PY
 )"
 
@@ -98,14 +117,73 @@ check b.json 'd["library_tracks"] == 20 and not d["scan_running"]' "20 tracks re
 check b.json 'd["albums"] == 7' "albums grouped"
 
 echo "== lists"
-ui "click 200 $MENU0" 'wait 500' 'dump c1.json' "click 26 $HEAD" 'wait 400' 'dump c2.json' \
-   "click 200 $MENU1" 'wait 600' 'dump c3.json' "click 100 $((TOP + 150))" 'wait 600' 'dump c4.json' \
-   "click 26 $HEAD" 'wait 300' "click 26 $HEAD" 'wait 300' 'dump c5.json'
-check c1.json 'p["page"] == "List(Songs)"' "the song list opens"
+# (A page takes a third of a second to slide in or out.)
+ui "click 200 $MENU0" 'wait 600' 'dump c1.json' "click 26 $HEAD" 'wait 600' 'dump c2.json' \
+   "click 200 $MENU1" 'wait 1500' 'dump c3.json' 'wait 1000' 'dump c3b.json' \
+   "click 100 $((TOP + 150))" 'wait 600' 'dump c4.json' \
+   "click 26 $HEAD" 'wait 600' "click 26 $HEAD" 'wait 600' 'dump c5.json'
+check c1.json 'p["page"] == "List(Songs)" and not p["moving"]' "the song list opens"
 check c2.json 'p["page"] is None' "the back button returns"
 check c3.json 'p["page"] == "List(Albums)"' "the albums open"
+python3 - "$PROFILE/c3.json" "$PROFILE/c3b.json" <<'PY'
+import json, sys
+a, b = (json.load(open(f))["art"] for f in sys.argv[1:3])
+ok = a["textures"] > 0 and b["pending"] == 0 and a["uploads"] == b["uploads"]
+print(("  ok   " if ok else "  FAIL ") + "the covers of the grid are loaded once and kept")
+if not ok:
+    print("       art:", a, b)
+sys.exit(0 if ok else 1)
+PY
 check c4.json 'p["page"].startswith("List(Album(") and p["depth"][0] == 2' "an album opens above them"
 check c5.json 'p["page"] is None and p["depth"][0] == 0' "back twice is the first page again"
+
+echo "== touch"
+ui "tap 200 $MENU0" 'wait 600' "swipe 4 $((TOP + 300)) 260 $((TOP + 304)) 12" 'wait 700' 'dump g1.json'
+check g1.json 'p["page"] is None and not p["moving"]' "a finger pulling from the left edge goes back"
+ui "tap 200 $MENU0" 'wait 600' "tap $((W - 30)) $SONG0" 'wait 600' 'dump g2.json' \
+   "tap 200 $SHEET_UP1" 'wait 700' 'dump g2b.json' \
+   "tap 200 $((TOP + 20))" 'wait 600' 'dump g3.json' "tap 26 $HEAD" 'wait 600' 'dump g4.json'
+check g2.json 'p["sheet"] is not None and p["sheet"].startswith("Track")' "the more button of a song puts up its sheet"
+check g2b.json 'p["sheet"] is not None and p["sheet"].startswith("Info(")' "its line before the last shows what is known about the song"
+check g3.json 'p["sheet"] is None' "a tap outside the sheet puts it away"
+check g4.json 'p["page"] is None' "and the page under it answers again"
+
+echo "== order, several songs at once, pins"
+# "Title" is the ninth choice from the bottom of the sort sheet; a second tap turns it round.
+ui "tap 200 $MENU0" 'wait 600' 'dump o0.json' "tap $SORT_X $TOOLS" 'wait 600' 'dump o1.json' \
+   "tap 200 $CHOICE_UP8" 'wait 700' 'dump o2.json' \
+   "tap $SORT_X $TOOLS" 'wait 600' "tap 200 $CHOICE_UP8" 'wait 700' 'dump o3.json' \
+   "tap $SORT_X $TOOLS" 'wait 600' "tap 200 $CHOICE_UP9" 'wait 700' 'dump o4.json'
+check o1.json 'p["sheet"] == "Sort(Songs)"' "the songs can be put in another order"
+python3 - "$PROFILE/o0.json" "$PROFILE/o2.json" "$PROFILE/o3.json" "$PROFILE/o4.json" <<'PY'
+import json, sys
+first, by_title, turned, back = (json.load(open(f))["first_rows"] for f in sys.argv[1:5])
+key = lambda title: title.casefold()
+ok = (
+    by_title != first
+    and by_title[0] == min(by_title, key=key) and turned[0] == max(turned, key=key)
+    and back == first
+)
+print(("  ok   " if ok else "  FAIL ") + "by title, the other way round, and back to the order they came in")
+if not ok:
+    print("      ", first[:3], by_title[:3], turned[:3], back[:3])
+sys.exit(0 if ok else 1)
+PY
+ui "tap $SELECT_X $TOOLS" 'wait 500' "tap 200 $SONG0" "tap 200 $SONG2" 'wait 400' 'dump o5.json' \
+   "tap 110 $PILLS" 'wait 600' 'dump o6.json' "tap 200 $SHEET_UP3" 'wait 800' 'dump o7.json'
+check o5.json 'p["selecting"] == "Songs" and d["selected"] == 2' "two songs are chosen with a tap each"
+check o6.json 'p["sheet"] == "Selection(Songs)"' "what can be done with them comes up"
+check o7.json 'p["selecting"] is None and p["sheet"] is None and d["queue_len"] == 2' "they are added to the queue together, and choosing ends"
+# An album is pinned from the sheet a long press brings up (its last line), shows at the
+# top of the library, and is unpinned the same way: the rows below are where they were.
+ui "tap 26 $HEAD" 'wait 600' "tap 200 $MENU1" 'wait 900' "hold 100 $((TOP + 150)) 900" 'wait 700' 'dump n1.json' \
+   "tap 200 $SHEET_UP0" 'wait 700' "tap 26 $HEAD" 'wait 700' 'dump n2.json' \
+   "tap 200 $((TOP + 50 + 30 + 27))" 'wait 700' 'dump n3.json' \
+   "tap 26 $HEAD" 'wait 600' "hold 200 $((TOP + 50 + 30 + 27)) 900" 'wait 700' "tap 200 $SHEET_UP0" 'wait 700' 'dump n4.json'
+check n1.json 'p["sheet"] is not None and p["sheet"].startswith("Album(")' "a long press on an album offers what can be done with it"
+check n2.json 'd["pinned"] == 1 and p["page"] is None' "the album is pinned"
+check n3.json 'p["page"].startswith("List(Album(")' "the pin at the top of the library leads to it"
+check n4.json 'd["pinned"] == 0 and p["sheet"] is None' "and it is unpinned again"
 
 echo "== playback"
 ui "click 200 $MENU0" 'wait 500' "click 150 $SONG0" 'wait 1500' 'dump p1.json'
@@ -123,13 +201,39 @@ check p6.json 'd["queue_index"] == 1 and d["state"] == "Playing"' "next"
 ui "click $RIGHT $HEAD" 'wait 500' 'dump p7.json' "click 150 $((TOP + 50 + 34 + 31))" 'wait 1000' 'dump p8.json'
 check p7.json 'p["queue_open"]' "the queue opens in the player"
 check p8.json 'd["queue_index"] == 0 and d["state"] == "Playing"' "a tap in the queue plays that entry"
-ui "click 28 $HEAD" 'wait 400' 'dump p9.json'
+# The third entry is carried to the top by its handle.
+ui "finger down $GRIP_X $((TOP + 239))" "finger move $GRIP_X $((TOP + 220))" "finger move $GRIP_X $((TOP + 150))" \
+   "finger move $GRIP_X $((TOP + 92))" 'wait 200' 'dump q1.json' "finger up $GRIP_X $((TOP + 92))" 'wait 700' 'dump q2.json'
+check q1.json 'p["carrying"] == [2, 0]' "a queue entry is taken hold of by its handle"
+python3 - "$PROFILE/p8.json" "$PROFILE/q2.json" <<'PY'
+import json, sys
+before, after = (json.load(open(f)) for f in sys.argv[1:3])
+a, b = before["queue"], after["queue"]
+ok = b[0] == a[2] and b[1:3] == a[0:2] and b[3:] == a[3:] and after["state"] == "Playing" and after["phone"]["carrying"] is None
+print(("  ok   " if ok else "  FAIL ") + "and let go of at the top: it plays third no more but first, the song that is on plays on")
+if not ok:
+    print("      ", a[:4], b[:4])
+sys.exit(0 if ok else 1)
+PY
+ui "tap $VIEW_METERS $HEAD" 'wait 1200' 'dump v1.json' "tap $VIEW_LYRICS $HEAD" 'wait 600' 'dump v2.json' \
+   "tap $VIEW_LYRICS $HEAD" 'wait 500' 'dump v3.json'
+check v1.json 'p["player_view"] == "Meters" and d["meter"]["position"][0] > 0' "the VU meters follow what is playing"
+check v2.json 'p["player_view"] == "Lyrics"' "the lyrics take the cover's place"
+check v3.json 'p["player_view"] == "Cover"' "a second tap brings the cover back"
+ui "click 28 $HEAD" 'wait 600' 'dump p9.json'
 check p9.json 'not p["player_open"]' "the player closes"
+ui "tap 150 $MINI" 'wait 700' "swipe 200 $COVER_Y 200 $((COVER_Y + 300)) 12" 'wait 700' 'dump p10.json'
+check p10.json 'not p["player_open"] and d["state"] == "Playing"' "pulled down by its cover, the player goes away and the music plays on"
 
 echo "== search"
-ui "click $TAB_SEARCH $TABS" 'wait 500' 'text 꽃' 'wait 600' 'dump s1.json' "click 150 $((TOP + 50 + 4 + 44 + 8 + 32 + 8 + 31))" 'wait 1200' 'dump s2.json'
-check s1.json 'p["tab"] == "Search" and p["search_rows"] == 4' "a Korean search finds 4 songs"
+ui "click $TAB_SEARCH $TABS" 'wait 500' 'dump s0.json' "tap 150 $((TOP + 72))" 'wait 500' 'text 꽃' 'wait 600' 'dump s1.json' "click 150 $((TOP + 50 + 4 + 44 + 8 + 32 + 8 + 31))" 'wait 1200' 'dump s2.json'
+check s0.json 'p["tab"] == "Search" and not d["text_focus"]' "the search tab opens without the keyboard"
+check s1.json 'p["tab"] == "Search" and p["search_rows"] == 4' "a tap in the field and a Korean search find 4 songs"
 check s2.json 'd["state"] == "Playing" and d["queue_len"] == 4' "a tap on a result plays what was found"
+# The search is kept as a smart playlist (the plus in the field), under the name offered.
+ui "tap $((W - 82)) $((TOP + 72))" 'wait 700' 'dump s3.json' 'key Enter' 'wait 1200' 'dump s4.json'
+check s3.json 'd["dialog_open"]' "the plus in the search field asks for a smart playlist's name"
+check s4.json 'len(d["smart_playlists"]) == 1 and p["page"] == "List(Smart(\"꽃\"))" and p["tab"] == "Playlists"' "the search is kept as a smart playlist and opens"
 
 echo "== playlists"
 ui "click $TAB_PLAYLISTS $TABS" 'wait 500' "click $RIGHT $HEAD" 'wait 600' 'dump l1.json' 'text  하나' 'wait 300' 'key Enter' 'wait 900' 'dump l2.json'
@@ -137,7 +241,7 @@ check l1.json 'p["tab"] == "Playlists" and d["dialog_open"]' "the plus asks for 
 check l2.json 'not d["dialog_open"] and p["page"].startswith("List(Playlist(")' "the new playlist opens"
 
 echo "== settings"
-ui "click $TAB_SETTINGS $TABS" 'wait 500' "click 200 $MENU1" 'wait 600' 'dump t1.json' "click 26 $HEAD" 'wait 300' "click 200 $MENU5" 'wait 600' 'dump t2.json'
+ui "click $TAB_SETTINGS $TABS" 'wait 500' "click 200 $MENU1" 'wait 600' 'dump t1.json' "click 26 $HEAD" 'wait 600' "click 200 $MENU5" 'wait 600' 'dump t2.json'
 check t1.json 'p["page"] == "Settings(Playback)"' "the playback settings open"
 check t2.json 'p["page"] == "Settings(About)"' "the about page opens"
 

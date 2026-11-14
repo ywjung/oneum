@@ -591,6 +591,26 @@ strings! {
     phone_smart: "스마트 플레이리스트", "Smart Playlists";
     phone_app_volume: "앱 볼륨", "App volume";
     phone_import_failed: "가져오지 못했습니다.", "Could not import.";
+    phone_eq_note: "조절한 소리는 1초 안에 들립니다. 슬라이더를 두 번 탭하면 0 dB로 돌아갑니다. 대역을 올린 만큼 프리앰프를 내려 두면 소리가 최대 음량을 넘지 않습니다(기본 프리셋은 그렇게 맞춰져 있습니다). 그래도 넘는 순간은 잘리지 않고 피크 보호가 눌러 줍니다.",
+        "Changes are heard within a second. Double-tap a slider to return it to 0 dB. Lowering the pre-amp by as much as the highest band is raised keeps the sound within full scale (the built-in presets are set that way). What still goes over is not clipped: peak protection brings it down.";
+    phone_stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 iPhone에만 있습니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this iPhone.";
+    phone_pin: "보관함에 고정", "Pin to Library";
+    phone_pins_full: "고정은 12개까지 할 수 있습니다. 하나를 해제한 뒤 다시 고정하세요.", "Up to 12 things can be pinned. Unpin one, then pin again.";
+    phone_sort: "정렬", "Sort";
+    phone_sort_default: "기본 순서", "Default Order";
+    phone_sort_added: "추가한 날", "Date Added";
+    phone_select: "선택", "Select";
+    phone_done: "완료", "Done";
+    phone_deselect: "선택 해제", "Deselect All";
+    phone_selected_songs: "선택한 곡…", "Selected Songs…";
+    phone_nothing_selected: "곡을 눌러 고르세요.", "Tap songs to choose them.";
+    phone_reorder: "순서 바꾸기", "Reorder";
+    phone_show_total: "전체 길이 보기", "Show the whole length";
+    phone_show_left: "남은 시간 보기", "Show the time left";
+    phone_search_tips: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y\n파일 검사 결과로: check:damaged · dr:<8\n여러 낱말을 하나로: \"let it be\"\n곡을 검색한 뒤 ＋를 누르면 그 검색이 스마트 플레이리스트로 저장됩니다.",
+        "A search can be narrowed to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac\nBy what was listened to: plays:>=5 · fav:yes · added:30d · played:1y\nBy what the file check found: check:damaged · dr:<8\nSeveral words as one: \"let it be\"\nSearch for songs, then press ＋ to keep the search as a smart playlist.";
+    phone_no_lyrics: "가사가 없습니다", "No lyrics";
+    phone_no_lyrics_hint: "파일의 태그나 같은 이름의 .lrc 파일에 든 가사를 보여 줍니다.", "Lyrics come from the file's tags or an .lrc file of the same name.";
 }
 
 impl Lang {

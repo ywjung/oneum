@@ -11,21 +11,21 @@ use crate::playback::{Command, PlayState};
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
 
 /// The path of the playing track through the app, in words (see `OneumApp::signal_path`).
-struct SignalPath {
-    track_id: crate::model::TrackId,
+pub(super) struct SignalPath {
+    pub(super) track_id: crate::model::TrackId,
     /// Codec of the file ("FLAC", "MP3", …).
-    codec: String,
+    pub(super) codec: String,
     /// Sample rate and bit depth of the file.
-    source_format: String,
+    pub(super) source_format: String,
     /// Name of the output device.
-    device: String,
+    pub(super) device: String,
     /// Rate, hardware sample format and exclusive access of the output.
-    format: String,
+    pub(super) format: String,
     /// What the app does to the samples on their way, in the order it does it (empty
     /// when it does nothing).
-    stages: Vec<Stage>,
+    pub(super) stages: Vec<Stage>,
     /// The file is played from memory.
-    in_memory: bool,
+    pub(super) in_memory: bool,
 }
 
 /// Why a stage of the signal path is there.
@@ -41,9 +41,9 @@ enum StageKind {
 
 /// One thing the app does to the samples.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Stage {
+pub(super) struct Stage {
     kind: StageKind,
-    name: String,
+    pub(super) name: String,
     /// What exactly ("44,100 → 48,000 Hz", "−6.0 dB"); may be empty.
     detail: String,
 }
@@ -223,6 +223,55 @@ fn processing_lines(
     lines
 }
 
+/// What a role in a song's credits is called.
+pub(super) fn role_label(
+    s: &crate::i18n::Strings,
+    role: crate::library::details::Role,
+) -> &'static str {
+    use crate::library::details::Role;
+    match role {
+        Role::Composer => s.role_composer,
+        Role::Lyricist => s.role_lyricist,
+        Role::Conductor => s.role_conductor,
+        Role::Arranger => s.role_arranger,
+        Role::Performer => s.role_performer,
+        Role::Producer => s.role_producer,
+        Role::Engineer => s.role_engineer,
+        Role::Mixer => s.role_mixer,
+        Role::Remixer => s.role_remixer,
+    }
+}
+
+/// The facts of a song's file that are worth a line each (work, label, dates), with
+/// what each is called. A date that is just the song's year again says nothing new.
+pub(super) fn facts_to_show(
+    s: &crate::i18n::Strings,
+    details: &crate::library::details::Details,
+    year: Option<i32>,
+) -> Vec<(&'static str, String)> {
+    use crate::library::details::Fact;
+    let year = year.map(|y| y.to_string());
+    details
+        .facts
+        .iter()
+        .filter(|(fact, text)| {
+            let date = matches!(fact, Fact::Recorded | Fact::Released);
+            !(date && Some(text) == year.as_ref())
+        })
+        .map(|(fact, text)| {
+            let label = match fact {
+                Fact::Work => s.info_work,
+                Fact::Movement => s.info_movement,
+                Fact::Label => s.info_label,
+                Fact::CatalogNumber => s.info_catalog,
+                Fact::Recorded => s.info_recorded,
+                Fact::Released => s.info_released,
+            };
+            (label, text.clone())
+        })
+        .collect()
+}
+
 /// What the file of one song says beyond what the library keeps (credits, facts,
 /// lyrics), read on a thread of its own: a file on a drive that has gone to sleep must
 /// not hold up the window.
@@ -254,7 +303,7 @@ impl Extras {
 }
 
 /// A sample rate as it is spoken of: "44.1 kHz", "96 kHz".
-fn kilohertz(rate: u32) -> String {
+pub(super) fn kilohertz(rate: u32) -> String {
     if rate.is_multiple_of(1000) {
         format!("{} kHz", rate / 1000)
     } else {
@@ -271,6 +320,17 @@ const MAX_VERSIONS: usize = 6;
 
 /// How a title or an artist is compared when looking for the same song again:
 /// without regard to case and to space around it.
+/// The library's own spelling of `name`, if it has an artist of that name.
+pub(super) fn known_artist(
+    artists: &std::collections::HashMap<String, String>,
+    name: &str,
+) -> Option<String> {
+    let wanted = folded(name);
+    (!wanted.is_empty())
+        .then(|| artists.get(&wanted).cloned())
+        .flatten()
+}
+
 fn folded(text: &str) -> String {
     text.trim().to_lowercase()
 }
@@ -279,7 +339,9 @@ impl OneumApp {
     /// The library's artists by their folded name, for looking names up in: collected
     /// once per change of the library, not once per frame. Of names that fold alike,
     /// the first in the library's order is the one kept.
-    fn artist_names(&mut self) -> std::sync::Arc<std::collections::HashMap<String, String>> {
+    pub(super) fn artist_names(
+        &mut self,
+    ) -> std::sync::Arc<std::collections::HashMap<String, String>> {
         match &self.artist_names {
             Some((generation, names)) if *generation == self.lib_generation => names.clone(),
             _ => {
@@ -340,7 +402,7 @@ fn stage_color(ui: &Ui, kind: StageKind) -> egui::Color32 {
 
 /// The signal path of the track that is playing, drawn as a chain from the file down
 /// to the device: every stage the audio passes, in order, with what it does.
-fn signal_path_block(ui: &mut Ui, s: &crate::i18n::Strings, path: &SignalPath) {
+pub(super) fn signal_path_block(ui: &mut Ui, s: &crate::i18n::Strings, path: &SignalPath) {
     let dim = theme::dim(ui);
     let strong = ui.visuals().strong_text_color();
     let summary = path_summary(&path.stages);
@@ -1143,7 +1205,7 @@ impl OneumApp {
 
     /// What the file of `track` says beyond the library (see [`Extras`]), once it has
     /// been read. `None` while it is being read.
-    fn extras_of(
+    pub(super) fn extras_of(
         &mut self,
         track: &crate::model::Track,
     ) -> Option<std::sync::Arc<crate::library::details::Details>> {
@@ -1318,7 +1380,7 @@ impl OneumApp {
 
     /// What is happening to the track that is playing: where it comes from, where it
     /// goes and what the app does to it in between. `None` while nothing is playing.
-    fn signal_path(&self) -> Option<SignalPath> {
+    pub(super) fn signal_path(&self) -> Option<SignalPath> {
         let s = self.s();
         let current = self.player.current?;
         let source = self.player.source.as_ref()?;
@@ -2008,6 +2070,143 @@ impl OneumApp {
         moved_to
     }
 
+    /// The other tracks of the library that are the same song as `track` (another
+    /// album, another format), once its extras have been read (see `extras_of`).
+    pub(super) fn other_versions_of(
+        &self,
+        track: crate::model::TrackId,
+    ) -> Vec<std::sync::Arc<crate::model::Track>> {
+        self.extras
+            .as_ref()
+            .filter(|extras| extras.track == track)
+            .map(|extras| {
+                extras
+                    .versions
+                    .iter()
+                    .filter_map(|id| self.track(*id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What is known about a song, a line each: what the library keeps (place on the
+    /// album, format, leveling, what the file check found, plays) and the facts of its
+    /// file (work, label, dates). The same lines on a desk and on a phone.
+    pub(super) fn info_rows(
+        &self,
+        track: &crate::model::Track,
+        details: Option<&crate::library::details::Details>,
+    ) -> Vec<(&'static str, String)> {
+        let s = self.s();
+        let mut rows: Vec<(&'static str, String)> = Vec::new();
+        if !track.album_artist.is_empty() && track.album_artist != track.artist {
+            rows.push((s.info_album_artist, track.album_artist.clone()));
+        }
+        if let Some(n) = track.track_no {
+            let text = match track.disc_no.filter(|d| *d > 1) {
+                Some(disc) => self.lang.track_on_disc(n, disc),
+                None => n.to_string(),
+            };
+            rows.push((s.info_track, text));
+        }
+        if let Some(year) = track.year {
+            rows.push((s.info_year, year.to_string()));
+        }
+        if !track.genre.is_empty() {
+            rows.push((s.info_genre, track.genre.clone()));
+        }
+        rows.push((s.col_duration, format_time(track.duration_ms)));
+        let format = if track.codec == track.container || track.container.is_empty() {
+            track.codec.clone()
+        } else {
+            format!("{} ({})", track.codec, track.container)
+        };
+        rows.push((s.info_format, format));
+        rows.push((
+            s.info_sample_rate,
+            format!("{} Hz", group_digits(track.sample_rate as usize)),
+        ));
+        rows.push((s.info_channels, track.channels.to_string()));
+        if let Some(bits) = track.bit_depth {
+            rows.push((s.info_bit_depth, format!("{bits} bit")));
+        }
+        if let Some(kbps) = track.bitrate_kbps {
+            rows.push((s.info_bitrate, format!("{kbps} kbps")));
+        }
+        rows.push((
+            s.info_size,
+            format!("{:.1} MB", track.file_size as f64 / 1_048_576.0),
+        ));
+        let rg = track.leveling();
+        let gain = match (rg.track_gain_db, rg.album_gain_db) {
+            (None, None) => s.info_none.to_string(),
+            (t, a) => {
+                let fmt = |v: Option<f32>| v.map_or("—".to_string(), |v| format!("{v:+.2} dB"));
+                let values = format!("{} {} / {} {}", s.rg_track, fmt(t), s.rg_album, fmt(a));
+                // Not from the file's tags: say whose numbers these are.
+                if track.replaygain.track_gain_db.is_none() && track.measured.is_some() {
+                    format!("{values} ({})", s.info_measured)
+                } else {
+                    values
+                }
+            }
+        };
+        rows.push((s.info_replaygain, gain));
+        // What the file check found, for the file as it is.
+        if let Some(check) = track.check {
+            use crate::model::CheckVerdict;
+            let verdict = match check.verdict {
+                CheckVerdict::Verified => s.info_check_verified,
+                CheckVerdict::Decoded => s.info_check_decoded,
+                CheckVerdict::Damaged => s.info_check_damaged,
+            };
+            rows.push((s.info_check, verdict.to_string()));
+            if let Some(dr) = check.dr {
+                // The album's value: the mean of its checked tracks.
+                let album: Vec<f32> = self
+                    .snapshot
+                    .album_index(track.album_key)
+                    .and_then(|i| self.snapshot.albums().get(i as usize))
+                    .map(|album| {
+                        album
+                            .tracks
+                            .iter()
+                            .filter_map(|&i| self.snapshot.tracks.get(i as usize))
+                            .filter_map(|t| t.check.and_then(|c| c.dr))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let text = if album.len() > 1 {
+                    let mean = album.iter().sum::<f32>() / album.len() as f32;
+                    format!(
+                        "DR{} ({} DR{})",
+                        dr.round() as i32,
+                        s.rg_album,
+                        mean.round() as i32
+                    )
+                } else {
+                    format!("DR{}", dr.round() as i32)
+                };
+                rows.push((s.info_dr, text));
+            }
+            if let Some(peak) = check.true_peak.filter(|p| *p > 0.0) {
+                let db = 20.0 * peak.log10();
+                let text = if db < 0.0 {
+                    format!("−{:.1} dBTP", -db)
+                } else {
+                    format!("+{db:.1} dBTP")
+                };
+                rows.push((s.info_true_peak, text));
+            }
+        }
+        rows.push((s.info_plays, track.play_count.to_string()));
+        // What the file says beyond the library: work, label, dates.
+        if let Some(details) = details {
+            rows.extend(facts_to_show(s, details, track.year));
+        }
+        rows
+    }
+
     fn info_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let s = self.s();
         // Explicitly requested track, else the single selected row, else what is playing.
@@ -2036,27 +2235,11 @@ impl OneumApp {
         };
         let dim = theme::dim(ui);
         let details = self.extras_of(&track);
-        let versions: Vec<std::sync::Arc<crate::model::Track>> = self
-            .extras
-            .as_ref()
-            .filter(|extras| extras.track == track.id)
-            .map(|extras| {
-                extras
-                    .versions
-                    .iter()
-                    .filter_map(|id| self.track(*id).cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let versions = self.other_versions_of(track.id);
         // The library's own spelling of a name, if it has an artist of that name:
         // only such names are links, so that a link always leads somewhere.
         let artists = self.artist_names();
-        let in_library = move |name: &str| {
-            let wanted = folded(name);
-            (!wanted.is_empty())
-                .then(|| artists.get(&wanted).cloned())
-                .flatten()
-        };
+        let in_library = move |name: &str| known_artist(&artists, name);
         egui::ScrollArea::vertical()
             .id_salt("info")
             .auto_shrink([false, false])
@@ -2100,130 +2283,7 @@ impl OneumApp {
                 }
                 ui.add_space(8.0);
 
-                let mut rows: Vec<(&str, String)> = Vec::new();
-                if !track.album_artist.is_empty() && track.album_artist != track.artist {
-                    rows.push((s.info_album_artist, track.album_artist.clone()));
-                }
-                if let Some(n) = track.track_no {
-                    let text = match track.disc_no.filter(|d| *d > 1) {
-                        Some(disc) => self.lang.track_on_disc(n, disc),
-                        None => n.to_string(),
-                    };
-                    rows.push((s.info_track, text));
-                }
-                if let Some(year) = track.year {
-                    rows.push((s.info_year, year.to_string()));
-                }
-                if !track.genre.is_empty() {
-                    rows.push((s.info_genre, track.genre.clone()));
-                }
-                rows.push((s.col_duration, format_time(track.duration_ms)));
-                let format = if track.codec == track.container || track.container.is_empty() {
-                    track.codec.clone()
-                } else {
-                    format!("{} ({})", track.codec, track.container)
-                };
-                rows.push((s.info_format, format));
-                rows.push((
-                    s.info_sample_rate,
-                    format!("{} Hz", group_digits(track.sample_rate as usize)),
-                ));
-                rows.push((s.info_channels, track.channels.to_string()));
-                if let Some(bits) = track.bit_depth {
-                    rows.push((s.info_bit_depth, format!("{bits} bit")));
-                }
-                if let Some(kbps) = track.bitrate_kbps {
-                    rows.push((s.info_bitrate, format!("{kbps} kbps")));
-                }
-                rows.push((
-                    s.info_size,
-                    format!("{:.1} MB", track.file_size as f64 / 1_048_576.0),
-                ));
-                let rg = track.leveling();
-                let gain = match (rg.track_gain_db, rg.album_gain_db) {
-                    (None, None) => s.info_none.to_string(),
-                    (t, a) => {
-                        let fmt =
-                            |v: Option<f32>| v.map_or("—".to_string(), |v| format!("{v:+.2} dB"));
-                        let values =
-                            format!("{} {} / {} {}", s.rg_track, fmt(t), s.rg_album, fmt(a));
-                        // Not from the file's tags: say whose numbers these are.
-                        if track.replaygain.track_gain_db.is_none() && track.measured.is_some() {
-                            format!("{values} ({})", s.info_measured)
-                        } else {
-                            values
-                        }
-                    }
-                };
-                rows.push((s.info_replaygain, gain));
-                // What the file check found, for the file as it is.
-                if let Some(check) = track.check {
-                    use crate::model::CheckVerdict;
-                    let verdict = match check.verdict {
-                        CheckVerdict::Verified => s.info_check_verified,
-                        CheckVerdict::Decoded => s.info_check_decoded,
-                        CheckVerdict::Damaged => s.info_check_damaged,
-                    };
-                    rows.push((s.info_check, verdict.to_string()));
-                    if let Some(dr) = check.dr {
-                        // The album's value: the mean of its checked tracks.
-                        let album: Vec<f32> = self
-                            .snapshot
-                            .album_index(track.album_key)
-                            .and_then(|i| self.snapshot.albums().get(i as usize))
-                            .map(|album| {
-                                album
-                                    .tracks
-                                    .iter()
-                                    .filter_map(|&i| self.snapshot.tracks.get(i as usize))
-                                    .filter_map(|t| t.check.and_then(|c| c.dr))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let text = if album.len() > 1 {
-                            let mean = album.iter().sum::<f32>() / album.len() as f32;
-                            format!(
-                                "DR{} ({} DR{})",
-                                dr.round() as i32,
-                                s.rg_album,
-                                mean.round() as i32
-                            )
-                        } else {
-                            format!("DR{}", dr.round() as i32)
-                        };
-                        rows.push((s.info_dr, text));
-                    }
-                    if let Some(peak) = check.true_peak.filter(|p| *p > 0.0) {
-                        let db = 20.0 * peak.log10();
-                        let text = if db < 0.0 {
-                            format!("−{:.1} dBTP", -db)
-                        } else {
-                            format!("+{db:.1} dBTP")
-                        };
-                        rows.push((s.info_true_peak, text));
-                    }
-                }
-                rows.push((s.info_plays, track.play_count.to_string()));
-                // What the file says beyond the library: work, label, dates.
-                if let Some(details) = &details {
-                    use crate::library::details::Fact;
-                    let year = track.year.map(|y| y.to_string());
-                    for (fact, text) in &details.facts {
-                        let label = match fact {
-                            Fact::Work => s.info_work,
-                            Fact::Movement => s.info_movement,
-                            Fact::Label => s.info_label,
-                            Fact::CatalogNumber => s.info_catalog,
-                            Fact::Recorded => s.info_recorded,
-                            Fact::Released => s.info_released,
-                        };
-                        // A date that is just the year again says nothing new.
-                        let date = matches!(fact, Fact::Recorded | Fact::Released);
-                        if !(date && Some(text) == year.as_ref()) {
-                            rows.push((label, text.clone()));
-                        }
-                    }
-                }
+                let rows = self.info_rows(&track, details.as_deref());
                 egui::Grid::new("info-grid")
                     .num_columns(2)
                     .spacing([10.0, 5.0])
@@ -2249,7 +2309,6 @@ impl OneumApp {
                 // Who wrote, played and produced it. A name the library has as an
                 // artist is a link to that artist.
                 if let Some(details) = details.as_ref().filter(|d| !d.credits.is_empty()) {
-                    use crate::library::details::Role;
                     ui.add_space(12.0);
                     ui.label(RichText::new(s.info_credits).small().color(dim));
                     ui.add_space(3.0);
@@ -2258,17 +2317,7 @@ impl OneumApp {
                         .spacing([10.0, 5.0])
                         .show(ui, |ui| {
                             for credit in &details.credits {
-                                let role = match credit.role {
-                                    Role::Composer => s.role_composer,
-                                    Role::Lyricist => s.role_lyricist,
-                                    Role::Conductor => s.role_conductor,
-                                    Role::Arranger => s.role_arranger,
-                                    Role::Performer => s.role_performer,
-                                    Role::Producer => s.role_producer,
-                                    Role::Engineer => s.role_engineer,
-                                    Role::Mixer => s.role_mixer,
-                                    Role::Remixer => s.role_remixer,
-                                };
+                                let role = role_label(s, credit.role);
                                 ui.label(RichText::new(role).small().color(dim));
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing.x = 8.0;

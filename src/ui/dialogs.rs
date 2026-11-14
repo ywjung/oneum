@@ -67,6 +67,39 @@ impl OneumApp {
             let top = ctx.content_rect().top() + 72.0 - ctx.viewport_rect().top();
             modal = modal
                 .area(egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, [0.0, top]));
+            // The modal dims what the system leaves to the app's content; the strips
+            // around that (behind the status bar and the home indicator, beside a
+            // camera) are dimmed here, or they would stand out as lighter bands.
+            let (full, safe) = (ctx.viewport_rect(), ctx.content_rect());
+            let mut painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::unique("oneum-dialog-edges"),
+            ));
+            // (A layer's painter is cut off at the content's edges, where these begin.)
+            painter.set_clip_rect(full);
+            let dim = modal.backdrop_color;
+            for strip in [
+                egui::Rect::from_min_max(full.min, egui::pos2(full.right(), safe.top())),
+                egui::Rect::from_min_max(egui::pos2(full.left(), safe.bottom()), full.max),
+                egui::Rect::from_min_max(
+                    egui::pos2(full.left(), safe.top()),
+                    egui::pos2(safe.left(), safe.bottom()),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(safe.right(), safe.top()),
+                    egui::pos2(full.right(), safe.bottom()),
+                ),
+            ] {
+                if strip.width() > 0.0 && strip.height() > 0.0 {
+                    painter.rect_filled(strip, 0.0, dim);
+                }
+            }
+            // Room around what it says, and corners like the phone's own alerts.
+            modal = modal.frame(
+                egui::Frame::popup(&ctx.global_style())
+                    .inner_margin(16)
+                    .corner_radius(16),
+            );
         }
         let width = 400.0_f32.min(ctx.content_rect().width() - 56.0);
         let modal = modal.show(ctx, |ui| {
@@ -95,9 +128,11 @@ impl OneumApp {
                 Dialog::RenamePlaylist { .. } => (s.rename, String::new(), s.ok),
                 Dialog::SmartPlaylist { query, .. } => (s.smart_playlist, query.clone(), s.ok),
             };
+            // On a phone: larger text, and two buttons a finger cannot miss, side by side.
+            let touch = self.phone_mode;
             ui.label(
                 RichText::new(title)
-                    .font(super::theme::semibold(16.0))
+                    .font(super::theme::semibold(if touch { 18.0 } else { 16.0 }))
                     .strong(),
             );
             ui.add_space(6.0);
@@ -116,9 +151,14 @@ impl OneumApp {
             | Dialog::RenamePlaylist { name, focus, .. }
             | Dialog::SmartPlaylist { name, focus, .. } = &mut dialog
             {
-                let edit = egui::TextEdit::singleline(name)
+                let mut edit = egui::TextEdit::singleline(name)
                     .hint_text(hint)
                     .desired_width(f32::INFINITY);
+                if touch {
+                    edit = edit
+                        .font(egui::FontId::proportional(17.0))
+                        .margin(egui::Margin::symmetric(10, 9));
+                }
                 let response = ui.add(edit);
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::Role::TextInput, true, s.playlist_name)
@@ -164,13 +204,18 @@ impl OneumApp {
                 } else {
                     (super::theme::accent(dark), egui::Color32::WHITE)
                 };
+                let button_size = if touch {
+                    egui::vec2((ui.available_width() - 8.0) / 2.0, 46.0)
+                } else {
+                    egui::vec2(76.0, 28.0)
+                };
                 let confirm_button = egui::Button::new(RichText::new(confirm).strong().color(ink))
                     .fill(fill)
-                    .min_size(egui::vec2(76.0, 28.0));
+                    .min_size(button_size);
                 if ui.add_enabled(can_confirm, confirm_button).clicked() {
                     outcome = Outcome::Confirm;
                 }
-                let cancel_button = egui::Button::new(s.cancel).min_size(egui::vec2(76.0, 28.0));
+                let cancel_button = egui::Button::new(s.cancel).min_size(button_size);
                 if ui.add(cancel_button).clicked() {
                     outcome = Outcome::Cancel;
                 }

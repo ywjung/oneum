@@ -59,6 +59,13 @@ const LOOK: markdown::Look = markdown::Look {
     heading_gap: 18.0,
 };
 
+/// On a phone, held closer and read without a pointer: larger type.
+const TOUCH_LOOK: markdown::Look = markdown::Look {
+    body: 16.0,
+    heading: 20.0,
+    heading_gap: 24.0,
+};
+
 /// The guide in `lang`, parsed once.
 fn guide(lang: Lang) -> &'static [Block] {
     static KO: OnceLock<Vec<Block>> = OnceLock::new();
@@ -279,7 +286,12 @@ impl OneumApp {
 
     /// The text of the guide. `jump` scrolls to section `n` (1-based).
     pub(super) fn guide_body(&self, ui: &mut egui::Ui, jump: Option<usize>) {
-        markdown::show(ui, guide(self.lang), LOOK, |ui, section| {
+        let look = if theme::touch(ui.ctx()) {
+            TOUCH_LOOK
+        } else {
+            LOOK
+        };
+        markdown::show(ui, guide(self.lang), look, |ui, section| {
             if jump == Some(section) {
                 ui.scroll_to_cursor(Some(Align::TOP));
             }

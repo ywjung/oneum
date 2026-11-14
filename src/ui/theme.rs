@@ -16,6 +16,16 @@ pub fn accent(dark: bool) -> Color32 {
     }
 }
 
+/// Where [`touch`] is kept in the context's data.
+const TOUCH: &str = "oneum-touch";
+
+/// True on the phone screens: what is shown there is read at arm's length and hit with
+/// a finger, so the widgets that both kinds of screen share draw themselves larger.
+pub fn touch(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(egui::Id::unique(TOUCH)))
+        .unwrap_or(false)
+}
+
 /// Text colour for de-emphasised content (secondary lines, unavailable tracks).
 pub fn dim(ui: &egui::Ui) -> Color32 {
     ui.visuals().weak_text_color()
@@ -154,6 +164,7 @@ fn install_fonts(ctx: &egui::Context) {
 /// larger: they are read at arm's length and hit with a finger.
 pub fn install(ctx: &egui::Context, phone: bool) {
     install_fonts(ctx);
+    ctx.data_mut(|data| data.insert_temp(egui::Id::unique(TOUCH), phone));
     for theme in [Theme::Dark, Theme::Light] {
         let dark = theme == Theme::Dark;
         ctx.style_mut_of(theme, |style| {
@@ -203,10 +214,14 @@ pub fn install(ctx: &egui::Context, phone: bool) {
                     ),
                 ]
                 .into();
-                style.spacing.button_padding = egui::vec2(12.0, 7.0);
-                style.spacing.interact_size.y = 32.0;
+                style.spacing.button_padding = egui::vec2(14.0, 9.0);
+                style.spacing.interact_size.y = 36.0;
+                style.spacing.slider_rail_height = 5.0;
                 // Lists are moved with a finger; the bar only shows where one is.
                 style.spacing.scroll = egui::style::ScrollStyle::floating();
+                // … and can be taken hold of at the right edge to move through a long
+                // list quickly: its handle never gets smaller than a finger.
+                style.spacing.scroll.handle_min_length = 44.0;
                 style.visuals.handle_shape = egui::style::HandleShape::Circle;
                 style.visuals.slider_trailing_fill = true;
             }

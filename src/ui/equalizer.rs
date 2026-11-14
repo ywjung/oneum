@@ -248,7 +248,9 @@ fn gain_slider(
             egui::Stroke::new(3.0, accent),
         );
         let lively = enabled && (response.hovered() || response.dragged());
-        let radius = if lively { 8.0 } else { 7.0 };
+        // Larger where it is taken hold of with a finger.
+        let grow = if theme::touch(ui.ctx()) { 3.0 } else { 0.0 };
+        let radius = if lively { 8.0 } else { 7.0 } + grow;
         let knob_fill = if dark {
             Color32::from_rgb(0xF2, 0xF2, 0xF7)
         } else {
@@ -438,6 +440,19 @@ impl OneumApp {
     pub(super) fn equalizer_body(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let dim = theme::dim(ui);
+        // On a phone the whole equalizer fits the width of the screen: a narrower
+        // pre-amp column, and taller sliders for a finger to travel.
+        let touch = theme::touch(ui.ctx());
+        let (preamp_width, slider_height) = if touch {
+            (52.0, 190.0)
+        } else {
+            (PREAMP_WIDTH, SLIDER_HEIGHT)
+        };
+        let field_width = if touch {
+            (ui.available_width() - 150.0).clamp(110.0, 230.0)
+        } else {
+            230.0
+        };
         let current = matching_preset(&self.settings.eq, &self.settings.eq_presets);
 
         // Preset: what is chosen, and back to flat.
@@ -452,7 +467,7 @@ impl OneumApp {
                 None => s.eq_custom.to_string(),
             };
             egui::ComboBox::from_id_salt("eq-preset")
-                .width(230.0)
+                .width(field_width)
                 .height(420.0)
                 .selected_text(selected)
                 .show_ui(ui, |ui| {
@@ -511,10 +526,10 @@ impl OneumApp {
         widgets::card(ui, |ui| {
             let value_row = 18.0;
             let name_row = 18.0;
-            let height = CURVE_HEIGHT + 12.0 + value_row + SLIDER_HEIGHT + name_row;
+            let height = CURVE_HEIGHT + 12.0 + value_row + slider_height + name_row;
             let (area, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-            let bands_left = area.left() + PREAMP_WIDTH;
+            let bands_left = area.left() + preamp_width;
             let band_width = (area.right() - bands_left) / BANDS as f32;
             let curve = Rect::from_min_max(
                 pos2(bands_left, area.top()),
@@ -524,7 +539,7 @@ impl OneumApp {
 
             let sliders_top = curve.bottom() + 12.0 + value_row;
             let column = |left: f32, width: f32| {
-                Rect::from_min_size(pos2(left, sliders_top), vec2(width, SLIDER_HEIGHT))
+                Rect::from_min_size(pos2(left, sliders_top), vec2(width, slider_height))
             };
             let text_color = if enabled {
                 ui.visuals().text_color()
@@ -554,7 +569,7 @@ impl OneumApp {
                     dim,
                 );
             };
-            let preamp = column(area.left(), PREAMP_WIDTH - 12.0);
+            let preamp = column(area.left(), preamp_width - 12.0);
             labelled_slider(
                 ui,
                 preamp,
@@ -567,7 +582,7 @@ impl OneumApp {
             ui.painter().line_segment(
                 [
                     pos2(bands_left - 8.0, sliders_top - value_row),
-                    pos2(bands_left - 8.0, sliders_top + SLIDER_HEIGHT + name_row),
+                    pos2(bands_left - 8.0, sliders_top + slider_height + name_row),
                 ],
                 egui::Stroke::new(1.0, widgets::divider_color(ui)),
             );
@@ -588,7 +603,7 @@ impl OneumApp {
             let field = egui::TextEdit::singleline(&mut self.eq_name)
                 .hint_text(s.eq_name_hint)
                 .char_limit(MAX_NAME_CHARS)
-                .desired_width(230.0);
+                .desired_width(field_width);
             let typed = ui.add(field);
             let named = !clean_name(&self.eq_name).is_empty();
             if typed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && named {
@@ -627,7 +642,13 @@ impl OneumApp {
             self.info_toast(s.eq_deleted);
         }
         ui.add_space(10.0);
-        ui.add(egui::Label::new(RichText::new(s.eq_note).small().color(dim)).wrap());
+        // A finger taps where a pointer clicks: the note says so.
+        let note = if touch {
+            RichText::new(s.phone_eq_note).size(13.0)
+        } else {
+            RichText::new(s.eq_note).small()
+        };
+        ui.add(egui::Label::new(note.color(dim)).wrap());
     }
 }
 
