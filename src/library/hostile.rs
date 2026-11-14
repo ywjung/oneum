@@ -112,8 +112,26 @@ fn lyrics_of_any_content_stay_within_limits() {
     for bytes in inputs(23, 4_000, &pieces) {
         let text = String::from_utf8_lossy(&bytes);
         if let Some(lines) = lyrics::timed(&text) {
-            assert!(lines.len() <= 5_000);
+            assert!((2..=5_000).contains(&lines.len()));
             assert!(lines.iter().all(|l| !l.text.contains('\n')), "{text:?}");
+            // In the order of their times; the lines of one moment go together: a few
+            // at most with one entry, each once, none of them empty, and none under an
+            // entry without words of its own.
+            assert!(
+                lines.windows(2).all(|w| w[0].at_ms <= w[1].at_ms),
+                "{text:?}"
+            );
+            for line in &lines {
+                assert!(line.also.len() <= 3, "{text:?}");
+                assert!(line.also.is_empty() || !line.text.is_empty(), "{text:?}");
+                for (i, also) in line.also.iter().enumerate() {
+                    assert!(!also.is_empty() && !also.contains('\n'), "{text:?}");
+                    assert!(
+                        *also != line.text && !line.also[..i].contains(also),
+                        "{text:?}"
+                    );
+                }
+            }
         }
         if let Some(plain) = lyrics::clean(&text) {
             assert!(!plain.is_empty());

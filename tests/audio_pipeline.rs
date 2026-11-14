@@ -2183,6 +2183,163 @@ fn cue_sheet_tracks_are_their_stretches_of_the_image() {
     }
 }
 
+/// A sheet can be for a file of any format the app plays. Cut at random places, the
+/// tracks are always their stretches of the file: each exactly as long as the sheet
+/// says, together as long as the file, and (the cut made by seeking) the same audio as
+/// the file decoded in one go — sample for sample for the lossless formats, and within
+/// what a decoder that starts in the middle differs by for the lossy ones.
+#[test]
+fn sheet_tracks_of_every_format_are_their_stretches_of_the_file() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut noise = 0x2545_F491_4F6C_DD1Du64;
+    let mut roll = move |n: u64| {
+        noise ^= noise << 13;
+        noise ^= noise >> 7;
+        noise ^= noise << 17;
+        (noise >> 11) % n
+    };
+    for (name, lossless) in [
+        ("gap_a.wav", true),
+        ("gap_a.flac", true),
+        ("gap_a.aiff", true),
+        ("gap_a.alac.m4a", true),
+        ("gap_a.mp3", false),
+        ("gap_a.mp2", false),
+        ("gap_a.ogg", false),
+        ("gap_a.aac.m4a", false),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extension = name.split_once('.').expect("extension").1;
+        let image = dir.path().join(format!("image.{extension}"));
+        std::fs::copy(fixtures.join(name), &image).expect("copy fixture");
+        let whole = decode_path(&image);
+        let (rate, channels) = {
+            let dec = TrackDecoder::open(&image).expect("opens");
+            (dec.info().sample_rate, dec.info().channels)
+        };
+        let total = (whole.len() / channels) as u64;
+        // The file's length in CD frames (75 to the second), rounded down.
+        let cd_frames = total * 75 / u64::from(rate);
+        assert!(cd_frames > 8, "{name}: too short to cut");
+        for round in 0..12 {
+            // Two to four tracks, starting at random CD frames (the first not always at 0).
+            let mut starts: Vec<u64> = (0..2 + roll(3)).map(|_| roll(cd_frames)).collect();
+            starts.sort_unstable();
+            starts.dedup();
+            let sheet = dir.path().join("image.cue");
+            let mut text = format!("FILE \"image.{extension}\" WAVE\n");
+            for (i, start) in starts.iter().enumerate() {
+                text.push_str(&format!(
+                    "TRACK {:02} AUDIO\nINDEX 01 {:02}:{:02}:{:02}\n",
+                    i + 1,
+                    start / 75 / 60,
+                    start / 75 % 60,
+                    start % 75
+                ));
+            }
+            std::fs::write(&sheet, text).expect("write sheet");
+            let frame = |cd: u64| cd * u64::from(rate) / 75;
+            for (i, start) in starts.iter().enumerate() {
+                let track = oneum::library::cue::track_path(&sheet, i as u32 + 1);
+                let (from, to) = (
+                    frame(*start),
+                    starts.get(i + 1).map_or(total, |next| frame(*next)),
+                );
+                let pcm = decode_path(&track);
+                let context = format!("{name} round {round} track {} of {starts:?}", i + 1);
+                assert_eq!(
+                    (pcm.len() / channels) as u64,
+                    to - from,
+                    "{context}: length"
+                );
+                let dec = TrackDecoder::open(&track).expect("opens");
+                assert_eq!(dec.info().total_frames, Some(to - from), "{context}");
+                let expected = &whole[from as usize * channels..to as usize * channels];
+                if lossless {
+                    assert!(pcm == expected, "{context}: not the file's audio");
+                } else {
+                    // A lossy decoder that starts in the middle needs a moment.
+                    let skip = (4_608 * channels).min(pcm.len());
+                    let diff = max_abs_diff(&pcm[skip..], &expected[skip..]);
+                    assert!(diff < 1e-3, "{context}: differs by {diff}");
+                }
+                // A seek to a random place in the track: the rest of the track from
+                // there, and nothing of the next one.
+                if to > from {
+                    let at = roll(to - from);
+                    let mut dec = TrackDecoder::open(&track).expect("opens");
+                    dec.seek(at).expect("seeks");
+                    let (mut rest, mut buf) = (Vec::new(), Vec::new());
+                    while dec.next(&mut buf).expect("decodes") {
+                        rest.extend_from_slice(&buf);
+                    }
+                    let expected = &expected[at as usize * channels..];
+                    assert_eq!(
+                        rest.len(),
+                        expected.len(),
+                        "{context}: length after a seek to {at}"
+                    );
+                    if lossless {
+                        assert!(rest == expected, "{context}: after a seek to {at}");
+                    } else {
+                        let skip = (4_608 * channels).min(rest.len());
+                        let diff = max_abs_diff(&rest[skip..], &expected[skip..]);
+                        assert!(diff < 1e-3, "{context}: seek to {at} differs by {diff}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The tracks of a sheet and the image itself, queued in any order (a track twice, the
+/// image between its own tracks): what is heard is each of them in turn, whole and
+/// without a gap, read from the file or from memory (where tracks of one image share
+/// one copy of it).
+#[test]
+fn sheet_tracks_in_any_order_play_as_queued() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (image, sheet, _) = write_image_and_sheet(dir.path(), "image.wav");
+    let mut paths: Vec<PathBuf> = (1..=3)
+        .map(|n| oneum::library::cue::track_path(&sheet, n))
+        .collect();
+    paths.push(image);
+    let audio: Vec<Vec<f32>> = paths.iter().map(|p| decode_path(p)).collect();
+    let mut noise = 0x9E37_79B9_7F4A_7C15u64;
+    let mut roll = move |n: u64| {
+        noise ^= noise << 13;
+        noise ^= noise >> 7;
+        noise ^= noise << 17;
+        (noise >> 11) % n
+    };
+    for round in 0..10 {
+        let order: Vec<usize> = (0..2 + roll(5)).map(|_| roll(4) as usize).collect();
+        let names: Vec<String> = order
+            .iter()
+            .map(|&i| paths[i].display().to_string())
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let expected: Vec<f32> = order
+            .iter()
+            .flat_map(|&i| audio[i].iter().copied())
+            .collect();
+        for (how, played) in [
+            ("file", play(&names, 44_100)),
+            ("memory", play_from_memory(&names, 44_100, 0)),
+        ] {
+            let context = format!("round {round} ({how}): {order:?}");
+            assert_eq!(played.underruns, 0, "{context}");
+            assert_eq!(played.frames() * 2, expected.len(), "{context}: length");
+            assert_eq!(played.started().len(), order.len(), "{context}: starts");
+            let heard = &played.pcm[FADE_GUARD * 2..];
+            assert!(
+                max_abs_diff(heard, &expected[FADE_GUARD * 2..]) < 1e-6,
+                "{context}: not what was queued"
+            );
+        }
+    }
+}
+
 /// Damage inside a sheet track is passed over like anywhere else (the FLAC reader drops
 /// the broken frame and finds the next), and the track still ends exactly where the
 /// next one starts: the tracks joined are the image as it decodes, hole included

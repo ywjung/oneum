@@ -37,6 +37,10 @@ struct Timing {
     /// from other computers are not reported. Rarely, since every scan walks the whole
     /// share and wakes the disks of the computer it is on.
     remote_rescan: Duration,
+    /// How long after a folder began to be watched it is scanned once more: the
+    /// system's event stream takes a moment to start, and what changed between the
+    /// scan that came with the folder and that moment is reported by nobody.
+    watch_settle: Duration,
 }
 
 const TIMING: Timing = Timing {
@@ -45,6 +49,7 @@ const TIMING: Timing = Timing {
     watcher_retry: Duration::from_secs(30),
     unwatched_rescan: Duration::from_secs(5 * 60),
     remote_rescan: Duration::from_secs(30 * 60),
+    watch_settle: Duration::from_secs(3),
 };
 
 pub(crate) enum WatchMsg {
@@ -136,7 +141,8 @@ fn run(
                     }
                 }
             }
-            reconcile(inner, watcher.as_mut(), &mut watched, &mut unwatchable);
+            let newly = reconcile(inner, watcher.as_mut(), &mut watched, &mut unwatchable);
+            polled.watch_began(&newly);
             polled.check(inner, &watched, &timing);
             last_check = Some(Instant::now());
         }
@@ -170,12 +176,23 @@ struct Polled {
     since: HashMap<i64, Instant>,
     /// Whether a folder is on a network share, as found when it was last seen online.
     remote: HashMap<i64, bool>,
+    /// Folders that began to be watched, and when: each is scanned once more a little
+    /// later (see `Timing::watch_settle`).
+    settling: HashMap<i64, Instant>,
 }
 
 impl Polled {
     /// Requests a rescan of every online folder without file events (not watched, or on
     /// a network share) whose last one is `interval` ago. A folder that is watched again
     /// gets one more, for what changed since its last.
+    /// Notes that these folders have just begun to be watched.
+    fn watch_began(&mut self, roots: &[i64]) {
+        let now = Instant::now();
+        for id in roots {
+            self.settling.insert(*id, now);
+        }
+    }
+
     fn check(&mut self, inner: &Inner, watched: &HashMap<i64, Watched>, timing: &Timing) {
         let online: Vec<(i64, PathBuf)> = lock(&inner.state)
             .roots
@@ -210,6 +227,17 @@ impl Polled {
             }
         }
         self.since.retain(|id, _| is_online(id));
+        // A folder whose watch has had time to start: what changed before it did.
+        self.settling.retain(|id, began| {
+            if !is_online(id) || !watched.contains_key(id) {
+                return false;
+            }
+            let settled = now.duration_since(*began) >= timing.watch_settle;
+            if settled && !due.contains(id) {
+                due.push(*id);
+            }
+            !settled
+        });
         for id in due {
             inner.scan.request_root(&inner.counters, id, None);
         }
@@ -217,13 +245,15 @@ impl Polled {
 }
 
 /// Brings the watched set in line with the library's folders and requests a scan for
-/// every folder whose presence on disk changed.
+/// every folder whose presence on disk changed. Returns the folders that have just
+/// begun to be watched.
 fn reconcile(
     inner: &Inner,
     mut watcher: Option<&mut RecommendedWatcher>,
     watched: &mut HashMap<i64, Watched>,
     unwatchable: &mut HashSet<i64>,
-) {
+) -> Vec<i64> {
+    let mut newly_watched = Vec::new();
     let roots: Vec<(i64, PathBuf, bool)> = lock(&inner.state)
         .roots
         .iter()
@@ -257,6 +287,7 @@ fn reconcile(
                         let canonical =
                             std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
                         watched.insert(id, Watched { path, canonical });
+                        newly_watched.push(id);
                     }
                     Err(err) => {
                         if unwatchable.insert(id) {
@@ -278,6 +309,7 @@ fn reconcile(
             inner.scan.request_root(&inner.counters, id, None);
         }
     }
+    newly_watched
 }
 
 /// Records which directories an event touches. Returns true if anything was recorded.
@@ -519,6 +551,7 @@ mod tests {
             watcher_retry: Duration::from_millis(3000),
             unwatched_rescan: Duration::from_millis(200),
             remote_rescan: Duration::from_millis(200),
+            watch_settle: Duration::from_millis(200),
         };
         let attempts = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel();

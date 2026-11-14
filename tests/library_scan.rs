@@ -2690,7 +2690,7 @@ impl ModelAlbum {
     }
 }
 
-fn write_model_sheet(path: &Path, album: usize, sheet: &ModelSheet) {
+fn write_model_sheet(path: &Path, album: usize, sheet: &ModelSheet, spelling: usize) {
     match sheet {
         ModelSheet::None => {
             let _ = fs::remove_file(path);
@@ -2702,7 +2702,10 @@ fn write_model_sheet(path: &Path, album: usize, sheet: &ModelSheet) {
         )
         .unwrap(),
         ModelSheet::Tracks(letter, tracks) => {
-            let mut text = String::from("FILE \"image.wav\" WAVE\n");
+            // The file's name as written elsewhere: other letter case, or the name it
+            // had before it was converted.
+            let name = ["image.wav", "IMAGE.WAV", "Image.Wav", "image.flac"][spelling % 4];
+            let mut text = format!("FILE \"{name}\" WAVE\n");
             for (number, start) in tracks {
                 text.push_str(&format!(
                     "TRACK {number:02} AUDIO\nTITLE \"{letter}{album}-{number}\"\nINDEX 01 00:{start:02}:00\n"
@@ -2765,6 +2768,9 @@ fn sheet_model_run(seed: u64, steps: usize) {
     let mut unreadable = [false; 2];
     // Whether the scan before this step could finish (the library is what it should be).
     let mut settled = true;
+    // Whether only a scan of the whole music folder can bring the library up to date
+    // (something outside the folder scanned last is still open).
+    let mut whole_due = false;
     let mut log: Vec<String> = Vec::new();
     for step in 0..steps {
         let a = roll(2) as usize;
@@ -2772,10 +2778,14 @@ fn sheet_model_run(seed: u64, steps: usize) {
         fs::create_dir_all(&dir).unwrap();
         let image = dir.join("image.wav");
         let sheet_paths = [dir.join("image.cue"), dir.join("zz.cue")];
-        let op = roll(15);
+        let op = roll(16);
         if unreadable[a] && op <= 7 {
             continue;
         }
+        // Changes to an album's files are followed by a scan of its folder alone, as the
+        // folder watcher asks for, or by one of the whole music folder; everything else
+        // by one of the whole music folder.
+        let folder_only = matches!(op, 0..=7 | 14) && roll(2) == 0;
         match op {
             0..=2 => {
                 let length = [0, 800, 1500, 3000, 5000, 8000][roll(6) as usize];
@@ -2805,7 +2815,7 @@ fn sheet_model_run(seed: u64, steps: usize) {
                         ModelSheet::Tracks(['T', 'Z'][which], tracks)
                     }
                 };
-                write_model_sheet(&sheet_paths[which], a, &sheet);
+                write_model_sheet(&sheet_paths[which], a, &sheet, roll(6) as usize);
                 log.push(format!("{step}: A{a} sheet {which} {sheet:?}"));
                 albums[a].sheets[which] = sheet;
             }
@@ -2826,6 +2836,44 @@ fn sheet_model_run(seed: u64, steps: usize) {
                 locked = !locked;
                 lock_dir(locked);
                 log.push(format!("{step}: locked folder {locked}"));
+            }
+            15 => {
+                // The album's file is opened (from the file manager, say): that gives
+                // the tracks the folder stands for, and changes nothing in the library.
+                if settled && albums[a].audio_ms.is_some() {
+                    let titles_of = |library: &Library| {
+                        let mut all: Vec<(String, bool)> = library
+                            .snapshot()
+                            .tracks
+                            .iter()
+                            .map(|t| (t.title.clone(), t.available))
+                            .collect();
+                        all.sort();
+                        all
+                    };
+                    let before = titles_of(&library);
+                    let opened = library.import_files(std::slice::from_ref(&image));
+                    let mut got: Vec<String> = opened
+                        .iter()
+                        .filter_map(|id| library.track(*id))
+                        .map(|t| t.title.clone())
+                        .collect();
+                    got.sort();
+                    let mut want: Vec<String> = albums[a]
+                        .expected(a)
+                        .into_iter()
+                        .map(|(title, _)| title)
+                        .collect();
+                    want.sort();
+                    log.push(format!("{step}: A{a} file opened"));
+                    let context = format!("seed {seed}, after:\n  {}", log.join("\n  "));
+                    assert_eq!(got, want, "opened: {context}");
+                    assert_eq!(
+                        titles_of(&library),
+                        before,
+                        "opening changed the library: {context}"
+                    );
+                }
             }
             14 => {
                 // The first sheet cannot be read for a while (and can again). Only from
@@ -2867,12 +2915,20 @@ fn sheet_model_run(seed: u64, steps: usize) {
             }
         }
 
-        rescan(&library);
         // A scan that could not read the locked folder concludes nothing about what is
-        // gone: what the library holds then is checked once a scan can finish.
-        let incomplete = locked && fs::read_dir(&locked_dir).is_err();
-        settled = !incomplete;
-        if incomplete {
+        // gone: what the library holds then is checked once a scan of everything can
+        // finish. (A scan of an album's folder alone does not meet the locked folder.)
+        let cannot_finish = locked && fs::read_dir(&locked_dir).is_err();
+        if folder_only && !whole_due {
+            library.debug_rescan_dirs(std::slice::from_ref(&dir));
+            wait_scan(&library);
+            log.push(format!("{step}: (scan of A{a} alone)"));
+        } else {
+            rescan(&library);
+            whole_due = cannot_finish;
+        }
+        settled = !whole_due;
+        if whole_due {
             continue;
         }
         let mut expected: Vec<(String, u64)> = vec![("Anchor".into(), 1000)];
@@ -3019,6 +3075,97 @@ fn an_opened_sheet_file_is_its_tracks() {
     for id in tracks {
         assert!(library.track(id).expect("kept").available);
     }
+}
+
+/// A playlist with tracks of a sheet in it, written out and read in again (on the same
+/// computer): the same tracks, in their order. The sheet's tracks are written as the
+/// paths the library knows them by.
+#[test]
+fn a_playlist_with_sheet_tracks_comes_back_as_it_was() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    write_tagged_wav(&music.join("single.wav"), 1000, "Single", "Band", "Singles");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    let ids = [
+        by_title(&library, "Two").id,
+        by_title(&library, "Single").id,
+        by_title(&library, "One").id,
+        by_title(&library, "Two").id,
+    ];
+    let playlist = library.create_playlist("Mix").unwrap();
+    library.add_to_playlist(playlist, &ids).unwrap();
+    let file = env.dir.path().join("mix.m3u8");
+    assert_eq!(library.export_m3u8(playlist, &file).unwrap(), 4);
+    let imported = library.import_m3u8(&file).unwrap();
+    assert!(imported.missing.is_empty(), "{:?}", imported.missing);
+    let back: Vec<_> = library
+        .playlist_items(imported.playlist_id)
+        .into_iter()
+        .map(|item| item.track_id)
+        .collect();
+    assert_eq!(back, ids);
+    assert_eq!(titles(&library), ["One", "Single", "Two"], "nothing added");
+}
+
+/// A sheet that appears, changes and goes in a watched folder is followed without a
+/// rescan being asked for: the folder watcher sees `.cue` files too.
+#[test]
+fn the_watcher_follows_a_sheet() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    write_tagged_wav(&music.join("other.wav"), 1000, "Other", "Band", "Other");
+    let (library, _) = env.open_scanned();
+    library.start_watching();
+    // Give the event stream a moment to start before changing anything.
+    std::thread::sleep(Duration::from_millis(1500));
+    let sheet = music.join("Live/image.cue");
+    let write = |second: &str| {
+        fs::write(
+            &sheet,
+            format!(
+                "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+                 \x20 TRACK 02 AUDIO\n    TITLE \"{second}\"\n    INDEX 01 00:01:00\n"
+            ),
+        )
+        .unwrap();
+    };
+    write("Two");
+    wait_until("the sheet's tracks", TIMEOUT, || {
+        titles(&library) == ["One", "Other", "Two"]
+    });
+    write("Second");
+    wait_until("the new title", TIMEOUT, || {
+        titles(&library) == ["One", "Other", "Second"]
+    });
+    fs::remove_file(&sheet).unwrap();
+    wait_until("the file alone again", TIMEOUT, || {
+        titles(&library) == ["Other", "Whole"]
+    });
+    assert!(library.snapshot().tracks.iter().all(|t| t.available));
+}
+
+/// A file that appears just as a folder begins to be watched (the system's event
+/// stream is not running yet, and the scan that came with the folder is over) is not
+/// missed: the folder is scanned once more shortly after.
+#[test]
+fn a_change_made_as_watching_begins_is_not_missed() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("a/one.wav"), 500, "One", "Band", "A");
+    let (library, _) = env.open_scanned();
+    library.start_watching();
+    write_tagged_wav(&music.join("a/two.wav"), 500, "Two", "Band", "A");
+    wait_until("the file from before the watch was live", TIMEOUT, || {
+        titles(&library) == ["One", "Two"]
+    });
 }
 
 /// A music folder that is removed takes the record of its sheets with it.

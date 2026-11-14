@@ -491,9 +491,26 @@ fn read_playlist_file(path: &Path) -> Result<Vec<u8>, LibraryError> {
     })
 }
 
-/// The CUE sheets in `folder` that are for one audio file there: (that file, the sheet,
-/// its track numbers), the first by name for a file that has several (as for the scan).
-fn sheets_in(folder: &Path) -> Vec<(PathBuf, PathBuf, Vec<u32>)> {
+/// A CUE sheet in a folder, as far as it says which file there is its audio file.
+struct FolderSheet {
+    path: PathBuf,
+    file: SheetFile,
+    /// The numbers of its tracks.
+    numbers: Vec<u32>,
+}
+
+/// The audio file of a sheet in a folder.
+enum SheetFile {
+    /// The file the sheet names.
+    Named(PathBuf),
+    /// The sheet cannot be read just now: the file of this size, by the record of the
+    /// sheet's last reading (as the scan knows it meanwhile, see `scan::hold_sheet`).
+    OfSize(u64),
+}
+
+/// The CUE sheets in `folder` that are for one audio file there, in the order of their
+/// names (the first one for a file has it, as for the scan).
+fn sheets_in(inner: &Inner, folder: &Path) -> Vec<FolderSheet> {
     let Ok(entries) = fs::read_dir(folder) else {
         return Vec::new();
     };
@@ -506,17 +523,30 @@ fn sheets_in(folder: &Path) -> Vec<(PathBuf, PathBuf, Vec<u32>)> {
         })
         .collect();
     sheets.sort();
-    let mut found: Vec<(PathBuf, PathBuf, Vec<u32>)> = Vec::new();
-    for sheet_path in sheets {
-        let Some(sheet) = cue::read(&sheet_path) else {
-            continue;
+    let mut found: Vec<FolderSheet> = Vec::new();
+    for path in sheets {
+        let named = cue::read_checked(&path).and_then(|sheet| match sheet {
+            Some(sheet) => Ok(cue::audio_of_checked(&path, &sheet)?.map(|audio| {
+                let numbers = sheet.tracks.iter().map(|t| t.number).collect();
+                (SheetFile::Named(audio), numbers)
+            })),
+            None => Ok(None),
+        });
+        let sheet = match named {
+            Ok(sheet) => sheet,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            // It (or its file) cannot be examined just now: what its last reading
+            // recorded stands for it.
+            Err(_) => lock(&inner.sheets_read)
+                .get(&scan::sheet_key(&path))
+                .map(|record| (SheetFile::OfSize(record.audio_size), record.tracks.clone())),
         };
-        let Some(audio) = cue::audio_of(&sheet_path, &sheet) else {
-            continue;
-        };
-        if found.iter().all(|(known, _, _)| *known != audio) {
-            let numbers = sheet.tracks.iter().map(|t| t.number).collect();
-            found.push((audio, sheet_path, numbers));
+        if let Some((file, numbers)) = sheet {
+            found.push(FolderSheet {
+                path,
+                file,
+                numbers,
+            });
         }
     }
     found
@@ -1556,7 +1586,7 @@ impl Library {
         // file system is asked.
         let mut results: Vec<Vec<TrackId>> = vec![Vec::new(); paths.len()];
         // The CUE sheets of a folder, as (audio file, sheet, its track numbers).
-        let mut sheets_of: HashMap<PathBuf, Vec<(PathBuf, PathBuf, Vec<u32>)>> = HashMap::new();
+        let mut sheets_of: HashMap<PathBuf, Vec<FolderSheet>> = HashMap::new();
         let mut revive: Vec<TrackId> = Vec::new();
         // New files: library path -> (folder it belongs to, result slots waiting for it).
         let mut fresh: Vec<(PathBuf, Option<i64>, Vec<usize>)> = Vec::new();
@@ -1594,20 +1624,29 @@ impl Library {
             {
                 let sheets = sheets_of
                     .entry(folder.to_path_buf())
-                    .or_insert_with(|| sheets_in(folder));
-                if let Some((_, sheet, numbers)) =
-                    sheets.iter().find(|(audio, _, _)| *audio == library_path)
-                {
+                    .or_insert_with(|| sheets_in(inner, folder));
+                let size = sheets
+                    .iter()
+                    .any(|sheet| matches!(sheet.file, SheetFile::OfSize(_)))
+                    .then(|| fs::metadata(&library_path).map(|meta| meta.len()).ok())
+                    .flatten();
+                // The first sheet (by name) that is for the file has it.
+                let sheet = sheets.iter().find(|sheet| match &sheet.file {
+                    SheetFile::Named(audio) => *audio == library_path,
+                    SheetFile::OfSize(of) => size == Some(*of),
+                });
+                if let Some(sheet) = sheet {
                     // Only the tracks its reading gave: one that starts beyond the end
                     // of the file may still be kept (a favourite), and is not one.
                     let given = lock(&inner.sheets_read)
-                        .get(&scan::sheet_key(sheet))
+                        .get(&scan::sheet_key(&sheet.path))
                         .map(|record| record.tracks.clone());
                     let state = lock(&inner.state);
-                    let tracks: Vec<TrackId> = numbers
+                    let tracks: Vec<TrackId> = sheet
+                        .numbers
                         .iter()
                         .filter(|n| given.as_ref().is_none_or(|given| given.contains(n)))
-                        .filter_map(|n| state.id_of_path(&cue::track_path(sheet, *n)))
+                        .filter_map(|n| state.id_of_path(&cue::track_path(&sheet.path, *n)))
                         .collect();
                     if !tracks.is_empty() {
                         // The file is there (the sheet was found for it): its tracks are
@@ -2336,6 +2375,27 @@ impl Library {
         self.inner
             .publish_interval_ms
             .store(millis, Ordering::Relaxed);
+    }
+
+    /// Scans only `dirs` of the music folder they are in, as the folder watcher does
+    /// when files in them change (lets tests take that path without waiting for the
+    /// watcher). Folders that are in no music folder are ignored.
+    #[doc(hidden)]
+    pub fn debug_rescan_dirs(&self, dirs: &[PathBuf]) {
+        let mut by_root: HashMap<i64, std::collections::BTreeSet<PathBuf>> = HashMap::new();
+        {
+            let state = lock(&self.inner.state);
+            for dir in dirs {
+                if let Some(root) = state.root_containing(dir) {
+                    by_root.entry(root.id).or_default().insert(dir.clone());
+                }
+            }
+        }
+        for (root_id, dirs) in by_root {
+            self.inner
+                .scan
+                .request_root(&self.inner.counters, root_id, Some(dirs));
+        }
     }
 
     /// Number of files whose tags were read since the library was opened (lets tests
