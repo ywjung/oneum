@@ -42,11 +42,30 @@ impl PlayerHost for LibraryHost {
             available: t.available,
             sample_rate: t.playback_rate(),
             bit_depth: t.bit_depth,
+            album_key: t.album_key,
         })
+    }
+
+    fn has_track(&self, id: TrackId) -> bool {
+        self.library.track(id).is_some()
+    }
+
+    fn album_of(&self, id: TrackId) -> Option<u64> {
+        // As the library shows albums: shuffling by album keeps a merged one whole.
+        let key = self.library.track(id)?.album_key;
+        Some(self.library.snapshot().shown_album_key(key))
     }
 
     fn record_play(&self, id: TrackId) {
         self.library.record_play(id);
+    }
+
+    fn resume_point(&self, id: TrackId) -> Option<u64> {
+        self.library.resume_point(id)
+    }
+
+    fn set_resume_point(&self, id: TrackId, position_ms: Option<u64>) {
+        self.library.set_resume_point(id, position_ms);
     }
 
     fn radio_picks(&self, seed: TrackId, exclude: &[TrackId], count: usize) -> Vec<TrackId> {
@@ -74,16 +93,15 @@ impl PlayerHost for LibraryHost {
         })
     }
 
-    fn save_session(&self, session: &Session, queue_changed: bool) {
-        if queue_changed {
-            let items: Vec<(u64, TrackId)> = session
+    fn save_session(&self, session: &Session, queue_changed: bool) -> bool {
+        let items: Option<Vec<(u64, TrackId)>> = queue_changed.then(|| {
+            session
                 .queue
                 .items
                 .iter()
                 .map(|i| (i.id, i.track))
-                .collect();
-            self.library.save_queue(&items);
-        }
+                .collect()
+        });
         let meta = SessionMeta {
             current: session.queue.current,
             shuffle: session.queue.shuffle,
@@ -92,8 +110,15 @@ impl PlayerHost for LibraryHost {
             position_ms: session.position_ms,
             volume: Some(session.volume),
         };
-        if let Ok(json) = serde_json::to_string(&meta) {
-            self.library.kv_set(SESSION_KEY, &json);
+        match serde_json::to_string(&meta) {
+            // The queue and the rest go in together, or not at all.
+            Ok(json) => self
+                .library
+                .save_session(items.as_deref(), SESSION_KEY, &json),
+            Err(err) => {
+                tracing::warn!(%err, "could not encode the playback session");
+                false
+            }
         }
     }
 

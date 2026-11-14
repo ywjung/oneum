@@ -144,16 +144,25 @@ fn from_tagged(file: &TaggedFile) -> (Vec<Credit>, Vec<(Fact, String)>) {
     (credits, facts)
 }
 
-/// Everything the file at `path` says beyond what the library keeps. A file that
-/// cannot be read says nothing (these are extras, not worth an error message); its
-/// lyrics may still come from a text file next to it.
+/// Everything the file of the track at `path` says beyond what the library keeps. A
+/// file that cannot be read says nothing (these are extras, not worth an error
+/// message); its lyrics may still come from a text file next to it.
+///
+/// For a track of a CUE sheet that is the sheet's audio file: its credits are the
+/// album's. Lyrics in that file would be the whole album's, so none are taken from it.
 pub fn read(path: &Path) -> Details {
-    let tagged = lofty::read_from_path(path).ok();
+    let sheet_track = super::cue::sheet_of(path).is_some();
+    let file = super::cue::real_file(path);
+    let tagged = super::tags::read_tagged(&file);
     let (credits, facts) = tagged.as_ref().map(from_tagged).unwrap_or_default();
-    let lyrics = tagged
-        .as_ref()
-        .and_then(lyrics::from_tags)
-        .or_else(|| lyrics::from_sidecar(path));
+    let lyrics = if sheet_track {
+        None
+    } else {
+        tagged
+            .as_ref()
+            .and_then(lyrics::from_tags)
+            .or_else(|| lyrics::from_sidecar(path))
+    };
     Details {
         credits,
         facts,
@@ -264,6 +273,22 @@ mod tests {
                 let lyrics = details.lyrics.as_ref().expect("lyrics");
                 assert_eq!(lyrics.plain, "da da da\ndum");
                 assert_eq!(lyrics.line_at(3_500), Some(1));
+
+                // The same file as the audio file of a CUE sheet: a track of it has the
+                // file's credits (the album's), not its lyrics (the whole album's).
+                let sheet = folder.join("album.cue");
+                std::fs::write(
+                    &sheet,
+                    format!(
+                        "FILE \"{name}\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n\
+                         TRACK 02 AUDIO\nINDEX 01 00:00:30\n"
+                    ),
+                )
+                .expect("sheet");
+                let track = read(&super::super::cue::track_path(&sheet, 2));
+                assert_eq!(track.credits, details.credits);
+                assert_eq!(track.facts, details.facts);
+                assert!(track.lyrics.is_none());
             }
         }
         // A file that is not audio says nothing, quietly.

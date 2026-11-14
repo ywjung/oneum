@@ -31,6 +31,15 @@ const SLEEP_FADE: Duration = Duration::from_secs(5);
 /// own short fade-out, so that the volume coming back up is not heard as a tick.
 const SLEEP_RESTORE_AFTER: Duration = Duration::from_millis(120);
 const QUEUE_SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
+/// "Resume long tracks": tracks at least this long start where they were left off…
+const RESUME_MIN_DURATION_MS: u64 = 20 * 60 * 1000;
+/// …if at least this much of them had been heard…
+const RESUME_MIN_POSITION_MS: u64 = 30 * 1000;
+/// …and not all but this last bit (then it counts as finished).
+const RESUME_END_MS: u64 = 60 * 1000;
+/// After a session save failed (a full disk, a locked database), the wait before the
+/// next attempt.
+const SESSION_RETRY_AFTER: Duration = Duration::from_secs(2);
 /// Playback stops after this many tracks in a row could not be played.
 pub const MAX_CONSECUTIVE_FAILURES: usize = 10;
 /// A play is counted once this much of the track has been heard (or half of it, if shorter).
@@ -57,6 +66,8 @@ pub struct PlayableTrack {
     pub sample_rate: u32,
     /// Bits per sample of a lossless file, when the library knows it.
     pub bit_depth: Option<u8>,
+    /// The album it belongs to as the file says (see [`PlayerHost::album_of`]).
+    pub album_key: u64,
 }
 
 /// Persisted across restarts.
@@ -70,6 +81,16 @@ pub struct Session {
 /// The player's view of the rest of the app. Also the seam used by tests.
 pub trait PlayerHost: Send + Sync + 'static {
     fn track(&self, id: TrackId) -> Option<PlayableTrack>;
+    /// Whether the track is (still) there; asked for every queue item whenever the
+    /// library changes, so a host can answer it without building a [`PlayableTrack`].
+    fn has_track(&self, id: TrackId) -> bool {
+        self.track(id).is_some()
+    }
+    /// The album a track counts as for shuffling by album: a host that shows albums
+    /// tagged inconsistently as one gives that one's key.
+    fn album_of(&self, id: TrackId) -> Option<u64> {
+        self.track(id).map(|t| t.album_key)
+    }
     /// A track was listened to (see `PLAY_CREDIT_MS`).
     fn record_play(&self, id: TrackId);
     /// Radio: up to `count` tracks to follow `seed` when the queue has run out, none of
@@ -77,9 +98,17 @@ pub trait PlayerHost: Send + Sync + 'static {
     fn radio_picks(&self, _seed: TrackId, _exclude: &[TrackId], _count: usize) -> Vec<TrackId> {
         Vec::new()
     }
+    /// Where the user left off in a long track (see "resume long tracks").
+    fn resume_point(&self, _id: TrackId) -> Option<u64> {
+        None
+    }
+    /// Remembers where the user left off in a long track, or forgets it (`None`).
+    fn set_resume_point(&self, _id: TrackId, _position_ms: Option<u64>) {}
     fn load_session(&self) -> Option<Session>;
-    /// `queue_changed` is false when only the position or volume differ from the last save.
-    fn save_session(&self, session: &Session, queue_changed: bool);
+    /// `queue_changed` is false when only the position or volume differ from the last
+    /// successful save. Returns false if the session could not be saved; the player then
+    /// keeps it marked as unsaved (the queue too, if it was part of it) and tries again.
+    fn save_session(&self, session: &Session, queue_changed: bool) -> bool;
     /// The snapshot changed (repaint, update Now Playing). Called from the player thread.
     fn changed(&self);
 }
@@ -119,6 +148,10 @@ pub enum Command {
     SetCorrection(Option<PeqProfile>),
     /// Radio on or off: when the queue runs out, go on with songs like the last one.
     SetRadio(bool),
+    /// Shuffle whole albums instead of single tracks.
+    SetShuffleByAlbum(bool),
+    /// Start long tracks where they were left off.
+    SetResumeLongTracks(bool),
     /// Stop when the song that is on now has ended, with the next one ready to play.
     /// Applies to this one song: it is over once playback has stopped there or another
     /// song was started.
@@ -286,6 +319,8 @@ pub struct PlayerConfig {
     /// The parametric correction profile to start with.
     pub correction: Option<PeqProfile>,
     pub radio: bool,
+    pub shuffle_by_album: bool,
+    pub resume_long_tracks: bool,
     pub device_pref: Option<String>,
     pub output: OutputSettings,
     /// Playback that is wanted but produces no audio for this long is treated as a
@@ -302,6 +337,8 @@ impl Default for PlayerConfig {
             crossfeed: Crossfeed::Off,
             correction: None,
             radio: false,
+            shuffle_by_album: false,
+            resume_long_tracks: false,
             device_pref: None,
             output: OutputSettings::default(),
             stall_timeout: Duration::from_secs(15),
@@ -569,6 +606,8 @@ struct Player<H: PlayerHost> {
     /// not applied).
     correction: Option<String>,
     radio: bool,
+    /// Start long tracks where they were left off (see `start_fresh`).
+    resume_long_tracks: bool,
     /// The queue item after which playback stops.
     stop_after: Option<ItemId>,
     /// Sleep timer: when to pause.
@@ -599,6 +638,8 @@ struct Player<H: PlayerHost> {
     /// Since when a feed exists although playback is paused.
     paused_since: Option<Instant>,
     last_session_save: Instant,
+    /// Set after a failed session save: no timed save is tried before then.
+    session_retry_at: Option<Instant>,
     last_position_publish: Instant,
     running: bool,
     start_requested_at: Option<Instant>,
@@ -615,15 +656,23 @@ impl<H: PlayerHost> Player<H> {
         session: Option<Session>,
         volume: f32,
     ) -> Self {
-        let (queue, resume_ms) = match session {
+        let (mut queue, resume_ms) = match session {
             Some(s) => {
                 let mut queue = Queue::from_state(s.queue);
                 // Tracks may have left the library since the last run.
-                let current_removed = queue.retain_tracks(|t| host.track(t).is_some());
+                let current_removed = queue.retain_tracks(|t| host.has_track(t));
                 (queue, if current_removed { 0 } else { s.position_ms })
             }
             None => (Queue::new(), 0),
         };
+        let lookup = host.clone();
+        queue.set_album_lookup(Box::new(move |track| {
+            lookup
+                .album_of(track)
+                .unwrap_or(u64::MAX ^ track.cast_unsigned())
+        }));
+        // As it was: a restored shuffled queue keeps its order.
+        queue.restore_shuffle_by_album(config.shuffle_by_album);
         let state = if queue.current().is_some() {
             PlayState::Paused
         } else {
@@ -654,6 +703,7 @@ impl<H: PlayerHost> Player<H> {
                 .filter(|p| !p.is_flat())
                 .map(|p| p.name.clone()),
             radio: config.radio,
+            resume_long_tracks: config.resume_long_tracks,
             stop_after: None,
             sleep_at: None,
             sleep_restore_at: None,
@@ -672,6 +722,7 @@ impl<H: PlayerHost> Player<H> {
             last_render_position: (0, 0),
             paused_since: None,
             last_session_save: Instant::now(),
+            session_retry_at: None,
             last_position_publish: Instant::now(),
             running: true,
             start_requested_at: None,
@@ -1190,22 +1241,24 @@ impl<H: PlayerHost> Player<H> {
                 tracks,
                 start_index,
             } => {
+                self.remember_position();
                 self.queue.replace(&tracks, start_index);
                 self.mark_queue_changed();
                 self.want_playing = true;
                 self.consecutive_failures = 0;
                 self.listen.reset();
-                self.start_current(0, false);
+                self.start_fresh();
             }
             Command::PlayNext(tracks) => self.add_tracks(&tracks, true),
             Command::Enqueue(tracks) => self.add_tracks(&tracks, false),
             Command::JumpTo(id) => {
+                self.remember_position();
                 if self.queue.jump_to(id).is_some() {
                     self.want_playing = true;
                     self.consecutive_failures = 0;
                     self.listen.reset();
                     self.meta_dirty_since.get_or_insert_with(Instant::now);
-                    self.start_current(0, false);
+                    self.start_fresh();
                 }
             }
             Command::RemoveItems(ids) => {
@@ -1233,6 +1286,7 @@ impl<H: PlayerHost> Player<H> {
                 }
             }
             Command::Stop => {
+                self.remember_position();
                 if self.queue.current().is_some() {
                     self.stop_after = None;
                     self.halt();
@@ -1256,11 +1310,12 @@ impl<H: PlayerHost> Player<H> {
             }
             Command::Next => {
                 self.consecutive_failures = 0;
+                self.remember_position();
                 match self.queue.next_manual() {
                     Some(_) => {
                         self.listen.reset();
                         self.meta_dirty_since.get_or_insert_with(Instant::now);
-                        self.start_current(0, false);
+                        self.start_fresh();
                     }
                     None if self.queue.current().is_some() => self.end_of_queue(),
                     None => {}
@@ -1268,12 +1323,24 @@ impl<H: PlayerHost> Player<H> {
             }
             Command::Previous => {
                 self.consecutive_failures = 0;
-                match self.queue.previous_manual(self.position_ms()) {
-                    Some(Previous::Restart) => self.seek_to(0),
+                let position = self.position_ms();
+                self.remember_position();
+                match self.queue.previous_manual(position) {
+                    Some(Previous::Restart) => {
+                        // Started over on purpose: the place it was left at is not
+                        // where to come back to (until 30 s are heard, none is saved).
+                        if self.resume_long_tracks
+                            && self.current_duration_ms() >= RESUME_MIN_DURATION_MS
+                            && let Some(item) = self.queue.current()
+                        {
+                            self.host.set_resume_point(item.track, None);
+                        }
+                        self.seek_to(0);
+                    }
                     Some(Previous::Item(_)) => {
                         self.listen.reset();
                         self.meta_dirty_since.get_or_insert_with(Instant::now);
-                        self.start_current(0, false);
+                        self.start_fresh();
                     }
                     None => {}
                 }
@@ -1325,6 +1392,12 @@ impl<H: PlayerHost> Player<H> {
                 self.engine.set_correction(profile);
                 self.review_processed();
             }
+            Command::SetShuffleByAlbum(on) => {
+                self.queue.set_shuffle_by_album(on);
+                self.mark_queue_changed();
+                self.sync_next();
+            }
+            Command::SetResumeLongTracks(on) => self.resume_long_tracks = on,
             Command::SetRadio(on) => {
                 self.radio = on;
                 self.dirty = true;
@@ -1392,7 +1465,7 @@ impl<H: PlayerHost> Player<H> {
             }
             Command::LibraryChanged => {
                 let before = self.queue.len();
-                let current_removed = self.queue.retain_tracks(|t| self.host.track(t).is_some());
+                let current_removed = self.queue.retain_tracks(|t| self.host.has_track(t));
                 if self.queue.len() != before {
                     self.mark_queue_changed();
                     self.after_removal(current_removed);
@@ -1614,6 +1687,10 @@ impl<H: PlayerHost> Player<H> {
             if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                 self.host.record_play(finished.track_id);
             }
+            // Heard to the end: next time it starts from the beginning.
+            if finished.duration_ms >= RESUME_MIN_DURATION_MS {
+                self.host.set_resume_point(finished.track_id, None);
+            }
             self.listen.reset();
             if self.queue.advance_auto().map(|i| i.id) != Some(next_id) {
                 self.queue.jump_to(next_id);
@@ -1627,10 +1704,15 @@ impl<H: PlayerHost> Player<H> {
             let length_ms =
                 seg.start_ms + (end - seg.at_frame) * 1000 / u64::from(chain.rate.max(1));
             // A track that broke mid-way did not play to its end.
-            if failed != Some(seg.item_id)
-                && self.listen.take_credit(credit_threshold_ms(length_ms))
-            {
-                self.host.record_play(seg.track_id);
+            if failed != Some(seg.item_id) {
+                if self.listen.take_credit(credit_threshold_ms(length_ms)) {
+                    self.host.record_play(seg.track_id);
+                }
+                // The feed ran out at its end (the queue is over, or what follows needs a
+                // feed of its own): next time it starts from the beginning.
+                if seg.duration_ms >= RESUME_MIN_DURATION_MS {
+                    self.host.set_resume_point(seg.track_id, None);
+                }
             }
         }
         self.listen.reset();
@@ -1710,6 +1792,10 @@ impl<H: PlayerHost> Player<H> {
                         / u64::from(chain.rate.max(1));
                 if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                     self.host.record_play(finished.track_id);
+                }
+                // Heard to the end: next time it starts from the beginning.
+                if finished.duration_ms >= RESUME_MIN_DURATION_MS {
+                    self.host.set_resume_point(finished.track_id, None);
                 }
                 // The next segment is a new playthrough, also of the same item (repeat one).
                 self.listen.reset();
@@ -1916,19 +2002,72 @@ impl<H: PlayerHost> Player<H> {
         }
     }
 
+    /// Starts the current item: from the beginning, or for a long track (with "resume
+    /// long tracks" on) where it was left off.
+    fn start_fresh(&mut self) {
+        let start = self
+            .queue
+            .current()
+            .filter(|_| self.resume_long_tracks)
+            .and_then(|item| {
+                let duration = self.host.track(item.track)?.duration_ms;
+                let at = self.host.resume_point(item.track)?;
+                (duration >= RESUME_MIN_DURATION_MS
+                    && at >= RESUME_MIN_POSITION_MS
+                    && at + RESUME_END_MS < duration)
+                    .then_some(at)
+            })
+            .unwrap_or(0);
+        self.start_current(start, false);
+    }
+
+    /// With "resume long tracks" on, remembers where the current long track is (or
+    /// forgets it when it was heard to its last minute).
+    fn remember_position(&mut self) {
+        if !self.resume_long_tracks {
+            return;
+        }
+        let Some(item) = self.queue.current() else {
+            return;
+        };
+        let duration = self.current_duration_ms();
+        if duration < RESUME_MIN_DURATION_MS {
+            return;
+        }
+        let position = self.position_ms();
+        if position + RESUME_END_MS >= duration {
+            self.host.set_resume_point(item.track, None);
+        } else if position >= RESUME_MIN_POSITION_MS {
+            self.host.set_resume_point(item.track, Some(position));
+        }
+    }
+
     fn save_session(&mut self, force: bool) {
-        let queue_changed = self.queue_dirty_since.take().is_some() || force;
-        self.meta_dirty_since = None;
+        self.remember_position();
+        let queue_changed = self.queue_dirty_since.is_some() || force;
         let session = Session {
             queue: self.queue.to_state(),
             position_ms: self.position_ms(),
             volume: self.volume,
         };
-        self.host.save_session(&session, queue_changed);
+        let saved = self.host.save_session(&session, queue_changed);
         self.last_session_save = Instant::now();
+        if saved {
+            self.queue_dirty_since = None;
+            self.meta_dirty_since = None;
+            self.session_retry_at = None;
+        } else {
+            // Still unsaved (a queue change stays part of it), and tried again a little
+            // later: not on every tick, and not given up on.
+            self.meta_dirty_since.get_or_insert_with(Instant::now);
+            self.session_retry_at = Some(Instant::now() + SESSION_RETRY_AFTER);
+        }
     }
 
     fn save_session_if_due(&mut self) {
+        if self.session_retry_at.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
         let queue_due = self
             .queue_dirty_since
             .or(self.meta_dirty_since)

@@ -16,7 +16,7 @@ pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
     app_hooks, coreaudio as device, decode_cp949, fatal_alert, finder, locale, menu, nowplaying,
-    power, pump_main_loop, responder, run_on_main, testing, window,
+    power, pump_main_loop, responder, run_on_main, system, testing, window,
 };
 
 #[cfg(windows)]
@@ -24,7 +24,7 @@ pub mod windows;
 #[cfg(windows)]
 pub use windows::{
     app_hooks, decode_cp949, device, fatal_alert, finder, locale, menu, nowplaying, power,
-    pump_main_loop, responder, run_on_main, testing, window,
+    pump_main_loop, responder, run_on_main, system, testing, window,
 };
 
 /// True for an address a browser can be sent to: `http://` or `https://`, nothing else,

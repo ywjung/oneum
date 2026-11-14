@@ -5,6 +5,7 @@ use eframe::egui;
 use oneum::{app, platform::app_hooks, ui::OneumApp};
 
 fn main() {
+    install_panic_report();
     // Must be registered before the event loop exists so that files the app is launched
     // with (double-click in Finder) are delivered.
     app_hooks::install_before_launch();
@@ -14,7 +15,7 @@ fn main() {
             eprintln!("OnEum could not start: {error}");
             tracing::error!("startup failed: {error}");
             // Launched from Finder nobody sees stderr: say it in a dialog.
-            startup_alert(&error.to_string());
+            startup_alert(Problem::Library, &error.to_string());
             std::process::exit(1);
         }
     };
@@ -40,6 +41,8 @@ fn main() {
             // The menu bar is built by the app (platform::macos::menu).
             builder.with_default_menu(false);
         })),
+        // Every graphics adapter that can show the window is tried, not only the first.
+        wgpu_options: oneum::ui::renderer::wgpu_options(),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -49,7 +52,12 @@ fn main() {
     );
     if let Err(error) = result {
         tracing::error!("event loop failed: {error}");
-        startup_alert(&error.to_string());
+        let problem = if matches!(error, eframe::Error::Wgpu(_)) {
+            Problem::Graphics
+        } else {
+            Problem::Window
+        };
+        startup_alert(problem, &error.to_string());
         core.shutdown();
         std::process::exit(1);
     }
@@ -68,8 +76,18 @@ fn window_icon() -> egui::IconData {
     egui::IconData::default()
 }
 
-/// Tells the user why the app is not coming up, in the system language.
-fn startup_alert(detail: &str) {
+/// What kept the app from coming up (or ended it).
+#[derive(Clone, Copy)]
+enum Problem {
+    Library,
+    Graphics,
+    Window,
+    Crash,
+}
+
+/// Tells the user why the app is not coming up (or is going away), in the system
+/// language, with the details and where the log is.
+fn startup_alert(problem: Problem, detail: &str) {
     use oneum::i18n::Lang;
     let lang = if oneum::platform::locale::prefers_korean() {
         Lang::Ko
@@ -77,12 +95,56 @@ fn startup_alert(detail: &str) {
         Lang::En
     };
     let s = lang.strings();
+    let (title, body) = match problem {
+        Problem::Library => (s.startup_failed_title, s.startup_failed_body),
+        Problem::Graphics => (s.startup_failed_title, s.startup_graphics_body),
+        Problem::Window => (s.startup_failed_title, s.startup_window_body),
+        Problem::Crash => (s.crashed_title, s.crashed_body),
+    };
     let log = oneum::app::log_dir_hint();
+    let copy = if cfg!(windows) {
+        format!("\n\n{}", s.alert_copy_hint)
+    } else {
+        String::new()
+    };
     oneum::platform::fatal_alert(
-        s.startup_failed_title,
+        title,
         &format!(
-            "{}\n\n{detail}\n\n{}: {log}",
-            s.startup_failed_body, s.startup_failed_log
+            "{body}\n\n{detail}\n\n{}: {log}{copy}",
+            s.startup_failed_log
         ),
     );
+}
+
+/// Panics go in the log, whatever thread they happen on (many are caught there: a scan
+/// or a decoder that fails on one file). One on the main thread ends the app (on
+/// Windows the window system aborts the process right after), so that one is also told
+/// in a dialog rather than being a silent exit.
+fn install_panic_report() {
+    static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".to_string());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed");
+        tracing::error!(thread = name, %location, "panic: {message}");
+        previous(info);
+        // A panic that is caught where it happens (`app::panics::catch`) does not end
+        // the app: no dialog for it.
+        if name == "main"
+            && !oneum::app::panics::is_caught()
+            && !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            startup_alert(Problem::Crash, &format!("{message}\n({location})"));
+        }
+    }));
 }

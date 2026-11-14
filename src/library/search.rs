@@ -124,6 +124,10 @@ pub(crate) enum Filter {
     AddedSince(i64),
     /// Last played at or after this time (Unix seconds).
     PlayedSince(i64),
+    /// What the file check found (see `library::check`).
+    Check(CheckWanted),
+    /// DR value (rounded) from the first to the second, both included.
+    Dr(i32, i32),
     /// A value that cannot be understood (`year:abc`): nothing matches, which says more
     /// than silently showing everything.
     Never,
@@ -138,10 +142,34 @@ enum Subject {
     Favorite,
     Added,
     Played,
+    Check,
+    Dr,
+}
+
+/// A `check:` condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckWanted {
+    Damaged,
+    /// Verified or decoded without a fault.
+    Intact,
+    /// Matched the checksum the file carries.
+    Verified,
+    /// Not checked (yet, or since the file changed).
+    Unchecked,
+}
+
+fn check_wanted(value: &str) -> Option<CheckWanted> {
+    match value {
+        "damaged" | "bad" | "손상" | "손상됨" => Some(CheckWanted::Damaged),
+        "ok" | "intact" | "good" | "정상" => Some(CheckWanted::Intact),
+        "verified" | "md5" | "확인" => Some(CheckWanted::Verified),
+        "none" | "unchecked" | "no" | "미검사" | "안함" => Some(CheckWanted::Unchecked),
+        _ => None,
+    }
 }
 
 /// The names a field can be asked for by, in normalised form.
-const FIELD_NAMES: [(&str, Subject); 27] = [
+const FIELD_NAMES: [(&str, Subject); 30] = [
     ("title", Subject::Text(Field::Title)),
     ("제목", Subject::Text(Field::Title)),
     ("artist", Subject::Text(Field::Artist)),
@@ -169,6 +197,9 @@ const FIELD_NAMES: [(&str, Subject); 27] = [
     ("played", Subject::Played),
     ("들은", Subject::Played),
     ("최근재생", Subject::Played),
+    ("check", Subject::Check),
+    ("검사", Subject::Check),
+    ("dr", Subject::Dr),
 ];
 
 /// Splits a normalised query at whitespace; double quotes keep words together
@@ -314,6 +345,8 @@ impl PreparedQuery {
                             .map(|span| Filter::AddedSince(now.saturating_sub(span))),
                         Subject::Played => time_span(value)
                             .map(|span| Filter::PlayedSince(now.saturating_sub(span))),
+                        Subject::Check => check_wanted(value).map(Filter::Check),
+                        Subject::Dr => year_range(value).map(|(from, to)| Filter::Dr(from, to)),
                         Subject::Text(_) => None,
                     };
                     filters.push(filter.unwrap_or(Filter::Never));
@@ -489,6 +522,27 @@ mod tests {
         assert_eq!(year_range("abc"), None);
         assert_eq!(year_range(">"), None);
         assert_eq!(PreparedQuery::new("year:abc").filters, [Filter::Never]);
+    }
+
+    #[test]
+    fn what_the_file_check_found_can_be_asked_for() {
+        assert_eq!(
+            PreparedQuery::new("check:damaged dr:<8").filters,
+            [Filter::Check(CheckWanted::Damaged), Filter::Dr(i32::MIN, 7)]
+        );
+        assert_eq!(
+            PreparedQuery::new("검사:정상 dr:10-14").filters,
+            [Filter::Check(CheckWanted::Intact), Filter::Dr(10, 14)]
+        );
+        assert_eq!(
+            PreparedQuery::new("check:md5").filters,
+            [Filter::Check(CheckWanted::Verified)]
+        );
+        assert_eq!(
+            PreparedQuery::new("검사:미검사").filters,
+            [Filter::Check(CheckWanted::Unchecked)]
+        );
+        assert_eq!(PreparedQuery::new("check:maybe").filters, [Filter::Never]);
     }
 
     #[test]

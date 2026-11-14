@@ -394,6 +394,24 @@ impl LibrarySnapshot {
             Filter::Favorite(wanted) => track.favorite == *wanted,
             Filter::AddedSince(since) => track.added_at >= *since,
             Filter::PlayedSince(since) => track.last_played_at.is_some_and(|at| at >= *since),
+            Filter::Check(wanted) => {
+                use super::search::CheckWanted;
+                use crate::model::CheckVerdict;
+                let verdict = track.check.map(|c| c.verdict);
+                match wanted {
+                    CheckWanted::Damaged => verdict == Some(CheckVerdict::Damaged),
+                    CheckWanted::Intact => matches!(
+                        verdict,
+                        Some(CheckVerdict::Verified | CheckVerdict::Decoded)
+                    ),
+                    CheckWanted::Verified => verdict == Some(CheckVerdict::Verified),
+                    CheckWanted::Unchecked => verdict.is_none(),
+                }
+            }
+            Filter::Dr(from, to) => track
+                .check
+                .and_then(|c| c.dr)
+                .is_some_and(|dr| (*from..=*to).contains(&(dr.round() as i32))),
             Filter::Never => false,
         }
     }
@@ -513,6 +531,15 @@ impl LibrarySnapshot {
     /// Position of the album with the given key in [`LibrarySnapshot::albums`].
     pub fn album_index(&self, key: u64) -> Option<u32> {
         self.index.album_by_key.get(&key).copied()
+    }
+
+    /// The key of the album a track's own album key is shown as: tracks of one album
+    /// tagged inconsistently have different keys but are shown as one album, whose key
+    /// this is. The key itself if it is not merged (or not known).
+    pub fn shown_album_key(&self, key: u64) -> u64 {
+        self.album_index(key)
+            .and_then(|i| self.albums().get(i as usize))
+            .map_or(key, |album| album.key)
     }
 
     /// Builds the snapshot again from its own tracks, reusing the cached normalised
@@ -766,7 +793,8 @@ fn album_aliases(tracks: &[Arc<Track>], indexes: &[Arc<TrackIndex>]) -> HashMap<
         if track.album.is_empty() {
             continue;
         }
-        let Some(folder) = track.path.parent() else {
+        // A sheet's tracks are in the sheet's folder.
+        let Some(folder) = track.file().parent() else {
             continue;
         };
         folders_of_key
@@ -870,6 +898,8 @@ mod tests {
             mtime_ns: 1,
             replaygain: ReplayGainTags::default(),
             measured: None,
+            unmeasurable: false,
+            check: None,
             art_id: None,
             favorite: false,
             play_count: 0,
@@ -925,6 +955,17 @@ mod tests {
         // Both keys lead to the merged album.
         assert_eq!(snapshot.album_index(tagged_key), Some(0));
         assert_eq!(snapshot.album_index(untagged_key), Some(0));
+
+        // The tracks of a CUE sheet in that folder are in it too.
+        let mut tagged = track(3, "Three", "A", "Sessions");
+        tagged.path = PathBuf::from(format!("{folder}/bonus.flac"));
+        tagged.album_artist = "Various Artists".into();
+        tagged.album_key = album_key("Sessions", "Various Artists", false, &tagged.path);
+        let mut in_sheet = track(4, "Four", "B", "Sessions");
+        in_sheet.path = PathBuf::from(format!("{folder}/Sessions.cue/01"));
+        in_sheet.album_key = album_key("Sessions", "", false, &in_sheet.path);
+        let snapshot = LibrarySnapshot::from_tracks(vec![tagged, in_sheet]);
+        assert_eq!(snapshot.albums().len(), 1, "one album");
     }
 
     #[test]

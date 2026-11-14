@@ -58,6 +58,11 @@ objc2-core-audio = { version = "0.3", default-features = false, features = ["std
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = "0.3"
 
+# Windows' media controls (media keys and the system media overlay). The same version
+# cpal and wgpu already use; the features only select the parts that are compiled.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", default-features = false, features = ["std", "Foundation", "Media", "Win32_Foundation", "Win32_System_WinRT"] }
+
 [dev-dependencies]
 tempfile = "3"
 

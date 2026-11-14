@@ -46,6 +46,11 @@ struct TestHost {
     saves: AtomicUsize,
     /// Saves that had to rewrite the queue's items.
     queue_saves: AtomicUsize,
+    /// While set, saving the session fails (a full disk, a locked database).
+    fail_saves: AtomicBool,
+    /// Where long tracks were left off.
+    resume: Mutex<HashMap<TrackId, u64>>,
+    failed_saves: AtomicUsize,
     /// While set, looking a track up does not return: a stand-in for the player thread
     /// being stuck in a call into a device driver that has hung.
     hang: AtomicBool,
@@ -69,6 +74,7 @@ impl TestHost {
                     available,
                     sample_rate: 0,
                     bit_depth: None,
+                    album_key: 0,
                 },
             );
         };
@@ -97,6 +103,7 @@ impl TestHost {
                 available: true,
                 sample_rate: 0,
                 bit_depth: None,
+                album_key: 0,
             },
         );
         self
@@ -138,12 +145,27 @@ impl PlayerHost for TestHost {
     fn load_session(&self) -> Option<Session> {
         self.session.lock().expect("lock").clone()
     }
-    fn save_session(&self, session: &Session, queue_changed: bool) {
+    fn resume_point(&self, id: TrackId) -> Option<u64> {
+        self.resume.lock().expect("lock").get(&id).copied()
+    }
+    fn set_resume_point(&self, id: TrackId, position_ms: Option<u64>) {
+        let mut resume = self.resume.lock().expect("lock");
+        match position_ms {
+            Some(ms) => resume.insert(id, ms),
+            None => resume.remove(&id),
+        };
+    }
+    fn save_session(&self, session: &Session, queue_changed: bool) -> bool {
+        if self.fail_saves.load(Ordering::Relaxed) {
+            self.failed_saves.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         *self.saved.lock().expect("lock") = Some(session.clone());
         self.saves.fetch_add(1, Ordering::Relaxed);
         if queue_changed {
             self.queue_saves.fetch_add(1, Ordering::Relaxed);
         }
+        true
     }
     fn changed(&self) {
         self.changes.fetch_add(1, Ordering::Relaxed);
@@ -890,6 +912,120 @@ fn write_long_wav(dir: &std::path::Path, seconds: u32) -> PathBuf {
     path
 }
 
+/// A silent 21-minute WAV (8 kHz mono, so that it is small): a "long track".
+fn write_21_minute_wav(dir: &std::path::Path) -> PathBuf {
+    let frames: u32 = 21 * 60 * 8_000;
+    let data_len = frames * 2;
+    let mut bytes = Vec::with_capacity(44 + data_len as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8_000u32.to_le_bytes());
+    bytes.extend_from_slice(&16_000u32.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    bytes.resize(44 + data_len as usize, 0);
+    let path = dir.join("long21.wav");
+    std::fs::write(&path, bytes).expect("write");
+    path
+}
+
+/// "Resume long tracks": a long track chosen again starts where it was left; with the
+/// setting off, or after "previous" restarts it, from the beginning.
+#[test]
+fn a_long_track_starts_where_it_was_left_off() {
+    const MIX: TrackId = 901;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host = TestHost::new().with_track(MIX, write_21_minute_wav(dir.path()), 21 * 60_000);
+    let rig = Rig::start(host);
+    rig.send(Command::SetResumeLongTracks(true));
+    rig.send(play(&[MIX, A], 0));
+    rig.wait("the long track plays", |s| {
+        Rig::track(s) == Some(MIX) && s.state == PlayState::Playing
+    });
+    rig.send(Command::SeekTo(300_000));
+    rig.wait("seeked", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 300_000
+    });
+    rig.send(Command::Next);
+    rig.wait("the next track", |s| Rig::track(s) == Some(A));
+    let saved = rig.host.resume_point(MIX).expect("remembered");
+    assert!((300_000..310_000).contains(&saved), "{saved}");
+    // Chosen again: it starts there.
+    rig.send(play(&[MIX], 0));
+    let s = rig.wait("resumed", |s| {
+        Rig::track(s) == Some(MIX) && s.state == PlayState::Playing
+    });
+    assert!(s.position_ms >= saved, "{}", s.position_ms);
+    // "Previous" after three seconds restarts it from the beginning, as always, and
+    // the place it was left at is forgotten (started over on purpose).
+    rig.send(Command::Previous);
+    rig.wait("restarted", |s| {
+        s.state == PlayState::Playing && s.position_ms < 10_000
+    });
+    assert_eq!(
+        rig.host.resume_point(MIX),
+        None,
+        "forgotten when started over"
+    );
+    // Off: from the beginning.
+    rig.send(Command::SeekTo(400_000));
+    rig.wait("seeked again", |s| s.position_ms >= 400_000);
+    rig.send(Command::SetResumeLongTracks(false));
+    rig.send(play(&[A, MIX], 1));
+    let s = rig.wait("from the start", |s| {
+        Rig::track(s) == Some(MIX) && s.state == PlayState::Playing
+    });
+    assert!(s.position_ms < 10_000, "{}", s.position_ms);
+}
+
+/// A long track heard to its end as the queue runs out starts from the beginning next
+/// time, also when no position was saved in its last minute (a seek into the last
+/// seconds, between two of the regular saves).
+#[test]
+fn a_long_track_heard_to_the_end_of_the_queue_forgets_where_it_was() {
+    const MIX: TrackId = 902;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host = TestHost::new().with_track(MIX, write_21_minute_wav(dir.path()), 21 * 60_000);
+    host.resume.lock().expect("lock").insert(MIX, 600_000);
+    let rig = Rig::start(host);
+    rig.send(Command::SetResumeLongTracks(true));
+    rig.send(play(&[MIX], 0));
+    rig.wait("it starts where it was left", |s| {
+        Rig::track(s) == Some(MIX) && s.state == PlayState::Playing && s.position_ms >= 600_000
+    });
+    // The save that follows the new queue (a second later) remembers the place again.
+    std::thread::sleep(Duration::from_millis(1_500));
+    let saved = rig.host.resume_point(MIX).expect("remembered");
+    assert!(saved >= 600_000, "{saved}");
+    rig.send(Command::SeekTo(21 * 60_000 - 1_500));
+    rig.wait("the queue is over", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.resume_point(MIX), None, "heard to the end");
+}
+
+/// Shuffle by album through the player: albums stay whole.
+#[test]
+fn shuffling_by_album_through_the_player() {
+    let mut host = TestHost::new();
+    for id in 100..130 {
+        host.tracks.get_mut(&id).expect("track").album_key = (id / 10) as u64;
+    }
+    let rig = Rig::start(host);
+    rig.send(Command::SetShuffleByAlbum(true));
+    rig.send(Command::Enqueue((100..130).collect()));
+    rig.send(Command::SetShuffle(true));
+    let s = rig.wait("shuffled", |s| s.shuffle && s.queue.len() == 30);
+    let order: Vec<TrackId> = s.queue.iter().map(|i| i.track).collect();
+    for album in order.chunks(10) {
+        assert!(album.windows(2).all(|w| w[1] == w[0] + 1), "{order:?}");
+    }
+}
+
 fn long_host(dir: &tempfile::TempDir) -> TestHost {
     TestHost::new().with_track(LONG, write_long_wav(dir.path(), 12), 12_000)
 }
@@ -1151,6 +1287,32 @@ fn track_boundaries_do_not_rewrite_the_queue() {
         1,
         "only the initial queue is written"
     );
+}
+
+#[test]
+fn a_queue_change_that_could_not_be_saved_is_saved_later() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(Command::Enqueue(vec![A, B]));
+    rig.wait_host("first queue saved", |h| {
+        h.queue_saves.load(Ordering::Relaxed) == 1
+    });
+    // The disk refuses writes while the queue changes.
+    rig.host.fail_saves.store(true, Ordering::Relaxed);
+    rig.send(Command::Enqueue(vec![MONO]));
+    rig.wait_host("the save was tried and failed", |h| {
+        h.failed_saves.load(Ordering::Relaxed) >= 1
+    });
+    // Not retried on every tick.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(rig.host.failed_saves.load(Ordering::Relaxed), 1);
+    // Later saves still carry the queue, and nothing else has to happen first.
+    rig.host.fail_saves.store(false, Ordering::Relaxed);
+    rig.wait_host("the queue is saved after all", |h| {
+        h.queue_saves.load(Ordering::Relaxed) == 2
+    });
+    let saved = rig.host.saved.lock().expect("lock").clone().expect("saved");
+    let tracks: Vec<TrackId> = saved.queue.items.iter().map(|i| i.track).collect();
+    assert_eq!(tracks, vec![A, B, MONO]);
 }
 
 #[test]

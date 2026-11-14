@@ -1,5 +1,5 @@
 //! Modal dialogs. Only destructive actions and name entry use a modal (docs/UX.md).
-use super::{Nav, OneumApp};
+use super::{AppEvent, Nav, OneumApp};
 use crate::model::TrackId;
 use eframe::egui::{self, RichText};
 
@@ -184,9 +184,17 @@ impl OneumApp {
                 }
                 return;
             }
-            Dialog::DeletePlaylist(id, _) => library.delete_playlist(id),
+            Dialog::DeletePlaylist(id, _) => {
+                self.edit(move |library| {
+                    library.delete_playlist(id).err().map(AppEvent::EditFailed)
+                });
+                Ok(())
+            }
             Dialog::RemoveTracks(tracks) => {
-                library.remove_tracks(&tracks);
+                self.edit(move |library| {
+                    library.remove_tracks(&tracks);
+                    None
+                });
                 Ok(())
             }
             Dialog::SmartPlaylist {
@@ -209,6 +217,12 @@ impl OneumApp {
                             smart.name = name.clone();
                         }
                         if old != name {
+                            // A pin follows the playlist to its new name.
+                            super::repoint_pin(
+                                &mut self.settings.pinned,
+                                &crate::app::settings::Pin::Smart(old.clone()),
+                                crate::app::settings::Pin::Smart(name.clone()),
+                            );
                             self.views.remove(&Nav::Smart(old));
                         }
                     }
@@ -226,13 +240,15 @@ impl OneumApp {
                 return;
             }
             Dialog::NewPlaylist { name, tracks, .. } => {
-                library.create_playlist(&name).and_then(|id| {
-                    if !tracks.is_empty() {
-                        library.add_to_playlist(id, &tracks)?;
-                    }
-                    self.go(Nav::Playlist(id));
-                    Ok(())
-                })
+                // Created with its songs in one step: a failure leaves no empty
+                // playlist behind. It opens once it exists.
+                self.edit(move |library| {
+                    Some(match library.create_playlist_with(&name, &tracks) {
+                        Ok(id) => AppEvent::PlaylistCreated(id),
+                        Err(error) => AppEvent::EditFailed(error),
+                    })
+                });
+                Ok(())
             }
         };
         if let Err(error) = result {

@@ -37,9 +37,20 @@ pub struct SourceInfo {
     pub dsd_rate: Option<u32>,
 }
 
-/// Decodes one file into PCM.
+/// Decodes one file into PCM (or, for a track of a CUE sheet, one stretch of a file).
 pub struct TrackDecoder {
     inner: Inner,
+    range: Option<Range>,
+}
+
+/// A track of a CUE sheet: the frames of the file it is, as positions in the file.
+struct Range {
+    start: u64,
+    end: Option<u64>,
+    /// The file position of the next frame `next` gives.
+    next: u64,
+    /// The file's info with the track's length.
+    info: SourceInfo,
 }
 
 enum Inner {
@@ -63,6 +74,12 @@ struct MediaDecoder {
     consecutive_errors: u32,
     /// Corrupt packets skipped so far (reported for diagnostics).
     skipped_packets: u32,
+    /// Where (in source frames, from the packet timestamps) the audio `next` gave last
+    /// starts. Unlike a count of what was given, this stays right when a damaged packet
+    /// is skipped.
+    position: u64,
+    /// Bytes read since the last packet that decoded (see [`Watched`]).
+    since_audio: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn err(kind: PlaybackErrorKind, detail: impl Into<String>) -> PlaybackError {
@@ -118,6 +135,62 @@ pub fn can_play(path: &Path) -> Result<(), PlaybackError> {
     let mut decoder = TrackDecoder::open(path)?;
     let mut first = Vec::new();
     decoder.next(&mut first).map(|_| ())
+}
+
+/// Bytes the demuxer may read without a packet of audio coming of it (when opening the
+/// file, and between packets). Real files have packets every few kilobytes and their
+/// largest stretch of non-audio is a cover of some megabytes; a file that has turned
+/// into zeros (or a sparse file of gigabytes) would otherwise be searched to its end.
+const MAX_BYTES_WITHOUT_AUDIO: u64 = 128 * 1024 * 1024;
+
+/// The counter's value while a seek is under way: reads are not counted.
+const SEEKING: u64 = u64::MAX;
+
+/// A source that stops giving bytes once [`MAX_BYTES_WITHOUT_AUDIO`] have been read
+/// since the counter was last reset (by a packet that decoded).
+struct Watched {
+    inner: Box<dyn MediaSource>,
+    since_audio: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// The error a [`Watched`] source gives: no audio in what may be read.
+fn no_audio_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "no audio in the last 128 MB of the file",
+    )
+}
+
+impl std::io::Read for Watched {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::sync::atomic::Ordering;
+        let read = self.since_audio.load(Ordering::Relaxed);
+        if read == SEEKING {
+            return self.inner.read(buf);
+        }
+        if read >= MAX_BYTES_WITHOUT_AUDIO {
+            return Err(no_audio_error());
+        }
+        let n = self.inner.read(buf)?;
+        self.since_audio.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for Watched {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(to)
+    }
+}
+
+impl MediaSource for Watched {
+    fn is_seekable(&self) -> bool {
+        self.inner.is_seekable()
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.inner.byte_len()
+    }
 }
 
 /// ID3v2 tags in front of the audio looked past before giving up (one is usual, two
@@ -224,8 +297,25 @@ fn dsd_info(decoder: &DsdDecoder, in_memory: bool) -> SourceInfo {
 }
 
 impl TrackDecoder {
-    /// Opens `path`, reading from the file as decoding goes.
+    /// Opens `path`, reading from the file as decoding goes. A track of a CUE sheet
+    /// (see `library::cue`) opens its stretch of the sheet's audio file.
     pub fn open(path: &Path) -> Result<Self, PlaybackError> {
+        Self::open_located(path, crate::library::cue::resolve(path).as_ref())
+    }
+
+    /// Like [`TrackDecoder::open`] for a track whose stretch of a sheet's file was
+    /// looked up already (`None`: the file `path` whole).
+    pub fn open_located(
+        path: &Path,
+        segment: Option<&crate::library::cue::Segment>,
+    ) -> Result<Self, PlaybackError> {
+        match segment {
+            Some(segment) => Self::open_file(&segment.audio)?.limited_to(segment),
+            None => Self::open_file(path),
+        }
+    }
+
+    fn open_file(path: &Path) -> Result<Self, PlaybackError> {
         let mut file = std::fs::File::open(path).map_err(|e| map_file_error(&e))?;
         let inner = if starts_as_dsd(&mut file)? {
             let decoder = DsdDecoder::new(Box::new(file))?;
@@ -236,9 +326,52 @@ impl TrackDecoder {
                 path,
                 Box::new(file),
                 false,
+                false,
             )?))
         };
-        Ok(TrackDecoder { inner })
+        Ok(TrackDecoder { inner, range: None })
+    }
+
+    /// Opens `path` for checking it: like [`TrackDecoder::open`], with the decoder
+    /// computing the checksum the file carries for its audio (FLAC's MD5), to be
+    /// compared by [`TrackDecoder::checksum_matches`] at the end.
+    /// `segment`: the track's stretch of a sheet's file, looked up already (`None`: the
+    /// file `path` whole).
+    pub fn open_verifying(
+        path: &Path,
+        segment: Option<&crate::library::cue::Segment>,
+    ) -> Result<Self, PlaybackError> {
+        // A sheet's track is part of the file: the checksum is the whole file's.
+        if let Some(segment) = segment {
+            return Self::open_file(&segment.audio)?.limited_to(segment);
+        }
+        let mut file = std::fs::File::open(path).map_err(|e| map_file_error(&e))?;
+        let inner = if starts_as_dsd(&mut file)? {
+            let decoder = DsdDecoder::new(Box::new(file))?;
+            let info = dsd_info(&decoder, false);
+            Inner::Dsd(Box::new(decoder), info)
+        } else {
+            Inner::Media(Box::new(MediaDecoder::from_source(
+                path,
+                Box::new(file),
+                false,
+                true,
+            )?))
+        };
+        Ok(TrackDecoder { inner, range: None })
+    }
+
+    /// After decoding a file opened with [`TrackDecoder::open_verifying`] to its end:
+    /// whether the checksum it carries matches the decoded audio. `None` when it
+    /// carries none (or the format has none).
+    pub fn checksum_matches(&mut self) -> Option<bool> {
+        if self.range.is_some() {
+            return None;
+        }
+        match &mut self.inner {
+            Inner::Media(m) => m.decoder.finalize().verify_ok,
+            Inner::Dsd(..) => None,
+        }
     }
 
     /// Opens a file that is being loaded into memory (memory playback).
@@ -254,12 +387,53 @@ impl TrackDecoder {
                 &path,
                 Box::new(source),
                 true,
+                false,
             )?))
         };
-        Ok(TrackDecoder { inner })
+        Ok(TrackDecoder { inner, range: None })
+    }
+
+    /// Plays only `segment` of the file, if given (a track of a CUE sheet, for a decoder
+    /// opened from the sheet's file in memory).
+    pub fn within(
+        self,
+        segment: Option<&crate::library::cue::Segment>,
+    ) -> Result<Self, PlaybackError> {
+        match segment {
+            Some(segment) => self.limited_to(segment),
+            None => Ok(self),
+        }
+    }
+
+    /// Plays only `segment` of the file: from its first frame (sought to exactly) to
+    /// the frame before the next track's first.
+    fn limited_to(mut self, segment: &crate::library::cue::Segment) -> Result<Self, PlaybackError> {
+        let rate = self.info().sample_rate;
+        let start = segment.start_frame(rate);
+        // Not beyond the end of the file (a sheet may say the next track starts later
+        // than the file lasts).
+        let file_frames = self.info().total_frames;
+        let end = segment
+            .end_frame(rate)
+            .map(|end| file_frames.map_or(end, |total| end.min(total)));
+        if start > 0 {
+            self.seek_file(start)?;
+        }
+        let mut info = self.info().clone();
+        info.total_frames = end.or(file_frames).map(|end| end.saturating_sub(start));
+        self.range = Some(Range {
+            start,
+            end,
+            next: start,
+            info,
+        });
+        Ok(self)
     }
 
     pub fn info(&self) -> &SourceInfo {
+        if let Some(range) = &self.range {
+            return &range.info;
+        }
         match &self.inner {
             Inner::Media(m) => &m.info,
             Inner::Dsd(_, info) => info,
@@ -269,6 +443,19 @@ impl TrackDecoder {
     /// Seeks so that the next decoded frame is `frame` (in source frames). Seeking past
     /// the end leaves the decoder at end of stream.
     pub fn seek(&mut self, frame: u64) -> Result<(), PlaybackError> {
+        let Some(range) = &self.range else {
+            return self.seek_file(frame);
+        };
+        let target = range.start.saturating_add(frame);
+        let target = range.end.map_or(target, |end| target.min(end));
+        self.seek_file(target)?;
+        if let Some(range) = &mut self.range {
+            range.next = target;
+        }
+        Ok(())
+    }
+
+    fn seek_file(&mut self, frame: u64) -> Result<(), PlaybackError> {
         match &mut self.inner {
             Inner::Media(m) => m.seek(frame),
             Inner::Dsd(d, _) => d.seek(frame),
@@ -278,10 +465,36 @@ impl TrackDecoder {
     /// Decodes the next stretch into `out` (cleared first) as interleaved f32 at the
     /// source channel count. Returns `Ok(false)` at end of stream.
     pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool, PlaybackError> {
-        match &mut self.inner {
-            Inner::Media(m) => m.next(out),
-            Inner::Dsd(d, _) => d.next(out),
+        if let Some(range) = &self.range
+            && range.end.is_some_and(|end| range.next >= end)
+        {
+            out.clear();
+            return Ok(false);
         }
+        let more = match &mut self.inner {
+            Inner::Media(m) => m.next(out)?,
+            Inner::Dsd(d, _) => d.next(out)?,
+        };
+        let Some(range) = &mut self.range else {
+            return Ok(more);
+        };
+        if !more {
+            return Ok(false);
+        }
+        let channels = range.info.channels.max(1);
+        // Where this audio is in the file: from the packet timestamps (a damaged packet
+        // that was skipped leaves a hole a count would not see); DSD has no packets to
+        // skip and is counted.
+        let at = match &self.inner {
+            Inner::Media(m) => m.position,
+            Inner::Dsd(..) => range.next,
+        };
+        if let Some(end) = range.end {
+            let left = end.saturating_sub(at) as usize;
+            out.truncate(left.saturating_mul(channels).min(out.len()));
+        }
+        range.next = at + (out.len() / channels) as u64;
+        Ok(!out.is_empty())
     }
 
     /// Corrupt packets skipped so far (reported for diagnostics).
@@ -332,8 +545,14 @@ impl MediaDecoder {
         path: &Path,
         source: Box<dyn MediaSource>,
         in_memory: bool,
+        verify: bool,
     ) -> Result<Self, PlaybackError> {
-        let mss = MediaSourceStream::new(after_leading_tags(source), Default::default());
+        let since_audio = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let watched = Watched {
+            inner: after_leading_tags(source),
+            since_audio: std::sync::Arc::clone(&since_audio),
+        };
+        let mss = MediaSourceStream::new(Box::new(watched), Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
@@ -363,7 +582,10 @@ impl MediaDecoder {
             return Err(err(PlaybackErrorKind::Unsupported, "not an audio stream"));
         };
         let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&params, &AudioDecoderOptions::default().gapless(true))
+            .make_audio_decoder(
+                &params,
+                &AudioDecoderOptions::default().gapless(true).verify(verify),
+            )
             .map_err(|e| match e {
                 SymError::Unsupported(what) => err(PlaybackErrorKind::Unsupported, what),
                 other => err(PlaybackErrorKind::Unsupported, other.to_string()),
@@ -427,6 +649,8 @@ impl MediaDecoder {
             drop_until: None,
             consecutive_errors: 0,
             skipped_packets: 0,
+            position: 0,
+            since_audio,
         })
     }
 
@@ -449,6 +673,17 @@ impl MediaDecoder {
     /// timestamp while decoding. This gives codecs that need a warm-up packet after a
     /// reset (Vorbis, MP3 bit reservoir) valid audio at the target.
     fn seek(&mut self, frame: u64) -> Result<(), PlaybackError> {
+        // A seek may read far to find its place (an MP3 without a table of contents is
+        // walked frame by frame): what it reads does not count as reading without audio.
+        self.since_audio
+            .store(SEEKING, std::sync::atomic::Ordering::Relaxed);
+        let result = self.seek_inner(frame);
+        self.since_audio
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    fn seek_inner(&mut self, frame: u64) -> Result<(), PlaybackError> {
         // Positions are counted in the music; the decoded stream has the priming in front.
         let frame = frame.saturating_add(self.trim.map_or(0, |t| t.delay));
         let preroll = u64::from(self.info.sample_rate) / 8;
@@ -494,6 +729,11 @@ impl MediaDecoder {
                 Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     return Ok(false);
                 }
+                // Far past the last audio there is only damage: the track ends there.
+                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    tracing::debug!("{e}: ending the track");
+                    return Ok(false);
+                }
                 Err(SymError::ResetRequired) => return Ok(false),
                 Err(SymError::IoError(e)) => {
                     return Err(err(
@@ -509,6 +749,8 @@ impl MediaDecoder {
             match self.decoder.decode(&packet) {
                 Ok(buf) => {
                     self.consecutive_errors = 0;
+                    self.since_audio
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                     let channels = buf.spec().channels().count();
                     if channels != self.info.channels || buf.spec().rate() != self.info.sample_rate
                     {
@@ -561,12 +803,16 @@ impl MediaDecoder {
                         }
                         if start < target {
                             out.drain(..(target - start) as usize * channels);
+                            start = target;
                         }
                         self.drop_until = None;
                     }
                     if out.is_empty() {
                         continue;
                     }
+                    // In the music's frames (the stream has the priming in front).
+                    let delay = self.trim.map_or(0, |t| i64::try_from(t.delay).unwrap_or(0));
+                    self.position = u64::try_from(start.saturating_sub(delay)).unwrap_or(0);
                     return Ok(true);
                 }
                 Err(SymError::DecodeError(_)) | Err(SymError::IoError(_)) => {

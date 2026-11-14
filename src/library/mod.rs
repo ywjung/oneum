@@ -7,7 +7,10 @@
 //!
 //! Typical start-up: [`Library::open`], [`Library::set_notifier`], then
 //! [`Library::rescan`] and [`Library::start_watching`].
+pub mod apple;
 mod art;
+mod check;
+pub mod cue;
 pub mod details;
 #[cfg(test)]
 mod hostile;
@@ -20,10 +23,12 @@ pub mod radio;
 mod scan;
 mod search;
 mod snapshot;
+pub mod stats;
 mod tags;
 mod watch;
 
 pub use art::ArtImage;
+pub use check::CheckStatus;
 pub use ident::{album_key, fnv1a64};
 pub use loudness::LoudnessStatus;
 pub use search::{PreparedQuery, normalize};
@@ -46,6 +51,32 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use unicode_normalization::UnicodeNormalization;
 use watch::WatchMsg;
+
+/// The `kv` key of the record of read CUE sheets (see `Inner::sheets_read`).
+const SHEETS_READ_KEY: &str = "cue_sheets_read";
+
+/// What is recorded of a CUE sheet whose tracks were read (see `Inner::sheets_read`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SheetRecord {
+    /// The sheet's modification time when it was read.
+    mtime: i64,
+    /// The numbers of the tracks reading it gave: not every track of a sheet is one
+    /// (those that start beyond the end of the audio are not). None: the file was taken
+    /// in alone.
+    tracks: Vec<u32>,
+    /// The audio file's modification time and size then.
+    audio_mtime: i64,
+    audio_size: u64,
+}
+
+impl SheetRecord {
+    /// Whether the record was made of the sheet and its audio file as they are now.
+    fn is_of(&self, sheet_mtime: i64, audio_mtime: i64, audio_size: u64) -> bool {
+        self.mtime == sheet_mtime
+            && self.audio_mtime == audio_mtime
+            && self.audio_size == audio_size
+    }
+}
 
 /// Where the library keeps its files.
 #[derive(Debug, Clone)]
@@ -178,6 +209,17 @@ pub struct PlaylistItem {
     pub track_id: TrackId,
 }
 
+/// What an Apple Music library import did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppleImport {
+    /// Songs of the export found in the library (by their file).
+    pub matched: usize,
+    /// Songs of the export whose file is not in the library.
+    pub unmatched: usize,
+    /// Playlists made.
+    pub playlists: usize,
+}
+
 /// Result of importing an M3U playlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M3uImport {
@@ -238,6 +280,8 @@ pub(crate) struct State {
     pub(crate) links: Vec<FollowedLink>,
     /// Bumped by every change to `tracks`; lets `publish` skip redundant rebuilds.
     revision: u64,
+    /// Bumped whenever tracks leave the library (see [`Library::removals`]).
+    removals: u64,
 }
 
 impl State {
@@ -321,6 +365,7 @@ impl State {
             self.by_path.remove(&entry.track.path);
         }
         self.revision += 1;
+        self.removals += 1;
         Some(entry.track)
     }
 
@@ -387,6 +432,8 @@ pub(crate) struct Inner {
     counters: Counters,
     /// The run that measures the loudness of untagged tracks.
     loudness: loudness::LoudnessJob,
+    /// The run that checks files (integrity, dynamic range, true peak).
+    checks: check::CheckJob,
     /// Files that could not be added, by path, with the size and mtime they had. Lets
     /// later scans count them again without reading them again (not persisted).
     skipped: Mutex<HashMap<PathBuf, scan::Skipped>>,
@@ -395,6 +442,12 @@ pub(crate) struct Inner {
     /// music folder or when the watcher reports the move in two parts; this lets the
     /// later scan still connect the two.
     recently_added: Mutex<std::collections::VecDeque<(TrackId, std::time::Instant)>>,
+    /// CUE sheets whose tracks are in the library, by `scan::sheet_key`, with what was
+    /// recorded when they were read: a sheet changed since (or missing a track it gave)
+    /// is read again. Kept in the `kv` table (see [`Inner::save_sheet_records`]).
+    sheets_read: Mutex<HashMap<String, SheetRecord>>,
+    /// `sheets_read` changed since it was last saved.
+    sheets_dirty: AtomicBool,
     /// Makes the next folder scan panic (tests of the scan thread's containment).
     #[cfg(test)]
     panic_in_next_scan: AtomicBool,
@@ -427,27 +480,46 @@ pub(crate) fn resolve_dir(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Reads a playlist file, refusing files that are implausibly large.
+/// Reads a playlist file, refusing files that are implausibly large (and what is not a
+/// regular file: a pipe would never deliver).
 fn read_playlist_file(path: &Path) -> Result<Vec<u8>, LibraryError> {
-    use std::io::Read;
-    let too_large = || {
+    crate::storage::files::read_bounded(path, m3u::MAX_FILE_BYTES)?.ok_or_else(|| {
         LibraryError::Io(std::io::Error::new(
             std::io::ErrorKind::FileTooLarge,
-            "the playlist file is too large to be a playlist",
+            "the file is too large to be a playlist, or not a regular file",
         ))
+    })
+}
+
+/// The CUE sheets in `folder` that are for one audio file there: (that file, the sheet,
+/// its track numbers), the first by name for a file that has several (as for the scan).
+fn sheets_in(folder: &Path) -> Vec<(PathBuf, PathBuf, Vec<u32>)> {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return Vec::new();
     };
-    let file = fs::File::open(path)?;
-    if file.metadata()?.len() > m3u::MAX_FILE_BYTES {
-        return Err(too_large());
+    let mut sheets: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
+        })
+        .collect();
+    sheets.sort();
+    let mut found: Vec<(PathBuf, PathBuf, Vec<u32>)> = Vec::new();
+    for sheet_path in sheets {
+        let Some(sheet) = cue::read(&sheet_path) else {
+            continue;
+        };
+        let Some(audio) = cue::audio_of(&sheet_path, &sheet) else {
+            continue;
+        };
+        if found.iter().all(|(known, _, _)| *known != audio) {
+            let numbers = sheet.tracks.iter().map(|t| t.number).collect();
+            found.push((audio, sheet_path, numbers));
+        }
     }
-    // The size is checked again while reading: it may not be known up front (pipes)
-    // and the file may grow.
-    let mut bytes = Vec::new();
-    file.take(m3u::MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > m3u::MAX_FILE_BYTES {
-        return Err(too_large());
-    }
-    Ok(bytes)
+    found
 }
 
 fn to_stored(file: ScannedFile, now: i64) -> StoredTrack {
@@ -485,6 +557,8 @@ fn to_stored(file: ScannedFile, now: i64) -> StoredTrack {
             mtime_ns: file.mtime_ns,
             replaygain: tags.replaygain,
             measured: None,
+            unmeasurable: false,
+            check: None,
             art_id: file.art_id,
             favorite: false,
             play_count: 0,
@@ -568,6 +642,8 @@ impl Inner {
                             && published.play_count == current.play_count
                             && published.last_played_at == current.last_played_at
                             && published.measured == current.measured
+                            && published.unmeasurable == current.unmeasurable
+                            && published.check == current.check
                         {
                             return None;
                         }
@@ -577,6 +653,8 @@ impl Inner {
                             && published.file_size == current.file_size
                         {
                             track.measured = current.measured;
+                            track.unmeasurable = current.unmeasurable;
+                            track.check = current.check;
                         }
                         track.favorite = current.favorite;
                         track.play_count = current.play_count;
@@ -698,11 +776,14 @@ impl Inner {
                     track.play_count = old.track.play_count;
                     track.last_played_at = old.track.last_played_at;
                     track.added_at = old.track.added_at;
-                    // What was measured stays valid as long as the file is the same.
+                    // What was measured and checked stays valid as long as the file is
+                    // the same (read again for its names: new tags, a sheet's titles).
                     if old.track.mtime_ns == track.mtime_ns
                         && old.track.file_size == track.file_size
                     {
                         track.measured = old.track.measured;
+                        track.unmeasurable = old.track.unmeasurable;
+                        track.check = old.track.check;
                     }
                     false
                 }
@@ -737,6 +818,34 @@ impl Inner {
             }
             Err(err) => tracing::warn!(%err, "could not mark tracks available"),
         }
+    }
+
+    /// Removes tracks that others have taken the place of (a CUE sheet's audio file,
+    /// now taken in as the sheet's tracks), each `(track, those that take its place)`,
+    /// handing its places in playlists and its favourite mark over to them (see
+    /// `Db::hand_over_track`). Returns how many went. Stops early once `cancel` is set.
+    fn hand_over(&self, handovers: &[(TrackId, Vec<TrackId>)], cancel: &AtomicBool) -> usize {
+        let mut done = 0;
+        for (old, heirs) in handovers {
+            let mut db = lock(&self.db);
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            match db.hand_over_track(*old, heirs) {
+                Ok(favorite) => {
+                    let mut state = lock(&self.state);
+                    if favorite {
+                        for &heir in heirs {
+                            state.update(heir, |t| t.favorite = true);
+                        }
+                    }
+                    state.remove(*old);
+                    done += 1;
+                }
+                Err(err) => tracing::warn!(%err, "could not hand a replaced track over"),
+            }
+        }
+        done
     }
 
     /// Applies the missing-file policy to tracks whose files are gone. Each candidate
@@ -920,7 +1029,9 @@ impl Inner {
         }
     }
 
-    fn spawn(self: &Arc<Self>, name: &str, body: impl FnOnce(Arc<Inner>) + Send + 'static) {
+    /// Starts a library thread. False if it could not be started (`body` then never
+    /// runs: whatever it was to release is the caller's to release).
+    fn spawn(self: &Arc<Self>, name: &str, body: impl FnOnce(Arc<Inner>) + Send + 'static) -> bool {
         let inner = Arc::clone(self);
         match std::thread::Builder::new()
             .name(name.to_string())
@@ -930,8 +1041,12 @@ impl Inner {
                 let mut threads = lock(&self.threads);
                 threads.retain(|h| !h.is_finished());
                 threads.push(handle);
+                true
             }
-            Err(err) => tracing::error!(%err, thread = name, "could not start a library thread"),
+            Err(err) => {
+                tracing::error!(%err, thread = name, "could not start a library thread");
+                false
+            }
         }
     }
 
@@ -958,20 +1073,60 @@ impl Inner {
         self.art_wake.notify_one();
     }
 
+    /// Forgets the record of the CUE sheets under a music folder that is no longer one
+    /// (saved at once: no scan of it comes to do it).
+    fn forget_sheets_under(&self, root_path: &Path) {
+        let forgot = {
+            let mut read = lock(&self.sheets_read);
+            let before = read.len();
+            read.retain(|key, _| !Path::new(key).starts_with(root_path));
+            read.len() != before
+        };
+        if forgot {
+            self.sheets_dirty.store(true, Ordering::Release);
+            self.save_sheet_records();
+        }
+    }
+
+    /// Saves the record of read CUE sheets if it changed (see `sheets_read`).
+    fn save_sheet_records(&self) {
+        if !self.sheets_dirty.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let records: Vec<(String, SheetRecord)> = lock(&self.sheets_read)
+            .iter()
+            .map(|(key, record)| (key.clone(), record.clone()))
+            .collect();
+        let saved = serde_json::to_string(&records)
+            .map_err(|err| err.to_string())
+            .and_then(|json| {
+                lock(&self.db)
+                    .kv_set(SHEETS_READ_KEY, &json)
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = saved {
+            tracing::warn!(%err, "could not save which CUE sheets were read");
+            self.sheets_dirty.store(true, Ordering::Release);
+        }
+    }
+
     /// Recreates one artwork cache file from any track that uses it.
     fn regenerate_art(&self, art_id: &str) -> bool {
-        let source = lock(&self.state)
+        let track = lock(&self.state)
             .tracks
             .values()
             .find(|e| e.track.available && e.track.art_id.as_deref() == Some(art_id))
-            .map(|e| e.track.path.clone());
-        let Some(source) = source else {
+            .map(|e| Arc::clone(&e.track));
+        let Some(track) = track else {
             return false;
         };
+        // Outside the lock: for a track of a CUE sheet this reads the sheet.
+        let source = track.audio_file();
         let produced = tags::read_picture(&source)
             .and_then(|bytes| self.art.store_embedded(&bytes))
             .or_else(|| {
-                source
+                track
+                    .file()
                     .parent()
                     .and_then(art::find_folder_image)
                     .and_then(|image| self.art.store_folder_image(&image))
@@ -1075,6 +1230,13 @@ impl Library {
             db.set_root_available(root_id, false)?;
         }
 
+        let sheets_read: HashMap<String, SheetRecord> = db
+            .kv_get(SHEETS_READ_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<Vec<(String, SheetRecord)>>(&json).ok())
+            .map(|records| records.into_iter().collect())
+            .unwrap_or_default();
         let inner = Arc::new(Inner {
             db: Mutex::new(db),
             state: Mutex::new(state),
@@ -1091,8 +1253,11 @@ impl Library {
             scan: ScanQueue::default(),
             counters: Counters::default(),
             loudness: loudness::LoudnessJob::default(),
+            checks: check::CheckJob::default(),
             skipped: Mutex::new(HashMap::new()),
             recently_added: Mutex::new(std::collections::VecDeque::new()),
+            sheets_read: Mutex::new(sheets_read),
+            sheets_dirty: AtomicBool::new(false),
             #[cfg(test)]
             panic_in_next_scan: AtomicBool::new(false),
             publish_interval_ms: AtomicU64::new(scan::PUBLISH_INTERVAL.as_millis() as u64),
@@ -1214,16 +1379,19 @@ impl Library {
         // Forget the folder first: from here on no new scan of it can start, and the
         // watcher stops caring about it. Then stop a scan that is already running;
         // its batches check the cancel flag under the database lock.
+        let root_path;
         {
             let _db = lock(&self.inner.db);
             let mut state = lock(&self.inner.state);
-            if state.root(root_id).is_none() {
+            let Some(root) = state.root(root_id) else {
                 return Err(LibraryError::NotFound);
-            }
+            };
+            root_path = root.path.clone();
             state.roots.retain(|root| root.id != root_id);
             state.links.retain(|link| link.root_id != root_id);
         }
         self.inner.scan.cancel_root(root_id);
+        self.inner.forget_sheets_under(&root_path);
 
         // Delete the tracks in chunks so that other threads get their turn at the
         // database in between, then the folder row itself (which would also take any
@@ -1362,11 +1530,16 @@ impl Library {
     /// link, in different letter case on a case-insensitive volume, or in another
     /// Unicode form: a path is resolved to its on-disk spelling before it is compared
     /// or stored. Blocking: reads the files.
+    ///
+    /// The audio file of a CUE sheet in a music folder is in the library as the sheet's
+    /// tracks: it stands for them (not added alone, which its scan would undo).
     pub fn import_files(&self, paths: &[PathBuf]) -> Vec<TrackId> {
         self.import_paths(paths).into_iter().flatten().collect()
     }
 
-    fn import_paths(&self, paths: &[PathBuf]) -> Vec<Option<TrackId>> {
+    /// The tracks each path stands for, in input order: one, the tracks of the CUE
+    /// sheet a file is the audio of, or none (unreadable, unsupported, not there).
+    fn import_paths(&self, paths: &[PathBuf]) -> Vec<Vec<TrackId>> {
         /// Files per database transaction.
         const BATCH: usize = 200;
         let inner = &self.inner;
@@ -1381,7 +1554,9 @@ impl Library {
         // case on a case-insensitive volume, Unicode form) and looked up again under
         // the spelling the library uses for that location. No lock is held while the
         // file system is asked.
-        let mut results: Vec<Option<TrackId>> = vec![None; paths.len()];
+        let mut results: Vec<Vec<TrackId>> = vec![Vec::new(); paths.len()];
+        // The CUE sheets of a folder, as (audio file, sheet, its track numbers).
+        let mut sheets_of: HashMap<PathBuf, Vec<(PathBuf, PathBuf, Vec<u32>)>> = HashMap::new();
         let mut revive: Vec<TrackId> = Vec::new();
         // New files: library path -> (folder it belongs to, result slots waiting for it).
         let mut fresh: Vec<(PathBuf, Option<i64>, Vec<usize>)> = Vec::new();
@@ -1401,7 +1576,7 @@ impl Library {
                 location = Some((library_path, root_id));
             }
             if let Some((id, available)) = known {
-                results[slot] = Some(id);
+                results[slot] = vec![id];
                 if !available && absolute.is_file() && !revive.contains(&id) {
                     revive.push(id);
                 }
@@ -1412,6 +1587,42 @@ impl Library {
             };
             if !tags::has_audio_extension(&library_path) {
                 continue;
+            }
+            // The audio file of a CUE sheet in a music folder: it is the sheet's tracks.
+            if root_id.is_some()
+                && let Some(folder) = library_path.parent()
+            {
+                let sheets = sheets_of
+                    .entry(folder.to_path_buf())
+                    .or_insert_with(|| sheets_in(folder));
+                if let Some((_, sheet, numbers)) =
+                    sheets.iter().find(|(audio, _, _)| *audio == library_path)
+                {
+                    // Only the tracks its reading gave: one that starts beyond the end
+                    // of the file may still be kept (a favourite), and is not one.
+                    let given = lock(&inner.sheets_read)
+                        .get(&scan::sheet_key(sheet))
+                        .map(|record| record.tracks.clone());
+                    let state = lock(&inner.state);
+                    let tracks: Vec<TrackId> = numbers
+                        .iter()
+                        .filter(|n| given.as_ref().is_none_or(|given| given.contains(n)))
+                        .filter_map(|n| state.id_of_path(&cue::track_path(sheet, *n)))
+                        .collect();
+                    if !tracks.is_empty() {
+                        // The file is there (the sheet was found for it): its tracks are
+                        // available, like a known file opened again.
+                        for &id in &tracks {
+                            let unavailable =
+                                state.tracks.get(&id).is_some_and(|e| !e.track.available);
+                            if unavailable && !revive.contains(&id) {
+                                revive.push(id);
+                            }
+                        }
+                        results[slot] = tracks;
+                        continue;
+                    }
+                }
             }
             match fresh_index.get(&library_path) {
                 Some(&index) => fresh[index].2.push(slot),
@@ -1452,7 +1663,7 @@ impl Library {
             let committed = inner.commit_scanned(files, &[], None, None);
             for ((id, _), waiting) in committed.iter().zip(slots) {
                 for &slot in waiting {
-                    results[slot] = Some(*id);
+                    results[slot] = vec![*id];
                 }
                 changed = true;
             }
@@ -1509,6 +1720,14 @@ impl Library {
         )
     }
 
+    /// A count that grows whenever tracks leave the library (removed by the user,
+    /// their folder removed, their files gone). Most notifications are about other
+    /// things (scan and measuring progress, tags, play counts); comparing this tells
+    /// whether anything that refers to tracks by id has to be checked again.
+    pub fn removals(&self) -> u64 {
+        lock(&self.inner.state).removals
+    }
+
     pub fn track(&self, id: TrackId) -> Option<Arc<Track>> {
         lock(&self.inner.state)
             .tracks
@@ -1516,7 +1735,8 @@ impl Library {
             .map(|e| Arc::clone(&e.track))
     }
 
-    pub fn set_favorite(&self, ids: &[TrackId], favorite: bool) {
+    /// Marks or unmarks tracks as favourites. On an error nothing changed.
+    pub fn set_favorite(&self, ids: &[TrackId], favorite: bool) -> Result<(), LibraryError> {
         let changed: Vec<TrackId> = {
             let mut db = lock(&self.inner.db);
             let ids: Vec<TrackId> = {
@@ -1531,10 +1751,7 @@ impl Library {
                     })
                     .collect()
             };
-            if let Err(err) = db.set_favorite(&ids, favorite) {
-                tracing::warn!(%err, "could not save favourites");
-                return;
-            }
+            db.set_favorite(&ids, favorite)?;
             let mut state = lock(&self.inner.state);
             for &id in &ids {
                 state.update(id, |t| t.favorite = favorite);
@@ -1542,6 +1759,7 @@ impl Library {
             ids
         };
         self.inner.publish_patch(&changed);
+        Ok(())
     }
 
     // ---- measured loudness -----------------------------------------------------------
@@ -1582,6 +1800,44 @@ impl Library {
         true
     }
 
+    // ---- file check ------------------------------------------------------------------
+
+    /// Starts checking the files that have no result yet for their current state:
+    /// integrity, dynamic range, true peak (see `audio::check`). The files are only
+    /// read. Returns false if a run is in progress already.
+    pub fn check_files(&self) -> bool {
+        check::start(&self.inner)
+    }
+
+    /// Stops the run after the files that are being read; what was stored stays.
+    pub fn cancel_check(&self) {
+        self.inner.checks.cancel();
+    }
+
+    pub fn check_status(&self) -> CheckStatus {
+        self.inner.checks.status()
+    }
+
+    /// Forgets every check result (not while a run is in progress).
+    pub fn forget_checks(&self) {
+        if !self.inner.checks.status().running {
+            self.inner.forget_checks();
+        }
+    }
+
+    /// Blocks until no check run is in progress. False if `timeout` elapsed first. Not
+    /// for the UI thread.
+    pub fn wait_for_checks(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.inner.checks.status().running {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
     /// Records that a track was played: adds a history row and updates its play count
     /// and last-played time.
     pub fn record_play(&self, id: TrackId) {
@@ -1602,6 +1858,17 @@ impl Library {
             });
         }
         self.inner.publish_patch(&[id]);
+    }
+
+    /// Every counted play at or after `since` (Unix seconds): `(track, when)`, oldest
+    /// first. Blocking; not for the UI thread.
+    pub fn plays_since(&self, since: i64) -> Vec<(TrackId, i64)> {
+        lock(&self.inner.db)
+            .plays_since(since)
+            .unwrap_or_else(|err| {
+                tracing::warn!(%err, "could not read play history");
+                Vec::new()
+            })
     }
 
     /// Recently played tracks, most recent first, each track once.
@@ -1675,6 +1942,32 @@ impl Library {
                 return Err(LibraryError::NotFound);
             }
             db.append_playlist_items(id, tracks)?;
+        }
+        self.playlists_changed();
+        Ok(())
+    }
+
+    /// Creates a playlist with the given tracks in it, in one transaction (a failure
+    /// leaves no empty playlist behind). The name is trimmed.
+    pub fn create_playlist_with(
+        &self,
+        name: &str,
+        tracks: &[TrackId],
+    ) -> Result<i64, LibraryError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(LibraryError::InvalidName);
+        }
+        let (id, _) = lock(&self.inner.db).create_playlist_with_items(name, unix_now(), tracks)?;
+        self.playlists_changed();
+        Ok(id)
+    }
+
+    /// Gives a playlist exactly these tracks, in this order (undo of a removal). One
+    /// transaction: if it fails, the playlist keeps what it had.
+    pub fn replace_playlist_items(&self, id: i64, tracks: &[TrackId]) -> Result<(), LibraryError> {
+        if !lock(&self.inner.db).replace_playlist_items(id, tracks)? {
+            return Err(LibraryError::NotFound);
         }
         self.playlists_changed();
         Ok(())
@@ -1770,7 +2063,7 @@ impl Library {
 
         // First pass: entries the library already knows, by exact path or by a path that
         // differs only in Unicode normalisation (NFC playlist vs NFD file name).
-        let mut resolved: Vec<Option<TrackId>> = {
+        let mut resolved: Vec<Vec<TrackId>> = {
             let state = lock(&self.inner.state);
             let mut by_nfc: Option<HashMap<String, TrackId>> = None;
             entries
@@ -1790,6 +2083,7 @@ impl Library {
                     let key: String = path.to_string_lossy().nfc().collect();
                     by_nfc.get(&key).copied()
                 })
+                .map(|id| id.into_iter().collect())
                 .collect()
         };
         // Second pass: entries known under another spelling of their path, and files
@@ -1797,19 +2091,20 @@ impl Library {
         let unknown: Vec<(usize, PathBuf)> = entries
             .iter()
             .enumerate()
-            .filter(|(i, _)| resolved[*i].is_none())
+            .filter(|(i, _)| resolved[*i].is_empty())
             .filter_map(|(i, entry)| Some((i, entry.path.clone()?)))
             .collect();
         let unknown_paths: Vec<PathBuf> = unknown.iter().map(|(_, p)| p.clone()).collect();
-        for ((i, _), id) in unknown.iter().zip(self.import_paths(&unknown_paths)) {
-            resolved[*i] = id;
+        // (An entry naming a CUE sheet's audio file stands for the sheet's tracks.)
+        for ((i, _), ids) in unknown.iter().zip(self.import_paths(&unknown_paths)) {
+            resolved[*i] = ids;
         }
 
         let matched: Vec<TrackId> = resolved.iter().flatten().copied().collect();
         let missing: Vec<String> = entries
             .iter()
             .zip(&resolved)
-            .filter(|(_, id)| id.is_none())
+            .filter(|(_, ids)| ids.is_empty())
             .map(|(entry, _)| entry.raw.clone())
             .collect();
 
@@ -1830,6 +2125,126 @@ impl Library {
         })
     }
 
+    /// Takes over what Apple Music knew from its library export (see `apple`): play
+    /// counts, last plays, dates added, loved songs as favourites, and the user's
+    /// playlists. Songs are matched by their file (also when the path differs only in
+    /// Unicode normalisation); songs not in the library are counted, not added. Counts
+    /// are merged, not added up: importing twice changes nothing more. Blocking.
+    pub fn import_apple_music(&self, file: &Path) -> Result<AppleImport, LibraryError> {
+        let not_export = || {
+            LibraryError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not an Apple Music library export",
+            ))
+        };
+        let bytes = crate::storage::files::read_bounded(file, apple::MAX_FILE_BYTES)?
+            .ok_or_else(not_export)?;
+        let export = apple::parse(&String::from_utf8_lossy(&bytes)).ok_or_else(not_export)?;
+        drop(bytes);
+
+        // The export's songs that are in the library, by the export's id.
+        let found: HashMap<i64, TrackId> = {
+            let state = lock(&self.inner.state);
+            let by_nfc: HashMap<String, TrackId> = state
+                .by_path
+                .iter()
+                .map(|(p, &id)| (p.to_string_lossy().nfc().collect(), id))
+                .collect();
+            export
+                .tracks
+                .iter()
+                .filter_map(|t| {
+                    let id = state.id_of_path(&t.path).or_else(|| {
+                        let key: String = t.path.to_string_lossy().nfc().collect();
+                        by_nfc.get(&key).copied()
+                    })?;
+                    Some((t.id, id))
+                })
+                .collect()
+        };
+        let rows: Vec<crate::storage::db::ListeningRow> = export
+            .tracks
+            .iter()
+            .filter_map(|t| {
+                let id = *found.get(&t.id)?;
+                Some((id, t.play_count, t.last_played, t.added, t.loved))
+            })
+            .collect();
+        let changed: Vec<TrackId> = {
+            let mut db = lock(&self.inner.db);
+            db.merge_listening(&rows)?;
+            let mut state = lock(&self.inner.state);
+            for &(id, plays, last, added, loved) in &rows {
+                state.update(id, |t| {
+                    t.play_count = t.play_count.max(plays);
+                    if let Some(last) = last
+                        && t.last_played_at.is_none_or(|at| last > at)
+                    {
+                        t.last_played_at = Some(last);
+                    }
+                    if let Some(added) = added
+                        && added < t.added_at
+                    {
+                        t.added_at = added;
+                    }
+                    t.favorite |= loved;
+                });
+            }
+            rows.iter().map(|r| r.0).collect()
+        };
+        self.inner.publish_patch(&changed);
+
+        // Playlists, each with its songs in one step. One that is here already (same
+        // name, same songs: an earlier import) is not made again; a name taken by
+        // another list gets a mark.
+        let existing: Vec<(String, Vec<TrackId>)> = self
+            .playlists()
+            .into_iter()
+            .map(|p| {
+                let tracks = self
+                    .playlist_items(p.id)
+                    .into_iter()
+                    .map(|i| i.track_id)
+                    .collect();
+                (p.name, tracks)
+            })
+            .collect();
+        let mut made = 0;
+        for playlist in &export.playlists {
+            let tracks: Vec<TrackId> = playlist
+                .items
+                .iter()
+                .filter_map(|item| found.get(item).copied())
+                .collect();
+            if tracks.is_empty() {
+                continue;
+            }
+            let marked = format!("{} (Apple Music)", playlist.name);
+            if existing.iter().any(|(name, items)| {
+                (*name == playlist.name || *name == marked) && *items == tracks
+            }) {
+                continue;
+            }
+            let name = if existing.iter().any(|(name, _)| *name == playlist.name) {
+                marked
+            } else {
+                playlist.name.clone()
+            };
+            lock(&self.inner.db).create_playlist_with_items(&name, unix_now(), &tracks)?;
+            made += 1;
+        }
+        if made > 0 {
+            self.playlists_changed();
+        }
+        let matched = found.len();
+        tracing::info!(matched, playlists = made, "Apple Music library imported");
+        Ok(AppleImport {
+            matched,
+            unmatched: export.tracks.len() - matched,
+            playlists: made,
+        })
+    }
+
     // ---- session persistence for the playback module -------------------------------
 
     pub fn kv_get(&self, key: &str) -> Option<String> {
@@ -1845,10 +2260,34 @@ impl Library {
         }
     }
 
-    /// Replaces the saved play queue with `(queue item id, track id)` pairs in order.
-    pub fn save_queue(&self, items: &[(u64, TrackId)]) {
-        if let Err(err) = lock(&self.inner.db).save_queue(items) {
-            tracing::warn!(%err, "could not save the queue");
+    /// Saves the playback session in one transaction: the play queue as
+    /// `(queue item id, track id)` pairs in order, when given, and the rest of the
+    /// session as `value` under `key`. Returns false if nothing could be saved (then
+    /// nothing was: the stored session is still the previous one, whole).
+    pub fn save_session(&self, queue: Option<&[(u64, TrackId)]>, key: &str, value: &str) -> bool {
+        match lock(&self.inner.db).save_session(queue, key, value) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(%err, "could not save the playback session");
+                false
+            }
+        }
+    }
+
+    /// Where the user left off in a track, if that was remembered.
+    pub fn resume_point(&self, track: TrackId) -> Option<u64> {
+        lock(&self.inner.db)
+            .resume_point(track)
+            .unwrap_or_else(|err| {
+                tracing::warn!(%err, "could not read a resume point");
+                None
+            })
+    }
+
+    /// Remembers where the user left off in a track, or forgets it (`None`).
+    pub fn set_resume_point(&self, track: TrackId, position_ms: Option<u64>) {
+        if let Err(err) = lock(&self.inner.db).set_resume_point(track, position_ms, unix_now()) {
+            tracing::warn!(%err, "could not save a resume point");
         }
     }
 
@@ -1937,7 +2376,7 @@ mod tests {
     }
 
     /// Minimal 16-bit mono PCM WAV, a quarter of a second long.
-    fn write_wav(path: &Path) {
+    pub(super) fn write_wav(path: &Path) {
         let data = vec![0u8; 4000];
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"RIFF");
@@ -2001,7 +2440,7 @@ mod tests {
 
         // The user marks the track as a favourite and plays it in that window. The
         // snapshot shows both, but its track still agrees with its search index.
-        library.set_favorite(&[id], true);
+        library.set_favorite(&[id], true).unwrap();
         library.record_play(id);
         let snapshot = library.snapshot();
         let published = snapshot.get(id).unwrap();

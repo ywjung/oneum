@@ -23,6 +23,10 @@
 - 아이콘을 바꿨으면 `scripts/gen-icon.sh`.
 
 ## 2. 검사
+아래 세 가지(그리고 mingw-w64가 있으면 Windows 대상 clippy)를 한 번에 돌리는 스크립트가 `scripts/check.sh`입니다. 저장소를 GitHub에 올리면 `.github/workflows/ci.yml`이 macOS·Windows에서 같은 검사와 Windows 실행 확인, 의존성 권고 점검을 합니다.
+```bash
+scripts/check.sh
+```
 ```bash
 cargo fmt --all --check
 ```

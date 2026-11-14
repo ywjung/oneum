@@ -4,6 +4,11 @@
 //! then turned into incremental scans of just the affected directories; if the system
 //! reports that events were dropped, the whole folder is rescanned. Every few seconds the
 //! thread also checks whether folders appeared or disappeared (external drives).
+//!
+//! Where file events cannot be had, folders are rescanned now and then instead: when
+//! the watcher itself could not be created (it is tried again), when the system refused
+//! to watch a folder, and for folders on network shares, where the system does not see
+//! changes made from other computers.
 use super::{Inner, lock, tags};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -13,11 +18,34 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-/// Events are collected for this long before a scan is requested.
-const COALESCE_WINDOW: Duration = Duration::from_secs(2);
-/// Interval of the folder online/offline check.
-const ONLINE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The intervals of the watcher thread (shorter ones in tests).
+#[derive(Clone, Copy)]
+struct Timing {
+    /// Events are collected for this long before a scan is requested.
+    coalesce: Duration,
+    /// Interval of the folder online/offline check.
+    online_check: Duration,
+    /// How often a watcher that could not be created is tried again.
+    watcher_retry: Duration,
+    /// How often a folder without file events (the system could not watch it) is
+    /// rescanned. A scan of a folder whose files did not change only lists it and
+    /// compares sizes and dates.
+    unwatched_rescan: Duration,
+    /// How often a watched folder on a network share is rescanned: changes made there
+    /// from other computers are not reported. Rarely, since every scan walks the whole
+    /// share and wakes the disks of the computer it is on.
+    remote_rescan: Duration,
+}
+
+const TIMING: Timing = Timing {
+    coalesce: Duration::from_secs(2),
+    online_check: Duration::from_secs(5),
+    watcher_retry: Duration::from_secs(30),
+    unwatched_rescan: Duration::from_secs(5 * 60),
+    remote_rescan: Duration::from_secs(30 * 60),
+};
 
 pub(crate) enum WatchMsg {
     Fs(notify::Result<notify::Event>),
@@ -38,20 +66,32 @@ struct Dirty {
     dirs: BTreeSet<PathBuf>,
 }
 
+fn new_watcher(tx: &Sender<WatchMsg>) -> notify::Result<RecommendedWatcher> {
+    let tx = tx.clone();
+    notify::recommended_watcher(move |event| {
+        let _ = tx.send(WatchMsg::Fs(event));
+    })
+}
+
 /// Body of the watcher thread.
 pub(crate) fn run_watch_thread(inner: Arc<Inner>, rx: Receiver<WatchMsg>, tx: Sender<WatchMsg>) {
-    let mut watcher = match notify::recommended_watcher(move |event| {
-        let _ = tx.send(WatchMsg::Fs(event));
-    }) {
-        Ok(watcher) => Some(watcher),
-        Err(err) => {
-            tracing::warn!(%err, "file watching is unavailable; folders are only checked periodically");
-            None
-        }
-    };
+    run(&inner, &rx, &tx, TIMING, new_watcher);
+}
+
+fn run(
+    inner: &Inner,
+    rx: &Receiver<WatchMsg>,
+    tx: &Sender<WatchMsg>,
+    timing: Timing,
+    mut make_watcher: impl FnMut(&Sender<WatchMsg>) -> notify::Result<RecommendedWatcher>,
+) {
+    let mut watcher: Option<RecommendedWatcher> = None;
+    let mut watcher_tried: Option<Instant> = None;
+    let mut watcher_failed = false;
     let mut watched: HashMap<i64, Watched> = HashMap::new();
     // Folders whose watch could not be established (logged once, retried every check).
     let mut unwatchable: HashSet<i64> = HashSet::new();
+    let mut polled = Polled::default();
     let mut dirty: HashMap<i64, Dirty> = HashMap::new();
     let mut dirty_since: Option<Instant> = None;
     let mut last_check: Option<Instant> = None;
@@ -75,18 +115,103 @@ pub(crate) fn run_watch_thread(inner: Arc<Inner>, rx: Receiver<WatchMsg>, tx: Se
             break;
         }
 
-        if reconcile_now || last_check.is_none_or(|at| at.elapsed() >= ONLINE_CHECK_INTERVAL) {
-            reconcile(&inner, watcher.as_mut(), &mut watched, &mut unwatchable);
+        if reconcile_now || last_check.is_none_or(|at| at.elapsed() >= timing.online_check) {
+            if watcher.is_none()
+                && watcher_tried.is_none_or(|at| at.elapsed() >= timing.watcher_retry)
+            {
+                watcher_tried = Some(Instant::now());
+                match make_watcher(tx) {
+                    Ok(new) => {
+                        if watcher_failed {
+                            tracing::info!("file watching is available again");
+                        }
+                        watcher = Some(new);
+                        watched.clear();
+                    }
+                    Err(err) => {
+                        if !watcher_failed {
+                            tracing::warn!(%err, "file watching is unavailable; folders are rescanned now and then, and it is tried again");
+                        }
+                        watcher_failed = true;
+                    }
+                }
+            }
+            reconcile(inner, watcher.as_mut(), &mut watched, &mut unwatchable);
+            polled.check(inner, &watched, &timing);
             last_check = Some(Instant::now());
         }
 
-        if dirty_since.is_some_and(|since| since.elapsed() >= COALESCE_WINDOW) {
+        if dirty_since.is_some_and(|since| since.elapsed() >= timing.coalesce) {
             dirty_since = None;
             for (root_id, changes) in dirty.drain() {
                 let dirs = (!changes.full).then_some(changes.dirs);
                 inner.scan.request_root(&inner.counters, root_id, dirs);
             }
             inner.notify();
+        }
+    }
+}
+
+/// How often a music folder is scanned again without file events telling of changes:
+/// `None` for a watched folder on this computer.
+fn rescan_interval(remote: bool, watched: bool, timing: &Timing) -> Option<Duration> {
+    if !watched {
+        Some(timing.unwatched_rescan)
+    } else if remote {
+        Some(timing.remote_rescan)
+    } else {
+        None
+    }
+}
+
+/// Folders that file events do not cover, and when each was last rescanned for that.
+#[derive(Default)]
+struct Polled {
+    since: HashMap<i64, Instant>,
+    /// Whether a folder is on a network share, as found when it was last seen online.
+    remote: HashMap<i64, bool>,
+}
+
+impl Polled {
+    /// Requests a rescan of every online folder without file events (not watched, or on
+    /// a network share) whose last one is `interval` ago. A folder that is watched again
+    /// gets one more, for what changed since its last.
+    fn check(&mut self, inner: &Inner, watched: &HashMap<i64, Watched>, timing: &Timing) {
+        let online: Vec<(i64, PathBuf)> = lock(&inner.state)
+            .roots
+            .iter()
+            .filter(|root| root.online)
+            .map(|root| (root.id, root.path.clone()))
+            .collect();
+        let is_online = |id: &i64| online.iter().any(|(online_id, _)| online_id == id);
+        self.remote.retain(|id, _| is_online(id));
+        let now = Instant::now();
+        let mut due = Vec::new();
+        for (id, path) in &online {
+            let remote = *self.remote.entry(*id).or_insert_with(|| {
+                crate::platform::finder::is_on_local_volume(path) == Some(false)
+            });
+            if let Some(interval) = rescan_interval(remote, watched.contains_key(id), timing) {
+                match self.since.entry(*id) {
+                    // Just seen: the scan that comes with a folder (added, back online)
+                    // covers the present.
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(now);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        if now.duration_since(*entry.get()) >= interval {
+                            entry.insert(now);
+                            due.push(*id);
+                        }
+                    }
+                }
+            } else if self.since.remove(id).is_some() {
+                due.push(*id);
+            }
+        }
+        self.since.retain(|id, _| is_online(id));
+        for id in due {
+            inner.scan.request_root(&inner.counters, id, None);
         }
     }
 }
@@ -208,7 +333,11 @@ fn affected_dir(root: &Path, relative: &Path) -> Option<PathBuf> {
     if path.is_dir() {
         return Some(path);
     }
-    if path.is_file() && !tags::has_audio_extension(&path) && !is_image(&path) {
+    // A CUE sheet changes what its audio file is taken in as.
+    let sheet = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"));
+    if path.is_file() && !tags::has_audio_extension(&path) && !is_image(&path) && !sheet {
         return None;
     }
     // A file, or something that no longer exists (possibly a removed directory): its
@@ -244,6 +373,25 @@ mod tests {
     }
 
     #[test]
+    fn folders_without_reported_changes_are_rescanned_at_their_pace() {
+        assert_eq!(rescan_interval(false, true, &TIMING), None);
+        assert_eq!(
+            rescan_interval(true, true, &TIMING),
+            Some(Duration::from_secs(30 * 60)),
+            "a watched network share: rarely"
+        );
+        assert_eq!(
+            rescan_interval(true, false, &TIMING),
+            Some(Duration::from_secs(5 * 60)),
+            "not watched at all: more often"
+        );
+        assert_eq!(
+            rescan_interval(false, false, &TIMING),
+            Some(Duration::from_secs(5 * 60))
+        );
+    }
+
+    #[test]
     fn events_map_to_directories() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -252,6 +400,7 @@ mod tests {
         std::fs::write(root.join("album/a.mp3"), b"x").unwrap();
         std::fs::write(root.join("album/notes.txt"), b"x").unwrap();
         std::fs::write(root.join("album/.hidden.mp3"), b"x").unwrap();
+        std::fs::write(root.join("album/image.CUE"), b"x").unwrap();
         let watched = watched(root);
 
         let event =
@@ -271,6 +420,11 @@ mod tests {
             [root.join("album")]
         );
         assert_eq!(dirs_for(canonical.join("album")), [root.join("album")]);
+        // A CUE sheet decides what its audio file is taken in as.
+        assert_eq!(
+            dirs_for(canonical.join("album/image.CUE")),
+            [root.join("album")]
+        );
         // A deleted directory: its parent is rescanned.
         assert_eq!(dirs_for(canonical.join("gone/sub")), [root.join("gone")]);
         // Irrelevant files do not cause scans.
@@ -340,6 +494,93 @@ mod tests {
         );
         assert!(watched.contains_key(&root));
         library.shutdown();
+    }
+
+    /// Without a watcher, changes still show up (by rescans now and then), the watcher is
+    /// tried again, and once it stands the folder is watched as usual.
+    #[test]
+    fn a_watcher_that_could_not_be_made_is_made_later_and_rescans_fill_in() {
+        use crate::library::{Library, LibraryPaths};
+        use std::sync::atomic::AtomicUsize;
+        let temp = tempfile::tempdir().unwrap();
+        let music = temp.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let (library, _) = Library::open(LibraryPaths {
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+        })
+        .unwrap();
+        library.add_folder(&music).unwrap();
+        assert!(library.wait_for_scan(Duration::from_secs(30)));
+
+        let timing = Timing {
+            coalesce: Duration::from_millis(50),
+            online_check: Duration::from_millis(50),
+            watcher_retry: Duration::from_millis(3000),
+            unwatched_rescan: Duration::from_millis(200),
+            remote_rescan: Duration::from_millis(200),
+        };
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = {
+            let (inner, attempts, tx) = (library.inner.clone(), attempts.clone(), tx.clone());
+            std::thread::spawn(move || {
+                run(&inner, &rx, &tx, timing, |tx| {
+                    if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                        Err(notify::Error::generic("refused, as a system might"))
+                    } else {
+                        new_watcher(tx)
+                    }
+                })
+            })
+        };
+        let has = |name: &str| {
+            library
+                .snapshot()
+                .tracks
+                .iter()
+                .any(|t| t.path.ends_with(name))
+        };
+        let wait_for = |what: &str, cond: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !cond() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+
+        // No watcher yet: a file added now is found by a rescan.
+        std::thread::sleep(Duration::from_millis(100));
+        crate::library::tests::write_wav(&music.join("one.wav"));
+        wait_for("the rescan to find the new file", &|| has("one.wav"));
+        assert_eq!(attempts.load(Ordering::Relaxed), 1, "not tried again yet");
+        // The watcher is tried again, made, and then not tried any more.
+        wait_for("a second attempt", &|| {
+            attempts.load(Ordering::Relaxed) >= 2
+        });
+        crate::library::tests::write_wav(&music.join("two.wav"));
+        wait_for("the watched folder to report the new file", &|| {
+            has("two.wav")
+        });
+        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+
+        let _ = tx.send(WatchMsg::Stop);
+        thread.join().unwrap();
+        library.shutdown();
+    }
+
+    #[test]
+    fn a_local_folder_is_known_to_be_local() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            crate::platform::finder::is_on_local_volume(temp.path()),
+            Some(true)
+        );
+        assert_eq!(
+            crate::platform::finder::is_on_local_volume(&temp.path().join("missing")),
+            if cfg!(windows) { Some(true) } else { None }
+        );
     }
 
     #[test]

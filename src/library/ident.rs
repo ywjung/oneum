@@ -48,8 +48,10 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 ///    "Greatest Hits" in different folders stay separate. A folder named like `CD1`,
 ///    `Disc 2` or `disk3` counts as its parent so multi-disc sets stay together.
 ///
-/// Tracks without an album title share one "unknown album" per folder.
+/// Tracks without an album title share one "unknown album" per folder. The folder of a
+/// CUE sheet's track is the sheet's (see `cue::backing_file`).
 pub fn album_key(album: &str, album_artist: &str, compilation: bool, path: &Path) -> u64 {
+    let path = super::cue::backing_file(path);
     let album = normalize(album.trim());
     let album_artist = normalize(album_artist.trim());
     let mut hasher = Fnv1a::new();
@@ -203,6 +205,22 @@ mod tests {
         assert_eq!(a, b);
         let c = album_key("Now 100", "", false, &PathBuf::from("/m/b/02.mp3"));
         assert_ne!(a, c);
+    }
+
+    /// A sheet's tracks are in the sheet's folder: on one album with the files beside
+    /// them, and the discs of a set in `CD1` and `CD2` are one album.
+    #[test]
+    fn a_sheets_tracks_are_in_its_folder() {
+        let in_sheet = album_key("Live", "", false, &PathBuf::from("/m/Live/CD1/Live.cue/03"));
+        let beside = album_key("Live", "", false, &PathBuf::from("/m/Live/CD1/bonus.flac"));
+        let second_disc = album_key("Live", "", false, &PathBuf::from("/m/Live/CD2/Live.cue/01"));
+        assert_eq!(in_sheet, beside);
+        assert_eq!(in_sheet, second_disc);
+        assert_eq!(
+            album_key("", "", false, &PathBuf::from("/m/Live/CD1/Live.cue/03")),
+            album_key("", "", false, &PathBuf::from("/m/Live/CD1/x.flac")),
+            "the unknown album of the folder"
+        );
     }
 
     #[test]

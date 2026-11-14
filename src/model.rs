@@ -1,6 +1,7 @@
 //! Value types shared between modules.
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 /// Stable identifier of a track (SQLite rowid). Never reused for a different file while
 /// the row exists; survives rescans and relinking of moved files.
@@ -50,6 +51,12 @@ pub struct Track {
     /// Leveling values the app measured itself for a file without such tags (see
     /// `library::loudness`); kept in the app's database, never written to the file.
     pub measured: Option<ReplayGainTags>,
+    /// The app tried to measure the file as it is and could not read it: not tried
+    /// again until the file changes (a rescan replaces the track) or the app restarts.
+    pub unmeasurable: bool,
+    /// What the file check found for the file as it is (see `library::check`); kept
+    /// in the app's database.
+    pub check: Option<FileCheck>,
     /// Cached cover image id (hex), if the track has artwork.
     pub art_id: Option<String>,
     pub favorite: bool,
@@ -60,7 +67,59 @@ pub struct Track {
     pub added_at: i64,
 }
 
+/// What the file check found (see `library::check`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FileCheck {
+    pub verdict: CheckVerdict,
+    /// Dynamic range (the "DR" value), when the file has enough audio to tell.
+    pub dr: Option<f32>,
+    /// True peak (1.0 = full scale), measured on the audio oversampled.
+    pub true_peak: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckVerdict {
+    /// Decoded to the end without an error, and the checksum the file carries for its
+    /// audio (FLAC's MD5) matches.
+    Verified,
+    /// Decoded to the end without an error; the file carries no checksum to compare.
+    Decoded,
+    /// Undecodable parts, a checksum that does not match, or audio missing at the end.
+    Damaged,
+}
+
+impl CheckVerdict {
+    pub fn code(self) -> i64 {
+        match self {
+            CheckVerdict::Verified => 0,
+            CheckVerdict::Decoded => 1,
+            CheckVerdict::Damaged => 2,
+        }
+    }
+
+    pub fn from_code(code: i64) -> Option<Self> {
+        match code {
+            0 => Some(CheckVerdict::Verified),
+            1 => Some(CheckVerdict::Decoded),
+            2 => Some(CheckVerdict::Damaged),
+            _ => None,
+        }
+    }
+}
+
 impl Track {
+    /// The file that stands for the track on disk, without reading anything: its own
+    /// file, or for a track of a CUE sheet the sheet (whose folder is the album's).
+    pub fn file(&self) -> &Path {
+        crate::library::cue::backing_file(&self.path)
+    }
+
+    /// The audio file the track is read from: its own file, or for a track of a CUE
+    /// sheet the sheet's audio file (the sheet is read to find it).
+    pub fn audio_file(&self) -> Cow<'_, Path> {
+        crate::library::cue::real_file(&self.path)
+    }
+
     /// The sample rate playback runs at: the file's own, except for DSD, which plays as
     /// the PCM it is converted to.
     pub fn playback_rate(&self) -> u32 {
@@ -96,7 +155,7 @@ impl Track {
 
     /// True when the file's tags give no track gain, so that measuring it would help.
     pub fn wants_measuring(&self) -> bool {
-        self.replaygain.track_gain_db.is_none() && self.measured.is_none()
+        self.replaygain.track_gain_db.is_none() && self.measured.is_none() && !self.unmeasurable
     }
 }
 
@@ -128,6 +187,8 @@ pub(crate) fn test_track(id: TrackId) -> Track {
         mtime_ns: 1,
         replaygain: ReplayGainTags::default(),
         measured: None,
+        unmeasurable: false,
+        check: None,
         art_id: None,
         favorite: false,
         play_count: 0,

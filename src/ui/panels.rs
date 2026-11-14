@@ -4,7 +4,7 @@ use super::icons::Icon;
 use super::{
     Action, DragTracks, KeyPane, Nav, OneumApp, ToastAction, meter, spectrum, theme, widgets,
 };
-use crate::app::settings::RightPanel;
+use crate::app::settings::{Pin, RightPanel};
 use crate::audio::dsp::replaygain_factor;
 use crate::i18n::{format_time, group_digits};
 use crate::playback::{Command, PlayState};
@@ -719,6 +719,61 @@ impl OneumApp {
             });
     }
 
+    /// Where a pin leads and what it is called; `None` once what it pins is gone (a
+    /// deleted playlist, an album that is no longer in the library).
+    pub(super) fn pin_target(&self, pin: &Pin) -> Option<(Icon, String)> {
+        let s = self.s();
+        Some(match pin {
+            Pin::Album(key) => {
+                let album = self
+                    .snapshot
+                    .album_index(*key)
+                    .and_then(|i| self.snapshot.albums().get(i as usize))?;
+                let title = if album.title.is_empty() {
+                    s.unknown_album.to_string()
+                } else {
+                    album.title.clone()
+                };
+                (Icon::Album, title)
+            }
+            Pin::Artist(name) => (
+                Icon::Person,
+                if name.is_empty() {
+                    s.unknown_artist.to_string()
+                } else {
+                    name.clone()
+                },
+            ),
+            Pin::Genre(name) => (Icon::Tag, name.clone()),
+            Pin::Playlist(id) => (
+                Icon::Playlist,
+                self.playlists.iter().find(|p| p.id == *id)?.name.clone(),
+            ),
+            Pin::Smart(name) => self
+                .settings
+                .smart_playlists
+                .iter()
+                .any(|p| &p.name == name)
+                .then_some((Icon::Search, name.clone()))?,
+        })
+    }
+
+    /// The pins that still lead somewhere (those the sidebar shows). Only these count
+    /// toward the limit: one whose playlist was deleted makes room.
+    /// Albums are given by the key they are shown under now (see `shown_pin`), each
+    /// pin once.
+    pub(super) fn live_pins(&self) -> Vec<Pin> {
+        let mut live: Vec<Pin> = self
+            .settings
+            .pinned
+            .iter()
+            .filter(|pin| self.pin_target(pin).is_some())
+            .cloned()
+            .collect();
+        super::restate_pins(&mut live, |pin| super::shown_pin(&self.snapshot, pin));
+        live
+    }
+
     pub(super) fn sidebar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let s = self.s();
         let frame = egui::Frame::new()
@@ -738,6 +793,34 @@ impl OneumApp {
                     });
                     ui.add_space(2.0);
                 };
+                // Pinned things first, those that still exist.
+                let pins: Vec<(Pin, Icon, String)> = self
+                    .settings
+                    .pinned
+                    .iter()
+                    .filter_map(|pin| {
+                        let (icon, name) = self.pin_target(pin)?;
+                        Some((pin.clone(), icon, name))
+                    })
+                    .collect();
+                let live_pins: Vec<Pin> = pins.iter().map(|(pin, _, _)| pin.clone()).collect();
+                if !pins.is_empty() {
+                    header(ui, s.pinned);
+                    for (pin, icon, name) in pins {
+                        let nav = super::pin_nav(&pin);
+                        let response = sidebar_row(ui, self.nav == nav, icon, &name, None);
+                        if response.clicked() {
+                            actions.push(Action::Go(nav));
+                        }
+                        response.context_menu(|ui| {
+                            if ui.button(s.unpin).clicked() {
+                                actions.push(Action::TogglePin(pin.clone()));
+                                ui.close();
+                            }
+                        });
+                    }
+                    ui.add_space(4.0);
+                }
                 header(ui, s.library);
                 let total = self.snapshot.len();
                 let entries = [
@@ -752,6 +835,13 @@ impl OneumApp {
                     (Nav::Genres, Icon::Tag, s.genres, None),
                     (Nav::Favorites, Icon::Heart, s.favorites, None),
                     (Nav::Recent, Icon::Clock, s.recently_played, None),
+                    (
+                        Nav::Folder(std::path::PathBuf::new()),
+                        Icon::Folder,
+                        s.folders,
+                        None,
+                    ),
+                    (Nav::Stats, Icon::Meter, s.stats, None),
                 ];
                 for (nav, icon, label, trailing) in entries {
                     let selected = self.nav == nav
@@ -760,7 +850,8 @@ impl OneumApp {
                             (Nav::Album(_), Nav::Albums)
                                 | (Nav::Artist(_), Nav::Artists)
                                 | (Nav::Genre(_), Nav::Genres)
-                        ) && self.history.first() == Some(&nav);
+                        ) && self.history.first() == Some(&nav)
+                        || matches!(&self.nav, Nav::Folder(_)) && matches!(&nav, Nav::Folder(_));
                     if sidebar_row(ui, selected, icon, label, trailing.filter(|_| total > 0))
                         .clicked()
                     {
@@ -854,6 +945,13 @@ impl OneumApp {
                                     }
                                     ui.close();
                                 }
+                                super::pin_menu_item(
+                                    ui,
+                                    s,
+                                    &live_pins,
+                                    Pin::Smart(name.clone()),
+                                    actions,
+                                );
                                 ui.separator();
                                 if ui.button(s.smart_edit).clicked() {
                                     actions.push(Action::EditSmart(name.clone()));
@@ -891,13 +989,13 @@ impl OneumApp {
                                 if response.lost_focus() {
                                     let new_name = text.trim().to_string();
                                     self.renaming = None;
-                                    if enter
-                                        && !new_name.is_empty()
-                                        && new_name != name
-                                        && let Err(error) =
-                                            self.core.library.rename_playlist(id, &new_name)
-                                    {
-                                        self.library_error_toast(&error);
+                                    if enter && !new_name.is_empty() && new_name != name {
+                                        self.edit(move |library| {
+                                            library
+                                                .rename_playlist(id, &new_name)
+                                                .err()
+                                                .map(super::AppEvent::EditFailed)
+                                        });
                                     }
                                 }
                                 continue;
@@ -963,6 +1061,7 @@ impl OneumApp {
                                     self.export_playlist(id, &name);
                                     ui.close();
                                 }
+                                super::pin_menu_item(ui, s, &live_pins, Pin::Playlist(id), actions);
                                 ui.separator();
                                 if ui.button(s.delete).clicked() {
                                     self.dialog = Some(Dialog::DeletePlaylist(id, name.clone()));
@@ -1029,7 +1128,7 @@ impl OneumApp {
                     self.open_settings();
                     self.settings_tab = super::settings_window::Tab::Playback;
                 }
-                ToastAction::RestorePlaylist(id, tracks) => self.restore_playlist(id, &tracks),
+                ToastAction::RestorePlaylist(id, tracks) => self.restore_playlist(id, tracks),
             }
             dismiss = true;
         }
@@ -1163,7 +1262,28 @@ impl OneumApp {
                 if current == Some(index) {
                     current_top = Some(response.rect.top() - origin);
                 }
-                if response.clicked() {
+                let mut clicked = response.clicked();
+                // A translation or pronunciation of the same moment, right under it
+                // and a little quieter.
+                for also in &line.also {
+                    let color = if current == Some(index) {
+                        accent.gamma_multiply(0.75)
+                    } else if current.is_some_and(|now| index < now) {
+                        dim
+                    } else {
+                        strong.gamma_multiply(0.6)
+                    };
+                    let response = ui
+                        .add(
+                            egui::Label::new(RichText::new(also).size(11.5).color(color))
+                                .wrap()
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(s.lyrics_seek_hint);
+                    clicked |= response.clicked();
+                }
+                if clicked {
                     seek = Some(u64::from(line.at_ms));
                 }
             }
@@ -2036,6 +2156,53 @@ impl OneumApp {
                     }
                 };
                 rows.push((s.info_replaygain, gain));
+                // What the file check found, for the file as it is.
+                if let Some(check) = track.check {
+                    use crate::model::CheckVerdict;
+                    let verdict = match check.verdict {
+                        CheckVerdict::Verified => s.info_check_verified,
+                        CheckVerdict::Decoded => s.info_check_decoded,
+                        CheckVerdict::Damaged => s.info_check_damaged,
+                    };
+                    rows.push((s.info_check, verdict.to_string()));
+                    if let Some(dr) = check.dr {
+                        // The album's value: the mean of its checked tracks.
+                        let album: Vec<f32> = self
+                            .snapshot
+                            .album_index(track.album_key)
+                            .and_then(|i| self.snapshot.albums().get(i as usize))
+                            .map(|album| {
+                                album
+                                    .tracks
+                                    .iter()
+                                    .filter_map(|&i| self.snapshot.tracks.get(i as usize))
+                                    .filter_map(|t| t.check.and_then(|c| c.dr))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let text = if album.len() > 1 {
+                            let mean = album.iter().sum::<f32>() / album.len() as f32;
+                            format!(
+                                "DR{} ({} DR{})",
+                                dr.round() as i32,
+                                s.rg_album,
+                                mean.round() as i32
+                            )
+                        } else {
+                            format!("DR{}", dr.round() as i32)
+                        };
+                        rows.push((s.info_dr, text));
+                    }
+                    if let Some(peak) = check.true_peak.filter(|p| *p > 0.0) {
+                        let db = 20.0 * peak.log10();
+                        let text = if db < 0.0 {
+                            format!("−{:.1} dBTP", -db)
+                        } else {
+                            format!("+{db:.1} dBTP")
+                        };
+                        rows.push((s.info_true_peak, text));
+                    }
+                }
                 rows.push((s.info_plays, track.play_count.to_string()));
                 // What the file says beyond the library: work, label, dates.
                 if let Some(details) = &details {

@@ -15,9 +15,65 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use symphonia::core::io::MediaSource;
 
 /// Larger files are streamed from disk as usual. Two files can be in memory at a time
-/// (the track that plays and the one that follows).
+/// (the track that plays and the one that follows), together within [`Budget`].
 pub const MAX_FILE_BYTES: u64 = 1 << 30;
 const CHUNK_BYTES: usize = 1 << 20;
+/// The files in memory together take at most this share of the installed memory…
+const MEMORY_SHARE: u64 = 8;
+/// …and never more than this.
+const MAX_TOTAL_BYTES: u64 = 3 << 29; // 1.5 GiB
+/// The budget when the installed memory cannot be found out.
+const FALLBACK_TOTAL_BYTES: u64 = 1 << 29; // 512 MiB
+
+/// How many bytes all files in memory may take together. A file that does not fit in
+/// what is left is streamed from disk as usual (and plays the same way).
+pub struct Budget {
+    limit: u64,
+    used: AtomicU64,
+}
+
+impl Budget {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            used: AtomicU64::new(0),
+        }
+    }
+
+    /// The app's budget: a share of the installed memory.
+    pub fn global() -> &'static Arc<Budget> {
+        static GLOBAL: std::sync::OnceLock<Arc<Budget>> = std::sync::OnceLock::new();
+        GLOBAL.get_or_init(|| {
+            let limit = crate::platform::system::physical_memory_bytes()
+                .map_or(FALLBACK_TOTAL_BYTES, |installed| {
+                    (installed / MEMORY_SHARE).min(MAX_TOTAL_BYTES)
+                });
+            Arc::new(Budget::new(limit))
+        })
+    }
+
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+
+    /// Bytes taken by files in memory now.
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Acquire)
+    }
+
+    /// Takes `bytes` of the budget if they fit.
+    fn take(&self, bytes: u64) -> bool {
+        self.used
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|&total| total <= self.limit)
+            })
+            .is_ok()
+    }
+
+    fn give_back(&self, bytes: u64) {
+        self.used.fetch_sub(bytes, Ordering::AcqRel);
+    }
+}
 
 struct Shared {
     data: Mutex<Vec<u8>>,
@@ -25,6 +81,16 @@ struct Shared {
     loaded: AtomicU64,
     complete: AtomicBool,
     cancel: AtomicBool,
+    /// What this file takes of the budget, given back when the bytes are freed (the
+    /// loader may hold them a moment longer than the [`FileInMemory`]).
+    budget: Arc<Budget>,
+    reserved: u64,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.budget.give_back(self.reserved);
+    }
 }
 
 impl Shared {
@@ -41,21 +107,41 @@ pub struct FileInMemory {
     /// Open until the whole file is in memory.
     file: Option<Arc<File>>,
     shared: Arc<Shared>,
+    /// Common to every handle of this file in memory (see [`FileInMemory::share`]):
+    /// the loader is stopped when the last of them goes.
+    _alive: Arc<Alive>,
+}
+
+/// Stops the loader when dropped: it is not joined, so a read stuck on a dead drive
+/// cannot block whoever lets go of the file.
+struct Alive(Arc<Shared>);
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        self.0.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 impl FileInMemory {
     /// Opens `path` and starts loading it. `Ok(None)` means the file is not suited
-    /// (larger than [`MAX_FILE_BYTES`], empty, not a regular file, or no memory to hold
-    /// it) and should be streamed as usual.
+    /// (larger than [`MAX_FILE_BYTES`], empty, not a regular file, more than is left of
+    /// the app's [`Budget`], or no memory to hold it) and should be streamed as usual.
     pub fn start(path: &Path) -> io::Result<Option<Self>> {
+        Self::start_within(path, Budget::global())
+    }
+
+    /// [`FileInMemory::start`] within the given budget.
+    pub fn start_within(path: &Path, budget: &Arc<Budget>) -> io::Result<Option<Self>> {
         let file = File::open(path)?;
         let meta = file.metadata()?;
         let len = meta.len();
-        if !meta.is_file() || len == 0 || len > MAX_FILE_BYTES {
+        if !meta.is_file() || len == 0 || len > MAX_FILE_BYTES || !budget.take(len) {
             return Ok(None);
         }
+        // From here on the budget is given back when `shared` goes (or right here).
         let mut data = Vec::new();
         if data.try_reserve_exact(len as usize).is_err() {
+            budget.give_back(len);
             return Ok(None);
         }
         let file = Arc::new(file);
@@ -64,6 +150,8 @@ impl FileInMemory {
             loaded: AtomicU64::new(0),
             complete: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
+            budget: budget.clone(),
+            reserved: len,
         });
         let (loader_file, loader_shared) = (file.clone(), shared.clone());
         let spawned = std::thread::Builder::new()
@@ -76,8 +164,22 @@ impl FileInMemory {
             path: path.to_path_buf(),
             len,
             file: Some(file),
+            _alive: Arc::new(Alive(shared.clone())),
             shared,
         }))
+    }
+
+    /// Another handle to the same bytes: one file in memory read by two decoders (two
+    /// tracks of one CUE sheet's audio file), loaded once and counted once against the
+    /// budget.
+    pub fn share(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            len: self.len,
+            file: self.file.clone(),
+            shared: self.shared.clone(),
+            _alive: self._alive.clone(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -101,14 +203,6 @@ impl FileInMemory {
 
     pub fn into_source(self) -> MemorySource {
         MemorySource { file: self, pos: 0 }
-    }
-}
-
-impl Drop for FileInMemory {
-    fn drop(&mut self) {
-        // The loader notices before its next chunk; it is not joined, so a read stuck
-        // on a dead drive cannot block whoever drops this.
-        self.shared.cancel.store(true, Ordering::Relaxed);
     }
 }
 
@@ -312,6 +406,74 @@ mod tests {
         let mut all = Vec::new();
         file.into_source().read_to_end(&mut all).expect("reads");
         assert_eq!(all, expected);
+    }
+
+    /// Two tracks of one CUE sheet read the same file in memory: loaded once, counted
+    /// once, and still loaded and readable through one handle when the other is gone.
+    #[test]
+    fn a_shared_file_in_memory_is_loaded_and_counted_once() {
+        use std::io::Read;
+        let path = fixture("gap_a.flac");
+        let len = std::fs::metadata(&path).expect("fixture").len();
+        let budget = Arc::new(Budget::new(len + len / 2));
+        let first = FileInMemory::start_within(&path, &budget)
+            .expect("opens")
+            .expect("fits");
+        let second = first.share();
+        assert_eq!(budget.used(), len, "one copy");
+        drop(first);
+        wait_complete(&second);
+        let mut bytes = Vec::new();
+        second
+            .share()
+            .into_source()
+            .read_to_end(&mut bytes)
+            .expect("reads");
+        assert_eq!(bytes, std::fs::read(&path).expect("reads the file"));
+        drop(second);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while budget.used() != 0 {
+            assert!(Instant::now() < deadline, "the budget was not given back");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn files_in_memory_stay_within_the_budget() {
+        let path = fixture("gap_a.flac");
+        let len = std::fs::metadata(&path).expect("fixture").len();
+        // Room for two of them, not three.
+        let budget = Arc::new(Budget::new(2 * len + len / 2));
+        let first = FileInMemory::start_within(&path, &budget)
+            .expect("opens")
+            .expect("fits");
+        let second = FileInMemory::start_within(&path, &budget)
+            .expect("opens")
+            .expect("fits");
+        assert_eq!(budget.used(), 2 * len);
+        assert!(
+            FileInMemory::start_within(&path, &budget)
+                .expect("opens")
+                .is_none(),
+            "a third does not fit: it is streamed"
+        );
+        // Given back once the bytes are freed (the loader lets go of them too).
+        wait_complete(&first);
+        drop(first);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while budget.used() != len {
+            assert!(Instant::now() < deadline, "the budget was not given back");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            FileInMemory::start_within(&path, &budget)
+                .expect("opens")
+                .is_some()
+        );
+        drop(second);
+        // The app's own budget is a share of the installed memory, within the cap.
+        let global = Budget::global().limit();
+        assert!(global > 0 && global <= MAX_TOTAL_BYTES, "{global}");
     }
 
     #[test]

@@ -36,9 +36,29 @@ fn license_notices() -> &'static [markdown::Block] {
 }
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon-160.png");
 
+/// Size of the window where there is room for it. In a small window, or one zoomed in
+/// (⌘+), it shrinks to what there is and its body scrolls.
 const WIDTH: f32 = 620.0;
 const BODY_HEIGHT: f32 = 404.0;
+const MIN_WIDTH: f32 = 360.0;
+const MIN_BODY_HEIGHT: f32 = 120.0;
+/// Space kept free around the window when it has to shrink.
+const EDGE: f32 = 12.0;
+/// Where there is room the window sits this much above the centre.
+const LIFT: f32 = 20.0;
+/// Height of the header (title, tabs, divider) until it has been measured.
+const HEADER_GUESS: f32 = 92.0;
 const SIDE_MARGIN: f32 = 20.0;
+
+/// The settings window's width, body height and lift above the centre for a window
+/// content area of `screen` points, with a header `header` points tall.
+fn fit(screen: egui::Vec2, header: f32) -> (f32, f32, f32) {
+    let width = WIDTH.min(screen.x - 2.0 * EDGE).max(MIN_WIDTH);
+    let room = screen.y - 2.0 * EDGE - header;
+    let body = BODY_HEIGHT.min(room).max(MIN_BODY_HEIGHT);
+    let lift = ((room - body) / 2.0).clamp(0.0, LIFT);
+    (width, body, lift)
+}
 
 impl OneumApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -74,29 +94,42 @@ impl OneumApp {
         if backdrop_clicked && self.dialog.is_none() {
             close = true;
         }
+        // The header's height depends on the font size; it is measured as it is laid out
+        // and used from the next frame on.
+        let header_id = egui::Id::unique("settings-header-height");
+        let header = ctx
+            .data(|d| d.get_temp::<f32>(header_id))
+            .unwrap_or(HEADER_GUESS);
+        let (width, body_height, lift) = fit(screen.size(), header);
         egui::Window::new(s.settings)
             .title_bar(false)
             .collapsible(false)
             .resizable(false)
             .frame(frame)
-            .fixed_size([WIDTH, 0.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, -20.0])
+            .fixed_size([width, 0.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -lift])
             .show(ctx, |ui| {
-                ui.set_width(WIDTH);
+                ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = 0.0;
+                let top = ui.cursor().top();
                 close |= self.settings_header(ui);
                 widgets::row_divider(ui);
+                let measured = ui.cursor().top() - top;
+                if (measured - header).abs() > 0.5 {
+                    ctx.data_mut(|d| d.insert_temp(header_id, measured));
+                    ctx.request_repaint();
+                }
                 egui::ScrollArea::vertical()
                     .id_salt(("settings-body", self.settings_tab))
-                    .max_height(BODY_HEIGHT)
-                    .min_scrolled_height(BODY_HEIGHT)
+                    .max_height(body_height)
+                    .min_scrolled_height(body_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(14.0);
                         ui.horizontal(|ui| {
                             ui.add_space(SIDE_MARGIN);
                             ui.vertical(|ui| {
-                                ui.set_width(WIDTH - SIDE_MARGIN * 2.0);
+                                ui.set_width(width - SIDE_MARGIN * 2.0);
                                 ui.spacing_mut().item_spacing.y = 4.0;
                                 match self.settings_tab {
                                     Tab::General => self.settings_general(ui),
@@ -389,6 +422,131 @@ impl OneumApp {
                 );
             }
         });
+
+        ui.add_space(18.0);
+        self.check_card(ui);
+
+        ui.add_space(14.0);
+        widgets::section_title(ui, s.import_title);
+        let mut import = false;
+        widgets::card(ui, |ui| {
+            widgets::setting_row(
+                ui,
+                s.apple_import_row,
+                Some(s.apple_import_desc),
+                true,
+                |ui| {
+                    let button =
+                        egui::Button::new(s.apple_import_button).min_size(egui::vec2(0.0, 26.0));
+                    import = ui.add(button).clicked();
+                },
+            );
+        });
+        widgets::section_note(ui, s.apple_import_hint);
+        if import {
+            self.pick_apple_library();
+        }
+    }
+
+    /// The file check: start or stop it, what it found, and the way to the damaged files.
+    fn check_card(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let library = self.core.library.clone();
+        let status = library.check_status();
+        let (mut waiting, mut checked, mut damaged) = (0usize, 0usize, 0usize);
+        for track in &self.snapshot.tracks {
+            match track.check {
+                Some(check) => {
+                    checked += 1;
+                    damaged += usize::from(check.verdict == crate::model::CheckVerdict::Damaged);
+                }
+                None => waiting += usize::from(track.available),
+            }
+        }
+        let text = if status.running {
+            self.lang.check_progress(
+                true,
+                status.done,
+                status.total,
+                status.damaged,
+                status.failed,
+            )
+        } else if waiting > 0 {
+            self.lang.check_waiting(waiting)
+        } else if status.done > 0 {
+            self.lang.check_progress(
+                false,
+                status.done,
+                status.total,
+                status.damaged,
+                status.failed,
+            )
+        } else {
+            s.check_none.to_string()
+        };
+        widgets::section_title(ui, s.check_title);
+        let mut show_damaged = false;
+        widgets::card(ui, |ui| {
+            widgets::setting_row(ui, s.check_row, Some(&text), true, |ui| {
+                let label = if status.running {
+                    s.check_stop
+                } else {
+                    s.check_start
+                };
+                let button = egui::Button::new(label).min_size(egui::vec2(0.0, 26.0));
+                if ui
+                    .add_enabled(status.running || waiting > 0, button)
+                    .clicked()
+                {
+                    if status.running {
+                        library.cancel_check();
+                    } else {
+                        library.check_files();
+                    }
+                }
+            });
+            if status.running {
+                let fraction = status.done as f32 / status.total.max(1) as f32;
+                ui.add(egui::ProgressBar::new(fraction).desired_height(4.0));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            if checked > 0 {
+                widgets::row_divider(ui);
+                let summary = format!(
+                    "{} · {}",
+                    self.lang.song_count(checked),
+                    self.lang
+                        .check_progress(false, checked as u64, checked as u64, damaged as u64, 0)
+                        .split(" · ")
+                        .nth(1)
+                        .unwrap_or_default()
+                        .trim_end_matches('.')
+                );
+                widgets::setting_row(ui, s.check_results, Some(&summary), !status.running, |ui| {
+                    let forget = egui::Button::new(s.check_forget).min_size(egui::vec2(0.0, 26.0));
+                    if ui.add(forget).clicked() {
+                        // Waits for the database: on the edit thread, not in a frame.
+                        self.edit(|library| {
+                            library.forget_checks();
+                            None
+                        });
+                    }
+                    if damaged > 0 {
+                        let show =
+                            egui::Button::new(s.check_show_damaged).min_size(egui::vec2(0.0, 26.0));
+                        if ui.add(show).clicked() {
+                            show_damaged = true;
+                        }
+                    }
+                });
+            }
+        });
+        widgets::section_note(ui, s.check_hint);
+        if show_damaged {
+            self.settings_open = false;
+            self.show_search(super::Nav::Songs, "check:damaged");
+        }
     }
 
     fn settings_playback(&mut self, ui: &mut egui::Ui) {
@@ -544,6 +702,47 @@ impl OneumApp {
         }
         self.loudness_card(ui);
         widgets::section_note(ui, s.rg_hint);
+
+        ui.add_space(14.0);
+        widgets::section_title(ui, s.play_order);
+        let order_before = (
+            self.settings.shuffle_by_album,
+            self.settings.resume_long_tracks,
+        );
+        widgets::card(ui, |ui| {
+            widgets::setting_row(
+                ui,
+                s.shuffle_by_album_row,
+                Some(s.shuffle_by_album_desc),
+                true,
+                |ui| {
+                    widgets::toggle(
+                        ui,
+                        &mut self.settings.shuffle_by_album,
+                        s.shuffle_by_album_row,
+                    );
+                },
+            );
+            widgets::row_divider(ui);
+            widgets::setting_row(
+                ui,
+                s.resume_long_row,
+                Some(s.resume_long_desc),
+                true,
+                |ui| {
+                    widgets::toggle(ui, &mut self.settings.resume_long_tracks, s.resume_long_row);
+                },
+            );
+        });
+        widgets::section_note(ui, s.play_order_hint);
+        if self.settings.shuffle_by_album != order_before.0 {
+            player.send(Command::SetShuffleByAlbum(self.settings.shuffle_by_album));
+        }
+        if self.settings.resume_long_tracks != order_before.1 {
+            player.send(Command::SetResumeLongTracks(
+                self.settings.resume_long_tracks,
+            ));
+        }
 
         ui.add_space(14.0);
         widgets::section_title(ui, s.equalizer);
@@ -960,6 +1159,26 @@ mod tests {
 
     fn plain(spans: &[Span]) -> String {
         spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn the_window_fits_small_and_zoomed_windows() {
+        let header = 92.0;
+        // Room enough: full size, a little above the centre.
+        assert_eq!(
+            fit(egui::vec2(1180.0, 760.0), header),
+            (WIDTH, BODY_HEIGHT, LIFT)
+        );
+        // The smallest main window (760 × 480): narrower body, whole window inside.
+        let (width, body, lift) = fit(egui::vec2(760.0, 480.0), header);
+        assert_eq!(width, WIDTH);
+        assert!(header + body + 2.0 * EDGE <= 480.0, "{body}");
+        assert_eq!(lift, 0.0);
+        // Zoomed to 150 %: 760 × 480 pixels are about 507 × 320 points.
+        let (width, body, _) = fit(egui::vec2(507.0, 320.0), header);
+        assert!(width <= 507.0 - 2.0 * EDGE);
+        assert!(header + body + 2.0 * EDGE <= 320.0, "{body}");
+        assert!(body >= MIN_BODY_HEIGHT);
     }
 
     /// The notices that ship: all of the document is understood, the tables are whole.

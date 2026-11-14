@@ -66,6 +66,10 @@ pub struct Settings {
     pub correction: Option<String>,
     /// Radio: when the queue runs out, go on with songs like the last one (off by default).
     pub radio: bool,
+    /// Shuffle whole albums instead of single tracks (off by default).
+    pub shuffle_by_album: bool,
+    /// Tracks of 20 minutes or more start where they were left off (on by default).
+    pub resume_long_tracks: bool,
     /// The equalizer presets the user has saved, in the order they were saved.
     #[serde(deserialize_with = "lenient_list")]
     pub eq_presets: Vec<EqPreset>,
@@ -83,7 +87,26 @@ pub struct Settings {
     pub volume_before_mute: Option<f32>,
     /// Show the time left instead of the total length next to the seek bar.
     pub show_remaining_time: bool,
+    /// Albums, artists, genres and playlists kept at the top of the sidebar, in the
+    /// order they were pinned.
+    #[serde(deserialize_with = "lenient_list")]
+    pub pinned: Vec<Pin>,
 }
+
+/// Something kept at the top of the sidebar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Pin {
+    /// By its album key (see `library::album_key`).
+    Album(u64),
+    Artist(String),
+    Genre(String),
+    Playlist(i64),
+    /// A smart playlist, by its name.
+    Smart(String),
+}
+
+/// How many things can be pinned to the sidebar.
+pub const MAX_PINS: usize = 12;
 
 /// How many equalizer presets of the user's own are kept (the equalizer sheet offers
 /// no way to save more) and how long a preset's name may be.
@@ -95,6 +118,8 @@ pub const MAX_CORRECTIONS: usize = 30;
 pub const MAX_SMART_PLAYLISTS: usize = 100;
 pub const MAX_SMART_NAME_CHARS: usize = 60;
 pub const MAX_SMART_QUERY_CHARS: usize = 300;
+/// How long an artist or genre name kept in a pin may be.
+const MAX_PIN_NAME_CHARS: usize = 300;
 
 /// A list read one entry at a time: an entry this build cannot read (damaged, or of a
 /// kind a later version added) is left out instead of costing the whole file, and with
@@ -174,6 +199,26 @@ impl Settings {
         self.smart_playlists.retain(|smart| {
             !smart.name.is_empty() && !smart.query.is_empty() && names.insert(smart.name.clone())
         });
+        let mut seen = Vec::new();
+        self.pinned = std::mem::take(&mut self.pinned)
+            .into_iter()
+            .map(|pin| match pin {
+                Pin::Artist(name) => Pin::Artist(tidy_text(&name, MAX_PIN_NAME_CHARS)),
+                Pin::Genre(name) => Pin::Genre(tidy_text(&name, MAX_PIN_NAME_CHARS)),
+                Pin::Smart(name) => Pin::Smart(tidy_text(&name, MAX_SMART_NAME_CHARS)),
+                other => other,
+            })
+            .filter(|pin| {
+                let empty =
+                    matches!(pin, Pin::Artist(n) | Pin::Genre(n) | Pin::Smart(n) if n.is_empty());
+                let new = !seen.contains(pin);
+                if new {
+                    seen.push(pin.clone());
+                }
+                !empty && new
+            })
+            .take(MAX_PINS)
+            .collect();
         if !self.replaygain.preamp_db.is_finite() {
             self.replaygain.preamp_db = 0.0;
         }
@@ -218,6 +263,8 @@ impl Default for Settings {
             corrections: Vec::new(),
             correction: None,
             radio: false,
+            shuffle_by_album: false,
+            resume_long_tracks: true,
             eq_presets: Vec::new(),
             show_format_column: false,
             list_columns: ListColumns::default(),
@@ -227,6 +274,7 @@ impl Default for Settings {
             window_size: None,
             volume_before_mute: None,
             show_remaining_time: false,
+            pinned: Vec::new(),
         }
     }
 }
@@ -349,6 +397,44 @@ mod tests {
             MAX_SMART_QUERY_CHARS
         );
         assert!(s.list_columns.year && !s.list_columns.genre);
+    }
+
+    #[test]
+    fn pins_from_a_damaged_file_are_tidied() {
+        let json = r#"{"pinned":[
+            {"Album":18446744073709551615},
+            {"Artist":"  아이유\n"},
+            {"Artist":"아이유"},
+            {"Genre":""},
+            {"Playlist":3},
+            {"Smart":"Late"},
+            {"Starred":1},
+            "Album",
+            {"Playlist":3}
+        ]}"#;
+        let s = serde_json::from_str::<Settings>(json)
+            .expect("parses")
+            .sanitized();
+        assert_eq!(
+            s.pinned,
+            [
+                Pin::Album(u64::MAX),
+                Pin::Artist("아이유".into()),
+                Pin::Playlist(3),
+                Pin::Smart("Late".into()),
+            ]
+        );
+        let many = format!(
+            r#"{{"pinned":[{}]}}"#,
+            (0..40)
+                .map(|i| format!(r#"{{"Playlist":{i}}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let s = serde_json::from_str::<Settings>(&many)
+            .expect("parses")
+            .sanitized();
+        assert_eq!(s.pinned.len(), MAX_PINS);
     }
 
     #[test]

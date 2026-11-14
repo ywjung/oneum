@@ -22,6 +22,9 @@ pub struct TimedLine {
     pub at_ms: u32,
     /// May be empty: a pause in the singing.
     pub text: String,
+    /// Other lines written for the same moment: a translation or a pronunciation
+    /// that the file gives right after the original.
+    pub also: Vec<String>,
 }
 
 /// The lyrics of one song.
@@ -56,16 +59,6 @@ impl Lyrics {
     }
 }
 
-/// The lyrics of the file at `path`. `None` when there are none (or the file cannot be
-/// read: lyrics are an extra, not worth an error message).
-pub fn read(path: &Path) -> Option<Lyrics> {
-    let tagged = lofty::read_from_path(path).ok();
-    tagged
-        .as_ref()
-        .and_then(from_tags)
-        .or_else(|| from_sidecar(path))
-}
-
 /// Lyrics from the tags of an opened file.
 pub(crate) fn from_tags(file: &TaggedFile) -> Option<Lyrics> {
     let mut tags = Vec::new();
@@ -84,25 +77,12 @@ pub(crate) fn from_tags(file: &TaggedFile) -> Option<Lyrics> {
         })
 }
 
-/// Lyrics from a text file next to the song.
+/// Lyrics from a text file next to the song: a regular file (a pipe of that name would
+/// never deliver) no larger than any song's words.
 pub(crate) fn from_sidecar(path: &Path) -> Option<Lyrics> {
-    use std::io::Read;
     ["lrc", "txt"].into_iter().find_map(|extension| {
-        // Only a regular file: opening a pipe of that name would wait for someone to
-        // write to it, so the kind is looked at before the file is opened. Then it is
-        // opened once and asked again through the handle, so that what is checked is
-        // what is read, and never more than the limit however the file grows meanwhile.
         let sidecar = path.with_extension(extension);
-        if !std::fs::metadata(&sidecar).ok()?.is_file() {
-            return None;
-        }
-        let file = std::fs::File::open(sidecar).ok()?;
-        let meta = file.metadata().ok()?;
-        if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_SIDECAR_BYTES {
-            return None;
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_SIDECAR_BYTES).read_to_end(&mut bytes).ok()?;
+        let bytes = crate::storage::files::read_bounded(&sidecar, MAX_SIDECAR_BYTES).ok()??;
         Lyrics::from_raw(&super::legacy::decode_file(&bytes)?)
     })
 }
@@ -196,6 +176,8 @@ const MAX_TIMED_LINES: usize = 5_000;
 /// Every stamp gets the line's text, so the two together bound what the lines take.
 const MAX_STAMPS_PER_LINE: usize = 64;
 const MAX_LINE_CHARS: usize = 500;
+/// Lines kept for one moment besides the first (translation, pronunciation, …).
+const MAX_ALSO_LINES: usize = 3;
 /// The longest a time stamp's inside is taken to be (`1:02:03.456` is eleven bytes).
 const MAX_STAMP_BYTES: usize = 16;
 
@@ -244,19 +226,43 @@ pub(crate) fn timed(raw: &str) -> Option<Vec<TimedLine>> {
                 lines.push(TimedLine {
                     at_ms,
                     text: text.clone(),
+                    also: Vec::new(),
                 });
             }
         }
     }
-    if lines.len() < MIN_TIMED_LINES {
-        return None;
-    }
     for line in &mut lines {
         line.at_ms = (i64::from(line.at_ms) - offset_ms).clamp(0, i64::from(u32::MAX)) as u32;
     }
-    // A repeated line is written once with all its times: bring them in order.
+    // A repeated line is written once with all its times: bring them in order. The
+    // sort is stable, so lines of the same moment keep the order of the file.
     lines.sort_by_key(|line| line.at_ms);
-    Some(lines)
+    // Lines that share a moment are sung together: an original and its translation or
+    // pronunciation, written one after the other. They become one entry.
+    // More lines than that at one moment (the credits some files stack at the start)
+    // are not dropped: they start another entry of the same moment.
+    let mut merged: Vec<TimedLine> = Vec::with_capacity(lines.len());
+    for line in lines {
+        match merged.last_mut() {
+            Some(last) if last.at_ms == line.at_ms && last.also.len() < MAX_ALSO_LINES => {
+                if line.text.is_empty() || line.text == last.text || last.also.contains(&line.text)
+                {
+                    continue;
+                }
+                if last.text.is_empty() {
+                    last.text = line.text;
+                } else {
+                    last.also.push(line.text);
+                }
+            }
+            Some(last) if last.at_ms == line.at_ms && line.text.is_empty() => {}
+            _ => merged.push(line),
+        }
+    }
+    if merged.len() < MIN_TIMED_LINES {
+        return None;
+    }
+    Some(merged)
 }
 
 /// True for the inside of an LRC information line: one of the format's field names
@@ -306,6 +312,11 @@ pub(crate) fn clean(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The lyrics of the song at `path`, as the info panel gets them.
+    fn read(path: &Path) -> Option<Lyrics> {
+        crate::library::details::read(path).lyrics
+    }
+
     /// The words of the song at `path`, as plain text.
     fn plain(path: &Path) -> Option<String> {
         read(path).map(|lyrics| lyrics.plain)
@@ -317,6 +328,35 @@ mod tests {
             .into_iter()
             .map(|line| (line.at_ms, line.text))
             .collect()
+    }
+
+    /// An original and its translation share a time stamp: one entry, both shown.
+    #[test]
+    fn lines_of_the_same_moment_go_together() {
+        let raw = "[00:01.00]夜に駆ける\n[00:01.00]밤을 달리다\n[00:01.00]yoru ni kakeru\n\
+                   [00:01.00]밤을 달리다\n[00:05.00]\n[00:05.00]두 번째 줄\n[00:09.00]마지막";
+        let lines = timed(raw).expect("timed");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "夜に駆ける");
+        assert_eq!(lines[0].also, ["밤을 달리다", "yoru ni kakeru"]);
+        // A pause stamp followed by words at the same moment: the words.
+        assert_eq!(lines[1].text, "두 번째 줄");
+        assert!(lines[1].also.is_empty());
+        let lyrics = Lyrics::from_raw(raw).expect("lyrics");
+        assert_eq!(lyrics.line_at(1_500), Some(0));
+        assert_eq!(lyrics.line_at(6_000), Some(1));
+        // Five credit lines stacked at the start: none is lost.
+        let credits = "[00:00.00]제목\n[00:00.00]가수\n[00:00.00]작사\n[00:00.00]작곡\n\
+                       [00:00.00]편곡\n[00:03.00]첫 줄\n[00:06.00]둘째 줄";
+        let lines = timed(credits).expect("timed");
+        let shown: Vec<&str> = lines
+            .iter()
+            .flat_map(|l| std::iter::once(l.text.as_str()).chain(l.also.iter().map(String::as_str)))
+            .collect();
+        assert_eq!(
+            shown,
+            ["제목", "가수", "작사", "작곡", "편곡", "첫 줄", "둘째 줄"]
+        );
     }
 
     #[test]
@@ -505,11 +545,10 @@ mod tests {
     /// and half a megabyte of words would be gigabytes: both are bounded.
     #[test]
     fn a_line_with_thousands_of_time_stamps_and_endless_words_stays_small() {
-        let raw = format!(
-            "{}{}\n[00:01.00]second\n",
-            "[0:0]".repeat(5_000),
-            "word ".repeat(100_000)
-        );
+        let stamps: String = (0..5_000)
+            .map(|i| format!("[{}:{:02}]", 10 + i / 60, i % 60))
+            .collect();
+        let raw = format!("{stamps}{}\n[00:01.00]second\n", "word ".repeat(100_000));
         let lines = timed(&raw).expect("timed");
         assert_eq!(lines.len(), MAX_STAMPS_PER_LINE + 1);
         let held: usize = lines.iter().map(|l| l.text.len()).sum();
@@ -555,5 +594,21 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("reading the lyrics came back");
         assert_eq!(found.as_deref(), Some("words in the text file"));
+    }
+
+    /// A lyrics file far larger than any song's words is not lyrics: it is left alone
+    /// (not read half-way), and the text file is taken.
+    #[test]
+    fn an_oversized_lyrics_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let song = dir.path().join("Song.flac");
+        let huge = "la la la\n".repeat(MAX_SIDECAR_BYTES as usize / 9 + 1);
+        std::fs::write(dir.path().join("Song.lrc"), huge).unwrap();
+        assert!(from_sidecar(&song).is_none());
+        std::fs::write(dir.path().join("Song.txt"), "the words\n").unwrap();
+        assert_eq!(
+            from_sidecar(&song).map(|l| l.plain).as_deref(),
+            Some("the words")
+        );
     }
 }

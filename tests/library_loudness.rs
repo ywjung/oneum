@@ -198,6 +198,19 @@ fn a_file_that_cannot_be_read_does_not_stop_the_run() {
     let three = by_title(&library, "Three").leveling();
     assert!(near(three.track_gain_db, 2.0), "{three:?}");
     assert!(near(three.album_gain_db, 2.0), "{three:?}");
+
+    // What could not be read is remembered: it no longer counts as waiting, and the
+    // next run reads nothing (before, it read the file again and its album with it).
+    let two = by_title(&library, "Two");
+    assert!(two.unmeasurable && !two.wants_measuring());
+    measure(&library);
+    let again = library.loudness_status();
+    assert_eq!((again.total, again.done, again.failed), (0, 0, 0));
+    // Forgetting the measurements is a clean slate: it is tried again.
+    library.forget_loudness();
+    let two = by_title(&library, "Two");
+    assert!(!two.unmeasurable && two.wants_measuring());
+    assert!(by_title(&library, "One").wants_measuring());
 }
 
 #[test]
@@ -326,4 +339,62 @@ fn readings_agree_with_an_independent_scanner() {
         // agreement covers the gate too. And the file is not silent.
         assert!((-40.0..-5.0).contains(&ours), "{ours}");
     }
+}
+
+/// The file check over a real library: results per file, kept across a restart, and
+/// dropped when a file changes.
+#[test]
+fn the_file_check_finds_damage_and_keeps_its_results() {
+    use oneum::model::CheckVerdict;
+    let env = TestEnv::new();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for name in ["gap_a.flac", "damaged_middle.flac", "gap_b.wav"] {
+        std::fs::copy(fixtures.join(name), env.music().join(name)).unwrap();
+    }
+    write_tone(&env.music().join("tone.wav"), 12.0, -1.0, "Tone", "Checks");
+    let (library, _) = env.open_scanned();
+    assert!(library.check_files());
+    assert!(library.wait_for_checks(std::time::Duration::from_secs(60)));
+    let status = library.check_status();
+    assert_eq!((status.total, status.done, status.damaged), (4, 4, 1));
+    let verdict = |library: &Library, file: &str| {
+        library
+            .snapshot()
+            .tracks
+            .iter()
+            .find(|t| t.path.ends_with(file))
+            .and_then(|t| t.check)
+    };
+    assert_eq!(
+        verdict(&library, "gap_a.flac").map(|c| c.verdict),
+        Some(CheckVerdict::Verified)
+    );
+    assert_eq!(
+        verdict(&library, "damaged_middle.flac").map(|c| c.verdict),
+        Some(CheckVerdict::Damaged)
+    );
+    let tone = verdict(&library, "tone.wav").expect("checked");
+    assert_eq!(tone.verdict, CheckVerdict::Decoded);
+    // A sine: DR about 0, true peak at its −1 dB peak.
+    assert!(tone.dr.is_some_and(|dr| dr.abs() < 0.2), "{:?}", tone.dr);
+    let tp_db = 20.0 * tone.true_peak.expect("peak").log10();
+    assert!((tp_db + 1.0).abs() < 0.1, "{tp_db}");
+    // A second run has nothing left to do.
+    assert!(library.check_files());
+    assert!(library.wait_for_checks(std::time::Duration::from_secs(60)));
+    assert_eq!(library.check_status().total, 0);
+    library.shutdown();
+    drop(library);
+
+    // Kept across a restart; a changed file loses its result.
+    let library = env.open();
+    assert!(verdict(&library, "gap_b.wav").is_some());
+    std::fs::copy(fixtures.join("gap_a.wav"), env.music().join("gap_b.wav")).unwrap();
+    rescan(&library);
+    assert!(verdict(&library, "gap_b.wav").is_none());
+    assert!(verdict(&library, "gap_a.flac").is_some());
+    // "Forget" clears everything.
+    library.forget_checks();
+    assert!(verdict(&library, "gap_a.flac").is_none());
+    library.shutdown();
 }

@@ -641,6 +641,28 @@ fn file_tags(
 }
 
 /// Reads only the embedded cover of a file (used to regenerate an evicted cache entry).
+/// Everything lofty finds in the file (for the song's details: credits, lyrics), read
+/// under the same limits as a scan — a regular file only, a bounded cost of reading,
+/// parser panics contained — and without the artwork. `None` if it cannot be read.
+pub(crate) fn read_tagged(path: &Path) -> Option<TaggedFile> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Probe::new(BufReader::new(Budget::new(file)))
+            .options(ParseOptions::new().read_cover_art(false))
+            .guess_file_type()
+            .ok()?
+            .read()
+            .ok()
+    }))
+    .unwrap_or_else(|_| {
+        tracing::warn!("the tag reader failed on a file; its details are left out");
+        None
+    })
+}
+
 pub(crate) fn read_picture(path: &Path) -> Option<Vec<u8>> {
     read_tags(path, true).ok().and_then(|tags| tags.picture)
 }

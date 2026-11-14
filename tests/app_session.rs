@@ -84,12 +84,12 @@ fn session_survives_a_restart_and_tracks_resolve() {
         position_ms: 432,
         volume: 0.37,
     };
-    host.save_session(&session, true);
+    assert!(host.save_session(&session, true));
     host.record_play(ids[0]);
     // A later save without queue changes must not lose the stored queue.
     let mut moved = session.clone();
     moved.position_ms = 777;
-    host.save_session(&moved, false);
+    assert!(host.save_session(&moved, false));
     drop(host);
     library.shutdown();
     drop(library);
@@ -99,6 +99,63 @@ fn session_survives_a_restart_and_tracks_resolve() {
     assert_eq!(host.load_session(), Some(moved));
     assert_eq!(library.recent_plays(10), vec![ids[0]]);
     assert_eq!(library.track(ids[0]).expect("track").play_count, 1);
+    library.shutdown();
+}
+
+/// A session whose queue cannot be written is not saved in part: what is stored stays
+/// the previous session, whole, and the next successful save brings both up to date.
+#[test]
+fn a_session_is_saved_whole_or_not_at_all() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let music = dir.path().join("music");
+    std::fs::create_dir_all(&music).expect("music dir");
+    for name in ["a.wav", "b.wav", "c.wav"] {
+        write_wav(&music.join(name), 4000);
+    }
+    let library = open(dir.path());
+    let ids = library.import_files(&[
+        music.join("a.wav"),
+        music.join("b.wav"),
+        music.join("c.wav"),
+    ]);
+    let host = LibraryHost::new(library.clone(), || {});
+    let session = |tracks: &[i64], current: usize, position_ms: u64| Session {
+        queue: QueueState {
+            items: tracks
+                .iter()
+                .enumerate()
+                .map(|(i, &track)| QueueItem {
+                    id: i as u64 + 1,
+                    track,
+                })
+                .collect(),
+            current: Some(current),
+            shuffle: false,
+            repeat: RepeatMode::Off,
+            unshuffled: Vec::new(),
+        },
+        position_ms,
+        volume: 0.5,
+    };
+    let first = session(&[ids[0], ids[1], ids[2]], 2, 100);
+    assert!(host.save_session(&first, true));
+
+    // Writing the queue fails (here: a trigger stands in for a full disk).
+    let db = rusqlite::Connection::open(dir.path().join("data/library.db")).expect("db");
+    db.execute_batch(
+        "CREATE TRIGGER fail_queue BEFORE INSERT ON queue \
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+    )
+    .expect("trigger");
+    let second = session(&[ids[1]], 0, 5000);
+    assert!(!host.save_session(&second, true), "the failure is reported");
+    // Not "the new current item of the old queue": the old session, unchanged.
+    assert_eq!(host.load_session(), Some(first));
+
+    db.execute_batch("DROP TRIGGER fail_queue")
+        .expect("drop trigger");
+    assert!(host.save_session(&second, true));
+    assert_eq!(host.load_session(), Some(second));
     library.shutdown();
 }
 

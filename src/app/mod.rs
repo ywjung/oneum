@@ -3,6 +3,7 @@ pub mod host;
 #[cfg(test)]
 mod hostile;
 pub mod logging;
+pub mod panics;
 pub mod paths;
 pub mod settings;
 
@@ -223,6 +224,8 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         crossfeed: settings.crossfeed,
         correction: settings.active_correction().cloned(),
         radio: settings.radio,
+        shuffle_by_album: settings.shuffle_by_album,
+        resume_long_tracks: settings.resume_long_tracks,
         device_pref: settings.output_device.clone(),
         output: settings.output,
         ..PlayerConfig::default()
@@ -238,10 +241,18 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let _ = core_slot.set(core.clone());
 
     // Library changes: repaint, and let the player drop tracks that no longer exist.
+    // Only when tracks did leave the library: most notifications are progress (a scan,
+    // loudness measuring) or edits, many a second during a long run, and each
+    // `LibraryChanged` has the player look up every track in its queue.
     let notify_core = core.clone();
+    let seen_removals = std::sync::atomic::AtomicU64::new(library.removals());
     library.set_notifier(Box::new(move || {
         notify_core.request_repaint();
-        notify_core.player.send(Command::LibraryChanged);
+        let removals = notify_core.library.removals();
+        // `fetch_max`: of notifications racing on two threads, only one sends.
+        if seen_removals.fetch_max(removals, std::sync::atomic::Ordering::AcqRel) < removals {
+            notify_core.player.send(Command::LibraryChanged);
+        }
     }));
     library.rescan();
     library.start_watching();

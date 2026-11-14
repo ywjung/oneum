@@ -288,6 +288,20 @@ struct Work {
     path: PathBuf,
     size: u64,
     mtime_ns: i64,
+    /// For a CUE sheet (`path`): what its tracks are read from. They are read together.
+    sheet: Option<SheetWork>,
+}
+
+/// A CUE sheet to read (see [`Work`]); `mtime_ns` of its `Work` is the audio file's.
+struct SheetWork {
+    audio: PathBuf,
+    /// The sheet's own modification time, recorded once its tracks are in.
+    sheet_mtime: i64,
+}
+
+/// The key a sheet is recorded under (see `Inner::sheets_read`).
+pub(crate) fn sheet_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// A file that was read successfully.
@@ -307,6 +321,15 @@ enum Outcome {
     Read(Box<ScannedFile>),
     /// An unchanged file whose row needs its availability or folder fixed.
     Touch(TrackId),
+    /// A CUE sheet's tracks were read (sent after them): once they are in, the sheet is
+    /// recorded as read at `mtime` (see `Inner::sheets_read`).
+    SheetRead {
+        key: String,
+        record: super::SheetRecord,
+        /// The path and state of each file read (the sheet's tracks, or the audio file
+        /// alone), all of which have to be in for the record to be kept.
+        tracks: Vec<(PathBuf, i64)>,
+    },
 }
 
 /// What the library already knows about a file in the scanned area.
@@ -335,6 +358,34 @@ struct WalkResult {
     /// Number of directories (or entries) that could not be read. Whatever is below
     /// them was not seen, so nothing may be concluded from its absence.
     unreadable: usize,
+    /// Audio files a CUE sheet is for, with the paths of that sheet's tracks: they are
+    /// added as the sheet's tracks, not alone.
+    covered: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Audio files that have their sheet (the first by name that is for them), with
+    /// the paths of its tracks: another sheet for the same file is not used. Unlike
+    /// `covered`, also a file that is taken in alone because no track of its sheet lies
+    /// within it.
+    claimed: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Known tracks that a sheet's tracks take the place of (a file from before it had
+    /// a sheet, the tracks of a second sheet for the same file), with those tracks. They
+    /// go once at least one of their replacements is in the library.
+    superseded: HashMap<PathBuf, Vec<PathBuf>>,
+    /// CUE sheets met by the walk (by `sheet_key`), readable or not.
+    sheets: HashSet<String>,
+    /// Audio files found that were not known, as (folder, size) keys (see
+    /// [`folder_and_size`]): a sheet's file left alone when its sheet went is found again
+    /// by its size.
+    new_sizes: HashSet<u64>,
+    /// The sheets whose audio file the walk examined (by `sheet_key`), as they were
+    /// then: (the sheet's modification time, its file's, that file's size). A record
+    /// that is of this state says which tracks the sheet has (see `finish_scan`).
+    sheet_states: HashMap<String, (i64, i64, u64)>,
+    /// The audio files of sheets that cannot be read just now, as (folder, size) keys
+    /// (see `hold_sheet`): such a file is not taken in alone meanwhile.
+    held: HashSet<u64>,
+    /// Likewise, the files that such sheets have (also one that is taken in alone, no
+    /// track of its sheet lying within it): another sheet for it is not used meanwhile.
+    held_for_sheet: HashSet<u64>,
     /// The walk ran to its end (it was not cancelled).
     finished: bool,
 }
@@ -394,9 +445,57 @@ pub(crate) fn is_walkable(root: &Path, path: &Path) -> bool {
         .is_ok_and(|relative| !relative.components().any(|c| is_hidden(c.as_os_str())))
 }
 
+/// A key for "a file of this size in this folder".
+fn folder_and_size(dir: &Path, size: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut hasher);
+    size.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// For a sheet's track that has gone: whether what it came from is still where it was —
+/// the sheet itself (no longer usable, or without that track), or the audio file it was
+/// cut from (now alone, found by its size, which the track recorded). Either shows that
+/// the music folder is the one scanned before, not an empty or different drive.
+fn sheet_left_traces(path: &Path, known: &Known, walk: &WalkResult) -> bool {
+    let Some(sheet) = super::cue::sheet_of(path) else {
+        return false;
+    };
+    sheet.is_file()
+        || sheet
+            .parent()
+            .is_some_and(|dir| walk.new_sizes.contains(&folder_and_size(dir, known.size)))
+}
+
 /// True if the file is positively known to be absent. "Permission denied", I/O errors
 /// and the like are not evidence of absence.
 fn file_is_gone(path: &Path) -> bool {
+    // A sheet's track is gone with its sheet, or when the sheet no longer has it (or
+    // its audio file is gone).
+    if let Some(sheet_path) = super::cue::sheet_of(path) {
+        return match super::cue::read_checked(sheet_path) {
+            Err(err) => matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ),
+            // There, but not a usable sheet any more.
+            Ok(None) => true,
+            Ok(Some(sheet)) => {
+                let number = super::cue::track_number(path);
+                if !sheet.tracks.iter().any(|t| Some(t.number) == number) {
+                    return true;
+                }
+                match super::cue::audio_of_checked(sheet_path, &sheet) {
+                    Ok(Some(audio)) => file_is_gone(&audio),
+                    // The sheet names several files now, or its file is gone.
+                    Ok(None) => true,
+                    // Its file cannot be examined just now.
+                    Err(_) => false,
+                }
+            }
+        };
+    }
     match fs::metadata(path) {
         Ok(meta) => !meta.is_file(),
         Err(err) => matches!(
@@ -474,6 +573,316 @@ fn folder_art_id(inner: &Inner, path: &Path, folder_art: &FolderArt) -> Option<S
     let id = art::find_folder_image(dir).and_then(|image| inner.art.store_folder_image(&image));
     lock(folder_art).insert(dir.to_path_buf(), id.clone());
     id
+}
+
+/// True for a file with the `.cue` extension.
+fn is_sheet(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
+}
+
+/// A CUE sheet whose tracks cannot be read just now (the sheet or its audio file cannot
+/// be examined; that says nothing about what they hold): what is known of its tracks
+/// stays as it is, and the audio file is not taken in alone, or by another sheet,
+/// meanwhile. Not knowing which file that is, the walk knows it by its size: the one on
+/// record from the sheet's last reading, or else the one its tracks recorded (see
+/// `WalkResult::held`).
+fn hold_sheet(
+    inner: &Inner,
+    sheet_path: &Path,
+    key: String,
+    known: &HashMap<PathBuf, Known>,
+    result: &mut WalkResult,
+) {
+    let record = lock(&inner.sheets_read).get(&key).cloned();
+    result.sheets.insert(key);
+    let dir = sheet_path.parent();
+    // The file stays the sheet's (no other sheet takes it). With no track of the sheet
+    // within it, it is in the library alone: then there is nothing to keep out.
+    if let (Some(record), Some(dir)) = (&record, dir) {
+        let file = folder_and_size(dir, record.audio_size);
+        result.held_for_sheet.insert(file);
+        if !record.tracks.is_empty() {
+            result.held.insert(file);
+        }
+    }
+    for (path, track) in known {
+        if super::cue::sheet_of(path) != Some(sheet_path) {
+            continue;
+        }
+        // Only the tracks the reading gave: one that the library merely keeps (it
+        // starts beyond the end of the file) says nothing about the file.
+        let is_given = record.as_ref().is_none_or(|record| {
+            super::cue::track_number(path).is_some_and(|number| record.tracks.contains(&number))
+        });
+        if !is_given {
+            continue;
+        }
+        result.encountered.insert(path.clone());
+        if let (None, Some(dir)) = (&record, dir) {
+            let file = folder_and_size(dir, track.size);
+            result.held.insert(file);
+            result.held_for_sheet.insert(file);
+        }
+    }
+}
+
+/// A CUE sheet met by the walk (see `cue`). It comes before the other entries of its
+/// folder, so the audio file it is for is marked as covered before the walk comes to
+/// it. Its tracks are taken in (or found unchanged). False when the scan is ending (a
+/// channel closed).
+fn walk_sheet(
+    inner: &Inner,
+    sheet_path: &Path,
+    known: &HashMap<PathBuf, Known>,
+    result: &mut WalkResult,
+    work_tx: &SyncSender<Work>,
+    out_tx: &SyncSender<Outcome>,
+) -> bool {
+    let counters = &inner.counters;
+    let key = sheet_key(sheet_path);
+    let read =
+        fs::metadata(sheet_path).and_then(|meta| Ok((meta, super::cue::read_checked(sheet_path)?)));
+    let (sheet_meta, sheet) = match read {
+        Ok((meta, Some(sheet))) => (meta, sheet),
+        // Not a usable sheet (any more): its tracks from before go.
+        Ok((_, None)) => return true,
+        // Gone since the folder was listed: likewise.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(err) => {
+            tracing::debug!(%err, "a CUE sheet could not be read; its tracks are kept");
+            hold_sheet(inner, sheet_path, key, known, result);
+            return true;
+        }
+    };
+    let audio = match super::cue::audio_of_checked(sheet_path, &sheet) {
+        Ok(Some(audio)) => audio,
+        // No file for it (any more): its tracks from before go.
+        Ok(None) => return true,
+        Err(err) => {
+            tracing::debug!(%err, "a CUE sheet's file could not be examined; its tracks are kept");
+            hold_sheet(inner, sheet_path, key, known, result);
+            return true;
+        }
+    };
+    let paths: Vec<PathBuf> = sheet
+        .tracks
+        .iter()
+        .map(|t| super::cue::track_path(sheet_path, t.number))
+        .collect();
+    // Two sheets for one file: the first (by name) has it, and the other's tracks from
+    // before go.
+    if let Some(first) = result.claimed.get(&audio) {
+        let first = first.clone();
+        for path in paths {
+            if known.contains_key(&path) {
+                result.superseded.insert(path, first.clone());
+            }
+        }
+        return true;
+    }
+    let audio_meta = match fs::metadata(&audio) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(err) => {
+            tracing::debug!(%err, "a CUE sheet's file could not be examined; its tracks are kept");
+            hold_sheet(inner, sheet_path, key, known, result);
+            return true;
+        }
+    };
+    let size = audio_meta.len();
+    // The file of a sheet that cannot be read just now (one that comes before this one:
+    // its file is known by the size its tracks recorded, see `hold_sheet`): that sheet
+    // has it, and this one waits like it, with nothing of its own changed.
+    if sheet_path
+        .parent()
+        .is_some_and(|dir| result.held_for_sheet.contains(&folder_and_size(dir, size)))
+    {
+        result.sheets.insert(key);
+        return true;
+    }
+    let audio_mtime = mtime_ns(&audio_meta);
+    let sheet_mtime = mtime_ns(&sheet_meta);
+    // Not every track of a sheet is one in the library: those that start beyond the end
+    // of the audio are not. The record says how many reading it gave.
+    result
+        .sheet_states
+        .insert(key.clone(), (sheet_mtime, audio_mtime, size));
+    let record = lock(&inner.sheets_read).get(&key).cloned();
+    let as_read = record.filter(|r| r.is_of(sheet_mtime, audio_mtime, size));
+    // No track of it lies within its file (a sheet for a longer rip, or for another
+    // disc): the file is taken in alone, as it was when the sheet was read.
+    result.claimed.insert(audio.clone(), paths.clone());
+    if as_read.as_ref().is_some_and(|r| r.tracks.is_empty()) {
+        result.sheets.insert(key);
+        return true;
+    }
+    result.sheets.insert(key.clone());
+    result.covered.insert(audio.clone(), paths.clone());
+    if known.contains_key(&audio) {
+        result.superseded.insert(audio.clone(), paths.clone());
+    }
+    counters
+        .files_found
+        .fetch_add(paths.len() as u64, Ordering::Relaxed);
+    // A track's state is its stretch of the file (`cue::stretch_stamp`): what was measured
+    // of it stays valid when only names in the sheet change. The names are read again
+    // when the sheet changed since its tracks were read.
+    // Unchanged when the sheet and its file are as they were read, and every track the
+    // reading gave is in the library as it was (none was removed meanwhile). A track the
+    // reading did not give (it starts beyond the end of the file) is none, whatever the
+    // library still holds of it: such a track, kept as unavailable (a favourite), is left
+    // alone, neither seen nor brought back.
+    let mut unchanged = as_read.is_some();
+    let mut tracks = Vec::with_capacity(paths.len());
+    for (i, path) in paths.iter().enumerate() {
+        let number = sheet.tracks[i].number;
+        if as_read
+            .as_ref()
+            .is_some_and(|record| !record.tracks.contains(&number))
+        {
+            continue;
+        }
+        let stamp = super::cue::stretch_stamp(
+            audio_mtime,
+            sheet.tracks[i].start,
+            sheet.tracks.get(i + 1).map(|next| next.start),
+        );
+        match known.get(path) {
+            Some(k) => {
+                result.encountered.insert(path.clone());
+                unchanged &= k.size == size && k.mtime_ns == stamp && !k.reread;
+                tracks.push(k);
+            }
+            None => unchanged = false,
+        }
+    }
+    if unchanged {
+        counters
+            .files_done
+            .fetch_add(paths.len() as u64, Ordering::Relaxed);
+        for k in tracks {
+            if k.needs_touch && out_tx.send(Outcome::Touch(k.id)).is_err() {
+                return false;
+            }
+        }
+        return true;
+    }
+    result.reread.extend(
+        paths
+            .iter()
+            .filter(|path| known.contains_key(*path))
+            .cloned(),
+    );
+    // The tracks are counted as done when the sheet has been read.
+    counters
+        .files_done
+        .fetch_add(paths.len().saturating_sub(1) as u64, Ordering::Relaxed);
+    let work = Work {
+        path: sheet_path.to_path_buf(),
+        size,
+        mtime_ns: audio_mtime,
+        sheet: Some(SheetWork { audio, sheet_mtime }),
+    };
+    work_tx.send(work).is_ok()
+}
+
+/// Reads the tracks of a CUE sheet: the audio file's properties and artwork once, the
+/// names and times from the sheet (the file's own tags fill what the sheet leaves out).
+///
+/// Only what lies within the file: a track that starts beyond its end (a sheet for a
+/// longer rip, or for another disc) is none, and one runs at most to the end. A sheet
+/// with no track within the file is no sheet for it: the file is read alone, as it is.
+pub(crate) fn read_sheet(
+    inner: &Inner,
+    sheet_path: &Path,
+    audio: &Path,
+    size: u64,
+    mtime_ns: i64,
+    folder_art: &FolderArt,
+) -> Result<Vec<ScannedFile>, ReadError> {
+    let sheet = super::cue::read(sheet_path)
+        .ok_or_else(|| ReadError::Failed("the CUE sheet cannot be read".into()))?;
+    let image = read_file(inner, audio, size, mtime_ns, folder_art)?;
+    let total_ms = image.tags.duration_ms;
+    let pick = |a: &str, b: &str| {
+        if a.is_empty() {
+            b.to_string()
+        } else {
+            a.to_string()
+        }
+    };
+    let mut tracks = Vec::with_capacity(sheet.tracks.len());
+    for (i, track) in sheet.tracks.iter().enumerate() {
+        let next = sheet.tracks.get(i + 1).map(|next| next.start);
+        let Some(length_ms) = sheet_track_length(track.start, next, total_ms) else {
+            continue; // starts beyond the end of the audio
+        };
+        let mut tags = image.tags.clone();
+        tags.title = if track.title.is_empty() {
+            format!("Track {:02}", track.number)
+        } else {
+            track.title.clone()
+        };
+        tags.artist = pick(
+            &track.performer,
+            &pick(&sheet.performer, &image.tags.artist),
+        );
+        tags.album_artist = pick(&sheet.performer, &image.tags.album_artist);
+        tags.album = pick(&sheet.title, &image.tags.album);
+        tags.track_no = Some(track.number);
+        tags.disc_no = sheet.disc.or(image.tags.disc_no);
+        tags.year = sheet.year.or(image.tags.year);
+        tags.genre = pick(&sheet.genre, &image.tags.genre);
+        tags.duration_ms = length_ms;
+        // The file's own leveling tags are the whole album's.
+        let file_gain = &image.tags.replaygain;
+        tags.replaygain = crate::model::ReplayGainTags {
+            track_gain_db: track.gain_db,
+            track_peak: track.peak,
+            album_gain_db: sheet
+                .album_gain_db
+                .or(file_gain.album_gain_db)
+                .or(file_gain.track_gain_db),
+            album_peak: sheet
+                .album_peak
+                .or(file_gain.album_peak)
+                .or(file_gain.track_peak),
+        };
+        tracks.push(ScannedFile {
+            path: super::cue::track_path(sheet_path, track.number),
+            root_id: None,
+            size,
+            mtime_ns: super::cue::stretch_stamp(
+                mtime_ns,
+                track.start,
+                sheet.tracks.get(i + 1).map(|next| next.start),
+            ),
+            tags,
+            art_id: image.art_id.clone(),
+            art_from_folder: image.art_from_folder,
+        });
+    }
+    if tracks.is_empty() {
+        return Ok(vec![image]);
+    }
+    Ok(tracks)
+}
+
+/// How long a sheet's track is, in milliseconds, from its start and the next track's
+/// (CD frames) and the length of the audio (`0`: not known). `None` when it starts at or
+/// beyond the end of the audio: it is no track. It runs at most to the end of the audio;
+/// the last track runs to it, and is of unknown length (`0`, as for any file whose
+/// length is not known) when that of the audio is.
+pub(crate) fn sheet_track_length(start: u64, next: Option<u64>, total_ms: u64) -> Option<u64> {
+    let start_ms = super::cue::frames_to_ms(start);
+    let end_ms = match next {
+        Some(next) if total_ms > 0 => super::cue::frames_to_ms(next).min(total_ms),
+        Some(next) => super::cue::frames_to_ms(next),
+        None if total_ms > 0 => total_ms,
+        None => return Some(0),
+    };
+    (end_ms > start_ms).then(|| end_ms - start_ms)
 }
 
 /// Removes directories that are inside another directory of the set.
@@ -658,6 +1067,7 @@ fn scan_root(
     }
     inner.reload_playlists();
     inner.publish();
+    inner.save_sheet_records();
 }
 
 /// Records the directory links the walk followed, replacing what was known about the
@@ -704,8 +1114,16 @@ fn walk(
         }
         let home = home_dir();
         let canonical_root = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        // In each folder its CUE sheets come first: the files they cover are then known
+        // when the walk comes to them.
         let entries = WalkDir::new(dir)
             .follow_links(true)
+            .sort_by(|a, b| {
+                let rank = |entry: &walkdir::DirEntry| !is_sheet(entry.path());
+                rank(a)
+                    .cmp(&rank(b))
+                    .then_with(|| a.file_name().cmp(b.file_name()))
+            })
             .into_iter()
             .filter_entry(|entry| {
                 if entry.depth() == 0 {
@@ -766,6 +1184,12 @@ fn walk(
             if !entry.file_type().is_file() {
                 continue;
             }
+            if is_sheet(path) {
+                if !walk_sheet(inner, path, known, &mut result, work_tx, out_tx) {
+                    return result;
+                }
+                continue;
+            }
             if !tags::has_audio_extension(path) {
                 if let Some(priority) = art::cover_priority(path)
                     && let Some(dir) = path.parent()
@@ -780,6 +1204,10 @@ fn walk(
                 }
                 continue;
             }
+            // Taken in as the tracks of its sheet.
+            if result.covered.contains_key(path) {
+                continue;
+            }
             let known_file = known.get(path);
             if known_file.is_some() {
                 result.encountered.insert(path.to_path_buf());
@@ -791,6 +1219,17 @@ fn walk(
                 continue;
             };
             let (size, mtime) = (meta.len(), mtime_ns(&meta));
+            if known_file.is_none()
+                && let Some(dir) = path.parent()
+            {
+                let key = folder_and_size(dir, size);
+                // The file of a sheet that cannot be read just now: it is its tracks.
+                if result.held.contains(&key) {
+                    counters.files_done.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                result.new_sizes.insert(key);
+            }
             if let Some(known_file) = known_file
                 && known_file.size == size
                 && known_file.mtime_ns == mtime
@@ -824,6 +1263,7 @@ fn walk(
                 path: path.to_path_buf(),
                 size,
                 mtime_ns: mtime,
+                sheet: None,
             };
             if work_tx.send(work).is_err() {
                 return result;
@@ -847,6 +1287,52 @@ fn read_worker(
         let Ok(work) = next else { break };
         if cancel.load(Ordering::Relaxed) {
             continue; // drain so the walker is never blocked on a full channel
+        }
+        if let Some(sheet) = &work.sheet {
+            let read = read_sheet(
+                inner,
+                &work.path,
+                &sheet.audio,
+                work.size,
+                work.mtime_ns,
+                folder_art,
+            );
+            inner.counters.files_done.fetch_add(1, Ordering::Relaxed);
+            match read {
+                Ok(tracks) => {
+                    let states: Vec<(PathBuf, i64)> = tracks
+                        .iter()
+                        .map(|t| (t.path.clone(), t.mtime_ns))
+                        .collect();
+                    for track in tracks {
+                        if out_tx.send(Outcome::Read(Box::new(track))).is_err() {
+                            return;
+                        }
+                    }
+                    let taken = states
+                        .iter()
+                        .filter_map(|(path, _)| super::cue::track_number(path))
+                        .collect();
+                    let done = Outcome::SheetRead {
+                        key: sheet_key(&work.path),
+                        record: super::SheetRecord {
+                            mtime: sheet.sheet_mtime,
+                            tracks: taken,
+                            audio_mtime: work.mtime_ns,
+                            audio_size: work.size,
+                        },
+                        tracks: states,
+                    };
+                    if out_tx.send(done).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(%err, "CUE sheet skipped");
+                    inner.counters.errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            continue;
         }
         let result = read_file(inner, &work.path, work.size, work.mtime_ns, folder_art);
         inner.counters.files_done.fetch_add(1, Ordering::Relaxed);
@@ -875,6 +1361,7 @@ fn commit_batch(
 ) {
     let mut files = Vec::with_capacity(batch.len());
     let mut touches = Vec::new();
+    let mut sheets = Vec::new();
     for outcome in batch {
         match outcome {
             Outcome::Read(file) => {
@@ -883,9 +1370,37 @@ fn commit_batch(
                 files.push(file);
             }
             Outcome::Touch(id) => touches.push(id),
+            Outcome::SheetRead {
+                key,
+                record,
+                tracks,
+            } => sheets.push((key, record, tracks)),
         }
     }
     let committed = inner.commit_scanned(files, &touches, Some(root_id), Some(cancel));
+    // A sheet counts as read once all its tracks are in as they were read (they may have
+    // come in an earlier batch; a failed commit leaves the sheet to be read again).
+    if !sheets.is_empty() {
+        let done: Vec<(String, super::SheetRecord)> = {
+            let state = lock(&inner.state);
+            sheets
+                .into_iter()
+                .filter(|(_, _, tracks)| {
+                    tracks.iter().all(|(path, stamp)| {
+                        state
+                            .id_of_path(path)
+                            .and_then(|id| state.tracks.get(&id))
+                            .is_some_and(|entry| entry.track.mtime_ns == *stamp)
+                    })
+                })
+                .map(|(key, record, _)| (key, record))
+                .collect()
+        };
+        if !done.is_empty() {
+            lock(&inner.sheets_read).extend(done);
+            inner.sheets_dirty.store(true, Ordering::Release);
+        }
+    }
     let mut added = 0;
     let mut updated = 0;
     for (id, is_new) in committed {
@@ -1010,7 +1525,7 @@ fn refresh_folder_art(
     for (path, known) in known {
         if walk.encountered.contains(path)
             && !walk.reread.contains(path)
-            && let Some(dir) = path.parent()
+            && let Some(dir) = super::cue::backing_file(path).parent()
         {
             by_dir.entry(dir).or_default().push(known);
         }
@@ -1168,7 +1683,9 @@ fn other_tracks_exist(
         .take(LIVENESS_SAMPLE)
         .map(|t| t.path.clone())
         .collect();
-    sample.iter().any(|path| path.is_file())
+    sample
+        .iter()
+        .any(|path| super::cue::backing_file(path).is_file())
 }
 
 /// Handles tracks whose files were not found, and records the scan time. Only called
@@ -1186,13 +1703,87 @@ fn finish_scan(
     cancel: &AtomicBool,
 ) {
     refresh_folder_art(inner, known, walk, cancel);
+    // Sheets of this folder that the whole walk did not meet are gone: so is their record.
+    if full {
+        let mut read = lock(&inner.sheets_read);
+        let before = read.len();
+        read.retain(|key, _| !Path::new(key).starts_with(root_path) || walk.sheets.contains(key));
+        if read.len() != before {
+            inner.sheets_dirty.store(true, Ordering::Release);
+        }
+    }
+
+    // Which tracks each sheet has, going by the record of its reading, for the sheets
+    // whose record is of the sheet and its file as the walk found them. A track of such
+    // a sheet that the record does not list is none (it starts beyond the end of the
+    // file, or the file is taken in alone), whatever the library still holds of it,
+    // and whether the reading was in this scan or an earlier one.
+    let given_by: HashMap<String, Vec<u32>> = {
+        let records = lock(&inner.sheets_read);
+        walk.sheet_states
+            .iter()
+            .filter_map(|(key, &(sheet_mtime, audio_mtime, size))| {
+                let record = records.get(key)?;
+                record
+                    .is_of(sheet_mtime, audio_mtime, size)
+                    .then(|| (key.clone(), record.tracks.clone()))
+            })
+            .collect()
+    };
+    // `Some(true)`: a track its sheet has; `Some(false)`: one it does not have; `None`:
+    // not a sheet's track, or nothing is known (the sheet was not read as it is now).
+    let given = |path: &Path| -> Option<bool> {
+        let number = super::cue::track_number(path)?;
+        let tracks = given_by.get(&sheet_key(super::cue::backing_file(path)))?;
+        Some(tracks.contains(&number))
+    };
+
+    // What a sheet's tracks take the place of goes once they are really in (if the
+    // sheet's file could not be read, or no track of the sheet lies within it, the old
+    // track stays), and what the user gave it goes to them: the file to all of them, a
+    // second sheet's track to the first sheet's track of its number.
+    // A second sheet's track that has no such track to go to is simply not there any
+    // more, once the first sheet was read as it is (whatever that gave: with no track
+    // of it within the file, the file is there alone).
+    let mut handovers: Vec<(TrackId, Vec<TrackId>)> = Vec::new();
+    let mut outdone: HashSet<TrackId> = HashSet::new();
+    {
+        let state = lock(&inner.state);
+        for (path, replacements) in &walk.superseded {
+            let Some(old) = known.get(path) else {
+                continue;
+            };
+            if walk.encountered.contains(path) {
+                continue;
+            }
+            let of_sheet = super::cue::sheet_of(path).is_some();
+            let heirs: Vec<TrackId> = replacements
+                .iter()
+                .filter(|r| given(r) == Some(true))
+                .filter(|r| !of_sheet || r.file_name() == path.file_name())
+                .filter_map(|r| state.id_of_path(r))
+                .collect();
+            if !heirs.is_empty() {
+                handovers.push((old.id, heirs));
+            } else if of_sheet && replacements.first().is_some_and(|r| given(r).is_some()) {
+                outdone.insert(old.id);
+            }
+        }
+    }
+    let handed_over = inner.hand_over(&handovers, cancel);
+    let replaced: HashSet<TrackId> = handovers.iter().map(|(old, _)| *old).collect();
 
     // Missing: known, not seen by the walk, and confirmed absent by asking for the file
     // itself. A file that exists but was not visited (or cannot be examined) is left
-    // exactly as it is.
+    // exactly as it is. Also missing: the tracks a sheet does not have (see above).
     let mut missing: Vec<(&Path, TrackId)> = known
         .iter()
-        .filter(|(path, _)| !walk.encountered.contains(*path) && file_is_gone(path))
+        .filter(|(path, known)| {
+            !replaced.contains(&known.id)
+                && (given(path) == Some(false)
+                    || outdone.contains(&known.id)
+                    || (!walk.encountered.contains(*path) && file_is_gone(path)))
+        })
         .map(|(path, known)| (path.as_path(), known.id))
         .collect();
 
@@ -1214,18 +1805,38 @@ fn finish_scan(
         .root(root_id)
         .and_then(|root| root.unconfirmed_after);
     let counts = |id: TrackId| unconfirmed.is_none_or(|limit| id <= limit);
+    // What the walk itself shows of files that were known, among those `counts` holds
+    // for: one still where it was, one that a sheet now covers (found where it was),
+    // or what a sheet's track that has gone came from.
+    let seen_by_walk = |counts: &dyn Fn(TrackId) -> bool| {
+        walk.encountered
+            .iter()
+            .chain(walk.covered.keys())
+            .filter_map(|path| known.get(path))
+            .any(|known| counts(known.id))
+            || missing.iter().any(|(path, id)| {
+                counts(*id)
+                    && known
+                        .get(*path)
+                        .is_some_and(|k| sheet_left_traces(path, k, walk))
+            })
+    };
     let alive = if missing.is_empty() {
         true
     } else {
         root_present
             && (relinked > 0
-                || walk
-                    .encountered
-                    .iter()
-                    .filter_map(|path| known.get(path))
-                    .any(|known| counts(known.id))
+                || seen_by_walk(&counts)
                 || other_tracks_exist(inner, root_id, known, newest_before, counts))
     };
+    // A folder in doubt is so about the tracks from before the doubt began. Those added
+    // since were found in the folder as it has been since: for them, a file known
+    // since then that is still there shows that it is that folder, and one of them
+    // that has gone is gone (not kept as unavailable for ever).
+    let alive_since =
+        root_present && unconfirmed.is_some_and(|limit| seen_by_walk(&|id: TrackId| id > limit));
+    let in_doubt =
+        |id: TrackId| !alive && !(alive_since && unconfirmed.is_some_and(|limit| id > limit));
     // A scoped scan that simply found nothing missing says nothing about the folder.
     let verdict = match (alive, unconfirmed) {
         (false, None) => Some(Some(newest_before)),
@@ -1254,11 +1865,17 @@ fn finish_scan(
     }
     let candidates: Vec<(TrackId, bool)> = missing
         .iter()
-        .map(|(path, id)| (*id, !alive || behind_broken_symlink(path, root_path)))
+        .map(|(path, id)| (*id, in_doubt(*id) || behind_broken_symlink(path, root_path)))
         .collect();
     let (unavailable, removed) = inner.retire_missing(&candidates, cancel);
-    if relinked + unavailable + removed > 0 {
-        tracing::info!(relinked, unavailable, removed, "missing files handled");
+    if relinked + unavailable + removed + handed_over > 0 {
+        tracing::info!(
+            relinked,
+            unavailable,
+            removed,
+            handed_over,
+            "missing files handled"
+        );
     }
 
     if full && alive {
@@ -1424,6 +2041,8 @@ mod tests {
             mtime_ns: 0,
             replaygain: ReplayGainTags::default(),
             measured: None,
+            unmeasurable: false,
+            check: None,
             art_id: None,
             favorite: false,
             play_count: 0,
@@ -1495,6 +2114,59 @@ mod tests {
                 PathBuf::from("/m/c")
             ]
         );
+    }
+
+    /// A sheet's track whose audio file cannot be examined just now is not gone; one
+    /// whose file is gone (a link to nothing), or no longer in the sheet, is.
+    #[cfg(unix)]
+    #[test]
+    fn a_sheet_track_is_gone_only_when_that_is_known() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sheet = dir.path().join("Album.cue");
+        fs::write(
+            &sheet,
+            "FILE \"image.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let closed = dir.path().join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::write(closed.join("image.flac"), b"x").unwrap();
+        std::os::unix::fs::symlink(closed.join("image.flac"), dir.path().join("image.flac"))
+            .unwrap();
+        let track = super::super::cue::track_path(&sheet, 1);
+        assert!(!file_is_gone(&track));
+        assert!(file_is_gone(&super::super::cue::track_path(&sheet, 2)));
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        let entered = fs::metadata(closed.join("image.flac")).is_ok();
+        let gone = file_is_gone(&track);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        if !entered {
+            assert!(!gone, "not known to be gone");
+        }
+        fs::remove_file(closed.join("image.flac")).unwrap();
+        assert!(file_is_gone(&track), "a link to nothing");
+    }
+
+    /// A sheet's track lasts to the next one's start, at most to the end of the audio;
+    /// one beyond the end is none; the last, of audio of unknown length, is kept with
+    /// its length unknown.
+    #[test]
+    fn how_long_a_sheets_track_is() {
+        let s = |seconds: u64| seconds * 75; // CD frames
+        assert_eq!(sheet_track_length(s(0), Some(s(60)), 300_000), Some(60_000));
+        assert_eq!(sheet_track_length(s(240), None, 300_000), Some(60_000));
+        assert_eq!(
+            sheet_track_length(s(240), Some(s(400)), 300_000),
+            Some(60_000),
+            "to the end of the audio"
+        );
+        assert_eq!(sheet_track_length(s(300), Some(s(400)), 300_000), None);
+        assert_eq!(sheet_track_length(s(400), None, 300_000), None);
+        // Audio of unknown length: the next start is taken as written, the last runs
+        // to the end with no length known.
+        assert_eq!(sheet_track_length(s(240), Some(s(400)), 0), Some(160_000));
+        assert_eq!(sheet_track_length(s(240), None, 0), Some(0));
     }
 
     #[test]

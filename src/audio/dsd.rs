@@ -437,7 +437,7 @@ fn bessel_i0(x: f64) -> f64 {
 
 /// A Kaiser-windowed sinc low-pass: `taps` coefficients, `cutoff` in cycles per sample,
 /// unity gain at DC.
-fn kaiser_lowpass(taps: usize, cutoff: f64, beta: f64) -> Vec<f64> {
+pub(crate) fn kaiser_lowpass(taps: usize, cutoff: f64, beta: f64) -> Vec<f64> {
     let middle = (taps - 1) as f64 / 2.0;
     let norm = bessel_i0(beta);
     let mut h: Vec<f64> = (0..taps)

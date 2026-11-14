@@ -58,7 +58,14 @@ pub struct Queue {
     /// queue can tell when its copy is stale — also for changes that happen as a side
     /// effect of moving on, like the reshuffle at a "repeat all" wrap.
     revision: u64,
+    /// Shuffle whole albums instead of single tracks (with `album_of` set).
+    by_album: bool,
+    /// The album a track belongs to, for shuffling by album.
+    album_of: Option<AlbumOf>,
 }
+
+/// Tells which album a track belongs to.
+pub type AlbumOf = Box<dyn Fn(TrackId) -> u64 + Send>;
 
 impl Default for Queue {
     fn default() -> Self {
@@ -86,6 +93,8 @@ impl Queue {
             next_id: 1,
             rng,
             revision: 0,
+            by_album: false,
+            album_of: None,
         }
     }
 
@@ -143,6 +152,56 @@ impl Queue {
         self.repeat = mode;
     }
 
+    /// Gives the queue a way to tell albums apart (needed for shuffling by album).
+    pub fn set_album_lookup(&mut self, album_of: AlbumOf) {
+        self.album_of = Some(album_of);
+    }
+
+    /// Shuffle by album: whole albums come in random order, each album's tracks in
+    /// their order (and without gaps where the album has none). Changing it while
+    /// shuffled mixes the queue again; the current track stays current.
+    pub fn set_shuffle_by_album(&mut self, on: bool) {
+        if self.by_album == on {
+            return;
+        }
+        self.by_album = on;
+        if self.shuffle {
+            self.set_shuffle(false);
+            self.set_shuffle(true);
+        }
+    }
+
+    /// Sets the album mode without mixing anything (for a queue restored as it was).
+    pub fn restore_shuffle_by_album(&mut self, on: bool) {
+        self.by_album = on;
+    }
+
+    fn albums_shuffled(&self) -> bool {
+        self.by_album && self.album_of.is_some()
+    }
+
+    /// Album mode: moves the item at `at` and the tracks of its album that come after
+    /// it to the front, in their order. Returns how many were moved.
+    fn bring_album_to_front(&mut self, at: usize) -> usize {
+        let Some(album_of) = &self.album_of else {
+            return 0;
+        };
+        let key = album_of(self.items[at].track);
+        let mut head = Vec::new();
+        let mut rest = Vec::new();
+        for (index, item) in self.items.drain(..).enumerate() {
+            if index >= at && album_of(item.track) == key {
+                head.push(item);
+            } else {
+                rest.push(item);
+            }
+        }
+        let moved = head.len();
+        head.extend(rest);
+        self.items = head;
+        moved
+    }
+
     fn index_of(&self, id: ItemId) -> Option<usize> {
         self.items.iter().position(|i| i.id == id)
     }
@@ -158,10 +217,35 @@ impl Queue {
             .collect()
     }
 
-    /// Shuffles `items[from..]` in place.
+    /// Shuffles `items[from..]` in place: track by track, or in album mode album by
+    /// album (each album's tracks together, in the order they had).
     fn shuffle_tail(&mut self, from: usize) {
-        if from < self.items.len() {
-            self.rng.shuffle(&mut self.items[from..]);
+        if from >= self.items.len() {
+            return;
+        }
+        match &self.album_of {
+            Some(album_of) if self.by_album => {
+                let tail = self.items.split_off(from);
+                let mut order: Vec<u64> = Vec::new();
+                let mut albums: HashMap<u64, Vec<QueueItem>> = HashMap::new();
+                for item in tail {
+                    let key = album_of(item.track);
+                    albums
+                        .entry(key)
+                        .or_insert_with(|| {
+                            order.push(key);
+                            Vec::new()
+                        })
+                        .push(item);
+                }
+                let mut groups: Vec<Vec<QueueItem>> = order
+                    .into_iter()
+                    .filter_map(|key| albums.remove(&key))
+                    .collect();
+                self.rng.shuffle(&mut groups);
+                self.items.extend(groups.into_iter().flatten());
+            }
+            _ => self.rng.shuffle(&mut self.items[from..]),
         }
     }
 
@@ -178,8 +262,13 @@ impl Queue {
         let start = start_index.min(self.items.len() - 1);
         if self.shuffle {
             self.unshuffled = self.items.iter().map(|i| i.id).collect();
-            self.items.swap(0, start);
-            self.shuffle_tail(1);
+            if self.albums_shuffled() {
+                let moved = self.bring_album_to_front(start);
+                self.shuffle_tail(moved);
+            } else {
+                self.items.swap(0, start);
+                self.shuffle_tail(1);
+            }
             self.current = Some(0);
         } else {
             self.current = Some(start);
@@ -312,6 +401,10 @@ impl Queue {
         if on {
             self.unshuffled = self.items.iter().map(|i| i.id).collect();
             match self.current {
+                Some(c) if self.albums_shuffled() => {
+                    let moved = self.bring_album_to_front(c);
+                    self.shuffle_tail(moved);
+                }
                 Some(c) => {
                     let item = self.items.remove(c);
                     self.items.insert(0, item);
@@ -339,11 +432,26 @@ impl Queue {
     /// leads to the track that was actually heard before.
     fn reshuffle_for_wrap(&mut self) {
         self.revision += 1;
-        let last = self.current().map(|c| c.id);
+        let last = self.current();
         self.shuffle_tail(0);
-        if let Some(at) = last.and_then(|id| self.index_of(id)) {
-            let end = self.items.len() - 1;
-            self.items.swap(at, end);
+        match (&self.album_of, last) {
+            // The album that just played goes to the end as a whole.
+            (Some(album_of), Some(last)) if self.by_album => {
+                let key = album_of(last.track);
+                let (same, mut others): (Vec<QueueItem>, Vec<QueueItem>) = self
+                    .items
+                    .drain(..)
+                    .partition(|item| album_of(item.track) == key);
+                others.extend(same);
+                self.items = others;
+            }
+            (_, Some(last)) => {
+                if let Some(at) = self.index_of(last.id) {
+                    let end = self.items.len() - 1;
+                    self.items.swap(at, end);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -453,6 +561,273 @@ mod tests {
         let mut q = Queue::with_seed(42);
         q.replace(&(1..=n).collect::<Vec<_>>(), start);
         q
+    }
+
+    /// Albums of four tracks: 11–14, 21–24, … (the tens digit is the album).
+    fn album_queue(seed: u64) -> Queue {
+        let mut q = Queue::with_seed(seed);
+        q.set_album_lookup(Box::new(|track| (track / 10) as u64));
+        q.set_shuffle_by_album(true);
+        let tracks: Vec<TrackId> = (1..=6)
+            .flat_map(|a| (1..=4).map(move |t| a * 10 + t))
+            .collect();
+        q.replace(&tracks, 0);
+        q
+    }
+
+    /// Each album's tracks stay together and in order.
+    fn albums_are_whole(order: &[TrackId]) -> bool {
+        order
+            .chunks(4)
+            .all(|album| album.windows(2).all(|w| w[1] == w[0] + 1) && album[0] % 10 == 1)
+    }
+
+    #[test]
+    fn shuffling_by_album_keeps_albums_whole() {
+        for seed in 0..20 {
+            let mut q = album_queue(seed);
+            q.jump_to(q.items()[5].id); // track 22
+            q.set_shuffle(true);
+            let order = tracks(&q);
+            // The current track first, then the rest of its album, then whole albums.
+            assert_eq!(&order[..3], &[22, 23, 24], "seed {seed}");
+            // The track before the current one in its album comes later, on its own.
+            let rest: Vec<TrackId> = order[3..].iter().copied().filter(|t| *t != 21).collect();
+            assert!(albums_are_whole(&rest), "seed {seed}: {order:?}");
+            assert_eq!(cur(&q), 22);
+            // Off: the original order, the same current track.
+            q.set_shuffle(false);
+            assert_eq!(
+                tracks(&q),
+                (1..=6)
+                    .flat_map(|a| (1..=4).map(move |t| a * 10 + t))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(cur(&q), 22);
+        }
+        // Not every seed gives the albums in their original order.
+        let orders: HashSet<Vec<TrackId>> = (0..20)
+            .map(|seed| {
+                let mut q = album_queue(seed);
+                q.set_shuffle(true);
+                tracks(&q)
+            })
+            .collect();
+        assert!(orders.len() > 5);
+    }
+
+    #[test]
+    fn a_new_pass_by_album_starts_with_another_album() {
+        let mut q = album_queue(7);
+        q.set_shuffle(true);
+        q.set_repeat(RepeatMode::All);
+        assert!(albums_are_whole(&tracks(&q)));
+        for _ in 0..23 {
+            q.advance_auto().expect("more items");
+        }
+        let last_album = cur(&q) / 10;
+        let first = q.advance_auto().expect("wraps").track;
+        assert_ne!(first / 10, last_album);
+        let order = tracks(&q);
+        assert!(albums_are_whole(&order), "{order:?}");
+        assert_eq!(
+            order[20] / 10,
+            last_album,
+            "the album just heard comes last"
+        );
+    }
+
+    #[test]
+    fn switching_to_album_shuffle_while_shuffled_regroups() {
+        let mut q = album_queue(3);
+        q.set_shuffle_by_album(false);
+        q.set_shuffle(true);
+        let current = cur(&q);
+        q.set_shuffle_by_album(true);
+        assert_eq!(cur(&q), current);
+        assert_eq!(q.current_index(), Some(0));
+        let order = tracks(&q);
+        let album = current / 10;
+        let head: Vec<TrackId> = order
+            .iter()
+            .copied()
+            .take_while(|t| t / 10 == album)
+            .collect();
+        assert_eq!(head[0], current);
+        assert!(head.windows(2).all(|w| w[1] == w[0] + 1));
+    }
+
+    /// The queue driven through random edits, moves and mode changes (shuffle, by
+    /// album or not, repeat): whatever happens, it holds exactly the items put in and
+    /// not taken out, each once; the current item is one of them; the unshuffled order
+    /// lists the same items; turning shuffle off always gives the same order back; and
+    /// a queue restored from its saved state is the same queue.
+    #[test]
+    fn random_edits_keep_the_queue_whole() {
+        for seed in 1..=300u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut roll = move |n: u64| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 11) % n
+            };
+            let mut q = Queue::with_seed(seed);
+            q.set_album_lookup(Box::new(|track| (track / 10) as u64));
+            // The items the queue should hold: id -> track.
+            let mut held: HashMap<ItemId, TrackId> = HashMap::new();
+            let mut log: Vec<String> = Vec::new();
+            for step in 0..120 {
+                let some_tracks = |roll: &mut dyn FnMut(u64) -> u64| -> Vec<TrackId> {
+                    (0..1 + roll(6))
+                        .map(|_| (1 + roll(4) as i64) * 10 + 1 + roll(4) as i64)
+                        .collect()
+                };
+                let some_ids = |q: &Queue, roll: &mut dyn FnMut(u64) -> u64| -> Vec<ItemId> {
+                    let n = q.len() as u64;
+                    if n == 0 {
+                        return Vec::new();
+                    }
+                    (0..1 + roll(3))
+                        .map(|_| q.items()[roll(n) as usize].id)
+                        .collect()
+                };
+                let op = roll(17);
+                let current_before = q.current().map(|c| c.id);
+                match op {
+                    0 => {
+                        let tracks = some_tracks(&mut roll);
+                        let start = roll(tracks.len() as u64) as usize;
+                        q.replace(&tracks, start);
+                        held = q.items().iter().map(|i| (i.id, i.track)).collect();
+                    }
+                    1 => {
+                        for item in q.play_next(&some_tracks(&mut roll)) {
+                            held.insert(item.id, item.track);
+                        }
+                    }
+                    2 => {
+                        for item in q.append(&some_tracks(&mut roll)) {
+                            held.insert(item.id, item.track);
+                        }
+                    }
+                    3 => {
+                        let ids = some_ids(&q, &mut roll);
+                        q.remove(&ids);
+                        for id in ids {
+                            held.remove(&id);
+                        }
+                    }
+                    4 => {
+                        let album = 1 + roll(4) as i64;
+                        q.retain_tracks(|track| track / 10 != album);
+                        held.retain(|_, track| *track / 10 != album);
+                    }
+                    5 => {
+                        let ids = some_ids(&q, &mut roll);
+                        let to = roll(q.len() as u64 + 1) as usize;
+                        q.move_items(&ids, to);
+                    }
+                    6 => {
+                        if let Some(id) = some_ids(&q, &mut roll).first() {
+                            q.jump_to(*id);
+                        }
+                    }
+                    7 => {
+                        let on = !q.shuffle();
+                        let by_album = q.albums_shuffled();
+                        q.set_shuffle(on);
+                        // The current item leads the shuffled order: the rest of the
+                        // queue is still to come after it.
+                        if on && current_before.is_some() {
+                            assert_eq!(q.current_index(), Some(0), "seed {seed} step {step}");
+                        }
+                        if on && by_album {
+                            // After the current track and the rest of its album come
+                            // whole albums: no album in more than one run (the current
+                            // one: the run that leads, and its earlier tracks).
+                            let albums: Vec<i64> = q.items().iter().map(|i| i.track / 10).collect();
+                            let mut runs: HashMap<i64, usize> = HashMap::new();
+                            for (i, album) in albums.iter().enumerate() {
+                                if i == 0 || albums[i - 1] != *album {
+                                    *runs.entry(*album).or_default() += 1;
+                                }
+                            }
+                            let current = q.current().map(|c| c.track / 10);
+                            for (album, n) in runs {
+                                let most = if Some(album) == current { 2 } else { 1 };
+                                assert!(n <= most, "seed {seed} step {step}: {albums:?}");
+                            }
+                        }
+                    }
+                    8 => q.set_shuffle_by_album(roll(2) == 0),
+                    9 => q.set_repeat(
+                        [RepeatMode::Off, RepeatMode::All, RepeatMode::One][roll(3) as usize],
+                    ),
+                    10 => {
+                        q.advance_auto();
+                    }
+                    11 => {
+                        q.next_manual();
+                    }
+                    12 => {
+                        q.previous_manual(roll(2) * 10_000);
+                    }
+                    13 => {
+                        q.advance_after_failure();
+                    }
+                    14 => {
+                        q.rewind();
+                    }
+                    15 => {
+                        if roll(8) == 0 {
+                            q.clear();
+                            held.clear();
+                        }
+                    }
+                    _ => {
+                        // Shuffle off always gives the same order, with the same
+                        // current item.
+                        if !q.shuffle() {
+                            let (order, current) = (q.items().to_vec(), q.current());
+                            q.set_shuffle(true);
+                            q.set_shuffle(false);
+                            assert_eq!(q.items(), order, "seed {seed} step {step}");
+                            assert_eq!(q.current(), current, "seed {seed} step {step}");
+                        }
+                    }
+                }
+                log.push(format!("{step}: op {op}"));
+                let context = || format!("seed {seed}: {}", log.join(", "));
+                // Moving items and changing modes leave the current item the current one.
+                if matches!(op, 5 | 7 | 8 | 9 | 16) {
+                    assert_eq!(q.current().map(|c| c.id), current_before, "{}", context());
+                }
+                let ids: HashSet<ItemId> = q.items().iter().map(|i| i.id).collect();
+                assert_eq!(ids.len(), q.len(), "an item twice: {}", context());
+                let now: HashMap<ItemId, TrackId> =
+                    q.items().iter().map(|i| (i.id, i.track)).collect();
+                assert_eq!(now, held, "{}", context());
+                match q.current_index() {
+                    Some(c) => assert!(c < q.len(), "{}", context()),
+                    None => assert!(q.current().is_none()),
+                }
+                let saved = q.to_state();
+                if q.shuffle() {
+                    let unshuffled: HashSet<ItemId> = saved.unshuffled.iter().copied().collect();
+                    assert_eq!(saved.unshuffled.len(), q.len(), "{}", context());
+                    assert_eq!(unshuffled, ids, "{}", context());
+                } else {
+                    assert!(saved.unshuffled.is_empty(), "{}", context());
+                }
+                assert_eq!(
+                    Queue::from_state(saved.clone()).to_state(),
+                    saved,
+                    "{}",
+                    context()
+                );
+            }
+        }
     }
 
     #[test]

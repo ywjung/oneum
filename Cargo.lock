@@ -2582,6 +2582,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "walkdir",
+ "windows",
  "winit",
 ]
 

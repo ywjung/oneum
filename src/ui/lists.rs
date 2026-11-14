@@ -209,6 +209,24 @@ fn build_rows(
                 .map(track_row)
                 .collect()
         }
+        // Not a list of songs: nothing to build.
+        Nav::Stats => Vec::new(),
+        Nav::Folder(folder) => {
+            // In the order of the paths: the way the folders are laid out on disk.
+            let mut indices: Vec<u32> = (0..snap.len() as u32)
+                .filter(|&i| {
+                    (folder.as_os_str().is_empty()
+                        || snap.tracks[i as usize].path.starts_with(folder))
+                        && matches(i)
+                })
+                .collect();
+            indices.sort_by(|a, b| {
+                snap.tracks[*a as usize]
+                    .path
+                    .cmp(&snap.tracks[*b as usize].path)
+            });
+            indices.into_iter().map(track_row).collect()
+        }
         Nav::Smart(name) => smart
             .iter()
             .find(|p| &p.name == name)
@@ -301,6 +319,7 @@ fn build_rows(
             | Nav::Playlist(_)
             | Nav::Genre(_)
             | Nav::Smart(_)
+            | Nav::Folder(_)
     );
     let effective_sort = match (sort, nav) {
         (Some(s), _) => Some(s),
@@ -325,6 +344,59 @@ fn build_rows(
     rows
 }
 
+/// A folder inside the open folder view.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct FolderEntry {
+    pub(super) name: String,
+    pub(super) path: std::path::PathBuf,
+    /// Songs in it, folders inside it included.
+    pub(super) songs: usize,
+}
+
+/// The folders directly inside `folder` that hold songs, by name; for the empty path,
+/// the music folders.
+fn folder_entries(
+    tracks: &[std::sync::Arc<crate::model::Track>],
+    folder: &std::path::Path,
+    roots: &[std::path::PathBuf],
+) -> Vec<FolderEntry> {
+    if folder.as_os_str().is_empty() {
+        return roots
+            .iter()
+            .map(|root| FolderEntry {
+                name: root.file_name().map_or_else(
+                    || root.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                ),
+                path: root.clone(),
+                songs: tracks.iter().filter(|t| t.path.starts_with(root)).count(),
+            })
+            .collect();
+    }
+    let mut counts: HashMap<std::ffi::OsString, usize> = HashMap::new();
+    for track in tracks {
+        // A sheet's tracks are in the sheet's folder (not in a folder named after it).
+        let file = track.file();
+        let Ok(rest) = file.strip_prefix(folder) else {
+            continue;
+        };
+        let mut parts = rest.components();
+        if let (Some(first), Some(_)) = (parts.next(), parts.next()) {
+            *counts.entry(first.as_os_str().to_os_string()).or_default() += 1;
+        }
+    }
+    let mut entries: Vec<FolderEntry> = counts
+        .into_iter()
+        .map(|(name, songs)| FolderEntry {
+            name: name.to_string_lossy().into_owned(),
+            path: folder.join(&name),
+            songs,
+        })
+        .collect();
+    entries.sort_by_key(|e| e.name.to_lowercase());
+    entries
+}
+
 /// Title to show for an album. Untagged files have no album name; their folder name is
 /// the best available description ("Unknown album" only if even that is missing).
 fn album_title<'a>(album: &'a Album, snap: &'a LibrarySnapshot, unknown: &'a str) -> &'a str {
@@ -335,7 +407,7 @@ fn album_title<'a>(album: &'a Album, snap: &'a LibrarySnapshot, unknown: &'a str
         .tracks
         .first()
         .and_then(|&i| snap.tracks.get(i as usize))
-        .and_then(|t| t.path.parent())
+        .and_then(|t| t.file().parent())
         .and_then(|folder| folder.file_name())
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
@@ -545,6 +617,19 @@ impl OneumApp {
                 self.view_title(ui, self.s().genres, None);
                 self.genre_list_view(ui, &nav, actions);
             }
+            Nav::Stats => self.stats_view(ui, actions),
+            Nav::Folder(folder) => {
+                self.folder_header(ui, folder, actions);
+                self.track_list(
+                    ui,
+                    &nav,
+                    TableOptions {
+                        natural_order: true,
+                        ..Default::default()
+                    },
+                    actions,
+                );
+            }
             Nav::Smart(name) => {
                 let query = self
                     .settings
@@ -577,7 +662,7 @@ impl OneumApp {
         }
     }
 
-    fn view_title(&self, ui: &mut Ui, title: &str, subtitle: Option<&str>) {
+    pub(super) fn view_title(&self, ui: &mut Ui, title: &str, subtitle: Option<&str>) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -650,6 +735,7 @@ impl OneumApp {
                 Nav::Playlist(_) => (Icon::Queue, s.empty_playlist, s.empty_playlist_hint),
                 Nav::Genres => (Icon::Tag, s.empty_genres, s.empty_genres_hint),
                 Nav::Smart(_) => (Icon::Search, s.empty_search, s.smart_hint),
+                Nav::Folder(_) => (Icon::Folder, s.empty_search, ""),
                 _ => (Icon::Note, s.empty_search, ""),
             }
         };
@@ -1375,6 +1461,8 @@ impl OneumApp {
         }
         let s = self.s();
         let snap = self.snapshot.clone();
+        let pinned = self.live_pins();
+        let pinned = pinned.as_slice();
         let dim = theme::dim(ui);
         let columns = ((ui.available_width() / GRID_CELL).floor() as usize).max(1);
         let grid_rows = state.rows.len().div_ceil(columns);
@@ -1507,6 +1595,14 @@ impl OneumApp {
                                     actions.push(Action::Enqueue(album_tracks()));
                                     ui.close();
                                 }
+                                ui.separator();
+                                super::pin_menu_item(
+                                    ui,
+                                    s,
+                                    pinned,
+                                    crate::app::settings::Pin::Album(album.key),
+                                    actions,
+                                );
                             });
                         }
                     });
@@ -1586,6 +1682,113 @@ impl OneumApp {
         self.track_list(ui, nav, options, actions);
     }
 
+    /// The path of the open folder (each part leads there) and the folders inside it.
+    fn folder_header(&mut self, ui: &mut Ui, folder: &std::path::Path, actions: &mut Vec<Action>) {
+        let s = self.s();
+        let generation = self.lib_generation;
+        let fresh = self
+            .folder_children
+            .as_ref()
+            .is_some_and(|(f, g, _)| f == folder && *g == generation);
+        if !fresh {
+            let roots: Vec<std::path::PathBuf> = self
+                .core
+                .library
+                .roots()
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            let entries = folder_entries(&self.snapshot.tracks, folder, &roots);
+            self.folder_children = Some((folder.to_path_buf(), generation, entries));
+        }
+        let entries = self
+            .folder_children
+            .as_ref()
+            .map(|(_, _, e)| e.clone())
+            .unwrap_or_default();
+        let count = self
+            .views
+            .get(&Nav::Folder(folder.to_path_buf()))
+            .map_or(0, |v| v.rows.len());
+        // The path: "Folders › Music › Artist › Album", every part a way back.
+        let roots: Vec<std::path::PathBuf> = self
+            .core
+            .library
+            .roots()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        let root = roots.iter().find(|r| folder.starts_with(r)).cloned();
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(4.0);
+            let top = ui.add(
+                egui::Label::new(RichText::new(s.folders).heading().strong()).sense(Sense::click()),
+            );
+            if top.clicked() {
+                actions.push(Action::Go(Nav::Folder(std::path::PathBuf::new())));
+            }
+            if let Some(root) = &root {
+                let mut at = root.clone();
+                let mut parts = vec![(
+                    root.file_name().map_or_else(
+                        || root.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    ),
+                    root.clone(),
+                )];
+                if let Ok(rest) = folder.strip_prefix(root) {
+                    for part in rest.components() {
+                        at = at.join(part);
+                        parts.push((part.as_os_str().to_string_lossy().into_owned(), at.clone()));
+                    }
+                }
+                for (name, path) in parts {
+                    ui.label(RichText::new("›").heading().color(theme::dim(ui)));
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(name).heading().strong())
+                            .sense(Sense::click()),
+                    );
+                    if label.clicked() && path != folder {
+                        actions.push(Action::Go(Nav::Folder(path)));
+                    }
+                }
+            }
+            ui.label(RichText::new(self.lang.song_count(count)).color(theme::dim(ui)));
+        });
+        if !entries.is_empty() {
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .id_salt(("subfolders", folder.to_path_buf()))
+                .max_height(96.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(4.0);
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                        for entry in &entries {
+                            let text = format!(
+                                "{}  {}",
+                                entry.name,
+                                crate::i18n::group_digits(entry.songs)
+                            );
+                            let chip = ui
+                                .add(
+                                    egui::Button::new(RichText::new(text).size(12.5))
+                                        .corner_radius(12.0)
+                                        .min_size(egui::vec2(0.0, 24.0)),
+                                )
+                                .on_hover_text(s.subfolders);
+                            if chip.clicked() {
+                                actions.push(Action::Go(Nav::Folder(entry.path.clone())));
+                            }
+                        }
+                    });
+                });
+        }
+        ui.add_space(6.0);
+    }
+
     fn genre_list_view(&mut self, ui: &mut Ui, nav: &Nav, actions: &mut Vec<Action>) {
         let state = self.views.remove(nav).unwrap_or_default();
         if state.rows.is_empty() {
@@ -1597,6 +1800,7 @@ impl OneumApp {
         let dim = theme::dim(ui);
         let lang = self.lang;
         let list = &self.genre_list;
+        let pinned = &self.live_pins();
         TableBuilder::new(ui)
             .id_salt("genres")
             .striped(true)
@@ -1639,6 +1843,15 @@ impl OneumApp {
                     if row.response().clicked() {
                         actions.push(Action::Go(Nav::Genre(genre.name.clone())));
                     }
+                    row.response().context_menu(|ui| {
+                        super::pin_menu_item(
+                            ui,
+                            s,
+                            pinned,
+                            crate::app::settings::Pin::Genre(genre.name.clone()),
+                            actions,
+                        );
+                    });
                 });
             });
         self.views.insert(nav.clone(), state);
@@ -1655,6 +1868,7 @@ impl OneumApp {
         let snap = self.snapshot.clone();
         let dim = theme::dim(ui);
         let lang = self.lang;
+        let pinned = &self.live_pins();
         TableBuilder::new(ui)
             .id_salt("artists")
             .striped(true)
@@ -1718,6 +1932,15 @@ impl OneumApp {
                     if row.response().clicked() {
                         actions.push(Action::Go(Nav::Artist(artist.name.clone())));
                     }
+                    row.response().context_menu(|ui| {
+                        super::pin_menu_item(
+                            ui,
+                            s,
+                            pinned,
+                            crate::app::settings::Pin::Artist(artist.name.clone()),
+                            actions,
+                        );
+                    });
                 });
             });
         self.views.insert(nav.clone(), state);
@@ -1726,7 +1949,7 @@ impl OneumApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rediscover, genre_entries, rediscover};
+    use super::{Rediscover, folder_entries, genre_entries, rediscover};
     use crate::model::{Track, test_track};
     use std::sync::Arc;
 
@@ -1819,5 +2042,47 @@ mod tests {
             rediscover(&many, Rediscover::Added, NOW).len(),
             super::REDISCOVER_LIMIT
         );
+    }
+
+    #[test]
+    fn the_folders_inside_a_folder() {
+        use std::path::{Path, PathBuf};
+        let track = |path: &str| {
+            let mut t = test_track(1);
+            t.path = PathBuf::from(path);
+            std::sync::Arc::new(t)
+        };
+        let tracks = vec![
+            track("/m/Beatles/Abbey Road/1.flac"),
+            track("/m/Beatles/Abbey Road/2.flac"),
+            track("/m/Beatles/loose.flac"),
+            track("/m/아이유/Palette/1.flac"),
+            track("/m/top.flac"),
+            track("/elsewhere/a.flac"),
+            // The tracks of a CUE sheet are in the sheet's folder.
+            track("/m/Live/concert.cue/01"),
+            track("/m/Live/concert.cue/02"),
+        ];
+        let names = |folder: &str| -> Vec<(String, usize)> {
+            folder_entries(&tracks, Path::new(folder), &[])
+                .into_iter()
+                .map(|e| (e.name, e.songs))
+                .collect()
+        };
+        assert_eq!(
+            names("/m"),
+            [
+                ("Beatles".into(), 3),
+                ("Live".into(), 2),
+                ("아이유".into(), 1)
+            ]
+        );
+        assert!(names("/m/Live").is_empty());
+        assert_eq!(names("/m/Beatles"), [("Abbey Road".into(), 2)]);
+        assert!(names("/m/Beatles/Abbey Road").is_empty());
+        // The top: the music folders, with every song under them.
+        let top = folder_entries(&tracks, Path::new(""), &[PathBuf::from("/m")]);
+        assert_eq!(top.len(), 1);
+        assert_eq!((top[0].name.as_str(), top[0].songs), ("m", 7));
     }
 }

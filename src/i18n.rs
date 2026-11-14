@@ -126,6 +126,11 @@ strings! {
     startup_failed_title: "OnEum을 시작할 수 없습니다", "OnEum could not start";
     startup_failed_body: "라이브러리를 열지 못했습니다. 디스크 공간과 폴더 권한을 확인한 뒤 다시 실행해 주세요.", "The library could not be opened. Check free disk space and folder permissions, then start OnEum again.";
     startup_failed_log: "자세한 내용(로그)", "Details (log)";
+    startup_graphics_body: "창을 그릴 그래픽 장치를 준비하지 못했습니다. 그래픽 드라이버를 업데이트하거나, 가상 머신에서 실행 중이라면 3D 가속을 켠 뒤 다시 실행해 주세요.", "No graphics device could be set up to draw the window. Update the graphics driver or, in a virtual machine, turn on 3D acceleration, then start OnEum again.";
+    startup_window_body: "창을 열지 못했습니다.", "The window could not be opened.";
+    crashed_title: "OnEum에 오류가 생겨 종료됩니다", "OnEum ran into an error and will quit";
+    crashed_body: "예기치 못한 오류입니다. 아래 내용은 로그에도 남습니다.", "This was not expected. What follows is also in the log.";
+    alert_copy_hint: "이 창에서 Ctrl+C를 누르면 내용을 복사할 수 있습니다.", "Press Ctrl+C in this window to copy its text.";
     seek_bar: "재생 위치", "Playback position";
     nothing_playing: "재생 중인 곡 없음", "Not Playing";
     drop_hint: "여기에 놓아 음악 추가", "Drop to add music";
@@ -367,6 +372,12 @@ strings! {
     // Radio
     radio: "라디오", "Radio";
     radio_row: "대기열이 끝나면 이어서 재생", "Keep Playing When the Queue Ends";
+    play_order: "재생 순서", "Playing Order";
+    shuffle_by_album_row: "앨범 단위로 셔플", "Shuffle by Album";
+    shuffle_by_album_desc: "앨범의 순서만 섞고, 앨범 안의 곡은 순서대로 이어 재생합니다.", "Mixes the order of albums; each album plays through in order.";
+    resume_long_row: "긴 곡은 이어 듣기", "Resume Long Tracks";
+    resume_long_desc: "20분이 넘는 곡은 멈춘 곳에서 다시 시작합니다.", "Tracks over 20 minutes start where you left off.";
+    play_order_hint: "이어 듣기는 곡을 다시 고를 때 적용되며, 앨범이 이어서 재생될 때는 처음부터 나옵니다. 끝까지 들은 곡은 다음에 처음부터 시작합니다.", "Resuming applies when you choose the track again; when an album plays on into it, it starts from the beginning. A track heard to the end starts from the beginning next time.";
     radio_desc: "마지막 곡과 어울리는 곡을 라이브러리에서 골라 대기열에 더합니다.", "Adds songs from your library that go with the last one.";
     radio_hint: "장르·아티스트·연도가 가까운 곡을 고르고, 방금 들은 곡과 같은 아티스트의 연속은 피합니다. 인터넷을 쓰지 않으며, 반복 재생이 켜져 있으면 동작하지 않습니다.",
         "Picks songs close in genre, artist and year, and avoids what was just heard and long runs of one artist. Nothing goes online. Does nothing while Repeat is on.";
@@ -437,6 +448,48 @@ strings! {
             "Possibly waiting for permission. Check for a macOS prompt asking to allow access to the folder."
         };
     notice_generic_error: "작업을 완료하지 못했습니다.", "The operation could not be completed.";
+    pin_to_sidebar: "사이드바에 고정", "Pin to Sidebar";
+    check_title: "파일 검사", "File Check";
+    folders: "폴더", "Folders";
+    import_title: "다른 앱에서 가져오기", "Import from Another App";
+    apple_import_row: "Apple Music 보관함", "Apple Music Library";
+    apple_import_desc: "재생 횟수·마지막 재생·추가한 날짜·좋아요·플레이리스트", "Play counts, last plays, dates added, loved songs, playlists";
+    apple_import_button: "가져오기…", "Import…";
+    apple_import_hint: "Apple Music에서 파일 ▸ 보관함 ▸ 보관함 내보내기로 저장한 XML 파일을 고르세요. 라이브러리에 있는 곡(파일 위치로 찾음)에만 적용되고, 재생 횟수는 더하지 않고 큰 쪽을 남깁니다. 음악 파일은 바꾸지 않습니다.", "Choose the XML file saved with File ▸ Library ▸ Export Library… in Apple Music. It applies to the songs in your library (found by their file); play counts are not added up, the higher one is kept. Music files are not changed.";
+    notice_apple_import_failed: "Apple Music 보관함 파일을 읽지 못했습니다.", "Could not read the Apple Music library file.";
+    dialog_filter_apple: "Apple Music 보관함", "Apple Music library";
+    stats: "통계", "Statistics";
+    stats_7d: "7일", "7 Days";
+    stats_30d: "30일", "30 Days";
+    stats_1y: "1년", "Year";
+    stats_all: "전체", "All Time";
+    top_artists: "많이 들은 아티스트", "Top Artists";
+    top_albums: "많이 들은 앨범", "Top Albums";
+    top_songs: "많이 들은 곡", "Top Songs";
+    top_genres: "많이 들은 장르", "Top Genres";
+    stats_none: "이 기간에 들은 곡이 없습니다.", "Nothing was played in this period.";
+    stats_library: "라이브러리 구성", "Your Library";
+    stats_formats: "형식", "Formats";
+    stats_rates: "샘플레이트", "Sample Rates";
+    stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 컴퓨터에만 있습니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this computer.";
+    subfolders: "하위 폴더", "Folders inside";
+    check_row: "음악 파일 검사", "Check Music Files";
+    check_start: "검사", "Check";
+    check_stop: "멈추기", "Stop";
+    check_none: "모든 파일을 검사했습니다.", "Every file has been checked.";
+    check_hint: "파일을 끝까지 읽어 손상(FLAC은 파일에 든 MD5와 대조), 다이내믹 레인지(DR), 트루 피크를 잽니다. 파일은 읽기만 하고, 결과는 곡 정보에 나옵니다. 검색: check:damaged, dr:<8", "Reads every file to its end and looks for damage (for FLAC, against the MD5 the file carries), and measures dynamic range (DR) and true peak. Files are only read; the results show in Song Info. Search: check:damaged, dr:<8";
+    check_show_damaged: "손상된 곡 보기", "Show Damaged";
+    check_results: "검사 결과", "Results";
+    check_forget: "지우기", "Clear";
+    info_check: "무결성", "Integrity";
+    info_check_verified: "정상 (MD5 일치)", "Intact (MD5 matches)";
+    info_check_decoded: "정상 (끝까지 디코드됨)", "Intact (decodes to the end)";
+    info_check_damaged: "손상됨", "Damaged";
+    info_dr: "다이내믹 레인지", "Dynamic range";
+    info_true_peak: "트루 피크", "True peak";
+    unpin: "고정 해제", "Unpin";
+    pinned: "고정", "Pinned";
+    notice_not_saved: "변경 내용을 저장하지 못했습니다. 디스크의 남은 공간을 확인하세요.", "The change could not be saved. Check that the disk has free space.";
     notice_export_failed: "플레이리스트를 내보내지 못했습니다. 저장 위치를 확인하세요.", "Could not export the playlist. Check the destination.";
     notice_import_failed: "플레이리스트 파일을 읽지 못했습니다.", "Could not read the playlist file.";
     notice_no_playable_files: "재생할 수 있는 음악 파일이 없습니다.", "No playable music files were found.";
@@ -589,6 +642,190 @@ impl Lang {
         if failed > 0 {
             text.push_str(&match self {
                 Lang::Ko => format!(" · 읽지 못한 곡 {}곡", group_digits(failed)),
+                Lang::En => format!(" · {} could not be read", group_digits(failed)),
+            });
+        }
+        if !running {
+            text.push('.');
+        }
+        text
+    }
+
+    /// "1,234 plays · 56 h 7 min · 890 songs".
+    pub fn stats_summary(self, plays: usize, listened_ms: u64, songs: usize) -> String {
+        let minutes = listened_ms / 60_000;
+        let (h, m) = (minutes / 60, minutes % 60);
+        match self {
+            Lang::Ko => {
+                let length = if h > 0 {
+                    format!("{}시간 {m}분", group_digits(h as usize))
+                } else {
+                    format!("{m}분")
+                };
+                format!(
+                    "{}회 재생 · {length} · {}곡",
+                    group_digits(plays),
+                    group_digits(songs)
+                )
+            }
+            Lang::En => {
+                let length = if h > 0 {
+                    format!("{} h {m} min", group_digits(h as usize))
+                } else {
+                    format!("{m} min")
+                };
+                format!(
+                    "{} plays · {length} · {}",
+                    group_digits(plays),
+                    self.song_count(songs)
+                )
+            }
+        }
+    }
+
+    /// "12회" / "12 plays".
+    pub fn plays_short(self, n: usize) -> String {
+        match self {
+            Lang::Ko => format!("{}회", group_digits(n)),
+            Lang::En if n == 1 => "1 play".to_string(),
+            Lang::En => format!("{} plays", group_digits(n)),
+        }
+    }
+
+    /// The library in a line: songs, total length, size, lossless share.
+    pub fn library_makeup(
+        self,
+        songs: usize,
+        total_ms: u64,
+        bytes: u64,
+        lossless: usize,
+    ) -> String {
+        let minutes = total_ms / 60_000;
+        let (h, m) = (minutes / 60, minutes % 60);
+        let size = if bytes >= 1 << 30 {
+            format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+        } else {
+            format!("{:.0} MB", bytes as f64 / 1_048_576.0)
+        };
+        let share = (lossless * 100).checked_div(songs).unwrap_or(0);
+        match self {
+            Lang::Ko => {
+                let length = if h > 0 {
+                    format!("{}시간 {m}분", group_digits(h as usize))
+                } else {
+                    format!("{m}분")
+                };
+                format!(
+                    "{}곡 · {length} · {size} · 무손실 {share}%",
+                    group_digits(songs)
+                )
+            }
+            Lang::En => {
+                let length = if h > 0 {
+                    format!("{} h {m} min", group_digits(h as usize))
+                } else {
+                    format!("{m} min")
+                };
+                format!(
+                    "{} · {length} · {size} · {share}% lossless",
+                    self.song_count(songs)
+                )
+            }
+        }
+    }
+
+    /// The outcome of an Apple Music import.
+    pub fn apple_import_result(self, matched: usize, unmatched: usize, playlists: usize) -> String {
+        match self {
+            Lang::Ko => {
+                let mut text = format!(
+                    "Apple Music에서 {}곡의 기록을 가져왔습니다",
+                    group_digits(matched)
+                );
+                if playlists > 0 {
+                    text.push_str(&format!(" · 플레이리스트 {playlists}개"));
+                }
+                if unmatched > 0 {
+                    text.push_str(&format!(
+                        " · 라이브러리에 없는 곡 {}곡",
+                        group_digits(unmatched)
+                    ));
+                }
+                text.push('.');
+                text
+            }
+            Lang::En => {
+                let mut text = format!(
+                    "Took over the history of {} from Apple Music",
+                    self.song_count(matched)
+                );
+                if playlists > 0 {
+                    text.push_str(&format!(" · {playlists} playlists"));
+                }
+                if unmatched > 0 {
+                    text.push_str(&format!(
+                        " · {} not in your library",
+                        group_digits(unmatched)
+                    ));
+                }
+                text.push('.');
+                text
+            }
+        }
+    }
+
+    /// Files the check has yet to read.
+    pub fn check_waiting(self, n: usize) -> String {
+        match self {
+            Lang::Ko => format!(
+                "검사할 파일 {}개 · 파일을 끝까지 읽으므로 시간이 걸립니다.",
+                group_digits(n)
+            ),
+            Lang::En => format!(
+                "{} files to check · every file is read to its end, so this takes a while.",
+                group_digits(n)
+            ),
+        }
+    }
+
+    /// Progress of the file check, or its outcome once it has ended.
+    pub fn check_progress(
+        self,
+        running: bool,
+        done: u64,
+        total: u64,
+        damaged: u64,
+        failed: u64,
+    ) -> String {
+        let (done, total, damaged, failed) = (
+            done as usize,
+            total as usize,
+            damaged as usize,
+            failed as usize,
+        );
+        let mut text = match (self, running) {
+            (Lang::Ko, true) => format!(
+                "검사 중 · {}개 중 {}개",
+                group_digits(total),
+                group_digits(done)
+            ),
+            (Lang::En, true) => format!(
+                "Checking · {} of {}",
+                group_digits(done),
+                group_digits(total)
+            ),
+            (Lang::Ko, false) => format!("{}개를 검사했습니다", group_digits(done)),
+            (Lang::En, false) => format!("Checked {} files", group_digits(done)),
+        };
+        text.push_str(&match (self, damaged) {
+            (Lang::Ko, 0) => " · 손상 없음".to_string(),
+            (Lang::En, 0) => " · no damage found".to_string(),
+            (Lang::Ko, n) => format!(" · 손상 {}개", group_digits(n)),
+            (Lang::En, n) => format!(" · {} damaged", group_digits(n)),
+        });
+        if failed > 0 {
+            text.push_str(&match self {
+                Lang::Ko => format!(" · 읽지 못한 파일 {}개", group_digits(failed)),
                 Lang::En => format!(" · {} could not be read", group_digits(failed)),
             });
         }

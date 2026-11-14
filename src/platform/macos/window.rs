@@ -15,6 +15,10 @@ fn main_window(mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
 }
 
 /// Hides the main window without closing it. Main thread only (no-op elsewhere).
+/// The main window as the windowing library knows it. AppKit finds it on its own, so
+/// nothing needs to be kept here.
+pub fn remember_main_window(_handle: winit::raw_window_handle::RawWindowHandle) {}
+
 pub fn hide_main_window() {
     if let Some(mtm) = MainThreadMarker::new()
         && let Some(window) = main_window(mtm)

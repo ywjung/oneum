@@ -203,15 +203,18 @@ pub fn measure_file(
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<Option<Measurement>, PlaybackError> {
+    // A track of a CUE sheet is a stretch of the sheet's file (the sheet is read once).
+    let segment = crate::library::cue::resolve(path);
+    let file = segment.as_ref().map_or(path, |s| s.audio.as_path());
     // Only a regular file: a pipe put in a song's place would never deliver anything,
     // and the worker would wait for it for ever.
-    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+    if !std::fs::metadata(file).is_ok_and(|m| m.is_file()) {
         return Err(PlaybackError {
             kind: super::PlaybackErrorKind::FileUnreadable,
             detail: "not a regular file".into(),
         });
     }
-    let mut decoder = TrackDecoder::open(path)?;
+    let mut decoder = TrackDecoder::open_located(path, segment.as_ref())?;
     let (rate, channels) = {
         let info = decoder.info();
         (info.sample_rate, info.channels)

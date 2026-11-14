@@ -7,6 +7,7 @@ pub mod menu;
 pub mod nowplaying;
 pub mod power;
 pub mod responder;
+pub mod system;
 pub mod testing;
 pub mod window;
 

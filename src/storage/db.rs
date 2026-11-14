@@ -3,7 +3,7 @@
 //! The database is the source of truth; `crate::library` keeps an in-memory copy of the
 //! track table and talks to this type through a mutex. All user-provided values are bound
 //! as parameters. SQL text is only ever assembled from the constant column lists below.
-use crate::model::{ReplayGainTags, Track, TrackId};
+use crate::model::{CheckVerdict, FileCheck, ReplayGainTags, Track, TrackId};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, params};
 use std::fmt;
 use std::fs;
@@ -20,7 +20,7 @@ const HISTORY_KEEP_ROWS: i64 = 20_000;
 
 /// Ordered migration list. Entry `i` upgrades the schema from version `i` to `i + 1`;
 /// the current version is stored in `PRAGMA user_version`.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE roots (
@@ -124,6 +124,35 @@ CREATE TABLE loudness (
 );
 ";
 
+/// What another player knew about a song: `(track, plays, last played, added, loved)`
+/// (times in Unix seconds).
+pub type ListeningRow = (TrackId, u32, Option<i64>, Option<i64>, bool);
+
+const KV_UPSERT_SQL: &str = "INSERT INTO kv (key, value) VALUES (?1, ?2) \
+                             ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+
+/// Version 4:
+/// - `resume_points`: where the user left off in a long track (see the player's
+///   "resume long tracks").
+/// - `checks`: the results of the file check (integrity, dynamic range, true peak),
+///   like `loudness` tied to one state of the file.
+const SCHEMA_V4: &str = "
+CREATE TABLE resume_points (
+    track_id     INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    position_ms  INTEGER NOT NULL,
+    saved_at     INTEGER NOT NULL
+);
+CREATE TABLE checks (
+    track_id     INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    of_mtime_ns  INTEGER NOT NULL,
+    of_file_size INTEGER NOT NULL,
+    c_verdict    INTEGER NOT NULL,
+    c_dr         REAL,
+    c_true_peak  REAL,
+    checked_at   INTEGER NOT NULL
+);
+";
+
 /// Columns filled from the file on disk (re-written on every rescan of a changed file).
 const SCAN_COLS: [&str; 27] = [
     "root_id",
@@ -160,9 +189,13 @@ const USER_COLS: [&str; 4] = ["favorite", "play_count", "last_played_at", "added
 
 static SELECT_TRACKS_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "SELECT id, path, {}, {}, m_track_gain, m_track_peak, m_album_gain, m_album_peak \
-         FROM tracks LEFT JOIN loudness \
-         ON track_id = id AND of_mtime_ns = mtime_ns AND of_file_size = file_size",
+        "SELECT id, path, {}, {}, m_track_gain, m_track_peak, m_album_gain, m_album_peak, \
+         c_verdict, c_dr, c_true_peak \
+         FROM tracks \
+         LEFT JOIN loudness ON loudness.track_id = tracks.id \
+         AND loudness.of_mtime_ns = tracks.mtime_ns AND loudness.of_file_size = tracks.file_size \
+         LEFT JOIN checks ON checks.track_id = tracks.id \
+         AND checks.of_mtime_ns = tracks.mtime_ns AND checks.of_file_size = tracks.file_size",
         SCAN_COLS.join(", "),
         USER_COLS.join(", ")
     )
@@ -210,7 +243,8 @@ pub enum DbError {
         found: u32,
         supported: u32,
     },
-    /// A migration failed. `restored` tells whether the pre-migration backup was put back.
+    /// A migration failed. `restored` tells whether the upgrade was rolled back, leaving
+    /// the database exactly as it was before (a backup copy is kept either way).
     MigrationFailed {
         from: u32,
         to: u32,
@@ -237,9 +271,9 @@ impl fmt::Display for DbError {
                 f,
                 "upgrading the library database from v{from} to v{to} failed ({message}); {}",
                 if *restored {
-                    "the previous database was restored"
+                    "the database was left as it was"
                 } else {
-                    "the previous database could not be restored automatically"
+                    "the upgrade could not be rolled back; a copy of the previous database is kept next to it"
                 }
             ),
         }
@@ -322,7 +356,7 @@ impl Db {
         }
 
         let mut recovered_corrupt_db = None;
-        let mut conn = if path.exists() {
+        let conn = if path.exists() {
             match open_checked(path) {
                 Ok(conn) => conn,
                 // Only a file that SQLite itself calls damaged is replaced. Anything else
@@ -351,48 +385,58 @@ impl Db {
         let mut migrated_from = None;
         if version < latest {
             let fresh = version == 0 && !has_user_tables(&conn)?;
-            let backup = if fresh {
-                None
+            // The upgrade runs as one transaction that holds the write lock from its
+            // first statement: no other connection (a second process, the library tool)
+            // can write while it runs, and if any step fails the file is exactly as it
+            // was. Nothing is ever restored by replacing files, which would pull the
+            // database out from under a connection that has it open.
+            // (A dropped connection rolls back whatever is open, so the early returns
+            // below leave the file as it was too.)
+            if fresh {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
             } else {
-                // Fold the WAL into the main file and close it so that a plain file copy
-                // is a complete backup.
-                let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
-                drop(conn);
-                let backup = sibling(path, &format!(".bak-v{version}"));
-                fs::copy(path, &backup)?;
-                conn = open_checked(path)?;
-                Some(backup)
-            };
-
-            for (index, sql) in migrations.iter().enumerate().skip(version as usize) {
+                backup_and_lock(&conn, path, version)?;
+            }
+            // Re-read under the lock: another process may have upgraded meanwhile.
+            let locked_version: u32 =
+                conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if locked_version > latest {
+                return Err(DbError::NewerSchema {
+                    found: locked_version,
+                    supported: latest,
+                });
+            }
+            for (index, sql) in migrations.iter().enumerate().skip(locked_version as usize) {
                 let target = u32::try_from(index + 1).unwrap_or(u32::MAX);
-                if let Err(err) = apply_migration(&mut conn, sql, target) {
-                    drop(conn);
-                    let restored = match &backup {
-                        Some(backup) => match restore_backup(path, backup) {
-                            Ok(()) => true,
-                            Err(restore_err) => {
-                                tracing::error!(error = %restore_err, "could not restore database backup");
-                                false
+                if let Err(err) = apply_migration(&conn, sql, target) {
+                    // Some errors (a full disk, an I/O error) make SQLite roll back by
+                    // itself; then there is nothing left to roll back.
+                    let restored = conn.is_autocommit()
+                        || {
+                            match conn.execute_batch("ROLLBACK") {
+                                Ok(()) => true,
+                                Err(rollback_err) => {
+                                    tracing::error!(error = %rollback_err, "could not roll back the database upgrade");
+                                    false
+                                }
                             }
-                        },
-                        None => {
-                            // Nothing to lose: remove the half-initialised file.
-                            remove_db_files(path);
-                            false
-                        }
-                    };
+                        };
                     return Err(DbError::MigrationFailed {
-                        from: version,
+                        from: locked_version,
                         to: target,
                         message: err.to_string(),
                         restored,
                     });
                 }
             }
-            if !fresh {
-                migrated_from = Some(version);
-                tracing::info!(from = version, to = latest, "library database upgraded");
+            conn.execute_batch("COMMIT")?;
+            if !fresh && locked_version < latest {
+                migrated_from = Some(locked_version);
+                tracing::info!(
+                    from = locked_version,
+                    to = latest,
+                    "library database upgraded"
+                );
             }
         }
 
@@ -746,8 +790,67 @@ impl Db {
     }
 
     /// Forgets everything that was measured.
+    /// Stores file check results, each for the state of the file it was made of. Rows of
+    /// tracks that no longer exist are skipped.
+    pub fn set_checks(
+        &mut self,
+        rows: &[(TrackId, i64, u64, FileCheck)],
+        unix_secs: i64,
+    ) -> SqlResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO checks \
+                 (track_id, of_mtime_ns, of_file_size, c_verdict, c_dr, c_true_peak, checked_at) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1)",
+            )?;
+            for (id, mtime_ns, file_size, check) in rows {
+                stmt.execute(params![
+                    id,
+                    mtime_ns,
+                    file_size.cast_signed(),
+                    check.verdict.code(),
+                    check.dr.map(f64::from),
+                    check.true_peak.map(f64::from),
+                    unix_secs,
+                ])?;
+            }
+        }
+        tx.commit()
+    }
+
+    pub fn clear_checks(&self) -> SqlResult<usize> {
+        self.conn.execute("DELETE FROM checks", [])
+    }
+
     pub fn clear_loudness(&self) -> SqlResult<usize> {
         self.conn.execute("DELETE FROM loudness", [])
+    }
+
+    /// Merges what another player knew about songs, in one transaction: the higher
+    /// play count, the later last play, the earlier date added, and loved songs become
+    /// favourites. Rows are `(track, plays, last played, added, loved)`.
+    pub fn merge_listening(&mut self, rows: &[ListeningRow]) -> SqlResult<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE tracks SET \
+                 play_count = MAX(play_count, ?2), \
+                 last_played_at = CASE WHEN ?3 IS NULL THEN last_played_at \
+                     WHEN last_played_at IS NULL OR ?3 > last_played_at THEN ?3 \
+                     ELSE last_played_at END, \
+                 added_at = CASE WHEN ?4 IS NOT NULL AND ?4 < added_at THEN ?4 ELSE added_at END, \
+                 favorite = favorite OR ?5 \
+                 WHERE id = ?1",
+            )?;
+            for (id, plays, last, added, loved) in rows {
+                stmt.execute(params![id, plays, last, added, loved])?;
+            }
+        }
+        tx.commit()
     }
 
     pub fn set_favorite(&mut self, ids: &[TrackId], favorite: bool) -> SqlResult<()> {
@@ -788,6 +891,15 @@ impl Db {
     }
 
     /// Distinct recently played tracks, most recent first.
+    /// `(track, unix seconds)` of every play at or after `since`, oldest first.
+    pub fn plays_since(&self, since: i64) -> SqlResult<Vec<(TrackId, i64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT track_id, played_at FROM history WHERE played_at >= ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
     pub fn recent_plays(&self, limit: usize) -> SqlResult<Vec<TrackId>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT track_id FROM history GROUP BY track_id \
@@ -879,6 +991,85 @@ impl Db {
         Ok((id, added))
     }
 
+    /// Gives the tracks that take the place of `old` (a CUE sheet's tracks, for the file
+    /// they are cut from) what the user gave it, and deletes it, in one transaction: each
+    /// of its places in a playlist holds them instead, in their order, and if it was a
+    /// favourite, they are. Returns whether it was a favourite.
+    pub fn hand_over_track(&mut self, old: TrackId, heirs: &[TrackId]) -> SqlResult<bool> {
+        let tx = self.conn.transaction()?;
+        let favorite: bool = tx
+            .query_row(
+                "SELECT favorite FROM tracks WHERE id = ?1",
+                params![old],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if favorite {
+            let mut stmt = tx.prepare_cached("UPDATE tracks SET favorite = 1 WHERE id = ?1")?;
+            for heir in heirs {
+                stmt.execute(params![heir])?;
+            }
+        }
+        let playlists: Vec<i64> = {
+            let mut stmt =
+                tx.prepare("SELECT DISTINCT playlist_id FROM playlist_items WHERE track_id = ?1")?;
+            stmt.query_map(params![old], |r| r.get(0))?
+                .collect::<SqlResult<_>>()?
+        };
+        for playlist in playlists {
+            let items: Vec<TrackId> = {
+                let mut stmt = tx.prepare(
+                    "SELECT track_id FROM playlist_items WHERE playlist_id = ?1 \
+                     ORDER BY position, id",
+                )?;
+                stmt.query_map(params![playlist], |r| r.get(0))?
+                    .collect::<SqlResult<_>>()?
+            };
+            let handed: Vec<TrackId> = items
+                .into_iter()
+                .flat_map(|track| {
+                    if track == old {
+                        heirs.to_vec()
+                    } else {
+                        vec![track]
+                    }
+                })
+                .collect();
+            tx.execute(
+                "DELETE FROM playlist_items WHERE playlist_id = ?1",
+                params![playlist],
+            )?;
+            append_items(&tx, playlist, &handed)?;
+        }
+        tx.execute("DELETE FROM tracks WHERE id = ?1", params![old])?;
+        tx.commit()?;
+        Ok(favorite)
+    }
+
+    /// Replaces everything in a playlist with `tracks` in one transaction: if anything
+    /// fails, the playlist keeps what it had. Ids of tracks that do not exist are
+    /// skipped. Returns false (and changes nothing) if the playlist does not exist.
+    pub fn replace_playlist_items(&mut self, id: i64, tracks: &[TrackId]) -> SqlResult<bool> {
+        let tx = self.conn.transaction()?;
+        let exists = tx
+            .query_row("SELECT 1 FROM playlists WHERE id = ?1", params![id], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some();
+        if !exists {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1",
+            params![id],
+        )?;
+        append_items(&tx, id, tracks)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn remove_playlist_items(&mut self, id: i64, item_ids: &[i64]) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
         {
@@ -916,19 +1107,23 @@ impl Db {
     }
 
     pub fn kv_set(&self, key: &str, value: &str) -> SqlResult<()> {
-        self.conn.execute(
-            "INSERT INTO kv (key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
+        self.conn.execute(KV_UPSERT_SQL, params![key, value])?;
         Ok(())
     }
 
-    /// Replaces the saved play queue. Entries whose track does not exist are skipped.
-    pub fn save_queue(&mut self, items: &[(u64, TrackId)]) -> SqlResult<()> {
+    /// Saves the playback session in one transaction: the play queue when `queue` is
+    /// given (it replaces the saved one; entries whose track does not exist are
+    /// skipped), and the rest of the session as `value` under `key`. Both are written or
+    /// neither is, so the saved current item always belongs to the saved queue.
+    pub fn save_session(
+        &mut self,
+        queue: Option<&[(u64, TrackId)]>,
+        key: &str,
+        value: &str,
+    ) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM queue", [])?;
-        {
+        if let Some(items) = queue {
+            tx.execute("DELETE FROM queue", [])?;
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO queue (position, item_id, track_id) \
                  SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?3)",
@@ -941,7 +1136,43 @@ impl Db {
                 ])?;
             }
         }
+        tx.execute(KV_UPSERT_SQL, params![key, value])?;
         tx.commit()
+    }
+
+    /// Where the user left off in a track, if that was remembered.
+    pub fn resume_point(&self, track: TrackId) -> SqlResult<Option<u64>> {
+        self.conn
+            .query_row(
+                "SELECT position_ms FROM resume_points WHERE track_id = ?1",
+                params![track],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|ms| ms.map(|ms| ms.max(0).cast_unsigned()))
+    }
+
+    /// Remembers where the user left off in a track, or forgets it (`None`).
+    pub fn set_resume_point(
+        &self,
+        track: TrackId,
+        position_ms: Option<u64>,
+        unix_secs: i64,
+    ) -> SqlResult<()> {
+        match position_ms {
+            Some(ms) => self.conn.execute(
+                "INSERT INTO resume_points (track_id, position_ms, saved_at) \
+                 SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1) \
+                 ON CONFLICT(track_id) DO UPDATE SET position_ms = excluded.position_ms, \
+                 saved_at = excluded.saved_at",
+                params![track, to_i64(ms), unix_secs],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM resume_points WHERE track_id = ?1",
+                params![track],
+            )?,
+        };
+        Ok(())
     }
 
     pub fn load_queue(&self) -> SqlResult<Vec<(u64, TrackId)>> {
@@ -1009,11 +1240,71 @@ fn has_user_tables(conn: &Connection) -> SqlResult<bool> {
     Ok(count > 0)
 }
 
-fn apply_migration(conn: &mut Connection, sql: &str, target_version: u32) -> SqlResult<()> {
-    let tx = conn.transaction()?;
-    tx.execute_batch(sql)?;
-    tx.pragma_update(None, "user_version", target_version)?;
-    tx.commit()
+/// Runs one migration step inside the upgrade's transaction (see [`Db::open`]).
+fn apply_migration(conn: &Connection, sql: &str, target_version: u32) -> SqlResult<()> {
+    conn.execute_batch(sql)?;
+    conn.pragma_update(None, "user_version", target_version)
+}
+
+/// How often [`backup_and_lock`] tries again when another connection commits between
+/// the copy and the lock.
+const BACKUP_ATTEMPTS: usize = 5;
+
+/// Copies the database to `<path>.bak-v<version>` and leaves `conn` inside a
+/// `BEGIN IMMEDIATE` transaction (holding the write lock), with nothing committed by
+/// anyone between the copy and the lock: the copy is exactly the state the upgrade
+/// starts from.
+///
+/// The copy is made with `VACUUM INTO`, which reads one consistent snapshot of the
+/// database, write-ahead log included, while other connections go on using it. (Copying
+/// the file itself is only complete after a checkpoint, which a reader can keep from
+/// finishing.) It is written under a temporary name and renamed when complete, so a
+/// backup file is never a partial one.
+fn backup_and_lock(conn: &Connection, path: &Path, version: u32) -> Result<PathBuf, DbError> {
+    let backup = sibling(path, &format!(".bak-v{version}"));
+    let partial = sibling(path, &format!(".bak-v{version}.partial"));
+    let partial_name = partial.to_str().ok_or_else(|| {
+        DbError::Io(io::Error::new(
+            io::ErrorKind::InvalidFilename,
+            "the database folder's path cannot be passed to SQLite",
+        ))
+    })?;
+    for attempt in 1..=BACKUP_ATTEMPTS {
+        // `VACUUM INTO` refuses a target that exists (a leftover of an interrupted run).
+        match fs::remove_file(&partial) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let before: i64 = conn.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        conn.execute("VACUUM INTO ?1", params![partial_name])?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        // Changes only when another connection committed since `before`.
+        let after: i64 = conn.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        if after == before {
+            // Opened for writing: Windows only flushes a file through a handle that
+            // may write to it (a read-only handle fails with "access denied").
+            let finished = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&partial)
+                .and_then(|f| f.sync_all())
+                .and_then(|()| fs::rename(&partial, &backup));
+            if let Err(e) = finished {
+                let _ = conn.execute_batch("ROLLBACK");
+                let _ = fs::remove_file(&partial);
+                return Err(e.into());
+            }
+            return Ok(backup);
+        }
+        conn.execute_batch("ROLLBACK")?;
+        tracing::debug!(attempt, "the database changed while it was being backed up");
+    }
+    let _ = fs::remove_file(&partial);
+    Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+        Some("the database kept changing while it was being backed up".into()),
+    )))
 }
 
 /// Renames an unusable database (and its WAL/SHM companions) out of the way.
@@ -1036,19 +1327,6 @@ fn move_aside(path: &Path) -> io::Result<PathBuf> {
         }
     }
     Ok(target)
-}
-
-fn remove_db_files(path: &Path) {
-    let _ = fs::remove_file(path);
-    for suffix in ["-wal", "-shm"] {
-        let _ = fs::remove_file(sibling(path, suffix));
-    }
-}
-
-fn restore_backup(path: &Path, backup: &Path) -> io::Result<()> {
-    remove_db_files(path);
-    fs::copy(backup, path)?;
-    Ok(())
 }
 
 /// `path` with `suffix` appended to its file name.
@@ -1124,6 +1402,18 @@ fn row_to_track(row: &Row<'_>) -> SqlResult<StoredTrack> {
                     })
                 })
                 .transpose()?,
+            unmeasurable: false,
+            check: row
+                .get::<_, Option<i64>>(37)?
+                .and_then(CheckVerdict::from_code)
+                .map(|verdict| -> SqlResult<FileCheck> {
+                    Ok(FileCheck {
+                        verdict,
+                        dr: gain(38)?,
+                        true_peak: gain(39)?,
+                    })
+                })
+                .transpose()?,
             art_id: row.get(27)?,
             favorite: row.get(29)?,
             play_count: clamp_u32(row.get(30)?),
@@ -1171,6 +1461,8 @@ mod tests {
                     album_peak: None,
                 },
                 measured: None,
+                unmeasurable: false,
+                check: None,
                 art_id: Some("0123456789abcdef".into()),
                 favorite: false,
                 play_count: 0,
@@ -1487,6 +1779,132 @@ mod tests {
         );
     }
 
+    /// Writes that are still only in the write-ahead log while another connection holds
+    /// an older snapshot open (so no checkpoint can fold them into the main file).
+    fn with_unfolded_writes(path: &Path) -> (Db, Connection) {
+        let mut writer = Db::open(path).unwrap().db;
+        writer
+            .upsert_tracks(&[sample_track("/m/a.flac", None)])
+            .unwrap();
+        writer.kv_set("marker", "before").unwrap();
+        let reader = Connection::open(path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let n: i64 = reader
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        writer
+            .upsert_tracks(&[sample_track("/m/b.flac", None)])
+            .unwrap();
+        writer.kv_set("marker", "latest").unwrap();
+        (writer, reader)
+    }
+
+    #[test]
+    fn a_failed_upgrade_beside_a_reader_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let current = MIGRATIONS.len() as u32;
+        let (writer, reader) = with_unfolded_writes(&path);
+
+        let broken = "ALTER TABLE tracks ADD COLUMN rating INTEGER; \
+                      INSERT INTO table_that_does_not_exist VALUES (1);";
+        let started = std::time::Instant::now();
+        match Db::open_with_migrations(&path, &with_next(broken)) {
+            Err(DbError::MigrationFailed { restored, .. }) => assert!(restored),
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("migration must fail"),
+        }
+        // No waiting for the reader to let go.
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        // The reader's connection still works, and nothing written is lost.
+        let n: i64 = reader
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the reader keeps its snapshot");
+        reader.execute_batch("COMMIT").unwrap();
+        assert_eq!(writer.kv_get("marker").unwrap().as_deref(), Some("latest"));
+        drop((writer, reader));
+        let db = Db::open(&path).unwrap().db;
+        assert_eq!(db.schema_version().unwrap(), current);
+        assert_eq!(db.load_tracks().unwrap().len(), 2);
+        assert_eq!(db.kv_get("marker").unwrap().as_deref(), Some("latest"));
+        // And the backup holds the latest writes too.
+        let backup = Connection::open(sibling(&path, &format!(".bak-v{current}"))).unwrap();
+        let marker: String = backup
+            .query_row("SELECT value FROM kv WHERE key = 'marker'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(marker, "latest");
+    }
+
+    #[test]
+    fn an_upgrade_beside_a_reader_keeps_the_latest_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let current = MIGRATIONS.len() as u32;
+        let (writer, reader) = with_unfolded_writes(&path);
+        // A leftover of an interrupted backup is replaced, not an obstacle.
+        fs::write(sibling(&path, &format!(".bak-v{current}.partial")), b"junk").unwrap();
+
+        let next = "ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;";
+        let opened = Db::open_with_migrations(&path, &with_next(next)).unwrap();
+        assert_eq!(opened.migrated_from, Some(current));
+        assert_eq!(opened.db.load_tracks().unwrap().len(), 2);
+        assert_eq!(
+            opened.db.kv_get("marker").unwrap().as_deref(),
+            Some("latest")
+        );
+        assert!(!sibling(&path, &format!(".bak-v{current}.partial")).exists());
+        let backup = Connection::open(sibling(&path, &format!(".bak-v{current}"))).unwrap();
+        let (v, n): (u32, i64) = (
+            backup
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            backup
+                .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+                .unwrap(),
+        );
+        assert_eq!((v, n), (current, 2));
+        // The other connections see the upgrade once they start a new read.
+        reader.execute_batch("COMMIT").unwrap();
+        let rating: i64 = reader
+            .query_row("SELECT SUM(rating) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rating, 0);
+        drop((writer, reader));
+    }
+
+    #[test]
+    fn an_upgrade_waits_for_no_writer_and_changes_nothing_when_it_cannot_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let current = MIGRATIONS.len() as u32;
+        {
+            let db = Db::open(&path).unwrap().db;
+            db.kv_set("marker", "before").unwrap();
+        }
+        // Another connection is in the middle of writing and does not finish in time.
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute("UPDATE kv SET value = 'theirs' WHERE key = 'marker'", [])
+            .unwrap();
+        let next = "ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;";
+        assert!(matches!(
+            Db::open_with_migrations(&path, &with_next(next)),
+            Err(DbError::Sqlite(_))
+        ));
+        // Their write goes through; the database is still the old version.
+        writer.execute_batch("COMMIT").unwrap();
+        drop(writer);
+        let db = Db::open(&path).unwrap().db;
+        assert_eq!(db.schema_version().unwrap(), current);
+        assert_eq!(db.kv_get("marker").unwrap().as_deref(), Some("theirs"));
+    }
+
     #[test]
     fn unopenable_but_healthy_database_is_left_alone() {
         // A healthy database that cannot be opened for a reason other than corruption:
@@ -1593,8 +2011,12 @@ mod tests {
         );
         db.record_play(ids[0], 10).unwrap();
         db.record_play(ids[2], 11).unwrap();
-        db.save_queue(&[(7, ids[0]), (8, 9999), (u64::MAX, ids[2])])
-            .unwrap();
+        db.save_session(
+            Some(&[(7, ids[0]), (8, 9999), (u64::MAX, ids[2])][..]),
+            "test_session",
+            "{}",
+        )
+        .unwrap();
         assert_eq!(
             db.load_queue().unwrap(),
             vec![(7, ids[0]), (u64::MAX, ids[2])]
@@ -1686,7 +2108,12 @@ mod tests {
         let playlist = db.create_playlist("p", 1).unwrap();
         db.append_playlist_items(playlist, &[old, new, other, new])
             .unwrap();
-        db.save_queue(&[(1, new), (2, other), (3, old)]).unwrap();
+        db.save_session(
+            Some(&[(1, new), (2, other), (3, old)][..]),
+            "test_session",
+            "{}",
+        )
+        .unwrap();
         db.record_play(old, 100).unwrap();
         db.record_play(new, 200).unwrap();
         db.record_play(new, 300).unwrap();
@@ -1761,6 +2188,44 @@ mod tests {
             .unwrap();
         assert!(db.create_playlist_with_items("실패", 6, &ids).is_err());
         assert_eq!(db.playlists().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn replacing_a_playlist_is_all_or_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        let ids = db
+            .upsert_tracks(&[
+                sample_track("/m/a.flac", None),
+                sample_track("/m/b.flac", None),
+            ])
+            .unwrap();
+        let (playlist, _) = db
+            .create_playlist_with_items("목록", 5, &[ids[0], ids[1]])
+            .unwrap();
+        let tracks = |db: &Db| -> Vec<TrackId> {
+            db.all_playlist_items()
+                .unwrap()
+                .into_iter()
+                .map(|(_, _, track)| track)
+                .collect()
+        };
+        assert!(
+            db.replace_playlist_items(playlist, &[ids[1], 999, ids[0]])
+                .unwrap()
+        );
+        assert_eq!(tracks(&db), vec![ids[1], ids[0]]);
+        assert!(!db.replace_playlist_items(playlist + 1, &ids).unwrap());
+
+        // The second half fails: the playlist keeps what it had (not emptied).
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER refuse_items BEFORE INSERT ON playlist_items
+                 BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;",
+            )
+            .unwrap();
+        assert!(db.replace_playlist_items(playlist, &[ids[0]]).is_err());
+        assert_eq!(tracks(&db), vec![ids[1], ids[0]]);
     }
 
     #[test]

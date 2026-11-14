@@ -1,0 +1,62 @@
+# Checks on both systems the app is made for, and the dependencies' advisories.
+# What this cannot cover (sound through a real device, VoiceOver/Narrator, a USB DAC,
+# signing and notarisation) is checked by hand before a release: docs/RELEASE.md.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml selects the toolchain; rustup installs it on first use.
+      - run: rustup show
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      # The program has to come up on a machine without a graphics card (the runner
+      # draws with Windows' software renderer) and report its state.
+      - name: Start-up check
+        shell: pwsh
+        run: |
+          cargo build --locked --release --features automation --bin oneum
+          $profile = Join-Path $env:RUNNER_TEMP "oneum-profile"
+          New-Item -ItemType Directory -Force -Path $profile | Out-Null
+          $script = Join-Path $profile "script.txt"
+          $dump = Join-Path $profile "state.json"
+          Set-Content -Path $script -Value @("wait 1500", "volume 0", "dump $dump", "wait 300", "quit")
+          $env:ONEUM_DATA_DIR = $profile
+          $env:ONEUM_SCRIPT = $script
+          $env:ONEUM_NO_MEDIA_SESSION = "1"
+          $app = Start-Process -FilePath "target\release\oneum.exe" -PassThru
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not (Test-Path $dump) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          Get-Content (Join-Path $profile "logs\oneum.log") -ErrorAction SilentlyContinue
+          if (-not (Test-Path $dump)) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue; throw "the app did not come up" }
+          $state = Get-Content $dump -Raw | ConvertFrom-Json
+          if ($state.state -ne "Idle") { throw "unexpected state: $($state.state)" }
+          if (-not $app.WaitForExit(30000)) { Stop-Process -Id $app.Id -Force; throw "the app did not quit" }
+
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

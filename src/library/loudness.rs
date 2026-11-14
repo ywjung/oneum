@@ -204,6 +204,20 @@ impl Inner {
         self.publish_patch(&stored);
     }
 
+    /// Remembers that `job`'s file, as it is, could not be read for measuring.
+    fn mark_unmeasurable(&self, job: &Job) {
+        let marked = {
+            let mut state = lock(&self.state);
+            let same = state.tracks.get(&job.id).is_some_and(|e| {
+                e.track.mtime_ns == job.mtime_ns && e.track.file_size == job.file_size
+            });
+            same && state.update(job.id, |t| t.unmeasurable = true).is_some()
+        };
+        if marked {
+            self.publish_patch(&[job.id]);
+        }
+    }
+
     /// The measuring run. `self.loudness` has been claimed by the caller.
     pub(crate) fn run_loudness(&self) {
         let groups = {
@@ -219,7 +233,10 @@ impl Inner {
                 available: t.available,
                 tagged: t.replaygain.track_gain_db.is_some()
                     || t.replaygain.album_gain_db.is_some(),
-                measured: t.measured.is_some(),
+                // One that could not be read (in this run of the app, as it is now) is
+                // left alone like one that was measured: trying again would read it,
+                // and its whole album with it, for nothing.
+                measured: t.measured.is_some() || t.unmeasurable,
             }))
         };
         let work: Vec<(usize, usize)> = groups
@@ -260,6 +277,7 @@ impl Inner {
                             Err(err) => {
                                 tracing::debug!(track = group.jobs[j].id, %err, "not measured");
                                 job.failed.fetch_add(1, Ordering::Relaxed);
+                                self.mark_unmeasurable(&group.jobs[j]);
                                 None
                             }
                         };
@@ -299,11 +317,15 @@ impl Inner {
             let ids: Vec<TrackId> = state
                 .tracks
                 .values()
-                .filter(|e| e.track.measured.is_some())
+                .filter(|e| e.track.measured.is_some() || e.track.unmeasurable)
                 .map(|e| e.track.id)
                 .collect();
+            // A clean slate: what could not be read is tried again too.
             for &id in &ids {
-                state.update(id, |t| t.measured = None);
+                state.update(id, |t| {
+                    t.measured = None;
+                    t.unmeasurable = false;
+                });
             }
             ids
         };
@@ -316,7 +338,7 @@ pub(crate) fn start(inner: &Arc<Inner>) -> bool {
     if inner.shutdown.load(Ordering::Relaxed) || !inner.loudness.begin() {
         return false;
     }
-    inner.spawn("oneum-loudness", |inner| {
+    let started = inner.spawn("oneum-loudness", |inner| {
         struct Release<'a>(&'a Inner);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
@@ -327,13 +349,19 @@ pub(crate) fn start(inner: &Arc<Inner>) -> bool {
         let _release = Release(&inner);
         inner.run_loudness();
     });
-    true
+    if !started {
+        // No thread, so no run: the job is free again.
+        inner.loudness.running.store(false, Ordering::SeqCst);
+    }
+    started
 }
 
 /// Runs a measurement so that a decoder that panics on a damaged file costs that file
 /// only: the worker goes on, the file is counted as not measured, and its album is
 /// still committed. (Playback and the scan guard their decoding the same way.)
-fn guarded<T>(measure: impl FnOnce() -> Result<T, PlaybackError>) -> Result<T, PlaybackError> {
+pub(crate) fn guarded<T>(
+    measure: impl FnOnce() -> Result<T, PlaybackError>,
+) -> Result<T, PlaybackError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(measure)).unwrap_or_else(|_| {
         Err(PlaybackError {
             kind: PlaybackErrorKind::Corrupt,

@@ -992,6 +992,8 @@ fn synthetic_tracks(n: usize) -> Vec<Track> {
                     album_peak: None,
                 },
                 measured: None,
+                unmeasurable: false,
+                check: None,
                 art_id: art_id.clone(),
                 favorite: rng.u8(..50) == 0,
                 play_count: if rng.u8(..4) == 0 { rng.u32(..200) } else { 0 },

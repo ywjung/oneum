@@ -198,7 +198,11 @@ fn deleting_tracks_cascades_to_playlists_history_and_queue() {
         .unwrap();
     library.record_play(ids[0]);
     library.record_play(ids[1]);
-    library.save_queue(&[(10, ids[0]), (11, ids[1]), (12, ids[0])]);
+    assert!(library.save_session(
+        Some(&[(10, ids[0]), (11, ids[1]), (12, ids[0])][..]),
+        "test_session",
+        "{}"
+    ));
     let generation = library.playlists_generation();
 
     library.remove_tracks(&[ids[0]]);
@@ -208,6 +212,24 @@ fn deleting_tracks_cascades_to_playlists_history_and_queue() {
     assert_eq!(library.load_queue(), [(11, ids[1])]);
     assert_eq!(library.snapshot().len(), 4);
     assert!(library.snapshot().get(ids[0]).is_none());
+}
+
+/// The count the app uses to decide whether the play queue must be checked again: it
+/// moves when tracks leave the library, not on the many other notifications.
+#[test]
+fn only_removals_move_the_removal_count() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let start = library.removals();
+    library.set_favorite(&[ids[0]], true).unwrap();
+    library.record_play(ids[1]);
+    let playlist = library.create_playlist("mix").unwrap();
+    library.add_to_playlist(playlist, &ids).unwrap();
+    library.rescan();
+    assert!(library.wait_for_scan(std::time::Duration::from_secs(30)));
+    assert_eq!(library.removals(), start, "nothing left the library");
+    library.remove_tracks(&[ids[0], ids[1]]);
+    assert!(library.removals() > start);
 }
 
 #[test]
@@ -223,7 +245,9 @@ fn favourites_history_and_play_counts() {
     }
 
     let generation = library.generation();
-    library.set_favorite(&[ids[0], ids[3], 424_242], true);
+    library
+        .set_favorite(&[ids[0], ids[3], 424_242], true)
+        .unwrap();
     assert!(library.generation() > generation);
     assert!(notified.load(Ordering::Relaxed) > 0);
     let snapshot = library.snapshot();
@@ -233,12 +257,12 @@ fn favourites_history_and_play_counts() {
     // The index is intact after the cheap update.
     assert_eq!(snapshot.search("t4").len(), 1);
     assert_eq!(snapshot.search("ㅇㅇㅇ").len(), 5);
-    library.set_favorite(&[ids[0]], false);
+    library.set_favorite(&[ids[0]], false).unwrap();
     assert!(!library.track(ids[0]).unwrap().favorite);
     assert!(!library.snapshot().get(ids[0]).unwrap().favorite);
     // Setting the value it already has does not publish anything.
     let generation = library.generation();
-    library.set_favorite(&[ids[0]], false);
+    library.set_favorite(&[ids[0]], false).unwrap();
     assert_eq!(library.generation(), generation);
 
     assert!(library.recent_plays(10).is_empty());
@@ -279,11 +303,11 @@ fn kv_and_queue_persistence() {
     assert_eq!(library.kv_get("empty").as_deref(), Some(""));
 
     assert!(library.load_queue().is_empty());
-    library.save_queue(&[(1, ids[0]), (2, ids[1])]);
+    assert!(library.save_session(Some(&[(1, ids[0]), (2, ids[1])][..]), "test_session", "{}"));
     // Saving replaces the previous queue; the same track may be queued twice and item
     // ids are opaque 64-bit values. Unknown tracks are dropped.
     let queue = [(u64::MAX, ids[4]), (7, ids[4]), (3, 555_555), (0, ids[2])];
-    library.save_queue(&queue);
+    assert!(library.save_session(Some(&queue[..]), "test_session", "{}"));
     assert_eq!(
         library.load_queue(),
         [(u64::MAX, ids[4]), (7, ids[4]), (0, ids[2])]
@@ -300,7 +324,7 @@ fn kv_and_queue_persistence() {
         library.load_queue(),
         [(u64::MAX, ids[4]), (7, ids[4]), (0, ids[2])]
     );
-    library.save_queue(&[]);
+    assert!(library.save_session(Some(&[][..]), "test_session", "{}"));
     assert!(library.load_queue().is_empty());
 }
 
@@ -551,4 +575,87 @@ fn m3u8_import_refuses_files_too_large_to_be_playlists() {
         playlists,
         "no playlist is left behind"
     );
+}
+
+/// An Apple Music library export: counts, dates and loved songs are merged into the
+/// library's songs (matched by file, whatever the Unicode form of the path), the user's
+/// playlists are made, and importing again changes nothing.
+#[test]
+fn an_apple_music_library_export_is_taken_over() {
+    use unicode_normalization::UnicodeNormalization;
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    let path_of = |id: TrackId| library.track(id).unwrap().path.clone();
+    let url = |path: &std::path::Path, nfd: bool| {
+        let text = path.to_string_lossy();
+        let text: String = if nfd {
+            text.nfd().collect()
+        } else {
+            text.nfc().collect()
+        };
+        let mut url = String::from("file://");
+        for byte in text.bytes() {
+            if byte.is_ascii_alphanumeric() || b"/-_.".contains(&byte) {
+                url.push(byte as char);
+            } else {
+                url.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        url
+    };
+    library.record_play(ids[0]);
+    let before = library.track(ids[0]).unwrap();
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Tracks</key><dict>
+<key>1</key><dict><key>Track ID</key><integer>1</integer><key>Play Count</key><integer>7</integer>
+  <key>Play Date UTC</key><date>2020-01-01T00:00:00Z</date><key>Date Added</key><date>2001-01-01T00:00:00Z</date>
+  <key>Location</key><string>{}</string></dict>
+<key>2</key><dict><key>Track ID</key><integer>2</integer><key>Loved</key><true/>
+  <key>Location</key><string>{}</string></dict>
+<key>3</key><dict><key>Track ID</key><integer>3</integer><key>Play Count</key><integer>3</integer>
+  <key>Location</key><string>file:///nowhere/gone.mp3</string></dict>
+</dict><key>Playlists</key><array>
+<dict><key>Name</key><string>Library</string><key>Master</key><true/><key>Playlist Items</key><array>
+  <dict><key>Track ID</key><integer>1</integer></dict></array></dict>
+<dict><key>Name</key><string>드라이브</string><key>Playlist Items</key><array>
+  <dict><key>Track ID</key><integer>2</integer></dict><dict><key>Track ID</key><integer>3</integer></dict>
+  <dict><key>Track ID</key><integer>1</integer></dict></array></dict>
+</array></dict></plist>"#,
+        url(&path_of(ids[0]), false),
+        url(&path_of(ids[1]), true),
+    );
+    let file = env.dir.path().join("Library.xml");
+    fs::write(&file, xml).unwrap();
+
+    let result = library.import_apple_music(&file).expect("imports");
+    assert_eq!(
+        (result.matched, result.unmatched, result.playlists),
+        (2, 1, 1)
+    );
+    let first = library.track(ids[0]).unwrap();
+    assert_eq!(first.play_count, 7, "the higher count");
+    assert_eq!(
+        first.last_played_at, before.last_played_at,
+        "the later play stays"
+    );
+    assert_eq!(first.added_at, 978_307_200, "the earlier date added");
+    assert!(library.track(ids[1]).unwrap().favorite, "loved → favourite");
+    let playlist = library
+        .playlists()
+        .into_iter()
+        .find(|p| p.name == "드라이브")
+        .expect("playlist made");
+    assert_eq!(track_ids(&library, playlist.id), [ids[1], ids[0]]);
+    assert_eq!(library.snapshot().get(ids[0]).unwrap().play_count, 7);
+
+    // Again: nothing more.
+    let again = library.import_apple_music(&file).expect("imports");
+    assert_eq!(again.playlists, 0);
+    assert_eq!(library.track(ids[0]).unwrap().play_count, 7);
+    assert_eq!(library.playlists().len(), 1);
+
+    // Not an export.
+    fs::write(&file, "<html></html>").unwrap();
+    assert!(library.import_apple_music(&file).is_err());
 }

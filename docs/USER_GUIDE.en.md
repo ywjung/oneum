@@ -17,12 +17,15 @@
 - You can open this guide again at any time from **Help → OnEum User Guide** in the menu bar. Click an entry on the left to go to that section; press Esc to close.
 
 ## The Window
-- **Left**: Songs · Albums · Artists · Genres · Favorites · Listen Again, and below them your playlists (smart playlists first).
+- **Left**: Songs · Albums · Artists · Genres · Favorites · Listen Again · Folders · Statistics, and below them your playlists (smart playlists first). Anything you pinned comes first, at the top.
 - **Middle**: the song list or the album covers. The number of songs and their total length are shown at the bottom.
 - **Top**: the search field on the left, and five buttons on the right — equalizer, VU meter, settings, Up Next and song info.
 - **Right**: the Up Next (queue) or Song Info panel (open and close them with the buttons at the top, or with ⌘U and ⌘I).
 - **Bottom**: the song now playing, shuffle · previous · play · next · repeat, the playback position and the volume. Click the cover to go to its album, or the title to find the song in the list (⌘L).
 - Click an album, artist or genre to see its songs, and the **Back** button to return. **Genres** gathers the genres in your tags, with the number of songs in each (a song with several genres is in each of them).
+- **Pin to Sidebar**: right-click an album, artist, genre or playlist → **Pin to Sidebar** to keep it under "Pinned" at the top on the left (up to 12). Right-click a pinned entry → **Unpin**.
+- **Folders**: browse your music folders the way they are laid out on disk. Click a name in the path at the top to go to that folder, or a button below it to go into a folder inside. The list shows every song in the folder, in path order.
+- **Statistics**: from the play history kept on this computer, how often and how long you listened in the last 7 days, 30 days, year or all time, with your top artists, albums, songs and genres; and what your library is made of (formats, sample rates). Click a name to go there.
 
 ## Listening
 - Double-click a song (or select it and press Return): the whole list you are looking at becomes the queue, starting from that song. If you have searched or sorted, the results become the queue just as they are.
@@ -31,6 +34,8 @@
 - **Previous** restarts the current song once more than 3 seconds of it have played; before that it goes to the song before.
 - **Repeat** cycles through Off → All → One. While one song repeats, the next and previous buttons still move to other songs.
 - **Shuffle** mixes the queue with the current song kept first; switching it off restores the original order. While shuffling, "previous" is the song you just heard.
+- **Shuffle by Album** (Settings → Playback → Playing Order): shuffle mixes the order of the albums, and each album plays through in order, without gaps.
+- **Resume Long Tracks** (Settings → Playback → Playing Order, on at first): a track over 20 minutes (a DJ mix, an audiobook, a long classical piece) starts where you left off when you choose it again. When an album plays on into it, and once it was heard to the end, it starts from the beginning.
 - **Stop After Current Song** (Controls menu, ⌘⇧., or right-click the play button): plays the current song to its end and stops. While it is set, "Stops after song" is shown next to the volume; click it to switch it off. Playback stops with the next song ready, so pressing play goes on from there. It applies to this one song only (moving to another song cancels it).
 - **Sleep Timer** (Controls → Sleep Timer, or right-click the play button): stops playback in 15 minutes, 30 minutes, 45 minutes, 1 hour or 1 hour 30 minutes. The sound fades out over the last few seconds, and your volume setting stays as it was. While it runs, the time left is shown next to the volume; click it to switch the timer off.
 - Set the volume with the slider at the bottom right or with ⌘↑ / ⌘↓. The speaker icon (⌘⇧M) mutes; clicking it again brings back the volume you had.
@@ -60,6 +65,7 @@
 - Years can be ranges: `year:1994`, `year:1990-1999`, `year:>=2000`, `year:<1980`.
 - There are also `format:lossless` (FLAC, ALAC, WAV, AIFF) and `format:lossy`. Genres are only searched with `genre:`.
 - You can search by what you listened to: `plays:>=5` (play count, with ranges and comparisons as for years — songs never played are `plays:0`), `fav:yes` / `fav:no` (favorites), `added:30d` (added in the last 30 days) and `played:1y` (heard in the last year). Write periods with `d` (days), `w` (weeks), `m` (months) or `y` (years).
+- You can also search by what the file check found: `check:damaged`, `check:ok`, `check:none` (not checked), `dr:<8` (dynamic range — ranges and comparisons work as for years).
 - **Saving a search**: when you type a search in Songs, a **＋** appears at the right of the search field. Click it and give the search a name, and it becomes a smart playlist (see "Playlists").
 - Point at the search field to see a short summary of this.
 
@@ -98,6 +104,8 @@ Open it with the ⓘ button at the top right or with ⌘I. It shows the song tha
 - **Credits and work details**: when the file names them, the composer, lyricist, conductor, arranger, performers, producer, engineer, mixing and remixer, and the work, movement, label, catalog number, recording date and release date are shown. A name in the credits that is an artist in your library can be clicked.
 - **Other Versions of This Song**: if the library has more songs with the same title and artist (on another album, in another format), up to six are listed, the best sounding first. Click one to see its details.
 - **Lyrics**: shown when the file's tags contain lyrics, or when an `.lrc` or `.txt` file with the same name as the song is in the same folder. When the lyrics carry times (`.lrc`), the current line is highlighted and followed as the song plays, and clicking a line plays from there. Lyric files saved on older Korean Windows (EUC-KR) are read as well. Lyrics are not looked up on the internet.
+- When a lyrics file gives a translation or a pronunciation for the same moment, it is shown in smaller type under the original and highlighted with it.
+- **File check results**: for a checked song, **Integrity** (Intact (MD5 matches) / Intact (decodes to the end) / Damaged), **Dynamic range** (the DR value, with the album's) and **True peak** (see "File Check").
 - When the volume leveling values end with "(measured by the app)", they were measured by the app rather than read from the file's tags (see "Volume Leveling").
 
 ## Signal Path
@@ -121,7 +129,7 @@ Songs are recorded at different loudness; leveling saves you from reaching for t
   - The results are kept only in the app; **your music files are not changed**.
   - An album without any tags is measured as a whole, so that it also gets "Album" values.
   - A song whose file changes is analyzed again. Songs you add later are not analyzed by themselves; click the button again when you want them leveled.
-  - **Values Measured by the App → Clear** removes them all (analyze again to get them back).
+  - **Values Measured by the App → Clear** removes them all (analyze again to get them back). Songs that could not be read are remembered and passed over by later runs; they are tried again when the file changes, when the app starts again, or after Clear.
 - Tags written by older programs (mp3gain and the like) were measured in another way, so next to songs the app measured they may sound 1 to 2 dB different. Songs with tags always follow their tags.
 - Whether leveling is applied is shown as a "Volume leveling" step in the song's **Signal Path**. The VU meter shows the leveled level too.
 
@@ -137,7 +145,7 @@ Open it with the slider button at the top, **View → Equalizer…**, or **Equal
 
 ## Headphone Correction
 Every headphone model has its own frequency response, so the same music sounds bass-heavy on one and sharp on another. This feature corrects that with filters made from measurements. Use it in Settings → Playback → **Headphone Correction** (off at first).
-- Choose your headphone under **Correction Profile**, and the correction is applied at once. **Built-in profiles** for 33 widely used models are included.
+- Choose your headphone under **Correction Profile**, and the correction is applied at once. **Built-in profiles** for 34 widely used models are included.
   - Headphones: Sennheiser HD 800 S · HD 600 · HD 650 · HD 660S2 · HD 560S · Momentum 4 Wireless, Beyerdynamic DT 770 Pro · DT 990 Pro · DT 1990 (balanced earpads), AKG K701 · K371 · K712, Audio-Technica ATH-M50x · ATH-R70x, Sony MDR-7506 · WH-1000XM4 · WH-1000XM5, Apple AirPods Max, Bose QuietComfort 45, HIFIMAN Sundara (post-2020 earpads) · HE400se · Edition XS, Focal Clear · Utopia, Audeze LCD-X (2021) · LCD-2 Classic, Meze 99 Classics, Koss Porta Pro.
   - In-ear: Sony WF-1000XM4, Samsung Galaxy Buds2 Pro, Etymotic ER2XR, Moondrop Aria, Sennheiser IE 600.
 - The values of the built-in profiles are the ones the AutoEq project computed from oratory1990's measurements and published (to the Harman target), included unchanged. They come from the one unit that was measured, so units of the same model can differ a little, as can the result with worn earpads or a different fit. Names that mention earpads or a year were measured in that configuration.
@@ -213,11 +221,24 @@ Options for listening through a DAC or good headphones (Settings → Playback). 
 - Where you type text, as in the search field, Space, the arrows and Return are used for typing.
 - The same list is in Settings → Shortcuts.
 
+## File Check
+In Settings → Library, **Check** under **File Check** reads every music file to its end. Files are only read; the results stay in the app's database, and a file that changes is checked again on its own.
+- **Integrity**: whether the file decodes to its end; for FLAC, whether the audio matches the MD5 the file carries (a checksum of the original audio); for formats that state their length exactly (FLAC, ALAC, WAV, AIFF, DSD), whether the end is missing. An MP3's stated length cannot be trusted, so an MP3 cut short is not told apart.
+- **Dynamic range (DR)**: the difference between the loud and the average sound of the music. Higher means a less compressed recording. Worked out the way dr.loudness-war.info describes; other meters can differ by about 1.
+- **True peak**: the highest level of the waveform, between the samples too (dBTP). Above 0 it may clip when converted to analogue.
+- The results show in Song Info and can be searched (`check:damaged`, `dr:<8`); **Show Damaged** lists the damaged files. **Clear** removes all results.
+
+## Moving Over from Apple Music
+In Apple Music, save an XML file with **File ▸ Library ▸ Export Library…**, then choose it in Settings → Library under **Apple Music Library → Import…**.
+- The songs that are in your library (found by their file) get their play counts, last plays and dates added; loved songs become favorites. Play counts are not added up — the higher one is kept — so importing again changes nothing.
+- The playlists you made are created (not smart playlists or folders). When a list of that name exists already, "(Apple Music)" is added to the name; a list imported before is not made again.
+- Songs that are not in your library are counted, not added. Music files are not changed.
+
 ## Settings (⌘,)
 The gear button at the top right opens them too. Close them with Esc, the close (×) button, or a click outside. Changes apply and are saved at once.
 - **General**: language (Follow System / 한국어 / English), appearance (Follow System / Light / Dark), and the Format column.
-- **Library**: each music folder with its number of songs and when it was last scanned. The magnifier button opens the folder in Finder, and the trash button removes the folder from the library (you are asked first, and the original files stay where they are). **Add Music Folder**, **Rescan**.
-- **Playback**, from the top: output device (with the device and sample rate in use), output quality, volume leveling and the analysis of songs without tags, equalizer, headphone crossfeed, headphone correction and radio.
+- **Library**: each music folder with its number of songs and when it was last scanned. The magnifier button opens the folder in Finder, and the trash button removes the folder from the library (you are asked first, and the original files stay where they are). **Add Music Folder**, **Rescan**. Below them, the file check and moving over from Apple Music.
+- **Playback**, from the top: output device (with the device and sample rate in use), output quality, volume leveling and the analysis of songs without tags, playing order (shuffle by album, resume long tracks), equalizer, headphone crossfeed, headphone correction and radio.
 - **Shortcuts**: the keyboard shortcuts.
 - **About**: version, opening this guide, showing the log and data folders, and the open source licenses. Click **Show** next to the licenses to unfold the list of components as a table below it; click a source address to open it in the browser.
 
@@ -226,6 +247,11 @@ MP3, MP2 (.mp2), FLAC, WAV (ADPCM included), AIFF, ALAC (.m4a), AAC (.m4a), Ogg 
 - **Between songs**: FLAC, WAV, AIFF, ALAC, MP3 and AAC follow each other on an album without gaps. For AAC, the silence the encoder adds at the start and end is removed using what the file says about it (an edit list, or Apple's gapless information). Ogg Vorbis plays for the length recorded in the file; files from some encoders may leave a very short gap between songs.
 - **DSD**: DSF and DSDIFF (.dff), DSD64 to DSD512. As most players do, OnEum converts DSD to PCM (88.2 kHz; 96 kHz for the 48 kHz family), so volume leveling, the equalizer, the meters and sample-rate matching all work as usual. The conversion filter is flat to 20 kHz and removes the noise DSD pushes above the audio band. No gain is added, so the SACD reference level (0 dB) comes out at −6 dBFS and DSD may sound quieter than CDs ("Analyze Songs Without Tags" in volume leveling evens that out). DSD songs on an album follow each other without gaps: the end of one and the start of the next are converted as one. Sending DSD to the DAC as it is (DoP or native DSD) and DST-compressed .dff files are not supported. Song Info shows the file's DSD sample rate, and the signal path a "DSD to PCM" step.
 - **Matroska and WebM**: the FLAC, Vorbis, AAC, MP3 or PCM inside is played and the file's tags are read. WebM with Opus inside is not played.
+- **CUE sheets**: when a whole album is one file (FLAC, WAV …) and a `.cue` file next to it points to that file, the album is added as the songs the sheet lists (the file itself does not appear on its own).
+  Titles, artists, album, genre, year and ReplayGain come from the sheet; what the sheet leaves out comes from the file's tags. A song starts at the sheet's `INDEX 01` and ends at the next song's `INDEX 01`, and the songs follow each other without gaps.
+  Korean in a sheet is read in UTF-8 and in EUC-KR. The file is found also when the sheet spells its name in other letter case, or with Korean letters composed differently. If the sheet names a `.wav` and only a `.flac` of the same name is there (converted later), that is used. Opening that file from the Finder opens the sheet's songs. If the sheet describes a longer recording than the file holds, only the songs within the file are added; if none of them is (another disc's sheet, say), the file is added as one song as it is. If the file was a favourite or in playlists before the sheet came, the sheet's songs take its place there. Editing or deleting a sheet takes effect right away (folder watching); after a delete the file is one song again.
+  When every song has its own file and the sheet points to those files (as CD ripping programs often write it), the sheet is not used and the files are added as they are. If two sheets point to one file, the first by name is used.
+  In File Check, a FLAC's MD5 covers the whole file, so it is not compared for the songs of a sheet (whether they decode to the end is still checked). In an M3U8 export, the songs of a sheet are written as paths only OnEum reads (`Album.cue/02`), which other players cannot open.
 - **High resolution**: 24-bit, 96 and 192 kHz files play. If the device takes that sample rate they go out as they are, otherwise they are converted to suit the device (see "Output Quality").
 - **Mono and surround**: mono goes to both sides; 5.1 and 7.1 files (FLAC, WAV, AIFF, ALAC) are mixed down to stereo. The centre and surround channels are added a little lower to front left and right, the low-frequency effects (LFE) channel is left out, and the result is kept from going above full scale. Surround is not played out as surround.
 - **What cannot be played**: copy-protected (DRM) files (.m4p and the like), Opus, WavPack, DST-compressed DSD, and among AAC files HE-AAC (AAC+) and 5.1-channel AAC. Such files are not added to the library; the notice at the end of a scan says how many unsupported files were skipped.

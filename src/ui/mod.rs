@@ -5,6 +5,7 @@
 //! happen on other threads.
 mod art;
 mod automation;
+mod background;
 mod dialogs;
 mod equalizer;
 mod guide;
@@ -15,16 +16,18 @@ mod menubar;
 mod meter;
 mod panels;
 mod player_bar;
+pub mod renderer;
 mod settings_window;
 mod spectrum;
+mod stats_view;
 pub mod theme;
 mod widgets;
 
-use crate::app::settings::{RightPanel, Settings};
+use crate::app::settings::{MAX_PINS, Pin, RightPanel, Settings};
 use crate::app::{self, Core};
 use crate::audio::{OutputDeviceInfo, PlaybackErrorKind};
 use crate::i18n::{Lang, Strings};
-use crate::library::{LibraryError, LibrarySnapshot, OpenReport, PlaylistInfo, SortKey};
+use crate::library::{Library, LibraryError, LibrarySnapshot, OpenReport, PlaylistInfo, SortKey};
 use crate::model::{Track, TrackId};
 use crate::platform::MenuAction;
 use crate::platform::menu::AppMenu;
@@ -50,6 +53,8 @@ const VOLUME_STEP: f32 = 0.05;
 const SEEK_STEP_MS: i64 = 5_000;
 /// After a failed attempt to save the settings, how long until the next one.
 const SETTINGS_RETRY: Duration = Duration::from_secs(10);
+/// How long quitting waits for pending library edits and for the settings writer.
+const QUIT_PATIENCE: Duration = Duration::from_secs(3);
 /// The player thread answers within a fraction of a second, or a few seconds while an
 /// output device switches its format. Silence for this long means it is stuck.
 const PLAYER_STUCK_AFTER: Duration = Duration::from_secs(12);
@@ -71,6 +76,11 @@ pub enum Nav {
     Genre(String),
     /// A smart playlist (a saved search), by its name.
     Smart(String),
+    /// Every song in a folder and the folders inside it; the empty path stands for
+    /// all music folders.
+    Folder(std::path::PathBuf),
+    /// Listening statistics and what the library is made of.
+    Stats,
 }
 
 /// An optional column of the song lists.
@@ -144,6 +154,8 @@ enum Action {
     DeleteSmart(String),
     /// Put a smart playlist's search into the search field of the song list.
     EditSmart(String),
+    /// Pin to the sidebar, or unpin if pinned.
+    TogglePin(Pin),
 }
 
 /// What is being dragged out of a list: songs, and — when they come from a playlist view
@@ -187,6 +199,25 @@ enum ToastAction {
 enum AppEvent {
     FilesImported(Vec<TrackId>),
     PlaylistImported(Result<crate::library::M3uImport, LibraryError>),
+    /// A library edit (see `background.rs`) failed.
+    EditFailed(LibraryError),
+    AddedToPlaylist {
+        id: i64,
+        count: usize,
+    },
+    /// Items were removed from a playlist that held `before`: offer to undo.
+    RemovedFromPlaylist {
+        id: i64,
+        before: Vec<TrackId>,
+    },
+    PlaylistCreated(i64),
+    /// The settings file was written (or not): the generation handed to the writer.
+    SettingsWritten(u64, std::io::Result<()>),
+    /// The statistics page's figures were worked out.
+    StatsReady(Box<stats_view::StatsData>),
+    AppleImported(Result<crate::library::AppleImport, LibraryError>),
+    /// The file to show in the file manager was found (a CUE sheet's audio file).
+    Reveal(PathBuf),
 }
 
 /// Requests from the menu bar that need the window.
@@ -328,6 +359,12 @@ pub struct OneumApp {
     menu_dispatch: Option<Arc<dyn Fn(MenuAction) + Send + Sync>>,
     /// The genres of the library, for the genre view (built when that view is shown).
     genre_list: Vec<GenreEntry>,
+    /// The folders inside the open folder view: (folder, library generation, entries).
+    folder_children: Option<(PathBuf, u64, Vec<lists::FolderEntry>)>,
+    stats_period: stats_view::Period,
+    stats: Option<stats_view::StatsData>,
+    /// The period whose statistics are being worked out.
+    stats_pending: Option<stats_view::Period>,
     /// Library generation `genre_list` was built from.
     genre_list_generation: Option<u64>,
     /// Verification runs: whether the menu bar took each `menukey` so far.
@@ -339,6 +376,12 @@ pub struct OneumApp {
     ui_requests: Arc<Mutex<Vec<UiRequest>>>,
     events_tx: Sender<AppEvent>,
     events_rx: Receiver<AppEvent>,
+    edits: background::Edits,
+    settings_writer: background::SettingsWriter,
+    /// Bumped for every version of the settings handed to the writer.
+    settings_generation: u64,
+    /// The newest version handed to the writer and not yet reported back.
+    settings_in_flight: Option<(u64, Settings)>,
     shut_down: bool,
 }
 
@@ -366,9 +409,27 @@ impl OneumApp {
         if !app_hooks::install_now() {
             tracing::warn!("Finder open events are unavailable");
         }
+        // The media controls of Windows belong to a window: it has to be known first.
+        {
+            use winit::raw_window_handle::HasWindowHandle;
+            if let Ok(handle) = cc.window_handle() {
+                window::remember_main_window(handle.as_raw());
+            }
+        }
         app::install_media_session(&core);
 
         let (events_tx, events_rx) = channel();
+        let settings_writer = {
+            let events = events_tx.clone();
+            let core = core.clone();
+            background::SettingsWriter::start(
+                core.paths.settings_file(),
+                move |generation, result| {
+                    let _ = events.send(AppEvent::SettingsWritten(generation, result));
+                    core.request_repaint();
+                },
+            )
+        };
         let player = core.player.snapshot();
         let mut this = Self {
             perf: Perf::default(),
@@ -426,6 +487,10 @@ impl OneumApp {
             menu: None,
             menu_dispatch: None,
             genre_list: Vec::new(),
+            folder_children: None,
+            stats_period: stats_view::Period::default(),
+            stats: None,
+            stats_pending: None,
             genre_list_generation: None,
             menu_keys: Vec::new(),
             window_menu: crate::platform::MENU_IN_WINDOW
@@ -434,6 +499,10 @@ impl OneumApp {
             ui_requests: Arc::new(Mutex::new(Vec::new())),
             events_tx,
             events_rx,
+            edits: background::Edits::start(),
+            settings_writer,
+            settings_generation: 0,
+            settings_in_flight: None,
             shut_down: false,
             saved_settings: settings.clone(),
             settings,
@@ -666,6 +735,9 @@ impl OneumApp {
                 AppEvent::FilesImported(ids) if ids.is_empty() => {
                     self.warn_toast(self.s().notice_no_playable_files)
                 }
+                AppEvent::Reveal(path) => {
+                    finder::reveal(&path);
+                }
                 AppEvent::FilesImported(ids) => {
                     self.core.player.send(Command::PlayTracks {
                         tracks: ids,
@@ -685,6 +757,52 @@ impl OneumApp {
                 AppEvent::PlaylistImported(Err(error)) => {
                     tracing::warn!("playlist import failed: {error}");
                     self.warn_toast(self.s().notice_import_failed);
+                }
+                AppEvent::EditFailed(error) => self.edit_error_toast(&error),
+                AppEvent::AddedToPlaylist { id, count } => {
+                    let name = self
+                        .core
+                        .library
+                        .playlists()
+                        .into_iter()
+                        .find(|p| p.id == id)
+                        .map(|p| p.name)
+                        .unwrap_or_default();
+                    self.info_toast(self.lang.added_to_playlist(count, &name));
+                }
+                AppEvent::RemovedFromPlaylist { id, before } => {
+                    let s = self.s();
+                    self.toast = Some(Toast {
+                        text: s.notice_removed_from_playlist.into(),
+                        warning: false,
+                        action: Some((s.undo.into(), ToastAction::RestorePlaylist(id, before))),
+                        expires: Some(Instant::now() + Duration::from_secs(8)),
+                    });
+                    if let Some(state) = self.views.get_mut(&Nav::Playlist(id)) {
+                        state.selection.clear();
+                    }
+                }
+                AppEvent::PlaylistCreated(id) => {
+                    self.playlists_generation = self.core.library.playlists_generation();
+                    self.playlists = self.core.library.playlists();
+                    self.go(Nav::Playlist(id));
+                }
+                AppEvent::SettingsWritten(generation, result) => {
+                    self.settings_written(generation, result);
+                }
+                AppEvent::StatsReady(data) => self.stats_ready(data),
+                AppEvent::AppleImported(Ok(result)) => {
+                    self.info_toast(self.lang.apple_import_result(
+                        result.matched,
+                        result.unmatched,
+                        result.playlists,
+                    ));
+                    self.playlists_generation = self.core.library.playlists_generation();
+                    self.playlists = self.core.library.playlists();
+                }
+                AppEvent::AppleImported(Err(error)) => {
+                    tracing::warn!("Apple Music import failed: {error}");
+                    self.warn_toast(self.s().notice_apple_import_failed);
                 }
             }
         }
@@ -806,19 +924,39 @@ impl OneumApp {
         self.apply(action);
     }
 
-    /// Undoes "remove from playlist": the playlist gets its previous contents back.
-    fn restore_playlist(&mut self, id: i64, tracks: &[TrackId]) {
+    /// Undoes "remove from playlist": the playlist gets its previous contents back, in
+    /// one step (if that fails, it keeps what it has).
+    fn restore_playlist(&mut self, id: i64, tracks: Vec<TrackId>) {
+        self.edit(move |library| {
+            library
+                .replace_playlist_items(id, &tracks)
+                .err()
+                .map(AppEvent::EditFailed)
+        });
+    }
+
+    /// Runs a library edit on the edit thread (see `background.rs`), after the ones
+    /// before it. The event it returns, if any, is handled in a later frame.
+    fn edit(&self, job: impl FnOnce(&Library) -> Option<AppEvent> + Send + 'static) {
         let library = self.core.library.clone();
-        let current: Vec<i64> = library
-            .playlist_items(id)
-            .iter()
-            .map(|i| i.item_id)
-            .collect();
-        let result = library
-            .remove_playlist_items(id, &current)
-            .and_then(|()| library.add_to_playlist(id, tracks));
-        if let Err(error) = result {
-            self.library_error_toast(&error);
+        let core = self.core.clone();
+        let events = self.events_tx.clone();
+        self.edits.run(move || {
+            if let Some(event) = job(&library) {
+                let _ = events.send(event);
+                core.request_repaint();
+            }
+        });
+    }
+
+    /// A failed library edit: what could not be done, or that it could not be saved.
+    fn edit_error_toast(&mut self, error: &LibraryError) {
+        match error {
+            LibraryError::Db(_) | LibraryError::Io(_) => {
+                tracing::warn!("a library edit could not be saved: {error}");
+                self.warn_toast(self.s().notice_not_saved);
+            }
+            _ => self.library_error_toast(error),
         }
     }
 
@@ -905,6 +1043,12 @@ impl OneumApp {
     }
 
     // ----- navigation -----------------------------------------------------------------
+
+    /// Opens `nav` with `query` in its search field.
+    fn show_search(&mut self, nav: Nav, query: &str) {
+        self.go(nav.clone());
+        self.views.entry(nav).or_default().query = query.to_string();
+    }
 
     fn go(&mut self, nav: Nav) {
         if nav == self.nav {
@@ -1183,6 +1327,26 @@ impl OneumApp {
         }
     }
 
+    /// Asks for an Apple Music library export and takes it over, off the UI thread.
+    fn pick_apple_library(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .add_filter(self.s().dialog_filter_apple, &["xml"])
+            .pick_file();
+        let Some(file) = picked else { return };
+        let library = self.core.library.clone();
+        let tx = self.events_tx.clone();
+        let core = self.core.clone();
+        let spawned = std::thread::Builder::new()
+            .name("oneum-apple-import".into())
+            .spawn(move || {
+                let _ = tx.send(AppEvent::AppleImported(library.import_apple_music(&file)));
+                core.request_repaint();
+            });
+        if spawned.is_err() {
+            self.warn_toast(self.s().notice_apple_import_failed);
+        }
+    }
+
     fn export_playlist(&mut self, id: i64, name: &str) {
         let picked = rfd::FileDialog::new()
             .set_file_name(format!("{name}.m3u8"))
@@ -1238,7 +1402,6 @@ impl OneumApp {
     // ----- actions --------------------------------------------------------------------
 
     fn apply(&mut self, action: Action) {
-        let library = self.core.library.clone();
         match action {
             // "Play" on nothing (an empty playlist) must not stop what is playing.
             Action::PlayTracks(tracks, _) if tracks.is_empty() => {}
@@ -1250,59 +1413,71 @@ impl OneumApp {
             }
             Action::PlayNext(tracks) => self.core.player.send(Command::PlayNext(tracks)),
             Action::Enqueue(tracks) => self.core.player.send(Command::Enqueue(tracks)),
-            Action::AddToPlaylist(id, tracks) => match library.add_to_playlist(id, &tracks) {
-                Ok(()) => {
-                    let name = self
-                        .playlists
-                        .iter()
-                        .find(|p| p.id == id)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default();
-                    self.info_toast(self.lang.added_to_playlist(tracks.len(), &name));
-                }
-                Err(error) => self.library_error_toast(&error),
-            },
+            // Library edits wait for the database (a scan holding it, another program
+            // locking the file): on the edit thread, never in a frame.
+            Action::AddToPlaylist(id, tracks) => self.edit(move |library| {
+                Some(match library.add_to_playlist(id, &tracks) {
+                    Ok(()) => AppEvent::AddedToPlaylist {
+                        id,
+                        count: tracks.len(),
+                    },
+                    Err(error) => AppEvent::EditFailed(error),
+                })
+            }),
             Action::NewPlaylistWith(tracks) => {
                 self.dialog = Some(Dialog::new_playlist(self.s().untitled_playlist, tracks));
             }
-            Action::SetFavorite(tracks, favorite) => library.set_favorite(&tracks, favorite),
+            Action::SetFavorite(tracks, favorite) => self.edit(move |library| {
+                library
+                    .set_favorite(&tracks, favorite)
+                    .err()
+                    .map(AppEvent::EditFailed)
+            }),
             Action::Reveal(id) => {
                 if let Some(track) = self.snapshot.get(id) {
-                    finder::reveal(&track.path);
+                    if crate::library::cue::sheet_of(&track.path).is_some() {
+                        // Its audio file is found by reading the sheet: not in a frame.
+                        let (tx, core, sheet_track) =
+                            (self.events_tx.clone(), self.core.clone(), track.clone());
+                        let spawned = std::thread::Builder::new()
+                            .name("oneum-reveal".into())
+                            .spawn(move || {
+                                let file = sheet_track.audio_file().into_owned();
+                                let _ = tx.send(AppEvent::Reveal(file));
+                                core.request_repaint();
+                            });
+                        if spawned.is_err() {
+                            // The sheet, then: it is beside its audio file.
+                            finder::reveal(track.file());
+                        }
+                    } else {
+                        finder::reveal(&track.path);
+                    }
                 }
             }
             Action::ShowInfo(id) => {
                 self.info_track = Some(id);
                 self.settings.right_panel = RightPanel::Info;
             }
-            Action::RemoveFromPlaylist(id, items) => {
-                // Removing is a single key press, so it must be undoable.
+            Action::RemoveFromPlaylist(id, items) => self.edit(move |library| {
+                // Removing is a single key press, so it must be undoable. What it is
+                // undone to is read here, after the edits made before this one.
                 let before: Vec<TrackId> = library
                     .playlist_items(id)
                     .into_iter()
                     .map(|i| i.track_id)
                     .collect();
-                match library.remove_playlist_items(id, &items) {
-                    Ok(()) => {
-                        let s = self.s();
-                        self.toast = Some(Toast {
-                            text: s.notice_removed_from_playlist.into(),
-                            warning: false,
-                            action: Some((s.undo.into(), ToastAction::RestorePlaylist(id, before))),
-                            expires: Some(Instant::now() + Duration::from_secs(8)),
-                        });
-                        if let Some(state) = self.views.get_mut(&Nav::Playlist(id)) {
-                            state.selection.clear();
-                        }
-                    }
-                    Err(error) => self.library_error_toast(&error),
-                }
-            }
-            Action::MovePlaylistItems(id, items, to_index) => {
-                if let Err(error) = library.move_playlist_items(id, &items, to_index) {
-                    self.library_error_toast(&error);
-                }
-            }
+                Some(match library.remove_playlist_items(id, &items) {
+                    Ok(()) => AppEvent::RemovedFromPlaylist { id, before },
+                    Err(error) => AppEvent::EditFailed(error),
+                })
+            }),
+            Action::MovePlaylistItems(id, items, to_index) => self.edit(move |library| {
+                library
+                    .move_playlist_items(id, &items, to_index)
+                    .err()
+                    .map(AppEvent::EditFailed)
+            }),
             Action::RemoveFromLibrary(tracks) => self.dialog = Some(Dialog::RemoveTracks(tracks)),
             Action::Go(nav) => self.go(nav),
             Action::ToggleColumn(kind) => {
@@ -1331,7 +1506,19 @@ impl OneumApp {
                     ));
                 }
             }
+            Action::TogglePin(pin) => {
+                // Albums by the key they are shown under (one pinned before its tracks
+                // were merged into another album holds an alias of its key).
+                let snapshot = self.snapshot.clone();
+                let shown = |pin: &Pin| shown_pin(&snapshot, pin);
+                restate_pins(&mut self.settings.pinned, shown);
+                let live = self.live_pins();
+                toggle_pin(&mut self.settings.pinned, shown(&pin), |p| live.contains(p));
+            }
             Action::DeleteSmart(name) => {
+                self.settings
+                    .pinned
+                    .retain(|p| *p != Pin::Smart(name.clone()));
                 self.settings.smart_playlists.retain(|p| p.name != name);
                 self.views.remove(&Nav::Smart(name.clone()));
                 if self.nav == Nav::Smart(name) {
@@ -1346,8 +1533,7 @@ impl OneumApp {
                     .find(|p| p.name == name)
                     .map(|p| p.query.clone())
                 {
-                    self.go(Nav::Songs);
-                    self.views.entry(Nav::Songs).or_default().query = query;
+                    self.show_search(Nav::Songs, &query);
                     self.focus_search = true;
                 }
             }
@@ -1400,20 +1586,55 @@ impl OneumApp {
         }
     }
 
+    /// Hands the settings to the writer thread if they changed since the last save (and
+    /// are not already on their way). The file is written and synced there, not here.
     fn persist_settings(&mut self) {
         self.last_settings_save = Instant::now();
-        if self.settings != self.saved_settings {
-            match crate::storage::settings::save_json_atomic(
-                &self.core.paths.settings_file(),
-                &self.settings,
-            ) {
-                Ok(()) => self.saved_settings = self.settings.clone(),
-                // Kept as unsaved, and tried again a little later (a full disk, a
-                // folder made read-only): not every frame, and not given up on.
-                Err(e) => {
-                    tracing::warn!("could not save settings: {e}");
-                    self.last_settings_save = Instant::now() + SETTINGS_RETRY;
-                }
+        if self.settings == self.saved_settings
+            || self
+                .settings_in_flight
+                .as_ref()
+                .is_some_and(|(_, sent)| *sent == self.settings)
+        {
+            return;
+        }
+        let bytes = match serde_json::to_vec_pretty(&self.settings) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!("could not encode settings: {e}");
+                return;
+            }
+        };
+        self.settings_generation += 1;
+        let generation = self.settings_generation;
+        self.settings_in_flight = Some((generation, self.settings.clone()));
+        if !self.settings_writer.write(generation, bytes.clone()) {
+            let result =
+                crate::storage::settings::write_atomic(&self.core.paths.settings_file(), &bytes);
+            self.settings_written(generation, result);
+        }
+    }
+
+    /// The writer's report on one version of the settings.
+    fn settings_written(&mut self, generation: u64, result: std::io::Result<()>) {
+        // A report on a version that a newer one replaced says nothing about the newer.
+        if self
+            .settings_in_flight
+            .as_ref()
+            .is_none_or(|(newest, _)| *newest != generation)
+        {
+            return;
+        }
+        let Some((_, settings)) = self.settings_in_flight.take() else {
+            return;
+        };
+        match result {
+            Ok(()) => self.saved_settings = settings,
+            // Kept as unsaved, and tried again a little later (a full disk, a folder
+            // made read-only): not every frame, and not given up on.
+            Err(e) => {
+                tracing::warn!("could not save settings: {e}");
+                self.last_settings_save = Instant::now() + SETTINGS_RETRY;
             }
         }
     }
@@ -1634,6 +1855,35 @@ impl OneumApp {
                             self.core.library.forget_loudness();
                             continue;
                         }
+                        "check_start" => {
+                            self.core.library.check_files();
+                            continue;
+                        }
+                        "check_show_damaged" => {
+                            self.show_search(Nav::Songs, "check:damaged");
+                            continue;
+                        }
+                        "go_folders" => {
+                            self.go(Nav::Folder(PathBuf::new()));
+                            continue;
+                        }
+                        "go_first_folder" => {
+                            if let Some(root) = self.core.library.roots().first() {
+                                self.go(Nav::Folder(root.path.clone()));
+                            }
+                            continue;
+                        }
+                        "go_stats" => {
+                            self.go(Nav::Stats);
+                            continue;
+                        }
+                        "pin_first_album" => {
+                            if let Some(album) = self.snapshot.albums().first() {
+                                let pin = Pin::Album(album.key);
+                                self.apply(Action::TogglePin(pin));
+                            }
+                            continue;
+                        }
                         _ => {}
                     }
                     let request = match id.as_str() {
@@ -1812,6 +2062,30 @@ impl OneumApp {
                 .filter(|t| t.available && t.wants_measuring())
                 .count(),
         });
+        let check = self.core.library.check_status();
+        let checked: Vec<_> = self
+            .snapshot
+            .tracks
+            .iter()
+            .filter_map(|t| t.check)
+            .collect();
+        state["check"] = serde_json::json!({
+            "running": check.running,
+            "total": check.total,
+            "done": check.done,
+            "checked": checked.len(),
+            "damaged": checked.iter().filter(|c| c.verdict == crate::model::CheckVerdict::Damaged).count(),
+            "verified": checked.iter().filter(|c| c.verdict == crate::model::CheckVerdict::Verified).count(),
+            "with_dr": checked.iter().filter(|c| c.dr.is_some()).count(),
+        });
+        state["pinned"] = serde_json::json!(self.settings.pinned.len());
+        state["stats"] = serde_json::json!(self.stats_summary_for_dump());
+        state["subfolders"] = serde_json::json!(
+            self.folder_children
+                .as_ref()
+                .map_or(0, |(_, _, entries)| entries.len())
+        );
+        state["shuffle_by_album"] = serde_json::json!(self.settings.shuffle_by_album);
         state["crossfeed"] = serde_json::json!(format!("{:?}", p.crossfeed));
         state["rediscover"] = serde_json::json!(format!("{:?}", self.rediscover));
         let details = self.extras.as_ref().and_then(|e| e.details.as_ref());
@@ -1880,7 +2154,25 @@ impl OneumApp {
             return;
         }
         self.shut_down = true;
+        // Edits that were made go in before the library closes.
+        self.edits.finish(QUIT_PATIENCE);
+        // The writer finishes the settings it has; whatever is still unsaved after that
+        // (it failed, or the writer is stuck) is written here, the last thing it does.
         self.persist_settings();
+        self.settings_writer.finish(QUIT_PATIENCE);
+        while let Ok(event) = self.events_rx.try_recv() {
+            if let AppEvent::SettingsWritten(generation, result) = event {
+                self.settings_written(generation, result);
+            }
+        }
+        if self.settings != self.saved_settings
+            && let Err(e) = crate::storage::settings::save_json_atomic(
+                &self.core.paths.settings_file(),
+                &self.settings,
+            )
+        {
+            tracing::warn!("could not save settings when quitting: {e}");
+        }
         app::remove_media_session();
         self.menu = None;
         self.core.shutdown();
@@ -1896,6 +2188,80 @@ fn report_open_problems(app: &mut OneumApp, report: &OpenReport) {
             action: None,
             expires: None,
         });
+    }
+}
+
+/// Pins `pin`, or unpins it if it is pinned. Only pins whose things still exist
+/// (`live`) count toward the limit: the others are not shown and cannot be unpinned,
+/// so they are dropped when room is needed rather than holding places.
+fn toggle_pin(pinned: &mut Vec<Pin>, pin: Pin, live: impl Fn(&Pin) -> bool) {
+    if let Some(at) = pinned.iter().position(|p| *p == pin) {
+        pinned.remove(at);
+        return;
+    }
+    let kept: Vec<Pin> = pinned.iter().filter(|p| live(p)).cloned().collect();
+    if kept.len() < MAX_PINS {
+        *pinned = kept;
+        pinned.push(pin);
+    }
+}
+
+/// Makes the pin of `from` one of `to` (a smart playlist renamed). If `to` was pinned
+/// already, the first of the two stays where it is and the other goes.
+fn repoint_pin(pinned: &mut Vec<Pin>, from: &Pin, to: Pin) {
+    restate_pins(
+        pinned,
+        |pin| if pin == from { to.clone() } else { pin.clone() },
+    );
+}
+
+/// Puts every pin as `restate` says it (an album by the key it is shown under now), and
+/// keeps only the first of pins that have become the same.
+fn restate_pins(pinned: &mut Vec<Pin>, restate: impl Fn(&Pin) -> Pin) {
+    let mut seen: Vec<Pin> = Vec::new();
+    pinned.retain_mut(|pin| {
+        *pin = restate(pin);
+        let first = !seen.contains(pin);
+        if first {
+            seen.push(pin.clone());
+        }
+        first
+    });
+}
+
+/// A pin as the library shows its thing now: an album by the key it is shown under.
+fn shown_pin(snapshot: &LibrarySnapshot, pin: &Pin) -> Pin {
+    match pin {
+        Pin::Album(key) => Pin::Album(snapshot.shown_album_key(*key)),
+        other => other.clone(),
+    }
+}
+
+/// Where a pin leads.
+fn pin_nav(pin: &Pin) -> Nav {
+    match pin {
+        Pin::Album(key) => Nav::Album(*key),
+        Pin::Artist(name) => Nav::Artist(name.clone()),
+        Pin::Genre(name) => Nav::Genre(name.clone()),
+        Pin::Playlist(id) => Nav::Playlist(*id),
+        Pin::Smart(name) => Nav::Smart(name.clone()),
+    }
+}
+
+/// "Pin to Sidebar" (or "Unpin") in a context menu.
+fn pin_menu_item(
+    ui: &mut egui::Ui,
+    s: &Strings,
+    pinned: &[Pin],
+    pin: Pin,
+    actions: &mut Vec<Action>,
+) {
+    let is_pinned = pinned.contains(&pin);
+    let label = if is_pinned { s.unpin } else { s.pin_to_sidebar };
+    let room = is_pinned || pinned.len() < MAX_PINS;
+    if ui.add_enabled(room, egui::Button::new(label)).clicked() {
+        actions.push(Action::TogglePin(pin));
+        ui.close();
     }
 }
 
@@ -2023,5 +2389,77 @@ impl eframe::App for OneumApp {
 impl Drop for OneumApp {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins of things that are gone (a deleted playlist) do not hold places: when the
+    /// visible pins leave room, a new pin takes it and the gone ones are dropped.
+    #[test]
+    fn pins_of_gone_things_make_room() {
+        let mut pinned: Vec<Pin> = (0..MAX_PINS as i64).map(Pin::Playlist).collect();
+        // All twelve exist: no room.
+        toggle_pin(&mut pinned, Pin::Genre("Jazz".into()), |_| true);
+        assert_eq!(pinned.len(), MAX_PINS);
+        assert!(!pinned.contains(&Pin::Genre("Jazz".into())));
+        // Playlists 0 and 1 were deleted: room, and they go.
+        let gone = [Pin::Playlist(0), Pin::Playlist(1)];
+        toggle_pin(&mut pinned, Pin::Genre("Jazz".into()), |p| {
+            !gone.contains(p)
+        });
+        assert_eq!(pinned.len(), MAX_PINS - 1);
+        assert!(pinned.contains(&Pin::Genre("Jazz".into())));
+        assert!(!pinned.iter().any(|p| gone.contains(p)));
+        // Toggling a pinned thing unpins it.
+        toggle_pin(&mut pinned, Pin::Genre("Jazz".into()), |_| true);
+        assert!(!pinned.contains(&Pin::Genre("Jazz".into())));
+    }
+
+    /// A smart playlist renamed to the name of another pinned one: one pin for it, at
+    /// the first of the two places.
+    #[test]
+    fn a_renamed_smart_playlist_is_pinned_once() {
+        let smart = |name: &str| Pin::Smart(name.into());
+        let mut pinned = vec![smart("B"), Pin::Album(7), smart("A")];
+        repoint_pin(&mut pinned, &smart("A"), smart("B"));
+        assert_eq!(pinned, [smart("B"), Pin::Album(7)]);
+        let mut pinned = vec![Pin::Album(7), smart("A"), Pin::Playlist(1)];
+        repoint_pin(&mut pinned, &smart("A"), smart("C"));
+        assert_eq!(pinned, [Pin::Album(7), smart("C"), Pin::Playlist(1)]);
+    }
+
+    /// An album pinned under a key that has since become an alias (its tracks merged
+    /// into another album) is the same pin as that album's.
+    #[test]
+    fn an_album_pinned_before_a_merge_is_pinned_once() {
+        use crate::library::album_key;
+        use crate::model::test_track;
+        let folder = "/music/Sessions";
+        let mut tagged = test_track(1);
+        tagged.path = std::path::PathBuf::from(format!("{folder}/01.flac"));
+        tagged.album = "Sessions".into();
+        tagged.album_artist = "Band".into();
+        tagged.album_key = album_key("Sessions", "Band", false, &tagged.path);
+        let mut untagged = test_track(2);
+        untagged.path = std::path::PathBuf::from(format!("{folder}/02.flac"));
+        untagged.album = "Sessions".into();
+        untagged.album_key = album_key("Sessions", "", false, &untagged.path);
+        let (alias, shown) = (untagged.album_key, tagged.album_key);
+        let snapshot = LibrarySnapshot::from_tracks(vec![tagged, untagged]);
+        assert_eq!(snapshot.shown_album_key(alias), shown);
+
+        let mut pinned = vec![Pin::Album(alias), Pin::Playlist(1), Pin::Album(shown)];
+        restate_pins(&mut pinned, |pin| shown_pin(&snapshot, pin));
+        assert_eq!(pinned, [Pin::Album(shown), Pin::Playlist(1)]);
+        // Toggling the album as its menu offers it unpins it.
+        toggle_pin(
+            &mut pinned,
+            shown_pin(&snapshot, &Pin::Album(shown)),
+            |_| true,
+        );
+        assert_eq!(pinned, [Pin::Playlist(1)]);
     }
 }

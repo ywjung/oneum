@@ -203,8 +203,8 @@ PY
 echo "== type-ahead, remaining time, drag and drop"
 ui 'click 60 99' 'wait 400' 'click 400 93' 'wait 300' 'text here' 'wait 300' 'dump ta.json' 'wait 1200' \
    'click 810 743' 'wait 400' 'dump rt1.json' 'click 810 743' 'wait 400' 'dump rt2.json' \
-   'dump dd0.json' 'drag 400 125 100 311' 'wait 700' 'dump dd1.json' 'drag 400 157 1118 20' 'wait 600' 'dump dd2.json' \
-   'click 100 311' 'wait 500' 'dump dd3.json' 'drag 400 132 400 175' 'wait 700' 'dump dd4.json' \
+   'dump dd0.json' 'drag 400 125 100 371' 'wait 700' 'dump dd1.json' 'drag 400 157 1118 20' 'wait 600' 'dump dd2.json' \
+   'click 100 371' 'wait 500' 'dump dd3.json' 'drag 400 132 400 175' 'wait 700' 'dump dd4.json' \
    'menu playlist_rename' 'wait 600' 'key A cmd' 'text 드라이브' 'wait 200' 'key Enter' 'wait 600' 'dump pm1.json' \
    'menu playlist_delete' 'wait 500' 'dump pm2.json' 'key Escape' 'wait 400' 'dump pm3.json' 'click 60 99' 'wait 300'
 check ta.json 'd["selected_titles"] == ["Here Comes the Sun"]' "typing letters jumps to the song"
@@ -291,8 +291,8 @@ ui "menu correction_import $WORK/unsupported.txt" 'wait 300' 'dump hc0.json' \
    'menu correction_select Sennheiser HD 800 S' 'wait 400' 'dump hc3.json' \
    'menu correction_select No Such Headphones' 'wait 300' 'dump hc4.json' \
    'menu correction_off' 'wait 300' 'dump hc5.json'
-check hc0.json 'd["correction"] == {"selected": None, "applied": None, "profiles": [], "builtin": 33}' "a file with a filter that is not supported is not imported"
-check hc1.json 'd["correction"] == {"selected": "Test Phones", "applied": "Test Phones", "profiles": [["Test Phones", 2]], "builtin": 33}' "a correction file is imported, named after the file, and applied"
+check hc0.json 'd["correction"] == {"selected": None, "applied": None, "profiles": [], "builtin": 34}' "a file with a filter that is not supported is not imported"
+check hc1.json 'd["correction"] == {"selected": "Test Phones", "applied": "Test Phones", "profiles": [["Test Phones", 2]], "builtin": 34}' "a correction file is imported, named after the file, and applied"
 check hc2.json 'd["correction"]["applied"] is None and d["correction"]["profiles"] == [["Test Phones", 2]]' "…and can be switched off, the profile kept"
 check hc3.json 'd["correction"]["selected"] == "Sennheiser HD 800 S" and d["correction"]["applied"] == "Sennheiser HD 800 S" and d["correction"]["profiles"] == [["Test Phones", 2]]' "a built-in headphone profile is applied without being copied into the settings"
 check hc4.json 'd["correction"]["applied"] == "Sennheiser HD 800 S"' "a name that is no profile changes nothing"
@@ -339,6 +339,21 @@ check m1.json 'd["meter_visible"] and d["volume"] == 0 and all(v is not None and
 check m1.json 'd["spectrum_peak_hz"] is not None and 0.8 < d["spectrum_peak_hz"] / 880.0 < 1.25' "the spectrum display peaks at the tone's 880 Hz"
 check m2.json 'd["state"] == "Paused" and max(d["meter"]["position"]) < 0.01' "paused: the needles fall back to rest"
 check m3.json 'not d["meter_visible"] and d["state"] == "Playing"' "the meter deck closes again"
+
+echo "== file check, pins, folders, statistics"
+ui 'menu check_start' 'wait 2000' 'dump fc1.json'
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  python3 -c 'import json,sys; sys.exit(0 if not json.load(open(sys.argv[1]))["check"]["running"] else 1)' "$PROFILE/fc1.json" && break
+  ui 'wait 2000' 'dump fc1.json'
+done
+ui 'menu check_show_damaged' 'wait 500' 'dump fc2.json' 'key Escape' 'wait 300'
+check fc1.json 'not d["check"]["running"] and d["check"]["checked"] == 20 and d["check"]["with_dr"] >= 15 and d["check"]["verified"] >= 6' "the file check reads every file (FLAC MD5, DR)"
+check fc2.json 'd["query"] == "check:damaged" and d["rows"] == d["check"]["damaged"]' "…and lists the damaged ones"
+ui 'menu go_first_folder' 'wait 500' 'dump fo1.json' 'menu go_stats' 'wait 1500' 'dump st1.json' \
+   'menu pin_first_album' 'wait 300' 'dump pn1.json'
+check fo1.json 'd["nav"].startswith("Folder") and d["rows"] == 20 and d["subfolders"] == 5' "the folder view: every song under the music folder, its five folders as ways in"
+check st1.json 'd["nav"] == "Stats" and d["stats"] is not None and d["stats"][0] >= 1 and d["stats"][2] == 20' "statistics: the plays of this run and the whole library"
+check pn1.json 'd["pinned"] == 1' "an album is pinned to the sidebar"
 
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'

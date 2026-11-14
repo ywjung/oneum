@@ -1977,3 +1977,258 @@ fn the_tags_in_front_of_an_mp3_are_looked_past() {
         decode(&fixture("gap_a.mp3"), Some(20_000)).1
     );
 }
+
+/// Large real files, made by hand (`ONEUM_LARGE_DIR=<folder>`, see docs/TESTING.md):
+/// they open, play, and a seek to near their end lands there, although the demuxer reads
+/// far more than 128 MB without audio while it seeks.
+#[test]
+#[ignore = "needs large files made by hand"]
+fn large_files_open_and_seek_to_their_end() {
+    let Some(dir) = std::env::var_os("ONEUM_LARGE_DIR").map(PathBuf::from) else {
+        return;
+    };
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    names.sort();
+    for path in names {
+        let started = Instant::now();
+        let mut d = TrackDecoder::open(&path).expect("opens");
+        let info = d.info().clone();
+        let total = info.total_frames.expect("length known");
+        let mut chunk = Vec::new();
+        assert!(d.next(&mut chunk).unwrap(), "{path:?}: plays");
+        let target = total - u64::from(info.sample_rate) * 5;
+        d.seek(target).unwrap();
+        let mut after = 0u64;
+        while d.next(&mut chunk).unwrap() {
+            after += (chunk.len() / info.channels) as u64;
+        }
+        let size = std::fs::metadata(&path).unwrap().len() / 1_048_576;
+        println!(
+            "REPORT {}: {size} MB, {total} frames, {after} frames after the seek, {:?}",
+            path.file_name().unwrap().to_string_lossy(),
+            started.elapsed()
+        );
+        assert!(
+            after.abs_diff(total - target) < u64::from(info.sample_rate) / 10,
+            "{path:?}"
+        );
+    }
+}
+
+/// A file whose audio is followed by gigabytes of zeros (a sparse file here; a damaged
+/// disk or copy in life): the music plays and the track ends where the audio does, in
+/// well under a second, instead of the demuxer searching the zeros to the end (a 10 GB
+/// file took 21 s before).
+#[test]
+fn audio_followed_by_gigabytes_of_zeros_ends_where_the_audio_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zeros.mp3");
+    let file = std::fs::File::create(&path).unwrap();
+    std::io::Write::write_all(&mut &file, &std::fs::read(fixture("gap_a.mp3")).unwrap()).unwrap();
+    file.set_len(3 * 1024 * 1024 * 1024).unwrap();
+    let started = Instant::now();
+    let mut d = TrackDecoder::open(&path).unwrap();
+    let mut all = Vec::new();
+    let mut chunk = Vec::new();
+    while d.next(&mut chunk).unwrap() {
+        all.extend_from_slice(&chunk);
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    let (_, _, reference) = decode_all("gap_a.mp3");
+    assert_eq!(all, reference);
+}
+
+/// A CD image and its CUE sheet, written into `dir`: 44.1 kHz stereo 16-bit, five
+/// seconds of a sweep with noise (every frame different), three tracks starting at 0,
+/// 1 s + 37 CD frames and 3 s + 5 CD frames. Returns (image, sheet, track starts in
+/// sample frames).
+fn write_image_and_sheet(dir: &std::path::Path, image_name: &str) -> (PathBuf, PathBuf, [u64; 3]) {
+    let rate = 44_100u32;
+    let frames = rate * 5;
+    let mut data = Vec::with_capacity(frames as usize * 4);
+    let mut x: u32 = 7;
+    for n in 0..frames {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let t = f64::from(n) / f64::from(rate);
+        let sweep = (std::f64::consts::TAU * (200.0 + 400.0 * t) * t).sin() * 0.4;
+        let noise = (f64::from(x >> 16) / 65_536.0 - 0.5) * 0.1;
+        let l = ((sweep + noise) * 32_000.0) as i16;
+        let r = ((sweep * 0.5 - noise) * 32_000.0) as i16;
+        data.extend_from_slice(&l.to_le_bytes());
+        data.extend_from_slice(&r.to_le_bytes());
+    }
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&data);
+    let wav = dir.join("image.wav");
+    std::fs::write(&wav, bytes).expect("write image");
+    let image = if image_name == "image.wav" {
+        wav
+    } else {
+        let flac = dir.join(image_name);
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&wav)
+            .args(["-c:a", "flac"])
+            .arg(&flac)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(made, "ffmpeg could not make the FLAC image");
+        std::fs::remove_file(&wav).expect("remove wav");
+        flac
+    };
+    // The sheet names the WAV it was ripped to, as sheets often do after conversion.
+    let sheet = dir.join("image.cue");
+    std::fs::write(
+        &sheet,
+        "PERFORMER \"Tester\"\nTITLE \"Image\"\nFILE \"image.wav\" WAVE\n\
+         TRACK 01 AUDIO\n TITLE \"One\"\n INDEX 01 00:00:00\n\
+         TRACK 02 AUDIO\n TITLE \"Two\"\n INDEX 00 00:01:20\n INDEX 01 00:01:37\n\
+         TRACK 03 AUDIO\n TITLE \"Three\"\n INDEX 01 00:03:05\n",
+    )
+    .expect("write sheet");
+    (image, sheet, [0, 44_100 + 37 * 588, 3 * 44_100 + 5 * 588])
+}
+
+fn decode_path(path: &std::path::Path) -> Vec<f32> {
+    let mut dec = TrackDecoder::open(path).expect("opens");
+    let (mut all, mut buf) = (Vec::new(), Vec::new());
+    while dec.next(&mut buf).expect("decodes") {
+        all.extend_from_slice(&buf);
+    }
+    all
+}
+
+/// The tracks of a CUE sheet are exactly their stretches of the image: decoded one
+/// after another they are the image sample for sample, each its own length, and seeking
+/// inside a track lands on the right frame. Through the player's feed (from the file and
+/// from memory) they follow each other without a gap. For a WAV and a FLAC image.
+#[test]
+fn cue_sheet_tracks_are_their_stretches_of_the_image() {
+    let has_ffmpeg = std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    let mut images = vec!["image.wav"];
+    if has_ffmpeg {
+        images.push("image.flac");
+    } else {
+        eprintln!("note: the FLAC image is skipped: ffmpeg is not installed");
+    }
+    for image_name in images {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (image, sheet, starts) = write_image_and_sheet(dir.path(), image_name);
+        let whole = decode_path(&image);
+        let total = (whole.len() / 2) as u64;
+        let tracks: Vec<PathBuf> = (1..=3)
+            .map(|n| oneum::library::cue::track_path(&sheet, n))
+            .collect();
+        let mut joined = Vec::new();
+        for (i, track) in tracks.iter().enumerate() {
+            let pcm = decode_path(track);
+            let end = starts.get(i + 1).copied().unwrap_or(total);
+            assert_eq!(
+                (pcm.len() / 2) as u64,
+                end - starts[i],
+                "{image_name} track {}: length",
+                i + 1
+            );
+            let dec = TrackDecoder::open(track).expect("opens");
+            assert_eq!(dec.info().total_frames, Some(end - starts[i]));
+            joined.extend(pcm);
+        }
+        assert_eq!(joined, whole, "{image_name}: the tracks are the image");
+
+        // A seek inside track 2 lands on its frame.
+        let mut dec = TrackDecoder::open(&tracks[1]).expect("opens");
+        dec.seek(10_000).expect("seeks");
+        let mut buf = Vec::new();
+        assert!(dec.next(&mut buf).expect("decodes"));
+        let at = ((starts[1] + 10_000) * 2) as usize;
+        assert_eq!(&buf[..8], &whole[at..at + 8], "{image_name}: seek");
+
+        // Played as three tracks in a row: one continuous signal.
+        let names: Vec<String> = tracks.iter().map(|t| t.display().to_string()).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        for played in [play(&names, 44_100), play_from_memory(&names, 44_100, 0)] {
+            assert_eq!(played.frames() as u64, total, "{image_name}: played length");
+            assert_eq!(played.underruns, 0);
+            let starts_seen: Vec<u64> = played.started().iter().map(|s| s.0).collect();
+            assert_eq!(starts_seen, [1, 2, 3], "{image_name}: every track started");
+            // Past the fade-in at the very start, what was heard is the image.
+            let heard = &played.pcm[FADE_GUARD * 2..];
+            let image_pcm = &whole[FADE_GUARD * 2..];
+            assert!(
+                max_abs_diff(heard, image_pcm) < 1e-6,
+                "{image_name}: the boundaries are seamless"
+            );
+        }
+    }
+}
+
+/// Damage inside a sheet track is passed over like anywhere else (the FLAC reader drops
+/// the broken frame and finds the next), and the track still ends exactly where the
+/// next one starts: the tracks joined are the image as it decodes, hole included
+/// (counting what was decoded would run on into the next track by the hole's length).
+#[test]
+fn a_damaged_packet_does_not_move_where_a_sheet_track_ends() {
+    let has_ffmpeg = std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !has_ffmpeg {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (image, sheet, starts) = write_image_and_sheet(dir.path(), "image.flac");
+    // Damage a stretch in the middle of the first track (about 0.7 s into a 5 s image;
+    // the first track runs to 1.4 s).
+    let mut bytes = std::fs::read(&image).expect("read");
+    let at = bytes.len() * 14 / 100;
+    for b in &mut bytes[at..at + 64] {
+        *b ^= 0x5A;
+    }
+    std::fs::write(&image, &bytes).expect("write");
+
+    let mut whole_dec = TrackDecoder::open(&image).expect("opens");
+    let (mut whole, mut buf) = (Vec::new(), Vec::new());
+    while whole_dec.next(&mut buf).expect("decodes") {
+        whole.extend_from_slice(&buf);
+    }
+    assert!(
+        whole.len() < 5 * 44_100 * 2,
+        "the damage must leave a hole ({} samples)",
+        whole.len()
+    );
+    let mut joined = Vec::new();
+    for n in 1..=3 {
+        joined.extend(decode_path(&oneum::library::cue::track_path(&sheet, n)));
+    }
+    assert_eq!(joined.len(), whole.len(), "nothing twice, nothing left out");
+    assert!(
+        joined == whole,
+        "the tracks joined are the image as it decodes"
+    );
+    // The second track starts at its own start, untouched by the hole before it.
+    let second = decode_path(&oneum::library::cue::track_path(&sheet, 2));
+    let clean_len = (starts[2] - starts[1]) as usize * 2;
+    assert_eq!(second.len(), clean_len);
+}

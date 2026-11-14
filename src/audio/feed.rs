@@ -209,6 +209,8 @@ impl FeedHandle {
             written: written.clone(),
             preload: None,
             current_load: None,
+            current_file: None,
+            next_in_memory: None,
             last_preload_check: Instant::now(),
         };
         std::thread::Builder::new()
@@ -266,6 +268,12 @@ struct Worker {
     preload: Option<Preload>,
     /// Memory playback: turns true when the current track is entirely in memory.
     current_load: Option<LoadCompletion>,
+    /// Memory playback: the audio file the current track is read from, in memory. The
+    /// next track of the same file (a CUE sheet's) reads it too instead of loading it
+    /// again.
+    current_file: Option<(PathBuf, FileInMemory)>,
+    /// The announced next track, found to be read from `current_file`.
+    next_in_memory: Option<PathBuf>,
     last_preload_check: Instant,
 }
 
@@ -287,7 +295,9 @@ impl Preload {
             .spawn(move || {
                 // A failure is not reported from here: the track is opened again when
                 // its turn comes, and fails then if it is still unreadable.
-                let _ = tx.send(FileInMemory::start(&target).ok().flatten());
+                // A track of a CUE sheet loads the sheet's audio file.
+                let file = crate::library::cue::real_file(&target);
+                let _ = tx.send(FileInMemory::start(&file).ok().flatten());
             })
             .ok()?;
         Some(Self {
@@ -310,22 +320,39 @@ impl Worker {
         if !self.params.memory {
             return TrackDecoder::open(&req.path);
         }
+        // What is decided about the track after the one opened now is decided again.
+        self.next_in_memory = None;
+        // A track of a CUE sheet is read from the sheet's audio file (the sheet is read
+        // once, for the file and the stretch).
+        let segment = crate::library::cue::resolve(&req.path);
+        let real = segment
+            .as_ref()
+            .map_or_else(|| req.path.clone(), |s| s.audio.clone());
         let ahead = self
             .preload
             .take()
             .filter(|p| p.path == req.path)
             .and_then(Preload::take);
-        let file = match ahead {
+        let same_file = self
+            .current_file
+            .as_ref()
+            .filter(|(path, _)| *path == real)
+            .map(|(_, file)| file.share());
+        let file = match ahead.or(same_file) {
             Some(file) => Some(file),
-            None => FileInMemory::start(&req.path).map_err(|e| map_file_error(&e))?,
+            None => FileInMemory::start(&real).map_err(|e| map_file_error(&e))?,
         };
         match file {
             Some(file) => {
                 self.current_load = Some(file.completion());
-                TrackDecoder::open_in_memory(file)
+                self.current_file = Some((real, file.share()));
+                TrackDecoder::open_in_memory(file)?.within(segment.as_ref())
             }
             // Too large for memory: streamed like without memory playback.
-            None => TrackDecoder::open(&req.path),
+            None => {
+                self.current_file = None;
+                TrackDecoder::open_located(&req.path, segment.as_ref())
+            }
         }
     }
 
@@ -346,7 +373,20 @@ impl Worker {
             NextTrack::Track(next) => {
                 // Once per track that is announced: a file that cannot be loaded ahead
                 // (too large, unreadable) is not tried again and again.
-                if self.preload.as_ref().is_none_or(|p| p.path != next.path) {
+                let decided = self.preload.as_ref().is_some_and(|p| p.path == next.path)
+                    || self.next_in_memory.as_ref() == Some(&next.path);
+                if decided {
+                    return;
+                }
+                // The next track of the same CUE sheet's file: it is in memory already.
+                let in_memory = crate::library::cue::sheet_of(&next.path).is_some()
+                    && self.current_file.as_ref().is_some_and(|(path, _)| {
+                        *path == crate::library::cue::real_file(&next.path).as_ref()
+                    });
+                if in_memory {
+                    self.preload = None;
+                    self.next_in_memory = Some(next.path.clone());
+                } else {
                     self.preload = Preload::start(&next.path);
                 }
             }

@@ -167,7 +167,7 @@ fn state_survives_reopen() {
     let before: Vec<Track> = {
         let (library, _) = env.open_scanned();
         let id = by_title(&library, "Two").id;
-        library.set_favorite(&[id], true);
+        library.set_favorite(&[id], true).unwrap();
         library.record_play(id);
         let tracks = library
             .snapshot()
@@ -733,7 +733,7 @@ fn moved_file_is_relinked() {
     let a = by_title(&library, "Song A");
     let b = by_title(&library, "Song B");
     let untagged = by_title(&library, "untagged take");
-    library.set_favorite(&[a.id], true);
+    library.set_favorite(&[a.id], true).unwrap();
     library.record_play(a.id);
     let playlist = library.create_playlist("mix").unwrap();
     library
@@ -804,7 +804,7 @@ fn missing_files_follow_the_keep_or_remove_policy() {
     library
         .add_to_playlist(playlist, &[in_playlist.id])
         .unwrap();
-    library.set_favorite(&[favourite.id], true);
+    library.set_favorite(&[favourite.id], true).unwrap();
 
     let saved = fs::read(music.join("in playlist.wav")).unwrap();
     for name in ["in playlist.wav", "favourite.wav", "plain.wav"] {
@@ -1084,7 +1084,11 @@ fn remove_folder_only_touches_the_database() {
     library
         .add_to_playlist(playlist, &[first.id, loose[0]])
         .unwrap();
-    library.save_queue(&[(1, first.id), (2, loose[0])]);
+    assert!(library.save_session(
+        Some(&[(1, first.id), (2, loose[0])][..]),
+        "test_session",
+        "{}"
+    ));
     assert_eq!(library.snapshot().len(), 6);
 
     assert!(matches!(
@@ -1288,7 +1292,7 @@ fn loose_files_are_rechecked_on_rescan() {
     let library = env.open();
     let ids = library.import_files(&[kept.clone(), gone.clone(), edited.clone()]);
     assert_eq!(ids.len(), 3);
-    library.set_favorite(&[ids[0]], true);
+    library.set_favorite(&[ids[0]], true).unwrap();
 
     fs::remove_file(&kept).unwrap();
     fs::remove_file(&gone).unwrap();
@@ -1427,7 +1431,7 @@ fn files_on_disk_are_never_modified() {
     let before = snapshot_of(&music);
     let (library, root) = env.open_scanned();
     let ids: Vec<i64> = library.snapshot().tracks.iter().map(|t| t.id).collect();
-    library.set_favorite(&ids, true);
+    library.set_favorite(&ids, true).unwrap();
     library.record_play(ids[0]);
     rescan(&library);
     library.remove_tracks(&ids[..1]);
@@ -1733,7 +1737,7 @@ fn file_moved_between_music_folders_keeps_its_row() {
 
     let song = by_title(&library, "Song");
     let plain = by_title(&library, "Plain");
-    library.set_favorite(&[song.id], true);
+    library.set_favorite(&[song.id], true).unwrap();
     library.record_play(song.id);
     library.record_play(plain.id);
     let playlist = library.create_playlist("mix").unwrap();
@@ -1794,7 +1798,7 @@ fn file_missing_in_one_scan_and_found_in_a_later_one_is_relinked() {
     library
         .add_to_playlist(playlist, &[song.id, song.id])
         .unwrap();
-    library.save_queue(&[(1, song.id)]);
+    assert!(library.save_session(Some(&[(1, song.id)][..]), "test_session", "{}"));
 
     // The file leaves the library's sight for a while …
     let limbo = env.dir.path().join("limbo");
@@ -1997,7 +2001,9 @@ fn concurrent_favourites_and_plays_end_up_published() {
                 for round in 0..150usize {
                     let id = ids[(worker + round) % ids.len()];
                     if worker % 2 == 0 {
-                        library.set_favorite(&[id], (worker + round) % 3 == 0);
+                        library
+                            .set_favorite(&[id], (worker + round) % 3 == 0)
+                            .unwrap();
                     } else {
                         library.record_play(id);
                     }
@@ -2255,4 +2261,906 @@ fn dsd_matroska_and_adpcm_are_added_as_what_they_are() {
             ("Vorbis", "WebM")
         );
     }
+}
+
+#[test]
+fn cue_sheet_tracks_take_the_place_of_their_audio_file() {
+    let env = TestEnv::new();
+    let music = env.music();
+    let image = music.join("Live/image.wav");
+    write_tagged_wav(&image, 6000, "Whole Concert", "Image Artist", "Image Album");
+    write_tagged_wav(&music.join("other.wav"), 300, "Other", "Someone", "Else");
+    let library = env.open();
+    library.add_folder(&music).unwrap();
+    wait_scan(&library);
+    assert_eq!(titles(&library), ["Other", "Whole Concert"]);
+    let reads = library.debug_tag_reads();
+
+    // A sheet appears next to the file: its tracks replace the file.
+    let sheet_path = music.join("Live/image.cue");
+    let sheet = |first: &str| {
+        format!(
+            "PERFORMER \"시트 아티스트\"\nTITLE \"시트 앨범\"\nREM GENRE Jazz\nREM DATE 1999\n\
+             REM REPLAYGAIN_ALBUM_GAIN -7.50 dB\nFILE \"image.wav\" WAVE\n\
+             \x20 TRACK 01 AUDIO\n    TITLE \"{first}\"\n    INDEX 01 00:00:00\n\
+             \x20 TRACK 02 AUDIO\n    TITLE \"둘째 곡\"\n    PERFORMER \"Guest\"\n\
+             \x20   REM REPLAYGAIN_TRACK_GAIN -3.00 dB\n    INDEX 00 00:01:50\n    INDEX 01 00:02:00\n\
+             \x20 TRACK 03 AUDIO\n    INDEX 01 00:04:30\n"
+        )
+    };
+    fs::write(&sheet_path, sheet("첫 곡")).unwrap();
+    rescan(&library);
+    // A track without a title of its own is named by its number.
+    assert_eq!(titles(&library), ["Other", "Track 03", "둘째 곡", "첫 곡"]);
+    assert_eq!(
+        library.debug_tag_reads(),
+        reads + 1,
+        "the file is read once"
+    );
+    let snapshot = library.snapshot();
+    assert!(
+        snapshot.tracks.iter().all(|t| t.path != image),
+        "the file is not also there alone"
+    );
+    let second = by_title(&library, "둘째 곡");
+    assert_eq!(second.path, sheet_path.join("02"));
+    assert_eq!(
+        oneum::library::cue::backing_file(&second.path),
+        sheet_path.as_path()
+    );
+    assert_eq!(
+        oneum::library::cue::real_file(&second.path).as_ref(),
+        image.as_path()
+    );
+    assert_eq!(
+        (second.artist.as_str(), second.album_artist.as_str()),
+        ("Guest", "시트 아티스트")
+    );
+    assert_eq!(second.album, "시트 앨범");
+    assert_eq!((second.track_no, second.year), (Some(2), Some(1999)));
+    assert_eq!(second.genre, "Jazz");
+    // INDEX 01 is where a track starts: 2.0 s to 4.4 s.
+    assert_eq!(second.duration_ms, 2400);
+    assert_eq!(second.replaygain.track_gain_db, Some(-3.0));
+    assert_eq!(second.replaygain.album_gain_db, Some(-7.5));
+    assert_eq!((second.codec.as_str(), second.sample_rate), ("PCM", 8000));
+    let third = by_title(&library, "Track 03");
+    assert_eq!(third.duration_ms, 1600, "the last track runs to the end");
+    assert_eq!(third.artist, "시트 아티스트");
+    assert_eq!(third.album_key, second.album_key, "one album");
+
+    // Nothing changed: nothing is read again.
+    let generation = library.generation();
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), reads + 1);
+    assert_eq!(library.generation(), generation);
+    let status = library.scan_status();
+    assert_eq!((status.files_found, status.files_done), (4, 4));
+
+    // The sheet is edited: its tracks are read again and keep their identity.
+    fs::write(&sheet_path, sheet("Opening")).unwrap();
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), reads + 2);
+    let opening = by_title(&library, "Opening");
+    assert_eq!(opening.path, sheet_path.join("01"));
+    assert_eq!(by_title(&library, "둘째 곡").id, second.id);
+    assert_eq!(library.snapshot().len(), 4);
+
+    // A second sheet for the same file adds nothing.
+    fs::write(music.join("Live/zz.cue"), sheet("Again")).unwrap();
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 4);
+    assert!(
+        library.snapshot().tracks.iter().all(|t| t.title != "Again"),
+        "the first sheet by name has the file"
+    );
+    fs::remove_file(music.join("Live/zz.cue")).unwrap();
+
+    // A track taken out of the sheet goes; the one before it now runs to the end.
+    let two_tracks = sheet("Opening");
+    let two_tracks = &two_tracks[..two_tracks.find("  TRACK 03").unwrap()];
+    fs::write(&sheet_path, two_tracks).unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Opening", "Other", "둘째 곡"]);
+    assert_eq!(by_title(&library, "둘째 곡").duration_ms, 4000);
+
+    // The sheet goes: the file is there alone again.
+    fs::remove_file(&sheet_path).unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Other", "Whole Concert"]);
+}
+
+/// Trouble with a sheet or its file never costs tracks that are there: a sheet that
+/// cannot be read keeps its tracks, and a file whose sheet's tracks could not be read
+/// stays in the library as it was.
+#[test]
+fn cue_sheet_trouble_keeps_the_tracks_that_are_there() {
+    use std::os::unix::fs::PermissionsExt;
+    let set_mode = |path: &Path, mode: u32| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let env = TestEnv::new();
+    let music = env.music();
+    let image = music.join("Live/image.wav");
+    write_tagged_wav(&image, 3000, "Whole Concert", "Image Artist", "Image Album");
+    let library = env.open();
+    library.add_folder(&music).unwrap();
+    wait_scan(&library);
+    let whole = by_title(&library, "Whole Concert");
+    let sheet_path = music.join("Live/image.cue");
+    let sheet = "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+                 \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n";
+
+    // The file cannot be read when its sheet appears: no tracks come of the sheet, and
+    // the file stays (it is not taken as replaced).
+    set_mode(&image, 0o000);
+    fs::write(&sheet_path, sheet).unwrap();
+    rescan(&library);
+    set_mode(&image, 0o644);
+    assert_eq!(titles(&library), ["Whole Concert"]);
+    assert_eq!(by_title(&library, "Whole Concert").id, whole.id);
+    // Readable again: now the sheet's tracks take its place.
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two"]);
+    let one = by_title(&library, "One");
+
+    // The sheet cannot be read for a while: its tracks are kept as they are, and its
+    // file is not taken in alone meanwhile (known by the size the tracks recorded).
+    set_mode(&sheet_path, 0o000);
+    let unreadable = fs::read(&sheet_path).is_err();
+    rescan(&library);
+    set_mode(&sheet_path, 0o644);
+    if unreadable {
+        assert_eq!(titles(&library), ["One", "Two"], "not the file alone");
+        assert_eq!(by_title(&library, "One").id, one.id);
+    }
+    // Readable again: the same rows.
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two"]);
+    assert_eq!(by_title(&library, "One").id, one.id);
+
+    // A sheet made unusable (not a sheet any more) is the sheet gone.
+    fs::write(&sheet_path, "not a sheet").unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Whole Concert"]);
+
+    // The only album of the music folder: deleting its sheet also brings the file back
+    // alone (the file, found by its size, shows that the folder is the one it was).
+    fs::write(&sheet_path, sheet).unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two"]);
+    fs::remove_file(&sheet_path).unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Whole Concert"]);
+    assert!(library.snapshot().tracks.iter().all(|t| t.available));
+}
+
+/// A sheet written on another system may spell its file's name in other letter case
+/// (or another Unicode form) than the folder does. Its tracks are taken in, and the file
+/// is not taken in alone beside them.
+#[test]
+fn a_sheet_that_spells_its_file_otherwise_still_covers_it() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(
+        &music.join("Live/Image.wav"),
+        3000,
+        "Whole Concert",
+        "Band",
+        "Live",
+    );
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"IMAGE.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["One", "Two"]);
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two"]);
+}
+
+/// A sheet may say tracks start beyond the end of its file (a sheet for a longer rip):
+/// those are no tracks, and the one before them ends with the file (its length, what
+/// plays of it, and the file check agree). The sheet is not read again for that at
+/// every scan; a track removed from the library comes back with the next one, as a
+/// file's does.
+#[test]
+fn a_sheet_track_past_the_end_is_not_read_again_and_again() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n\
+         \x20 TRACK 03 AUDIO\n    TITLE \"Beyond\"\n    INDEX 01 00:10:00\n\
+         \x20 TRACK 04 AUDIO\n    TITLE \"Further\"\n    INDEX 01 00:20:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["One", "Two"]);
+    assert_eq!(
+        by_title(&library, "Two").duration_ms,
+        2000,
+        "to the end of the file"
+    );
+    assert!(library.check_files());
+    assert!(library.wait_for_checks(Duration::from_secs(60)));
+    for title in ["One", "Two"] {
+        let check = by_title(&library, title).check.expect("checked");
+        assert_ne!(
+            check.verdict,
+            oneum::model::CheckVerdict::Damaged,
+            "{title}"
+        );
+    }
+    let reads = library.debug_tag_reads();
+    rescan(&library);
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), reads, "not read again");
+
+    library.remove_tracks(&[by_title(&library, "Two").id]);
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two"], "back with the next scan");
+}
+
+/// A sheet none of whose tracks lie within its file (another disc's sheet under this
+/// disc's name) is no sheet for it: the file is there alone, as without the sheet, and
+/// stays so without being read again. Once the file is one the sheet fits, its tracks
+/// take its place.
+#[test]
+fn a_sheet_with_no_track_within_its_file_leaves_the_file_alone() {
+    let env = TestEnv::new();
+    let music = env.music();
+    let image = music.join("Live/image.wav");
+    write_tagged_wav(&image, 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:05:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:06:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["Whole"]);
+    let whole = by_title(&library, "Whole");
+    let reads = library.debug_tag_reads();
+    rescan(&library);
+    rescan(&library);
+    assert_eq!(titles(&library), ["Whole"]);
+    assert_eq!(by_title(&library, "Whole").id, whole.id);
+    assert_eq!(library.debug_tag_reads(), reads, "not read again");
+
+    // The whole concert after all: the sheet fits now.
+    write_tagged_wav(&image, 8000, "Whole", "Band", "Live");
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two"]);
+}
+
+/// The file of a sheet becomes shorter (a re-rip of less): its tracks that now start
+/// beyond its end leave the library, and once none fits, the file is there alone, with
+/// none of the old tracks beside it. Nothing is read again at the scans after that.
+#[test]
+fn sheet_tracks_past_a_shorter_file_leave() {
+    let env = TestEnv::new();
+    let music = env.music();
+    let image = music.join("Live/image.wav");
+    write_tagged_wav(&image, 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:01:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:02:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    assert_eq!(titles(&library), ["One", "Two"]);
+    let one = by_title(&library, "One");
+
+    write_tagged_wav(&image, 1500, "Whole", "Band", "Live");
+    rescan(&library);
+    assert_eq!(titles(&library), ["One"], "Two starts beyond the end now");
+    assert_eq!(by_title(&library, "One").id, one.id);
+    assert_eq!(by_title(&library, "One").duration_ms, 500);
+    let reads = library.debug_tag_reads();
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), reads, "not read again");
+
+    write_tagged_wav(&image, 800, "Whole", "Band", "Live");
+    rescan(&library);
+    assert_eq!(
+        titles(&library),
+        ["Whole"],
+        "the file alone, no old track beside it"
+    );
+    let reads = library.debug_tag_reads();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Whole"]);
+    assert_eq!(library.debug_tag_reads(), reads, "not read again");
+}
+
+/// A track that a shorter re-rip leaves out, but that the library keeps (a favourite),
+/// stays as unavailable: it is not brought back as playable, and does not have its
+/// sheet read again at every scan. A longer rip brings it back.
+#[test]
+fn a_kept_track_past_a_shorter_file_is_left_alone() {
+    let env = TestEnv::new();
+    let music = env.music();
+    let image = music.join("Live/image.wav");
+    write_tagged_wav(&image, 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:01:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:02:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    let two = by_title(&library, "Two");
+    library.set_favorite(&[two.id], true).unwrap();
+
+    write_tagged_wav(&image, 1500, "Whole", "Band", "Live");
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two"], "kept, as a favourite");
+    assert!(!by_title(&library, "Two").available);
+    let reads = library.debug_tag_reads();
+    rescan(&library);
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), reads, "not read again");
+    assert!(!by_title(&library, "Two").available, "not brought back");
+
+    write_tagged_wav(&image, 3000, "Whole", "Band", "Live");
+    rescan(&library);
+    let back = by_title(&library, "Two");
+    assert_eq!(back.id, two.id);
+    assert!(back.available && back.favorite);
+}
+
+/// A folder none of whose known files were found is in doubt (another drive at its
+/// path?): its tracks are kept as unavailable. That doubt is about the tracks from
+/// before. A file added since, and deleted later, leaves the library like any other,
+/// while other files added since are still there.
+#[test]
+fn a_file_added_since_a_folder_came_into_doubt_can_go() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("old.wav"), 1000, "Old", "Band", "Then");
+    let (library, _) = env.open_scanned();
+    fs::remove_file(music.join("old.wav")).unwrap();
+    write_tagged_wav(&music.join("new1.wav"), 1000, "New One", "Band", "Now");
+    write_tagged_wav(&music.join("new2.wav"), 1200, "New Two", "Band", "Now");
+    rescan(&library);
+    assert_eq!(titles(&library), ["New One", "New Two", "Old"]);
+    assert!(!by_title(&library, "Old").available, "kept, in doubt");
+
+    fs::remove_file(music.join("new1.wav")).unwrap();
+    rescan(&library);
+    assert_eq!(titles(&library), ["New Two", "Old"], "New One is gone");
+    assert!(!by_title(&library, "Old").available, "still kept");
+    assert!(by_title(&library, "New Two").available);
+}
+
+/// What the randomized test below knows of one album folder.
+#[derive(Clone, Debug)]
+struct ModelAlbum {
+    /// Length of `image.wav`, if it is there.
+    audio_ms: Option<u64>,
+    /// `image.cue` and `zz.cue`, in the order the scan meets them.
+    sheets: [ModelSheet; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ModelSheet {
+    None,
+    /// A `.cue` that is not a sheet.
+    Garbage,
+    /// A sheet for a file that is not there.
+    OtherFile,
+    /// The letter its titles begin with, and `(number, start in seconds)`.
+    Tracks(char, Vec<(u32, u64)>),
+}
+
+impl ModelAlbum {
+    /// The titles the album's folder gives, with their lengths. The first sheet that is
+    /// for the file has it; with no track of that sheet within the file, or no such
+    /// sheet, the file is there alone.
+    fn expected(&self, album: usize) -> Vec<(String, u64)> {
+        let Some(total) = self.audio_ms else {
+            return Vec::new();
+        };
+        let alone = vec![(format!("W{album}"), total)];
+        let claiming = self.sheets.iter().find_map(|sheet| match sheet {
+            ModelSheet::Tracks(letter, tracks) => Some((letter, tracks)),
+            _ => None,
+        });
+        let Some((letter, tracks)) = claiming else {
+            return alone;
+        };
+        let fitting: Vec<(String, u64)> = tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, start))| start * 1000 < total)
+            .map(|(i, (number, start))| {
+                let end = tracks
+                    .get(i + 1)
+                    .map_or(total, |(_, next)| (next * 1000).min(total));
+                (format!("{letter}{album}-{number}"), end - start * 1000)
+            })
+            .collect();
+        if fitting.is_empty() { alone } else { fitting }
+    }
+}
+
+fn write_model_sheet(path: &Path, album: usize, sheet: &ModelSheet) {
+    match sheet {
+        ModelSheet::None => {
+            let _ = fs::remove_file(path);
+        }
+        ModelSheet::Garbage => fs::write(path, "not a sheet").unwrap(),
+        ModelSheet::OtherFile => fs::write(
+            path,
+            "FILE \"elsewhere.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+        )
+        .unwrap(),
+        ModelSheet::Tracks(letter, tracks) => {
+            let mut text = String::from("FILE \"image.wav\" WAVE\n");
+            for (number, start) in tracks {
+                text.push_str(&format!(
+                    "TRACK {number:02} AUDIO\nTITLE \"{letter}{album}-{number}\"\nINDEX 01 00:{start:02}:00\n"
+                ));
+            }
+            fs::write(path, text).unwrap();
+        }
+    }
+}
+
+/// The scan of CUE sheets and their files, driven through random changes: files that
+/// get longer, shorter or go; sheets that change, break, move or go, one or two for a
+/// file; tracks made favourites, put in a playlist, removed from the library; scans
+/// that cannot finish (a folder that cannot be read). After every scan that finished,
+/// the library has to be exactly what the folders say: the tracks that are there, each
+/// once, with the right lengths; nothing else available; nothing kept that nobody
+/// refers to. And a scan right after it has to find nothing to read.
+#[test]
+fn random_changes_to_sheets_and_files_leave_the_library_right() {
+    // More seeds for a longer search: ONEUM_MODEL_SEEDS=2000 cargo test … random_changes
+    let seeds = std::env::var("ONEUM_MODEL_SEEDS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(24u64);
+    for seed in 1..=seeds {
+        sheet_model_run(seed, 90);
+    }
+}
+
+fn sheet_model_run(seed: u64, steps: usize) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut roll = move |n: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) % n
+    };
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("anchor.wav"), 1000, "Anchor", "Band", "Anchor");
+    // A folder that can be made unreadable: a scan that meets it concludes nothing.
+    let locked_dir = music.join("locked");
+    fs::create_dir_all(&locked_dir).unwrap();
+    let lock_dir = |on: bool| {
+        let mode = if on { 0o000 } else { 0o755 };
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let (library, _) = env.open_scanned();
+    let playlist = library.create_playlist("Mix").unwrap();
+    let mut albums = vec![
+        ModelAlbum {
+            audio_ms: None,
+            sheets: [ModelSheet::None, ModelSheet::None],
+        };
+        2
+    ];
+    let mut locked = false;
+    // Albums whose first sheet cannot be read for now: nothing of them changes then.
+    let mut unreadable = [false; 2];
+    // Whether the scan before this step could finish (the library is what it should be).
+    let mut settled = true;
+    let mut log: Vec<String> = Vec::new();
+    for step in 0..steps {
+        let a = roll(2) as usize;
+        let dir = music.join(format!("A{a}"));
+        fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("image.wav");
+        let sheet_paths = [dir.join("image.cue"), dir.join("zz.cue")];
+        let op = roll(15);
+        if unreadable[a] && op <= 7 {
+            continue;
+        }
+        match op {
+            0..=2 => {
+                let length = [0, 800, 1500, 3000, 5000, 8000][roll(6) as usize];
+                if length == 0 {
+                    let _ = fs::remove_file(&image);
+                    albums[a].audio_ms = None;
+                } else {
+                    write_tagged_wav(&image, length as u32, &format!("W{a}"), "Band", "Live");
+                    albums[a].audio_ms = Some(length);
+                }
+                log.push(format!("{step}: A{a} audio {length} ms"));
+            }
+            3..=6 => {
+                // Mostly the first sheet; sometimes a second one for the same file.
+                let which = usize::from(roll(4) == 0);
+                let sheet = match roll(6) {
+                    0 => ModelSheet::None,
+                    1 => ModelSheet::Garbage,
+                    2 => ModelSheet::OtherFile,
+                    _ => {
+                        let mut tracks = Vec::new();
+                        let mut start = roll(3);
+                        for number in 1..=1 + roll(4) as u32 {
+                            tracks.push((number, start));
+                            start += 1 + roll(3);
+                        }
+                        ModelSheet::Tracks(['T', 'Z'][which], tracks)
+                    }
+                };
+                write_model_sheet(&sheet_paths[which], a, &sheet);
+                log.push(format!("{step}: A{a} sheet {which} {sheet:?}"));
+                albums[a].sheets[which] = sheet;
+            }
+            7 => {
+                // A sheet moves to the other name (if that is free).
+                let from = roll(2) as usize;
+                let to = 1 - from;
+                if albums[a].sheets[from] != ModelSheet::None
+                    && albums[a].sheets[to] == ModelSheet::None
+                {
+                    fs::rename(&sheet_paths[from], &sheet_paths[to]).unwrap();
+                    albums[a].sheets[to] =
+                        std::mem::replace(&mut albums[a].sheets[from], ModelSheet::None);
+                    log.push(format!("{step}: A{a} sheet {from} renamed to {to}"));
+                }
+            }
+            8 => {
+                locked = !locked;
+                lock_dir(locked);
+                log.push(format!("{step}: locked folder {locked}"));
+            }
+            14 => {
+                // The first sheet cannot be read for a while (and can again). Only from
+                // a settled library: what an unfinished scan left open (a file not yet
+                // handed over to its sheet's tracks) waits for the sheet to be readable.
+                if matches!(albums[a].sheets[0], ModelSheet::Tracks(..))
+                    && (settled || unreadable[a])
+                {
+                    let mode = if unreadable[a] { 0o644 } else { 0o000 };
+                    fs::set_permissions(&sheet_paths[0], fs::Permissions::from_mode(mode)).unwrap();
+                    unreadable[a] = !unreadable[a] && fs::read(&sheet_paths[0]).is_err();
+                    log.push(format!("{step}: A{a} sheet unreadable {}", unreadable[a]));
+                }
+            }
+            op => {
+                let mut tracks = library.snapshot().tracks.clone();
+                tracks.sort_by(|x, y| x.path.cmp(&y.path));
+                let Some(track) = tracks.get(roll(tracks.len().max(1) as u64) as usize) else {
+                    continue;
+                };
+                match op {
+                    9 | 10 => library.set_favorite(&[track.id], true).unwrap(),
+                    11 => library.add_to_playlist(playlist, &[track.id]).unwrap(),
+                    // (Not the anchor: with no file left that was known, the folder
+                    // would come into doubt, which keeps what is missing on purpose.)
+                    // (Nor a track of a sheet that cannot be read: it cannot be read
+                    // back in until the sheet can.)
+                    12 if track.title != "Anchor"
+                        && !(0..2).any(|a| {
+                            unreadable[a] && track.path.starts_with(music.join(format!("A{a}")))
+                        }) =>
+                    {
+                        library.remove_tracks(&[track.id]);
+                    }
+                    12 => {}
+                    _ => library.set_favorite(&[track.id], false).unwrap(),
+                }
+                log.push(format!("{step}: op {op} on {}", track.path.display()));
+            }
+        }
+
+        rescan(&library);
+        // A scan that could not read the locked folder concludes nothing about what is
+        // gone: what the library holds then is checked once a scan can finish.
+        let incomplete = locked && fs::read_dir(&locked_dir).is_err();
+        settled = !incomplete;
+        if incomplete {
+            continue;
+        }
+        let mut expected: Vec<(String, u64)> = vec![("Anchor".into(), 1000)];
+        for (a, album) in albums.iter().enumerate() {
+            expected.extend(album.expected(a));
+        }
+        expected.sort();
+        let look = |library: &Library| {
+            let snapshot = library.snapshot();
+            let in_playlist: Vec<_> = library
+                .playlist_items(playlist)
+                .into_iter()
+                .map(|item| item.track_id)
+                .collect();
+            let mut available: Vec<(String, u64)> = Vec::new();
+            let mut orphans: Vec<String> = Vec::new();
+            for track in &snapshot.tracks {
+                // (What is kept of a sheet that cannot be read stays until it can be:
+                // nothing is concluded about its tracks meanwhile.)
+                let waits = (0..2)
+                    .any(|a| unreadable[a] && track.path.starts_with(music.join(format!("A{a}"))));
+                if track.available {
+                    available.push((track.title.clone(), track.duration_ms));
+                } else if !track.favorite && !in_playlist.contains(&track.id) && !waits {
+                    orphans.push(track.path.display().to_string());
+                }
+            }
+            available.sort();
+            (available, orphans)
+        };
+        let (available, orphans) = look(&library);
+        let context = || {
+            lock_dir(false);
+            for a in 0..2 {
+                let sheet = music.join(format!("A{a}/image.cue"));
+                let _ = fs::set_permissions(sheet, fs::Permissions::from_mode(0o644));
+            }
+            format!("seed {seed}, after:\n  {}", log.join("\n  "))
+        };
+        assert_eq!(available, expected, "{}", context());
+        assert!(
+            orphans.is_empty(),
+            "kept for nobody: {orphans:?}\n{}",
+            context()
+        );
+        let reads = library.debug_tag_reads();
+        rescan(&library);
+        assert_eq!(
+            library.debug_tag_reads(),
+            reads,
+            "read again: {}",
+            context()
+        );
+        assert_eq!(look(&library).0, expected, "second scan: {}", context());
+    }
+    lock_dir(false);
+    for a in 0..2 {
+        let sheet = music.join(format!("A{a}/image.cue"));
+        let _ = fs::set_permissions(sheet, fs::Permissions::from_mode(0o644));
+    }
+}
+
+/// The file a sheet's tracks now stand for leaves the library, and what the user gave
+/// it goes to them: its places in playlists hold the album's tracks, in their order,
+/// and if it was a favourite, they are.
+#[test]
+fn a_replaced_files_favourite_and_playlists_go_to_the_sheets_tracks() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    write_tagged_wav(
+        &music.join("Other/song.wav"),
+        1000,
+        "Other",
+        "Band",
+        "Other",
+    );
+    let (library, _) = env.open_scanned();
+    let whole = by_title(&library, "Whole");
+    let other = by_title(&library, "Other");
+    library.set_favorite(&[whole.id], true).unwrap();
+    let playlist = library.create_playlist("Mix").unwrap();
+    library
+        .add_to_playlist(playlist, &[other.id, whole.id, other.id])
+        .unwrap();
+
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    rescan(&library);
+    assert_eq!(
+        titles(&library),
+        ["One", "Other", "Two"],
+        "the file is gone"
+    );
+    let (one, two) = (by_title(&library, "One"), by_title(&library, "Two"));
+    assert!(one.favorite && two.favorite);
+    let items: Vec<_> = library
+        .playlist_items(playlist)
+        .into_iter()
+        .map(|item| item.track_id)
+        .collect();
+    assert_eq!(items, [other.id, one.id, two.id, other.id]);
+    assert!(library.snapshot().tracks.iter().all(|t| t.available));
+}
+
+/// Opening the audio file of a sheet in a music folder (from the file manager, say)
+/// opens the sheet's tracks: the file is not added alone, which its scan would undo.
+#[test]
+fn an_opened_sheet_file_is_its_tracks() {
+    let env = TestEnv::new();
+    let music = env.music();
+    let image = music.join("Live/image.wav");
+    write_tagged_wav(&image, 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    let tracks = [by_title(&library, "One").id, by_title(&library, "Two").id];
+    assert_eq!(library.import_files(std::slice::from_ref(&image)), tracks);
+    assert_eq!(titles(&library), ["One", "Two"]);
+    // A playlist naming the file holds the tracks.
+    let list = env.dir.path().join("live.m3u8");
+    fs::write(&list, format!("{}\n", image.display())).unwrap();
+    let imported = library.import_m3u8(&list).unwrap();
+    assert_eq!(imported.matched, 2);
+    assert!(imported.missing.is_empty());
+
+    // Tracks kept while their file was away (they are in that playlist) are available
+    // again when the file is opened, as a known file opened again is.
+    let away = env.dir.path().join("image.wav");
+    fs::rename(&image, &away).unwrap();
+    rescan(&library);
+    assert!(!by_title(&library, "One").available);
+    assert!(!by_title(&library, "Two").available);
+    fs::rename(&away, &image).unwrap();
+    assert_eq!(library.import_files(std::slice::from_ref(&image)), tracks);
+    for id in tracks {
+        assert!(library.track(id).expect("kept").available);
+    }
+}
+
+/// A music folder that is removed takes the record of its sheets with it.
+#[test]
+fn removing_a_folder_forgets_its_sheets() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+    let (library, root) = env.open_scanned();
+    let recorded = || library.kv_get("cue_sheets_read").unwrap_or_default();
+    assert!(recorded().contains("image.cue"));
+    library.remove_folder(root).unwrap();
+    assert!(!recorded().contains("image.cue"), "{}", recorded());
+}
+
+/// A sheet's tracks are in the sheet's folder: with a file beside them of the same
+/// album (no album artist, where the sheet names one) they are one album, in the
+/// library's lists and when shuffling by album.
+#[test]
+fn a_sheet_and_a_file_beside_it_are_one_album() {
+    use oneum::app::host::LibraryHost;
+    use oneum::playback::PlayerHost;
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "PERFORMER \"Band\"\nTITLE \"Live\"\nFILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    write_wav(
+        &music.join("Live/bonus.wav"),
+        1000,
+        &[("INAM", "Bonus"), ("IART", "Band"), ("IPRD", "Live")],
+    );
+    let (library, _) = env.open_scanned();
+    let snapshot = library.snapshot();
+    let bonus = by_title(&library, "Bonus");
+    let one = by_title(&library, "One");
+    assert!(bonus.album_artist.is_empty() && !one.album_artist.is_empty());
+    assert_eq!(snapshot.albums().len(), 1, "one album");
+    let host = LibraryHost::new(library.clone(), || {});
+    assert!(host.has_track(one.id));
+    assert!(!host.has_track(987_654));
+    assert_eq!(host.album_of(one.id), host.album_of(bonus.id));
+}
+
+/// The cover beside a sheet is its tracks' artwork, and comes back when its cache file
+/// is evicted (also when the sheet cannot be read then: the folder is the sheet's).
+#[test]
+fn a_sheets_folder_cover_is_regenerated() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    write_png(&music.join("Live/cover.png"), 50, 50);
+    let sheet_path = music.join("Live/image.cue");
+    fs::write(
+        &sheet_path,
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+    let (library, _) = env.open_scanned();
+    let art_id = by_title(&library, "One")
+        .art_id
+        .clone()
+        .expect("the folder's cover");
+    let path = library.art_path(&art_id);
+    assert!(path.is_file());
+    for sheet_readable in [true, false] {
+        if !sheet_readable {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sheet_path, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        fs::remove_file(&path).unwrap();
+        assert!(library.load_art_rgba(&art_id, 96).is_none());
+        wait_until("artwork regeneration", TIMEOUT, || path.is_file());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&sheet_path, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// What was found out about a sheet's tracks (the file check here; the loudness
+/// measurement the same way) stays when only names in the sheet change, and goes for a
+/// track whose stretch of the file moves. Which sheets were read is kept across a
+/// restart: an unchanged sheet is not read again then.
+#[test]
+fn a_sheet_edit_keeps_what_was_measured_of_unmoved_tracks() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 6000, "Whole", "Band", "Live");
+    let sheet_path = music.join("Live/image.cue");
+    let sheet = |second_title: &str, third_start: &str| {
+        format!(
+            "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+             \x20 TRACK 02 AUDIO\n    TITLE \"{second_title}\"\n    INDEX 01 00:02:00\n\
+             \x20 TRACK 03 AUDIO\n    TITLE \"Three\"\n    INDEX 01 {third_start}\n"
+        )
+    };
+    fs::write(&sheet_path, sheet("Two", "00:04:00")).unwrap();
+    {
+        let (library, _) = env.open_scanned();
+        assert_eq!(titles(&library), ["One", "Three", "Two"]);
+        assert!(library.check_files());
+        assert!(library.wait_for_checks(Duration::from_secs(60)));
+        assert!(library.snapshot().tracks.iter().all(|t| t.check.is_some()));
+        library.shutdown();
+    }
+
+    // Reopened: the sheet is known to be read, nothing is read again.
+    let (library, _) = Library::open(env.paths()).unwrap();
+    rescan(&library);
+    assert_eq!(
+        library.debug_tag_reads(),
+        0,
+        "nothing read again after a restart"
+    );
+    let one = by_title(&library, "One");
+
+    // Only a title changes: the names are read again, the results stay.
+    fs::write(&sheet_path, sheet("Second", "00:04:00")).unwrap();
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), 1, "the sheet's file read once");
+    assert_eq!(titles(&library), ["One", "Second", "Three"]);
+    assert!(
+        library.snapshot().tracks.iter().all(|t| t.check.is_some()),
+        "a title change keeps what was found out"
+    );
+    assert_eq!(by_title(&library, "One").mtime_ns, one.mtime_ns);
+
+    // The third track starts later: tracks two and three have other stretches now.
+    fs::write(&sheet_path, sheet("Second", "00:05:00")).unwrap();
+    rescan(&library);
+    assert!(
+        by_title(&library, "One").check.is_some(),
+        "track one did not move"
+    );
+    assert!(by_title(&library, "Second").check.is_none());
+    assert!(by_title(&library, "Three").check.is_none());
 }

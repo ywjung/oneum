@@ -4,16 +4,257 @@
 //! What Windows does differently, and what is not implemented there:
 //! - The menu bar is drawn inside the window (`ui::menubar`); there is no system menu.
 //! - Closing the window quits (there is no Dock icon to bring a hidden window back).
-//! - Files are handed to the app on its command line (Explorer's "Open with").
-//! - Media keys and the system's media overlay are not connected.
+//! - Files are handed to the app on its command line (Explorer's "Open with"). A second
+//!   start hands its files to the window that is already open and ends (`app_hooks`).
+//! - Media keys and the system's media overlay go through the System Media Transport
+//!   Controls of the main window (`nowplaying`).
 //! - The output device is always used in shared mode at the rate Windows runs it at:
 //!   exclusive access and sample-rate matching are macOS features (`DEVICE_CONTROL`).
 
 use std::path::{Path, PathBuf};
 
-/// Runs `f` "on the main thread". Nothing on Windows needs that thread, so it runs here.
+/// Runs `f` on the main thread soon (from any thread): it is handed to a hidden window
+/// of that thread (see `hidden`). Without that window it runs here.
 pub fn run_on_main(f: impl FnOnce() + Send + 'static) {
-    f();
+    hidden::run_on_main(Box::new(f));
+}
+
+/// A hidden message-only window on the main thread. It runs work handed to the main
+/// thread, and it is how a second start of the app finds the first one: the second
+/// sends its files there (`WM_COPYDATA`) and ends once the first has acknowledged them.
+mod hidden {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    type Hwnd = isize;
+    type Job = Box<dyn FnOnce() + Send>;
+
+    #[repr(C)]
+    struct WndClassW {
+        style: u32,
+        wnd_proc: unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize,
+        cls_extra: i32,
+        wnd_extra: i32,
+        instance: isize,
+        icon: isize,
+        cursor: isize,
+        background: isize,
+        menu_name: *const u16,
+        class_name: *const u16,
+    }
+
+    #[repr(C)]
+    struct CopyData {
+        data: usize,
+        len: u32,
+        ptr: *const u8,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn RegisterClassW(class: *const WndClassW) -> u16;
+        fn CreateWindowExW(
+            ex_style: u32,
+            class: *const u16,
+            name: *const u16,
+            style: u32,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            parent: Hwnd,
+            menu: isize,
+            instance: isize,
+            param: *mut core::ffi::c_void,
+        ) -> Hwnd;
+        fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
+        fn FindWindowExW(parent: Hwnd, after: Hwnd, class: *const u16, name: *const u16) -> Hwnd;
+        fn SendMessageTimeoutW(
+            hwnd: Hwnd,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+            flags: u32,
+            timeout_ms: u32,
+            result: *mut usize,
+        ) -> isize;
+        fn AllowSetForegroundWindow(process: u32) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> isize;
+    }
+
+    const HWND_MESSAGE: Hwnd = -3;
+    const WM_APP: u32 = 0x8000;
+    const WM_COPYDATA: u32 = 0x004A;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    const ASFW_ANY: u32 = u32::MAX;
+    /// Marks the files message, and what the receiving app answers to it.
+    const OPEN_FILES: usize = 0x4F50_454E;
+    const RECEIVED: isize = 0x004F_4E45;
+    const CLASS: &str = "OnEumMessageWindow";
+
+    static WINDOW: AtomicIsize = AtomicIsize::new(0);
+    static JOBS: Mutex<Vec<Job>> = Mutex::new(Vec::new());
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// The window's name: one per data folder, so that test profiles (`ONEUM_DATA_DIR`)
+    /// run side by side with the user's app.
+    fn window_name() -> String {
+        let folder = std::env::var("ONEUM_DATA_DIR").unwrap_or_default();
+        format!("OnEum {:016x}", crate::library::fnv1a64(folder.as_bytes()))
+    }
+
+    pub(super) fn run_on_main(job: Job) {
+        let window = WINDOW.load(Ordering::Acquire);
+        if window == 0 {
+            job();
+            return;
+        }
+        JOBS.lock().unwrap_or_else(|e| e.into_inner()).push(job);
+        // SAFETY: plain message to a window of this process; no pointers are passed.
+        if unsafe { PostMessageW(window, WM_APP, 0, 0) } == 0 {
+            // Not posted: run what is waiting here rather than never.
+            let jobs = std::mem::take(&mut *JOBS.lock().unwrap_or_else(|e| e.into_inner()));
+            for job in jobs {
+                job();
+            }
+        }
+    }
+
+    unsafe extern "system" fn window_proc(
+        hwnd: Hwnd,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        match msg {
+            WM_APP => {
+                let jobs = std::mem::take(&mut *JOBS.lock().unwrap_or_else(|e| e.into_inner()));
+                for job in jobs {
+                    // A panic must not cross into the system's code (that aborts).
+                    let _ = crate::app::panics::catch(job);
+                }
+                0
+            }
+            WM_COPYDATA if lparam != 0 => {
+                // SAFETY: for WM_COPYDATA the system passes a valid COPYDATASTRUCT whose
+                // buffer lives until this call returns.
+                let data = unsafe { &*(lparam as *const CopyData) };
+                if data.data != OPEN_FILES || data.ptr.is_null() {
+                    return 0;
+                }
+                let bytes = unsafe { std::slice::from_raw_parts(data.ptr, data.len as usize) };
+                let units: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| u16::from_le_bytes(*b))
+                    .collect();
+                let paths: Vec<PathBuf> = units
+                    .split(|&u| u == 0)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| PathBuf::from(String::from_utf16_lossy(part)))
+                    .collect();
+                let _ = crate::app::panics::catch(|| {
+                    super::app_hooks::receive(paths);
+                    super::window::bring_to_front();
+                });
+                RECEIVED
+            }
+            // SAFETY: the default handling for everything else, with the same arguments.
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        }
+    }
+
+    /// Hands `paths` to an OnEum that is open already. True if one took them.
+    pub(super) fn hand_to_running(paths: &[PathBuf]) -> bool {
+        let (class, name) = (wide(CLASS), wide(&window_name()));
+        // SAFETY: NUL-terminated strings that outlive the call.
+        let other = unsafe { FindWindowExW(HWND_MESSAGE, 0, class.as_ptr(), name.as_ptr()) };
+        if other == 0 {
+            return false;
+        }
+        let mut payload: Vec<u16> = Vec::new();
+        for path in paths {
+            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+            payload.extend(absolute.to_string_lossy().encode_utf16());
+            payload.push(0);
+        }
+        payload.push(0);
+        let data = CopyData {
+            data: OPEN_FILES,
+            len: (payload.len() * 2) as u32,
+            ptr: payload.as_ptr().cast(),
+        };
+        let mut answer: usize = 0;
+        // SAFETY: `data` and `payload` live until the call returns (the system copies
+        // them to the other process); the answer goes to a local.
+        let sent = unsafe {
+            // The running app may then bring its window to the front.
+            AllowSetForegroundWindow(ASFW_ANY);
+            SendMessageTimeoutW(
+                other,
+                WM_COPYDATA,
+                0,
+                (&raw const data) as isize,
+                SMTO_ABORTIFHUNG,
+                5_000,
+                &mut answer,
+            )
+        };
+        sent != 0 && answer as isize == RECEIVED
+    }
+
+    /// Creates the window (on the main thread, before the event loop starts).
+    pub(super) fn create() {
+        let (class, name) = (wide(CLASS), wide(&window_name()));
+        // SAFETY: the class structure and the strings outlive the calls; the window
+        // procedure is a plain function of this program.
+        unsafe {
+            let instance = GetModuleHandleW(std::ptr::null());
+            let wc = WndClassW {
+                style: 0,
+                wnd_proc: window_proc,
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance,
+                icon: 0,
+                cursor: 0,
+                background: 0,
+                menu_name: std::ptr::null(),
+                class_name: class.as_ptr(),
+            };
+            RegisterClassW(&wc);
+            let window = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                name.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                0,
+                instance,
+                std::ptr::null_mut(),
+            );
+            if window == 0 {
+                tracing::warn!(
+                    "no message window: work for the main thread runs where it is handed over"
+                );
+            }
+            WINDOW.store(window, Ordering::Release);
+        }
+    }
 }
 
 /// Lets `duration` pass on the main thread (the counterpart of the macOS run loop pump:
@@ -98,33 +339,48 @@ pub fn fatal_alert(title: &str, body: &str) {
 
 pub mod app_hooks {
     use super::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
 
-    static OPENED: Mutex<Option<Vec<PathBuf>>> = Mutex::new(None);
+    static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static WAKER: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
     /// Remembers the files the app was started with (double-click, "Open with", a file
-    /// dropped on the program).
+    /// dropped on the program). If OnEum is open already, they go to it and this start
+    /// ends here; otherwise this one becomes the one that later starts hand files to.
     pub fn install_before_launch() {
         let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-        if let Ok(mut opened) = OPENED.lock() {
-            *opened = Some(paths);
+        if super::hidden::hand_to_running(&paths) {
+            std::process::exit(0);
         }
+        super::hidden::create();
+        receive(paths);
     }
 
     pub fn install_now() -> bool {
         true
     }
 
-    /// Nothing arrives later on Windows, so there is nothing to wake the UI for.
-    pub fn set_waker(_waker: impl Fn() + Send + Sync + 'static) {}
+    /// `waker` is called when files arrive from another start of the app.
+    pub fn set_waker(waker: impl Fn() + Send + Sync + 'static) {
+        let _ = WAKER.set(Box::new(waker));
+    }
+
+    pub(super) fn receive(paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        OPENED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(paths);
+        if let Some(wake) = WAKER.get() {
+            wake();
+        }
+    }
 
     /// The files to open, once.
     pub fn take_opened_paths() -> Vec<PathBuf> {
-        OPENED
-            .lock()
-            .ok()
-            .and_then(|mut opened| opened.take())
-            .unwrap_or_default()
+        std::mem::take(&mut *OPENED.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -148,6 +404,36 @@ pub mod finder {
         }
         // Explorer returns a non-zero status even when it worked; starting it is enough.
         explorer.spawn().is_ok()
+    }
+
+    /// `DRIVE_REMOTE` of `GetDriveTypeW`.
+    const DRIVE_REMOTE: u32 = 4;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetDriveTypeW(root_path_name: *const u16) -> u32;
+    }
+
+    /// Whether `path` is on a drive of this computer rather than on a network share.
+    /// `None` if that cannot be told from the path.
+    pub fn is_on_local_volume(path: &Path) -> Option<bool> {
+        use std::path::{Component, Prefix};
+        let prefix = match path.components().next()? {
+            Component::Prefix(prefix) => prefix.kind(),
+            _ => return None,
+        };
+        let letter = match prefix {
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) => return Some(false),
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => letter,
+            _ => return None,
+        };
+        let root: Vec<u16> = [letter, b':', b'\\', 0]
+            .iter()
+            .map(|&b| u16::from(b))
+            .collect();
+        // SAFETY: `root` is a NUL-terminated wide string that outlives the call.
+        let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
+        Some(kind != DRIVE_REMOTE)
     }
 }
 
@@ -217,15 +503,126 @@ pub mod nowplaying {
         pub art_path: Option<PathBuf>,
     }
 
-    /// Media keys and the system media overlay are not connected on Windows.
-    pub struct MediaSession;
+    use std::sync::Arc;
+    use windows::Foundation::{TimeSpan, TypedEventHandler};
+    use windows::Media::{
+        MediaPlaybackStatus, MediaPlaybackType, PlaybackPositionChangeRequestedEventArgs,
+        SystemMediaTransportControls, SystemMediaTransportControlsButton,
+        SystemMediaTransportControlsButtonPressedEventArgs,
+        SystemMediaTransportControlsTimelineProperties,
+    };
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
+    use windows::core::{HSTRING, Ref};
+
+    /// The System Media Transport Controls of the main window: the media keys of the
+    /// keyboard and the media overlay of Windows. Without a main window (or where the
+    /// system refuses them) there are none and nothing happens.
+    pub struct MediaSession {
+        controls: Option<SystemMediaTransportControls>,
+    }
 
     impl MediaSession {
-        pub fn install(_send: impl Fn(RemoteCommand) + Send + Sync + 'static) -> Self {
-            Self
+        pub fn install(send: impl Fn(RemoteCommand) + Send + Sync + 'static) -> Self {
+            let controls = super::window::main_window().and_then(|hwnd| {
+                open(hwnd, Arc::new(send))
+                    .inspect_err(
+                        |e| tracing::warn!(error = %e, "Windows media controls are unavailable"),
+                    )
+                    .ok()
+            });
+            Self { controls }
         }
 
-        pub fn update(&mut self, _info: Option<&NowPlayingInfo>) {}
+        pub fn update(&mut self, info: Option<&NowPlayingInfo>) {
+            if let Some(controls) = &self.controls
+                && let Err(e) = show(controls, info)
+            {
+                tracing::debug!(error = %e, "could not update the Windows media controls");
+            }
+        }
+    }
+
+    fn open(
+        hwnd: isize,
+        send: Arc<dyn Fn(RemoteCommand) + Send + Sync>,
+    ) -> windows::core::Result<SystemMediaTransportControls> {
+        let interop = windows::core::factory::<
+            SystemMediaTransportControls,
+            ISystemMediaTransportControlsInterop,
+        >()?;
+        // SAFETY: `hwnd` is the main window of this process, alive while the app runs.
+        let controls: SystemMediaTransportControls =
+            unsafe { interop.GetForWindow(HWND(hwnd as *mut core::ffi::c_void)) }?;
+        controls.SetIsEnabled(true)?;
+        controls.SetIsPlayEnabled(true)?;
+        controls.SetIsPauseEnabled(true)?;
+        controls.SetIsStopEnabled(true)?;
+        controls.SetIsNextEnabled(true)?;
+        controls.SetIsPreviousEnabled(true)?;
+        let on_button = send.clone();
+        controls.ButtonPressed(&TypedEventHandler::new(
+            move |_: Ref<SystemMediaTransportControls>,
+                  args: Ref<SystemMediaTransportControlsButtonPressedEventArgs>| {
+                let command = match args.ok()?.Button()? {
+                    SystemMediaTransportControlsButton::Play => RemoteCommand::Play,
+                    SystemMediaTransportControlsButton::Pause => RemoteCommand::Pause,
+                    SystemMediaTransportControlsButton::Stop => RemoteCommand::Stop,
+                    SystemMediaTransportControlsButton::Next => RemoteCommand::Next,
+                    SystemMediaTransportControlsButton::Previous => RemoteCommand::Previous,
+                    _ => return Ok(()),
+                };
+                on_button(command);
+                Ok(())
+            },
+        ))?;
+        controls.PlaybackPositionChangeRequested(&TypedEventHandler::new(
+            move |_: Ref<SystemMediaTransportControls>,
+                  args: Ref<PlaybackPositionChangeRequestedEventArgs>| {
+                let at = args.ok()?.RequestedPlaybackPosition()?;
+                send(RemoteCommand::Seek(
+                    at.Duration.max(0) as f64 / 10_000_000.0,
+                ));
+                Ok(())
+            },
+        ))?;
+        Ok(controls)
+    }
+
+    /// Seconds as a WinRT time span (units of 100 ns).
+    fn span(seconds: f64) -> TimeSpan {
+        TimeSpan {
+            Duration: (seconds.max(0.0) * 10_000_000.0) as i64,
+        }
+    }
+
+    fn show(
+        controls: &SystemMediaTransportControls,
+        info: Option<&NowPlayingInfo>,
+    ) -> windows::core::Result<()> {
+        let Some(info) = info else {
+            controls.SetPlaybackStatus(MediaPlaybackStatus::Stopped)?;
+            return controls.DisplayUpdater()?.ClearAll();
+        };
+        controls.SetPlaybackStatus(if info.playing {
+            MediaPlaybackStatus::Playing
+        } else {
+            MediaPlaybackStatus::Paused
+        })?;
+        let updater = controls.DisplayUpdater()?;
+        updater.SetType(MediaPlaybackType::Music)?;
+        let music = updater.MusicProperties()?;
+        music.SetTitle(&HSTRING::from(info.title.as_str()))?;
+        music.SetArtist(&HSTRING::from(info.artist.as_str()))?;
+        music.SetAlbumTitle(&HSTRING::from(info.album.as_str()))?;
+        updater.Update()?;
+        let timeline = SystemMediaTransportControlsTimelineProperties::new()?;
+        timeline.SetStartTime(span(0.0))?;
+        timeline.SetMinSeekTime(span(0.0))?;
+        timeline.SetEndTime(span(info.duration_s))?;
+        timeline.SetMaxSeekTime(span(info.duration_s))?;
+        timeline.SetPosition(span(info.position_s))?;
+        controls.UpdateTimelineProperties(&timeline)
     }
 }
 
@@ -263,6 +660,46 @@ pub mod responder {
     }
 }
 
+pub mod system {
+    /// `MEMORYSTATUSEX` of `GlobalMemoryStatusEx`.
+    #[repr(C)]
+    struct MemoryStatus {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatus) -> i32;
+    }
+
+    /// Installed memory in bytes.
+    pub fn physical_memory_bytes() -> Option<u64> {
+        let mut status = MemoryStatus {
+            length: std::mem::size_of::<MemoryStatus>() as u32,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        // SAFETY: `status` is a `MEMORYSTATUSEX` with its length set, as the function
+        // requires; it only writes into it.
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        (ok != 0 && status.total_phys > 0).then_some(status.total_phys)
+    }
+}
+
 pub mod testing {
     //! The scripted-verification helpers that drive macOS itself have no counterpart.
 
@@ -289,7 +726,43 @@ pub mod testing {
 
 pub mod window {
     //! The window is never hidden on Windows (closing it quits), so there is nothing to
-    //! hide or bring back.
+    //! hide or bring back. Its handle is kept for the media controls and for bringing it
+    //! to the front when another start of the app hands files over.
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    static MAIN: AtomicIsize = AtomicIsize::new(0);
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetForegroundWindow(hwnd: isize) -> i32;
+        fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+        fn IsIconic(hwnd: isize) -> i32;
+    }
+    const SW_RESTORE: i32 = 9;
+
+    /// Remembers the main window (called once it exists).
+    pub fn remember_main_window(handle: winit::raw_window_handle::RawWindowHandle) {
+        if let winit::raw_window_handle::RawWindowHandle::Win32(h) = handle {
+            MAIN.store(h.hwnd.get(), Ordering::Release);
+        }
+    }
+
+    pub(super) fn main_window() -> Option<isize> {
+        Some(MAIN.load(Ordering::Acquire)).filter(|h| *h != 0)
+    }
+
+    /// Restores the main window if minimised and brings it to the front.
+    pub(super) fn bring_to_front() {
+        if let Some(hwnd) = main_window() {
+            // SAFETY: a window handle of this process; the calls only change its state.
+            unsafe {
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
+                }
+                SetForegroundWindow(hwnd);
+            }
+        }
+    }
 
     pub fn hide_main_window() {}
 

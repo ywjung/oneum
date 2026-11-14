@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn the_builtin_profiles_are_what_the_source_says() {
         let sections = builtin_sections(BUILTIN_TEXT);
-        assert_eq!(sections.len(), 33);
+        assert_eq!(sections.len(), 34);
         assert_eq!(builtin_profiles().len(), sections.len(), "every one parses");
         let mut names = std::collections::HashSet::new();
         for ((name, text), profile) in sections.iter().zip(builtin_profiles()) {
