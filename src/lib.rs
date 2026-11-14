@@ -1,4 +1,4 @@
-//! OnEum — a local music player for macOS.
+//! OnEum — a local music player for macOS, Windows and the iPhone.
 //!
 //! Module responsibilities are described in `docs/ARCHITECTURE.md`.
 pub mod app;

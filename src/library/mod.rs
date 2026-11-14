@@ -1224,12 +1224,39 @@ impl Library {
     /// Opens (or creates) the library. Loads all tracks and builds the first snapshot
     /// before returning; no scan is started.
     pub fn open(paths: LibraryPaths) -> Result<(Arc<Library>, OpenReport), LibraryError> {
+        Self::open_with_home(paths, None)
+    }
+
+    /// [`Library::open`] where the music lies in a folder that moves (`home`: the
+    /// container of an iPhone app, which is given another path when the app is updated
+    /// or restored). The library's paths below the folder it was in last time are
+    /// brought along to where it is now before anything is read.
+    pub fn open_in_home(
+        paths: LibraryPaths,
+        home: &Path,
+    ) -> Result<(Arc<Library>, OpenReport), LibraryError> {
+        Self::open_with_home(paths, Some(home))
+    }
+
+    fn open_with_home(
+        paths: LibraryPaths,
+        home: Option<&Path>,
+    ) -> Result<(Arc<Library>, OpenReport), LibraryError> {
         fs::create_dir_all(&paths.data_dir)?;
         if let Err(err) = fs::create_dir_all(&paths.cache_dir) {
             tracing::warn!(%err, "could not create the cache directory; artwork is disabled");
         }
         let opened = Db::open(&paths.data_dir.join(DB_FILE_NAME))?;
-        let db = opened.db;
+        let mut db = opened.db;
+        if let Some(home) = home {
+            let moved = db.follow_home(home, SHEETS_READ_KEY)?;
+            if moved > 0 {
+                tracing::info!(
+                    moved,
+                    "the library's folder has moved: its paths were brought along"
+                );
+            }
+        }
         let report = OpenReport {
             recovered_corrupt_db: opened.recovered_corrupt_db,
             migrated_from: opened.migrated_from,

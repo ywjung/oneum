@@ -13,6 +13,8 @@
 | 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
+| iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`, Xcode 프로젝트로 기기용 릴리스 빌드(서명 제외) |
+| iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기**. TestFlight·App Store는 범위 밖 |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
 

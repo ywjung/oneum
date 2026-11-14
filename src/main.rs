@@ -1,4 +1,4 @@
-//! OnEum — a local music player for macOS and Windows.
+//! OnEum — a local music player for macOS, Windows and the iPhone.
 // A Windows GUI program: no console window behind it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 use eframe::egui;

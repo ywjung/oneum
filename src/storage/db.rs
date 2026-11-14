@@ -1111,6 +1111,77 @@ impl Db {
         Ok(())
     }
 
+    /// Follows the folder the library lives in when it has moved.
+    ///
+    /// An iPhone app's container is given another path when the app is updated or
+    /// restored from a backup: what was `…/Application/A/Documents/Album` is then
+    /// `…/Application/B/Documents/Album`. The paths in the database are absolute, so
+    /// without this every song would be a file that is gone. `home` is that folder as
+    /// it is now. If it is not the one this was last called with, every path below the
+    /// old one is rewritten to lie below the new one: music folders, tracks, and the
+    /// record of read CUE sheets (the JSON under `sheets_key`, a list of pairs keyed by
+    /// path). Paths elsewhere are left alone. All of it happens or none of it.
+    ///
+    /// Returns how many paths were rewritten (0 the first time and whenever the folder
+    /// is where it was).
+    pub fn follow_home(&mut self, home: &Path, sheets_key: &str) -> SqlResult<usize> {
+        // A folder whose name is not text cannot be remembered in `kv`: left alone.
+        let Some(now) = home.to_str().map(|h| h.trim_end_matches('/').to_string()) else {
+            return Ok(0);
+        };
+        if now.is_empty() {
+            return Ok(0);
+        }
+        let before = self.kv_get(HOME_KEY)?;
+        let Some(before) = before.filter(|before| *before != now) else {
+            self.kv_set(HOME_KEY, &now)?;
+            return Ok(0);
+        };
+        // What follows `before` in a path below it (or nothing, for the folder itself).
+        let below = |path: &[u8]| -> Option<Vec<u8>> {
+            let rest = path.strip_prefix(before.as_bytes())?;
+            (rest.is_empty() || rest[0] == b'/').then(|| [now.as_bytes(), rest].concat())
+        };
+        let tx = self.conn.transaction()?;
+        let mut moved = 0;
+        for table in ["roots", "tracks"] {
+            let rows: Vec<(i64, Vec<u8>)> = tx
+                .prepare(&format!("SELECT id, path FROM {table}"))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<SqlResult<_>>()?;
+            let mut update = tx.prepare(&format!("UPDATE {table} SET path = ?2 WHERE id = ?1"))?;
+            for (id, path) in rows {
+                if let Some(path) = below(&path) {
+                    update.execute(params![id, path])?;
+                    moved += 1;
+                }
+            }
+        }
+        let sheets: Option<String> = tx
+            .query_row(
+                "SELECT value FROM kv WHERE key = ?1",
+                params![sheets_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(mut records) = sheets
+            .and_then(|json| serde_json::from_str::<Vec<(String, serde_json::Value)>>(&json).ok())
+        {
+            for (key, _) in &mut records {
+                if let Some(path) = below(key.as_bytes()).and_then(|p| String::from_utf8(p).ok()) {
+                    *key = path;
+                    moved += 1;
+                }
+            }
+            if let Ok(json) = serde_json::to_string(&records) {
+                tx.execute(KV_UPSERT_SQL, params![sheets_key, json])?;
+            }
+        }
+        tx.execute(KV_UPSERT_SQL, params![HOME_KEY, now])?;
+        tx.commit()?;
+        Ok(moved)
+    }
+
     /// Saves the playback session in one transaction: the play queue when `queue` is
     /// given (it replaces the saved one; entries whose track does not exist are
     /// skipped), and the rest of the session as `value` under `key`. Both are written or
@@ -1335,6 +1406,9 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     name.push(suffix);
     PathBuf::from(name)
 }
+
+/// The `kv` key of the folder the library moves with (see [`Db::follow_home`]).
+const HOME_KEY: &str = "home";
 
 fn path_to_blob(path: &Path) -> std::borrow::Cow<'_, [u8]> {
     crate::platform::path_to_bytes(path)

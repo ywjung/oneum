@@ -66,6 +66,14 @@ impl AppPaths {
         Ok(paths)
     }
 
+    /// The folder the music is in on an iPhone: the Documents folder of the app's
+    /// container, which the Files app shows as "On My iPhone › OnEum" and Finder shows
+    /// when the phone is connected. `None` if the container cannot be told.
+    pub fn phone_music_dir() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME").filter(|v| !v.is_empty())?;
+        Some(PathBuf::from(home).join("Documents"))
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.data_dir.join("settings.json")
     }

@@ -3419,3 +3419,91 @@ fn a_sheet_edit_keeps_what_was_measured_of_unmoved_tracks() {
     assert!(by_title(&library, "Second").check.is_none());
     assert!(by_title(&library, "Three").check.is_none());
 }
+
+/// An iPhone app's container is given another path when the app is updated or restored
+/// from a backup, and the music in it moves with it. The library follows: the same
+/// songs, with what is known about them, at the paths they have now; nothing is read
+/// again, and what lies outside the container is left where it is.
+#[test]
+fn a_library_follows_its_folder_when_that_moves() {
+    use oneum::library::LibraryPaths;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = |home: &Path| LibraryPaths {
+        data_dir: home.join("Library/data"),
+        cache_dir: home.join("Library/cache"),
+    };
+    let before = dir.path().join("Application/A");
+    let music = before.join("Documents");
+    write_tagged_wav(&music.join("Album/one.wav"), 1000, "One", "Band", "Album");
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Second\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    let outside = dir.path().join("elsewhere/loose.wav");
+    write_tagged_wav(&outside, 1000, "Loose", "Band", "Singles");
+
+    let (ids, playlist, loose) = {
+        let (library, _) = Library::open_in_home(paths(&before), &before).unwrap();
+        library.add_folder(&music).unwrap();
+        wait_scan(&library);
+        assert_eq!(
+            library.import_files(std::slice::from_ref(&outside)).len(),
+            1
+        );
+        assert_eq!(titles(&library), ["First", "Loose", "One", "Second"]);
+        let ids: Vec<_> = ["One", "First", "Second", "Loose"]
+            .iter()
+            .map(|title| by_title(&library, title).id)
+            .collect();
+        library.set_favorite(&ids[..1], true).unwrap();
+        let playlist = library.create_playlist("Mix").unwrap();
+        library.add_to_playlist(playlist, &ids).unwrap();
+        let loose = by_title(&library, "Loose").path.clone();
+        library.shutdown();
+        (ids, playlist, loose)
+    };
+
+    let after = dir.path().join("Application/B");
+    fs::rename(&before, &after).unwrap();
+    let (library, _) = Library::open_in_home(paths(&after), &after).unwrap();
+    // As it is opened, before anything is scanned: the songs are where the files are.
+    let snapshot = library.snapshot();
+    for (title, id) in ["One", "First", "Second", "Loose"].iter().zip(&ids) {
+        let track = snapshot
+            .get(*id)
+            .unwrap_or_else(|| panic!("{title} is gone"));
+        assert_eq!(&track.title, title);
+        assert!(track.available, "{title} is not available");
+        assert!(track.file().exists(), "{}", track.path.display());
+    }
+    assert!(snapshot.get(ids[0]).unwrap().path.starts_with(&after));
+    assert_eq!(
+        snapshot.get(ids[3]).unwrap().path,
+        loose,
+        "left where it is"
+    );
+    assert!(snapshot.get(ids[0]).unwrap().favorite);
+    let roots = library.roots();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].path, after.join("Documents"));
+
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), 0, "nothing is read again");
+    assert_eq!(titles(&library), ["First", "Loose", "One", "Second"]);
+    let items: Vec<_> = library
+        .playlist_items(playlist)
+        .into_iter()
+        .map(|item| item.track_id)
+        .collect();
+    assert_eq!(items, ids);
+
+    // Opened again where it is: nothing to follow.
+    library.shutdown();
+    let (library, _) = Library::open_in_home(paths(&after), &after).unwrap();
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), 0);
+    assert_eq!(library.snapshot().len(), 4);
+}

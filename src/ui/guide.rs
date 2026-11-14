@@ -14,6 +14,9 @@ use std::sync::OnceLock;
 
 const GUIDE_KO: &str = include_str!("../../docs/USER_GUIDE.md");
 const GUIDE_EN: &str = include_str!("../../docs/USER_GUIDE.en.md");
+/// The guide to the phone screens, shown in the iPhone app instead of the one above.
+const PHONE_GUIDE_KO: &str = include_str!("../../docs/USER_GUIDE_IOS.md");
+const PHONE_GUIDE_EN: &str = include_str!("../../docs/USER_GUIDE_IOS.en.md");
 /// What is different on Windows; put in front of the second section there.
 const WINDOWS_NOTES_KO: &str = include_str!("../../docs/USER_GUIDE_WINDOWS.md");
 const WINDOWS_NOTES_EN: &str = include_str!("../../docs/USER_GUIDE_WINDOWS.en.md");
@@ -64,7 +67,21 @@ fn guide(lang: Lang) -> &'static [Block] {
         Lang::Ko => &KO,
         Lang::En => &EN,
     };
-    cell.get_or_init(|| parse(&guide_markdown(lang, cfg!(windows))))
+    cell.get_or_init(|| {
+        if crate::platform::PHONE {
+            parse(phone_guide_markdown(lang))
+        } else {
+            parse(&guide_markdown(lang, cfg!(windows)))
+        }
+    })
+}
+
+/// The guide to the phone screens as Markdown, in `lang`.
+pub(super) fn phone_guide_markdown(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Ko => PHONE_GUIDE_KO,
+        Lang::En => PHONE_GUIDE_EN,
+    }
 }
 
 /// Section headings of the guide in `lang`, in order (for the contents column and for
@@ -261,7 +278,7 @@ impl OneumApp {
     }
 
     /// The text of the guide. `jump` scrolls to section `n` (1-based).
-    fn guide_body(&self, ui: &mut egui::Ui, jump: Option<usize>) {
+    pub(super) fn guide_body(&self, ui: &mut egui::Ui, jump: Option<usize>) {
         markdown::show(ui, guide(self.lang), LOOK, |ui, section| {
             if jump == Some(section) {
                 ui.scroll_to_cursor(Some(Align::TOP));
@@ -411,6 +428,61 @@ mod tests {
                 assert!(all.contains(needle), "{needle} is missing in {lang:?}");
             }
         }
+    }
+
+    /// The guide to the phone screens is understood in full (nothing of the markup is
+    /// left in what is shown), and the English one tells what the Korean one does:
+    /// the same sections, with as many points in each.
+    #[test]
+    fn the_phone_guides_are_understood_and_tell_the_same() {
+        let outline = |lang: Lang| -> Vec<usize> {
+            let mut sections: Vec<usize> = Vec::new();
+            for block in parse(phone_guide_markdown(lang)) {
+                match block {
+                    Block::Heading(_) => sections.push(0),
+                    Block::Item { .. } => {
+                        if let Some(last) = sections.last_mut() {
+                            *last += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            sections
+        };
+        for (lang, needles) in [
+            (Lang::Ko, ["나의 iPhone", "플레이리스트", "잠금 화면"]),
+            (Lang::En, ["On My iPhone", "Playlists", "lock screen"]),
+        ] {
+            let blocks = parse(phone_guide_markdown(lang));
+            let titles = blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Title(_)))
+                .count();
+            assert_eq!(titles, 1);
+            assert!(headings(&blocks).len() >= 7, "{lang:?}");
+            let mut texts: Vec<String> = Vec::new();
+            for block in &blocks {
+                match block {
+                    Block::Title(t) | Block::Heading(t) => texts.push(t.clone()),
+                    Block::Paragraph(s) | Block::Item { text: s, .. } => texts.push(plain(s)),
+                    Block::Table { .. } => panic!("the phone guide has no tables"),
+                }
+            }
+            for text in &texts {
+                assert!(!text.trim().is_empty(), "empty block");
+                assert!(
+                    !text.contains("**") && !text.contains('`') && !text.starts_with('#'),
+                    "markup left in: {text}"
+                );
+                assert!(!text.starts_with("- "), "{text}");
+            }
+            let all = texts.join("\n");
+            for needle in needles {
+                assert!(all.contains(needle), "{needle} is missing in {lang:?}");
+            }
+        }
+        assert_eq!(outline(Lang::En), outline(Lang::Ko));
     }
 
     /// The two guides tell the same thing: the same sections in the same order, and

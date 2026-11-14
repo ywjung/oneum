@@ -1,19 +1,26 @@
 //! System media integration: Now Playing info and remote commands (media keys, Control
-//! Center, headphones). Handlers only forward a [`RemoteCommand`]; the caller routes it to
-//! the same player channel the GUI uses.
+//! Center, the lock screen of an iPhone, headphones). Handlers only forward a
+//! [`RemoteCommand`]; the caller routes it to the same player channel the GUI uses.
+//!
+//! The same on macOS and iOS but for two things: the image type of the cover, and the
+//! playback state, which only macOS is told (iOS takes it from the audio session).
 use block2::RcBlock;
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::NSImage;
-use objc2_foundation::{NSMutableDictionary, NSNumber, NSSize, NSString};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSImage as Image;
+use objc2_core_foundation::CGSize;
+use objc2_foundation::{NSMutableDictionary, NSNumber, NSString};
 use objc2_media_player::{
     MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle,
     MPMediaItemPropertyArtist, MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration,
     MPMediaItemPropertyTitle, MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
-    MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState, MPRemoteCommand,
-    MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
+    MPNowPlayingInfoPropertyPlaybackRate, MPRemoteCommand, MPRemoteCommandCenter,
+    MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
 };
+#[cfg(target_os = "ios")]
+use objc2_ui_kit::UIImage as Image;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -109,18 +116,34 @@ impl MediaSession {
         {
             return Some(artwork.clone());
         }
-        let image =
-            NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path.to_str()?))?;
-        let size: NSSize = image.size();
+        let image = load_image(path)?;
+        #[cfg(target_os = "macos")]
+        let size: CGSize = image.size();
+        // SAFETY: reading the size of an image that was just loaded.
+        #[cfg(target_os = "ios")]
+        let size: CGSize = unsafe { image.size() };
         let handler_image = image.clone();
-        let handler = RcBlock::new(move |_size: NSSize| NonNull::from(&*handler_image));
-        // SAFETY: the handler returns a pointer to an NSImage that the block itself keeps alive.
+        let handler = RcBlock::new(move |_size: CGSize| NonNull::from(&*handler_image));
+        // SAFETY: the handler returns a pointer to an image that the block itself keeps alive.
+        #[cfg(target_os = "macos")]
         let artwork = unsafe {
             MPMediaItemArtwork::initWithBoundsSize_requestHandler(
                 MPMediaItemArtwork::alloc(),
                 size,
                 &handler,
             )
+        };
+        // The bindings declare this initialiser for macOS only (with an `NSImage`). It
+        // is the same method on iOS, taking a block that returns a `UIImage`.
+        // SAFETY: as above; the argument types are those of
+        // `-[MPMediaItemArtwork initWithBoundsSize:requestHandler:]` on iOS.
+        #[cfg(target_os = "ios")]
+        let artwork: Retained<MPMediaItemArtwork> = unsafe {
+            objc2::msg_send![
+                MPMediaItemArtwork::alloc(),
+                initWithBoundsSize: size,
+                requestHandler: &*handler,
+            ]
         };
         self.artwork = Some((path.to_path_buf(), artwork.clone()));
         Some(artwork)
@@ -148,11 +171,9 @@ impl MediaSession {
         self.last = info.cloned();
         let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
         let Some(info) = info else {
-            // SAFETY: clearing the dictionary and setting a state are plain property sets.
-            unsafe {
-                center.setNowPlayingInfo(None);
-                center.setPlaybackState(MPNowPlayingPlaybackState::Stopped);
-            }
+            // SAFETY: clearing the dictionary is a plain property set.
+            unsafe { center.setNowPlayingInfo(None) };
+            set_playback_state(&center, None);
             return;
         };
         let artwork = info.art_path.clone().and_then(|p| self.artwork_for(&p));
@@ -184,12 +205,41 @@ impl MediaSession {
                 dict.insert(MPMediaItemPropertyArtwork, &**artwork);
             }
             center.setNowPlayingInfo(Some(&dict));
-            center.setPlaybackState(if info.playing {
-                MPNowPlayingPlaybackState::Playing
-            } else {
-                MPNowPlayingPlaybackState::Paused
-            });
         }
+        set_playback_state(&center, Some(info.playing));
+    }
+}
+
+/// The cover image in the file at `path`.
+fn load_image(path: &Path) -> Option<Retained<Image>> {
+    let path = NSString::from_str(path.to_str()?);
+    #[cfg(target_os = "macos")]
+    {
+        Image::initWithContentsOfFile(Image::alloc(), &path)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        Image::imageWithContentsOfFile(&path)
+    }
+}
+
+/// Tells macOS whether we are playing (`None`: stopped). iOS has no such property: it
+/// reads the state from the audio session and the playback rate in the info.
+fn set_playback_state(center: &MPNowPlayingInfoCenter, playing: Option<bool>) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_media_player::MPNowPlayingPlaybackState;
+        let state = match playing {
+            Some(true) => MPNowPlayingPlaybackState::Playing,
+            Some(false) => MPNowPlayingPlaybackState::Paused,
+            None => MPNowPlayingPlaybackState::Stopped,
+        };
+        // SAFETY: a plain property set.
+        unsafe { center.setPlaybackState(state) };
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (center, playing);
     }
 }
 
@@ -202,7 +252,7 @@ impl Drop for MediaSession {
             }
             let center = MPNowPlayingInfoCenter::defaultCenter();
             center.setNowPlayingInfo(None);
-            center.setPlaybackState(MPNowPlayingPlaybackState::Stopped);
+            set_playback_state(&center, None);
         }
     }
 }

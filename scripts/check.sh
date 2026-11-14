@@ -1,7 +1,7 @@
 #!/bin/sh
 # The checks every change has to pass, as CI runs them (.github/workflows/ci.yml):
 # formatting, lints for this system (and for Windows when the mingw-w64 cross compiler
-# is installed), and the tests.
+# is installed, and for the iPhone when its Rust target is), and the tests.
 #   scripts/check.sh
 set -eu
 cd "$(dirname "$0")/.."
@@ -15,6 +15,11 @@ if [ "$(uname)" = Darwin ] && command -v x86_64-w64-mingw32-gcc >/dev/null \
   && rustup target list --installed | grep -q x86_64-pc-windows-gnu; then
   echo "== lints (Windows)"
   cargo clippy --locked --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+fi
+if [ "$(uname)" = Darwin ] && rustup target list --installed | grep -q aarch64-apple-ios-sim; then
+  echo "== lints (iPhone)"
+  IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+    cargo clippy --locked --lib --bin oneum --target aarch64-apple-ios-sim -- -D warnings
 fi
 echo "== tests"
 cargo test --locked

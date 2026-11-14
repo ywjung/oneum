@@ -34,6 +34,12 @@ pub enum Icon {
     Meter,
     Equalizer,
     Tag,
+    /// Three dots: more that can be done with a row.
+    More,
+    /// "Go on": a row that leads somewhere.
+    Forward,
+    /// "Put away": closes a sheet that came up from below.
+    Down,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -188,6 +194,23 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 vec![p(0.60, 0.20), p(0.30, 0.5), p(0.60, 0.80)],
                 stroke,
             ));
+        }
+        Icon::Forward => {
+            painter.add(Shape::line(
+                vec![p(0.40, 0.20), p(0.70, 0.5), p(0.40, 0.80)],
+                stroke,
+            ));
+        }
+        Icon::Down => {
+            painter.add(Shape::line(
+                vec![p(0.20, 0.36), p(0.5, 0.66), p(0.80, 0.36)],
+                stroke,
+            ));
+        }
+        Icon::More => {
+            for x in [0.22, 0.5, 0.78] {
+                painter.circle_filled(p(x, 0.5), s * 0.075, color);
+            }
         }
         Icon::Gear => {
             painter.circle_stroke(c, s * 0.22, stroke);

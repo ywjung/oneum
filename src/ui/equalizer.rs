@@ -11,7 +11,7 @@ use crate::i18n::Strings;
 use crate::playback::Command;
 use eframe::egui::{self, Align, Color32, Layout, Rect, RichText, Sense, pos2, vec2};
 
-const WIDTH: f32 = 680.0;
+pub(super) const WIDTH: f32 = 680.0;
 const SIDE_MARGIN: f32 = 20.0;
 /// Width of the pre-amp's column, to the left of the bands.
 const PREAMP_WIDTH: f32 = 76.0;
@@ -435,7 +435,7 @@ impl OneumApp {
         }
     }
 
-    fn equalizer_body(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn equalizer_body(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let dim = theme::dim(ui);
         let current = matching_preset(&self.settings.eq, &self.settings.eq_presets);

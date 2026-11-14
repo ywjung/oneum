@@ -15,6 +15,9 @@
 | `platform` | 시스템별 구현을 같은 이름으로 내보내는 창구. 앱의 나머지는 어느 시스템인지 모른다. 모든 `unsafe`는 이 아래에 둔다 |
 | `platform::macos` | 메뉴, Now Playing·미디어 명령, Finder 연동, 창 숨김/복원, 잠자기 알림, CoreAudio 장치 제어(샘플레이트·하드웨어 포맷·독점 접근) |
 | `platform::windows` | 탐색기 연동, 시스템 언어, 그리고 Windows에 없는 것·구현하지 않은 것의 중립적인 대역(아래 "플랫폼") |
+| `platform::apple` | macOS와 iOS가 같이 쓰는 것: Now Playing·미디어 명령(MediaPlayer), CP949 변환, 시스템 언어, 설치된 메모리, 메인 스레드 실행 |
+| `platform::ios` | 씬 델리게이트(`scene`: winit의 창을 씬에 넣기, 파일 열기, 안전 영역, 키보드 높이, 화면 모드), 오디오 세션(`sound`), 문서 선택기와 가져오기(`files`), 백그라운드 진입·복귀(`lifecycle`) |
+| `ui::phone` | 폰 화면: 아래 탭, 탭마다 화면 스택, 미니 플레이어, 전체 화면 플레이어·대기열, 아래에서 올라오는 시트. 데스크톱과 같은 스냅샷·`Action`을 쓴다 |
 | `model` | 모듈 사이에서 공유하는 값 타입(`Track`, `TrackId`, `ReplayGainTags`). `Track::leveling()`이 태그와 측정값을 합친, 음량 보정이 실제로 쓰는 값이다 |
 
 ## 실행 문맥
@@ -393,6 +396,30 @@ ID3 태그는 "Latin-1"이라고 선언하고, `.lrc`·`.m3u`는 아무것도 �
 | 사용 안내 | 원문 그대로(한국어 `USER_GUIDE.md`, 영어 `USER_GUIDE.en.md`) | 키 기호를 Ctrl·Shift·Alt로, Finder를 파일 탐색기(File Explorer)로 바꾸고 "Windows에서 다른 점" 절(`USER_GUIDE_WINDOWS*.md`)을 추가 |
 
 Windows판은 `x86_64-pc-windows-gnu`로 Mac에서 크로스 컴파일한다(`scripts/package-windows.sh`). 실행 파일은 Windows의 시스템 DLL만 필요로 한다.
+
+### iPhone
+같은 crate를 `aarch64-apple-ios`(기기)와 `aarch64-apple-ios-sim`(시뮬레이터)으로 빌드한다. 결정과 그 근거는 [adr/0002-iphone.md](adr/0002-iphone.md).
+
+| 항목 | iPhone |
+|---|---|
+| 화면 | `ui::phone`. `platform::PHONE`이 참이면 폰 화면을 그린다. `ONEUM_PHONE=1`로 Mac의 창에서도 같은 화면을 볼 수 있다(개발용) |
+| 창 | 씬 생명주기가 필수다(iOS 27). winit은 씬을 모르므로 앱의 씬 델리게이트(`OneumSceneDelegate`, Info.plist에 등록)가 winit의 창을 씬에 넣는다 |
+| 그리는 크기 | winit 창의 `safeAreaInsets`를 0으로 돌려주게 해서 표면과 배치를 화면 전체로 맞추고, 실제 여백은 앱이 egui에 넘긴다(`raw_input_hook`) |
+| 메뉴·단축키 | 없음. 메뉴가 하던 일은 화면의 버튼과 시트가 한다 |
+| 음악의 위치 | 앱의 Documents 폴더 하나(첫 실행 때 음악 폴더로 등록). 파일 앱과 Finder의 파일 공유에 보인다(`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`) |
+| 파일 고르기 | 문서 선택기(`platform::files`). 음악 파일은 사본을 받아 `Documents/Imported`로 옮기고, 폴더는 접근 권한을 얻어 `Documents` 아래로 복사한다. 내보내기는 임시 폴더에 쓴 뒤 저장 위치를 고르게 한다 |
+| 파일 열기 | 씬 델리게이트의 `scene:openURLContexts:`. 컨테이너 밖의 파일은 가져온 뒤에 연다 |
+| 보관 공간 이동 | 업데이트·복원으로 컨테이너 경로가 바뀌면 `Db::follow_home`이 음악 폴더·곡·CUE 시트 기록의 경로를 새 위치로 옮긴다(한 트랜잭션). `Library::open_in_home` |
+| 소리 | 오디오 세션을 재생용으로 두고 스트림을 열기 전에 활성화한다. 출력 장치 선택·샘플레이트 맞춤·독점은 없다(`DEVICE_CONTROL` 거짓) |
+| 끊김과 경로 변경 | 끊김이 시작되면 일시정지, 끝나고 시스템이 허락하면(그리고 우리가 멈춘 경우에만) 재생. 출력이 사라지면(이어폰 분리) 일시정지 |
+| Now Playing | macOS와 같은 코드(`platform::apple::nowplaying`). 표지의 이미지 타입과 재생 상태 알림만 다르다 |
+| 백그라운드 | 재생은 이어진다(오디오 백그라운드 모드). 화면은 다시 그리지 않는다(`lifecycle::in_foreground`). 돌아올 때 폴더를 다시 읽는다 |
+| 폴더 감시 | 하지 않는다(주기적 재스캔 경로를 쓴다). 앱이 앞으로 올 때와 가져온 뒤에 스캔한다 |
+| 메모리 재생 | 상한 256MB |
+| 글꼴 | San Francisco(`/System/Library/Fonts/Core/SFUI.ttf`) + 시스템 한글 글꼴 |
+| 화면 모드 | 씬의 값을 읽어 egui에 넘긴다. 앱에서 고른 모드는 창에 지정해 상태 표시줄과 시스템 시트가 따른다 |
+| 사용 안내 | `USER_GUIDE_IOS.md`, `USER_GUIDE_IOS.en.md` |
+| 번들 | 시뮬레이터: `scripts/ios-sim.sh`가 직접 묶는다. 기기: `ios/OnEum.xcodeproj`가 cargo로 만든 실행 파일을 넣고 서명한다. Info.plist는 하나(`ios/Info.plist`) |
 
 ## 추상화 원칙
 trait은 테스트 경계에만 둔다: 플레이어가 바깥을 보는 창구 `PlayerHost`(곡 조회, 재생 기록, 세션 저장) 하나다.

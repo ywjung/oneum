@@ -1,5 +1,8 @@
 // Draws the OnEum app icon and writes assets/icon-1024.png.
-// Usage: swift scripts/gen-icon.swift assets/icon-1024.png
+// Usage: swift scripts/gen-icon.swift assets/icon-1024.png [--ios]
+//
+// With --ios the drawing fills the whole square and has no transparency: iOS cuts the
+// icon's shape itself and does not take an icon with see-through corners.
 //
 // The mark is the name: 온음 is "the whole sound", and a 온음표 is a whole note. So the
 // icon is a whole note (which is also the O of OnEum) lying on the lines of a staff.
@@ -7,18 +10,31 @@ import AppKit
 
 let size: CGFloat = 1024
 let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon-1024.png"
+let ios = CommandLine.arguments.contains("--ios")
 let space = CGColorSpaceCreateDeviceRGB()
+let alpha = ios ? CGImageAlphaInfo.noneSkipLast : CGImageAlphaInfo.premultipliedLast
 guard let ctx = CGContext(data: nil, width: Int(size), height: Int(size), bitsPerComponent: 8, bytesPerRow: 0,
-                          space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { exit(1) }
+                          space: space, bitmapInfo: alpha.rawValue) else { exit(1) }
 
 // macOS icon grid: the artwork sits inside a 824pt rounded square with margins.
 let inset: CGFloat = 100
 let rect = CGRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
-let shape = CGPath(roundedRect: rect, cornerWidth: 185, cornerHeight: 185, transform: nil)
+// For iOS the same drawing is enlarged until that square is the whole icon, and its
+// corners are left square.
+if ios {
+    let grow = size / rect.width
+    ctx.translateBy(x: size / 2, y: size / 2)
+    ctx.scaleBy(x: grow, y: grow)
+    ctx.translateBy(x: -size / 2, y: -size / 2)
+}
+let corner: CGFloat = ios ? 0 : 185
+let shape = CGPath(roundedRect: rect, cornerWidth: corner, cornerHeight: corner, transform: nil)
 
 // The plate: the app's violet, lighter at the top left.
 ctx.saveGState()
-ctx.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: CGColor(gray: 0, alpha: 0.30))
+if !ios {
+    ctx.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: CGColor(gray: 0, alpha: 0.30))
+}
 ctx.addPath(shape)
 ctx.setFillColor(CGColor(red: 0.33, green: 0.31, blue: 0.84, alpha: 1))
 ctx.fillPath()

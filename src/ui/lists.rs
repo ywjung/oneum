@@ -355,7 +355,7 @@ pub(super) struct FolderEntry {
 
 /// The folders directly inside `folder` that hold songs, by name; for the empty path,
 /// the music folders.
-fn folder_entries(
+pub(super) fn folder_entries(
     tracks: &[std::sync::Arc<crate::model::Track>],
     folder: &std::path::Path,
     roots: &[std::path::PathBuf],
@@ -399,7 +399,11 @@ fn folder_entries(
 
 /// Title to show for an album. Untagged files have no album name; their folder name is
 /// the best available description ("Unknown album" only if even that is missing).
-fn album_title<'a>(album: &'a Album, snap: &'a LibrarySnapshot, unknown: &'a str) -> &'a str {
+pub(super) fn album_title<'a>(
+    album: &'a Album,
+    snap: &'a LibrarySnapshot,
+    unknown: &'a str,
+) -> &'a str {
     if !album.title.is_empty() {
         return &album.title;
     }
@@ -461,8 +465,28 @@ enum Step {
 }
 
 impl OneumApp {
+    /// The rows `nav` would show for `query`, without keeping them (the phone's search).
+    pub(super) fn rows_for(&mut self, nav: &Nav, query: &str) -> Vec<Row> {
+        if *nav == Nav::Genres && self.genre_list_generation != Some(self.lib_generation) {
+            self.genre_list = genre_entries(&self.snapshot.tracks);
+            self.genre_list_generation = Some(self.lib_generation);
+        }
+        build_rows(
+            &self.snapshot,
+            &self.core.library,
+            nav,
+            query,
+            None,
+            self.rediscover,
+            Lists {
+                smart: &self.settings.smart_playlists,
+                genre_list: &self.genre_list,
+            },
+        )
+    }
+
     /// Rebuilds the row list of `nav` when the library, the query or the sort changed.
-    fn ensure_rows(&mut self, nav: &Nav) {
+    pub(super) fn ensure_rows(&mut self, nav: &Nav) {
         let mode = self.rediscover;
         let extra = match nav {
             // The lists change with what is played, and with which of them is shown.
@@ -718,7 +742,7 @@ impl OneumApp {
         });
     }
 
-    fn empty_list_message(&self, ui: &mut Ui, nav: &Nav, has_query: bool) {
+    pub(super) fn empty_list_message(&self, ui: &mut Ui, nav: &Nav, has_query: bool) {
         let s = self.s();
         let (icon, title, body) = if has_query {
             (Icon::Search, s.empty_search, s.empty_search_hint)

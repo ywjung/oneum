@@ -33,11 +33,16 @@ pub fn init(log_dir: &Path) {
     } else {
         tracing::Level::WARN
     };
-    let filter = Targets::new()
+    let mut filter = Targets::new()
         .with_default(third_party)
         .with_target("oneum", level)
         .with_target("symphonia", third_party.min(tracing::Level::WARN))
         .with_target("lofty", third_party.min(tracing::Level::WARN));
+    // On iOS winit warns in every frame that a window there has no title, cannot be
+    // minimised and so on (eframe asks each time): megabytes of it in an hour.
+    if crate::platform::PHONE && level < tracing::Level::DEBUG {
+        filter = filter.with_target("winit", tracing::Level::ERROR);
+    }
     let layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_target(false);

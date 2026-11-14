@@ -571,6 +571,26 @@ strings! {
     dialog_choose_files: "음악 파일 선택", "Choose Music Files";
     dialog_filter_audio: "음악 파일", "Audio Files";
     dialog_filter_playlist: "플레이리스트", "Playlists";
+    // The phone screens
+    phone_library: "보관함", "Library";
+    phone_songs: "곡", "Songs";
+    phone_now_playing: "지금 재생", "Now Playing";
+    phone_more: "더 보기", "More";
+    phone_empty_title: "음악을 넣어 주세요", "Add your music";
+    phone_empty_body: "파일 앱의 ‘나의 iPhone › OnEum’ 폴더에 음악을 넣으면 여기에 나타납니다. 다른 곳에 있는 음악은 아래에서 가져올 수 있습니다.",
+        "Music put into “On My iPhone › OnEum” in the Files app appears here. Music kept elsewhere can be brought in below.";
+    phone_import_files: "파일 가져오기", "Import Files";
+    phone_import_folder: "폴더 가져오기", "Import Folder";
+    phone_import_desc: "고른 파일을 OnEum의 폴더로 복사합니다.", "Copies what you choose into OnEum's folder.";
+    phone_music_place: "음악이 있는 곳", "Where the music is";
+    phone_music_place_desc: "파일 앱 › 나의 iPhone › OnEum", "Files › On My iPhone › OnEum";
+    phone_rescan_desc: "폴더에 넣은 음악을 지금 읽습니다.", "Reads what was put into the folder now.";
+    phone_search_prompt: "제목, 아티스트, 앨범으로 찾습니다.", "Find by title, artist or album.";
+    phone_no_playlists: "플레이리스트가 없습니다", "No playlists";
+    phone_no_playlists_hint: "곡의 ‘더 보기’에서 플레이리스트에 추가할 수 있습니다.", "Add songs from their “More” menu.";
+    phone_smart: "스마트 플레이리스트", "Smart Playlists";
+    phone_app_volume: "앱 볼륨", "App volume";
+    phone_import_failed: "가져오지 못했습니다.", "Could not import.";
 }
 
 impl Lang {

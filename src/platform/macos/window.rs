@@ -19,6 +19,24 @@ fn main_window(mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
 /// nothing needs to be kept here.
 pub fn remember_main_window(_handle: winit::raw_window_handle::RawWindowHandle) {}
 
+/// A window on a desk has no margins the system asks to keep free.
+pub fn safe_area_insets() -> Option<[f32; 4]> {
+    None
+}
+
+/// There is no on-screen keyboard over a window on a desk.
+pub fn keyboard_height() -> f32 {
+    0.0
+}
+
+/// The window system tells egui whether the system is dark; nothing to add.
+pub fn system_is_dark() -> Option<bool> {
+    None
+}
+
+/// The window's title bar follows the system by itself.
+pub fn set_appearance(_dark: Option<bool>) {}
+
 pub fn hide_main_window() {
     if let Some(mtm) = MainThreadMarker::new()
         && let Some(window) = main_window(mtm)

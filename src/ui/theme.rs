@@ -22,6 +22,13 @@ pub fn dim(ui: &egui::Ui) -> Color32 {
 }
 
 pub fn apply_choice(ctx: &egui::Context, choice: ThemeChoice) {
+    // What the system draws for the app (the status bar's text, the file picker)
+    // follows the same choice.
+    crate::platform::window::set_appearance(match choice {
+        ThemeChoice::System => None,
+        ThemeChoice::Light => Some(false),
+        ThemeChoice::Dark => Some(true),
+    });
     ctx.set_theme(match choice {
         ThemeChoice::System => ThemePreference::System,
         ThemeChoice::Light => ThemePreference::Light,
@@ -31,8 +38,24 @@ pub fn apply_choice(ctx: &egui::Context, choice: ThemeChoice) {
 
 /// Family name of the semibold UI face (always defined, see [`install_fonts`]).
 const SEMIBOLD: &str = "oneum-semibold";
-/// The macOS system UI font (San Francisco). A variable font: one file, several weights.
-const SYSTEM_UI_FONT: &str = "/System/Library/Fonts/SFNS.ttf";
+/// The system UI font of macOS and iOS (San Francisco). A variable font: one file,
+/// several weights.
+const SYSTEM_UI_FONT: &str = if cfg!(target_os = "ios") {
+    "/System/Library/Fonts/Core/SFUI.ttf"
+} else {
+    "/System/Library/Fonts/SFNS.ttf"
+};
+
+/// The system UI font's file, if it can be read. (In the iOS Simulator the system's
+/// files are below the folder `SIMULATOR_ROOT` names.)
+fn system_ui_font() -> Option<Vec<u8>> {
+    let root = std::env::var_os("SIMULATOR_ROOT").filter(|_| cfg!(target_os = "ios"));
+    let path = match root {
+        Some(root) => std::path::PathBuf::from(root).join(SYSTEM_UI_FONT.trim_start_matches('/')),
+        None => std::path::PathBuf::from(SYSTEM_UI_FONT),
+    };
+    std::fs::read(path).ok()
+}
 const SYSTEM_UI_Y_OFFSET: f32 = -0.06;
 
 /// A semibold font for titles and the names of things that are playing.
@@ -52,7 +75,7 @@ fn install_fonts(ctx: &egui::Context) {
         .cloned()
         .unwrap_or_default();
     let mut semibold_stack = regular_stack.clone();
-    if let Ok(bytes) = std::fs::read(SYSTEM_UI_FONT) {
+    if let Some(bytes) = system_ui_font() {
         let blob: egui::epaint::text::Blob = std::sync::Arc::new(bytes);
         let face = |weight: f32| {
             FontData::from_blob(blob.clone(), 0).tweak(FontTweak {
@@ -127,8 +150,9 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// One-time style setup for both themes.
-pub fn install(ctx: &egui::Context) {
+/// One-time style setup for both themes. On a phone (`phone`) text and controls are
+/// larger: they are read at arm's length and hit with a finger.
+pub fn install(ctx: &egui::Context, phone: bool) {
     install_fonts(ctx);
     for theme in [Theme::Dark, Theme::Light] {
         let dark = theme == Theme::Dark;
@@ -158,6 +182,34 @@ pub fn install(ctx: &egui::Context) {
             style.spacing.interact_size.y = 24.0;
             style.spacing.scroll.bar_width = 8.0;
             style.interaction.selectable_labels = false;
+            if phone {
+                style.text_styles = [
+                    (
+                        TextStyle::Heading,
+                        FontId::new(24.0, FontFamily::Proportional),
+                    ),
+                    (TextStyle::Body, FontId::new(15.0, FontFamily::Proportional)),
+                    (
+                        TextStyle::Button,
+                        FontId::new(15.0, FontFamily::Proportional),
+                    ),
+                    (
+                        TextStyle::Small,
+                        FontId::new(12.5, FontFamily::Proportional),
+                    ),
+                    (
+                        TextStyle::Monospace,
+                        FontId::new(13.0, FontFamily::Monospace),
+                    ),
+                ]
+                .into();
+                style.spacing.button_padding = egui::vec2(12.0, 7.0);
+                style.spacing.interact_size.y = 32.0;
+                // Lists are moved with a finger; the bar only shows where one is.
+                style.spacing.scroll = egui::style::ScrollStyle::floating();
+                style.visuals.handle_shape = egui::style::HandleShape::Circle;
+                style.visuals.slider_trailing_fill = true;
+            }
 
             let v = &mut style.visuals;
             let accent = accent(dark);

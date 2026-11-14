@@ -22,6 +22,8 @@ const CHUNK_BYTES: usize = 1 << 20;
 const MEMORY_SHARE: u64 = 8;
 /// …and never more than this.
 const MAX_TOTAL_BYTES: u64 = 3 << 29; // 1.5 GiB
+/// …and on a phone never more than this.
+const PHONE_MAX_TOTAL_BYTES: u64 = 256 << 20;
 /// The budget when the installed memory cannot be found out.
 const FALLBACK_TOTAL_BYTES: u64 = 1 << 29; // 512 MiB
 
@@ -48,6 +50,14 @@ impl Budget {
                 .map_or(FALLBACK_TOTAL_BYTES, |installed| {
                     (installed / MEMORY_SHARE).min(MAX_TOTAL_BYTES)
                 });
+            // A phone ends an app that takes much memory, long before what is
+            // installed is used up, and sooner when the app is in the background,
+            // which is where a music player spends its time.
+            let limit = if crate::platform::PHONE {
+                limit.min(PHONE_MAX_TOTAL_BYTES)
+            } else {
+                limit
+            };
             Arc::new(Budget::new(limit))
         })
     }

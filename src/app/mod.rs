@@ -191,6 +191,58 @@ pub fn log_dir_hint() -> String {
     }
 }
 
+/// What the system does to the sound (an iPhone: a call, headphones pulled out) is
+/// answered the way a listener expects of a music player: paused while something else
+/// has the sound, playing on afterwards only if it was this that stopped it, and
+/// silent when the output it played to is gone.
+fn observe_sound(player: &PlayerHandle) {
+    use platform::SoundEvent;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let player = player.clone();
+    let paused_for_interruption = AtomicBool::new(false);
+    platform::sound::observe(move |event| match event {
+        SoundEvent::Interrupted => {
+            let playing = matches!(
+                player.snapshot().state,
+                PlayState::Playing | PlayState::Loading | PlayState::Seeking
+            );
+            if playing {
+                paused_for_interruption.store(true, Ordering::Release);
+                player.send(Command::Pause);
+            }
+        }
+        SoundEvent::InterruptionOver { resume } => {
+            if paused_for_interruption.swap(false, Ordering::AcqRel) && resume {
+                player.send(Command::Play);
+            }
+        }
+        SoundEvent::OutputGone => {
+            paused_for_interruption.store(false, Ordering::Release);
+            player.send(Command::Pause);
+        }
+    });
+}
+
+/// On an iPhone the music folder is not chosen: it is the app's Documents folder, the
+/// one place the user can put files into. It is made a music folder of the library
+/// the first time the app starts.
+fn add_phone_music_folder(library: &Library) {
+    let Some(folder) = AppPaths::phone_music_dir() else {
+        tracing::warn!("the app's Documents folder cannot be told: no music folder");
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&folder) {
+        tracing::warn!("cannot make the music folder: {error}");
+        return;
+    }
+    if library.roots().iter().any(|root| root.path == folder) {
+        return;
+    }
+    if let Err(error) = library.add_folder(&folder) {
+        tracing::warn!("cannot add the music folder: {error}");
+    }
+}
+
 /// Opens the library, starts the player and the file watcher.
 pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let _ = PROCESS_START.set(std::time::Instant::now());
@@ -202,10 +254,23 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let system_prefers_korean = platform::locale::prefers_korean();
     let lang = settings.language.resolve(system_prefers_korean);
 
-    let (library, open_report) = Library::open(LibraryPaths {
+    let library_paths = LibraryPaths {
         data_dir: paths.data_dir.clone(),
         cache_dir: paths.cache_dir.clone(),
-    })?;
+    };
+    // An iPhone app's container (and the music in it) is given another path when the
+    // app is updated or restored: the library follows it.
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|_| platform::PHONE);
+    let (library, open_report) = match &home {
+        Some(home) => Library::open_in_home(library_paths, home)?,
+        None => Library::open(library_paths)?,
+    };
+
+    if platform::PHONE {
+        add_phone_music_folder(&library);
+    }
 
     // The player host needs a way back to the core for change notifications; the core
     // needs the player handle. Tie the knot through a late-initialised slot.
@@ -259,6 +324,10 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
 
     let wake_core = core.clone();
     app_hooks::set_waker(move || wake_core.request_repaint());
+    observe_sound(&player);
+    // Music put into the app's folder while it was away is read when it comes back.
+    let returning = library.clone();
+    platform::lifecycle::observe(|| {}, move || returning.rescan());
     let sleep_player = player;
     platform::power::observe_sleep(move || sleep_player.send(Command::SystemWillSleep));
 

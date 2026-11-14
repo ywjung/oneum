@@ -7,23 +7,122 @@
 //! - Windows (`windows`): File Explorer, the system language, and neutral stand-ins for
 //!   what Windows does differently or what is not implemented there (see
 //!   docs/ARCHITECTURE.md, "플랫폼").
+//! - iPhone (`ios`): the audio session, the lock screen, the document picker and the
+//!   app's life in the background; `apple` holds what it shares with macOS.
+#[cfg(not(target_os = "ios"))]
+pub mod dialogs;
 mod menu_action;
+#[cfg(not(target_os = "macos"))]
+pub mod no_device;
 
 pub use menu_action::MenuAction;
+
+/// What the system does to the app's sound without being asked (on an iPhone: a call
+/// comes in, the headphones are pulled out). See `sound::observe`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundEvent {
+    /// Something else has the sound now (a call, an alarm): the app is silent.
+    Interrupted,
+    /// That is over; `resume` says whether playing on is what the system expects.
+    InterruptionOver { resume: bool },
+    /// The output the sound went to is gone (headphones unplugged, a speaker out of
+    /// reach). Playing on would be heard from somewhere it was not meant for.
+    OutputGone,
+}
+
+/// Where the system leaves the app's sound alone and never ends the app unasked (macOS
+/// and Windows), there is nothing to prepare or to be told.
+#[cfg(not(target_os = "ios"))]
+pub mod sound {
+    use super::SoundEvent;
+
+    pub fn activate() -> bool {
+        true
+    }
+
+    pub fn observe(_on_event: impl Fn(SoundEvent) + Send + Sync + 'static) {}
+}
+
+/// See `ios::lifecycle`: a desktop app is not sent away and brought back.
+#[cfg(not(target_os = "ios"))]
+pub mod lifecycle {
+    /// A desktop app is always where it can be seen, or may draw as if it were.
+    pub fn in_foreground() -> bool {
+        true
+    }
+
+    pub fn observe(
+        _on_background: impl Fn() + Send + Sync + 'static,
+        _on_foreground: impl Fn() + Send + Sync + 'static,
+    ) {
+    }
+}
+
+/// What the user is asked to choose (see `files::pick`).
+pub struct PickRequest {
+    /// The dialog's title; empty for the system's own.
+    pub title: String,
+    /// Kinds of files offered: a name and the file extensions of that kind.
+    pub filters: Vec<(String, Vec<String>)>,
+    pub kind: PickKind,
+}
+
+pub enum PickKind {
+    /// A folder.
+    Folder,
+    /// One or more files.
+    Files,
+    /// One file.
+    File,
+    /// Where to write a file, which is suggested this name.
+    SaveAs(String),
+}
+
+impl PickRequest {
+    pub fn new(kind: PickKind) -> Self {
+        Self {
+            title: String::new(),
+            filters: Vec::new(),
+            kind,
+        }
+    }
+
+    pub fn title(mut self, title: &str) -> Self {
+        self.title = title.to_string();
+        self
+    }
+
+    pub fn filter(mut self, name: &str, extensions: &[&str]) -> Self {
+        let extensions = extensions.iter().map(|e| (*e).to_string()).collect();
+        self.filters.push((name.to_string(), extensions));
+        self
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod apple;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    app_hooks, coreaudio as device, decode_cp949, fatal_alert, finder, locale, menu, nowplaying,
-    power, pump_main_loop, responder, run_on_main, system, testing, window,
+    app_hooks, coreaudio as device, decode_cp949, fatal_alert, files, finder, locale, menu,
+    nowplaying, power, pump_main_loop, responder, run_on_main, system, testing, window,
+};
+
+#[cfg(target_os = "ios")]
+pub mod ios;
+#[cfg(target_os = "ios")]
+pub use ios::{
+    app_hooks, decode_cp949, device, fatal_alert, files, finder, lifecycle, locale, menu,
+    nowplaying, power, pump_main_loop, responder, run_on_main, sound, system, testing, window,
 };
 
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
 pub use windows::{
-    app_hooks, decode_cp949, device, fatal_alert, finder, locale, menu, nowplaying, power,
+    app_hooks, decode_cp949, device, fatal_alert, files, finder, locale, menu, nowplaying, power,
     pump_main_loop, responder, run_on_main, system, testing, window,
 };
 
@@ -52,14 +151,20 @@ pub fn open_web_page(address: &str) -> bool {
     is_web_address(address) && open_in_browser(address)
 }
 
+#[cfg(target_os = "ios")]
+use ios::open_in_browser;
 #[cfg(target_os = "macos")]
 use macos::open_in_browser;
 #[cfg(windows)]
 use windows::open_in_browser;
 
+/// True on a phone: one narrow screen that is touched, not a window with a pointer and
+/// a keyboard. The app then shows its phone screens (`ui::phone`).
+pub const PHONE: bool = cfg!(target_os = "ios");
+
 /// True where the menu bar is drawn inside the window and its shortcuts are handled by
 /// the app (there is no system menu bar to hold them).
-pub const MENU_IN_WINDOW: bool = cfg!(not(target_os = "macos"));
+pub const MENU_IN_WINDOW: bool = cfg!(windows);
 
 /// True where closing the window only hides it and the app keeps playing (the Mac
 /// convention for music apps: the Dock icon brings the window back). Elsewhere closing

@@ -429,6 +429,9 @@ impl OutputStream {
         shared: Arc<RenderShared>,
         signals: Arc<OutputSignals>,
     ) -> Result<Self, OutputError> {
+        // On an iPhone the app's audio session has to be the active one before a stream
+        // can start (a no-op elsewhere).
+        crate::platform::sound::activate();
         let host = cpal::default_host();
         let wanted = match device_id {
             Some(id) => id.to_string(),

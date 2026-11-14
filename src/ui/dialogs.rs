@@ -13,6 +13,12 @@ pub(super) enum Dialog {
         tracks: Vec<TrackId>,
         focus: bool,
     },
+    /// Give a playlist another name.
+    RenamePlaylist {
+        id: i64,
+        name: String,
+        focus: bool,
+    },
     /// Name a smart playlist: a new one for `query`, or `original` under a new name.
     SmartPlaylist {
         name: String,
@@ -54,8 +60,17 @@ impl OneumApp {
         };
         let s = self.s();
         let mut outcome = Outcome::Open;
-        let modal = egui::Modal::new(egui::Id::unique("oneum-dialog")).show(ctx, |ui| {
-            ui.set_width(400.0);
+        let id = egui::Id::unique("oneum-dialog");
+        let mut modal = egui::Modal::new(id);
+        if self.phone_mode {
+            // In the upper part of the screen: the keyboard comes up over the lower.
+            let top = ctx.content_rect().top() + 72.0 - ctx.viewport_rect().top();
+            modal = modal
+                .area(egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, [0.0, top]));
+        }
+        let width = 400.0_f32.min(ctx.content_rect().width() - 56.0);
+        let modal = modal.show(ctx, |ui| {
+            ui.set_width(width);
             let (title, body, confirm) = match &dialog {
                 Dialog::RemoveFolder(_, path) => (
                     s.confirm_remove_folder_title,
@@ -77,6 +92,7 @@ impl OneumApp {
                     s.remove_from_library,
                 ),
                 Dialog::NewPlaylist { .. } => (s.new_playlist, String::new(), s.ok),
+                Dialog::RenamePlaylist { .. } => (s.rename, String::new(), s.ok),
                 Dialog::SmartPlaylist { query, .. } => (s.smart_playlist, query.clone(), s.ok),
             };
             ui.label(
@@ -97,6 +113,7 @@ impl OneumApp {
                 s.playlist_name
             };
             if let Dialog::NewPlaylist { name, focus, .. }
+            | Dialog::RenamePlaylist { name, focus, .. }
             | Dialog::SmartPlaylist { name, focus, .. } = &mut dialog
             {
                 let edit = egui::TextEdit::singleline(name)
@@ -130,7 +147,9 @@ impl OneumApp {
                 let dark = ui.visuals().dark_mode;
                 let destructive = !matches!(
                     dialog,
-                    Dialog::NewPlaylist { .. } | Dialog::SmartPlaylist { .. }
+                    Dialog::NewPlaylist { .. }
+                        | Dialog::RenamePlaylist { .. }
+                        | Dialog::SmartPlaylist { .. }
                 );
                 let (fill, ink) = if destructive {
                     (
@@ -198,6 +217,15 @@ impl OneumApp {
                 self.edit(move |library| {
                     library.remove_tracks(&tracks);
                     None
+                });
+                Ok(())
+            }
+            Dialog::RenamePlaylist { id, name, .. } => {
+                self.edit(move |library| {
+                    library
+                        .rename_playlist(id, &name)
+                        .err()
+                        .map(AppEvent::EditFailed)
                 });
                 Ok(())
             }

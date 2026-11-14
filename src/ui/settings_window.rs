@@ -187,7 +187,7 @@ impl OneumApp {
         close
     }
 
-    fn settings_general(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn settings_general(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         widgets::section_title(ui, s.settings_section_display);
         widgets::card(ui, |ui| {
@@ -235,6 +235,10 @@ impl OneumApp {
             }
         });
 
+        // The song table and its columns are the desk's.
+        if self.phone_mode {
+            return;
+        }
         ui.add_space(14.0);
         widgets::section_title(ui, s.settings_section_lists);
         widgets::card(ui, |ui| {
@@ -254,7 +258,7 @@ impl OneumApp {
         });
     }
 
-    fn settings_library(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn settings_library(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let dim = theme::dim(ui);
         let roots = self.core.library.roots();
@@ -549,11 +553,10 @@ impl OneumApp {
         }
     }
 
-    fn settings_playback(&mut self, ui: &mut egui::Ui) {
+    /// Which output device to play on.
+    fn settings_output_device(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        self.refresh_devices();
         let player = self.core.player.clone();
-
         widgets::section_title(ui, s.settings_section_output);
         let before = self.settings.output_device.clone();
         let selected_text = match &before {
@@ -594,8 +597,19 @@ impl OneumApp {
             ));
         }
         widgets::section_note(ui, s.output_hint);
+    }
 
-        ui.add_space(14.0);
+    pub(super) fn settings_playback(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let player = self.core.player.clone();
+        // A phone sends its sound where the system says (speaker, headphones, AirPlay):
+        // there is no device to choose, and none whose rate or access could be set.
+        let phone = crate::platform::PHONE;
+        if !phone {
+            self.refresh_devices();
+            self.settings_output_device(ui);
+            ui.add_space(14.0);
+        }
         widgets::section_title(ui, s.settings_section_quality);
         let before = self.settings.output;
         widgets::card(ui, |ui| {
@@ -608,35 +622,39 @@ impl OneumApp {
                     s.out_macos_only
                 })
             };
-            widgets::setting_row(
-                ui,
-                s.out_match_rate,
-                describe(s.out_match_rate_desc),
-                device_control,
-                |ui| {
-                    widgets::toggle(
-                        ui,
-                        &mut self.settings.output.match_sample_rate,
-                        s.out_match_rate,
-                    );
-                },
-            );
-            widgets::row_divider(ui);
-            widgets::setting_row(
-                ui,
-                s.out_exclusive,
-                describe(s.out_exclusive_desc),
-                device_control,
-                |ui| {
-                    widgets::toggle(ui, &mut self.settings.output.exclusive, s.out_exclusive);
-                },
-            );
-            widgets::row_divider(ui);
+            if !phone {
+                widgets::setting_row(
+                    ui,
+                    s.out_match_rate,
+                    describe(s.out_match_rate_desc),
+                    device_control,
+                    |ui| {
+                        widgets::toggle(
+                            ui,
+                            &mut self.settings.output.match_sample_rate,
+                            s.out_match_rate,
+                        );
+                    },
+                );
+                widgets::row_divider(ui);
+                widgets::setting_row(
+                    ui,
+                    s.out_exclusive,
+                    describe(s.out_exclusive_desc),
+                    device_control,
+                    |ui| {
+                        widgets::toggle(ui, &mut self.settings.output.exclusive, s.out_exclusive);
+                    },
+                );
+                widgets::row_divider(ui);
+            }
             widgets::setting_row(ui, s.out_memory, Some(s.out_memory_desc), true, |ui| {
                 widgets::toggle(ui, &mut self.settings.output.memory_playback, s.out_memory);
             });
         });
-        widgets::section_note(ui, s.out_quality_hint);
+        if !phone {
+            widgets::section_note(ui, s.out_quality_hint);
+        }
         if self.settings.output != before {
             player.send(Command::SetOutput(self.settings.output));
         }
@@ -1055,7 +1073,7 @@ impl OneumApp {
         widgets::section_note(ui, s.shortcuts_note);
     }
 
-    fn settings_about(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn settings_about(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let dim = theme::dim(ui);
         if self.about_icon.is_none()
@@ -1103,28 +1121,34 @@ impl OneumApp {
                 ui.add(egui::Button::new(text).min_size(egui::vec2(0.0, 26.0)))
                     .clicked()
             };
-            widgets::setting_row(
-                ui,
-                s.menu_user_guide,
-                Some(s.about_guide_desc),
-                true,
-                |ui| {
-                    open_guide = button(ui, s.open_guide);
-                },
-            );
-            widgets::row_divider(ui);
-            widgets::setting_row(ui, s.log_folder, Some(s.log_folder_desc), true, |ui| {
-                if button(ui, s.show_in_finder) {
-                    finder::reveal(&log_dir);
-                }
-            });
-            widgets::row_divider(ui);
-            widgets::setting_row(ui, s.data_folder, Some(s.data_folder_desc), true, |ui| {
-                if button(ui, s.show_in_finder) {
-                    finder::reveal(&data_dir);
-                }
-            });
-            widgets::row_divider(ui);
+            // On a phone the guide is a page of its own in Settings, and there is no
+            // file manager to show the app's folders in.
+            if !self.phone_mode {
+                widgets::setting_row(
+                    ui,
+                    s.menu_user_guide,
+                    Some(s.about_guide_desc),
+                    true,
+                    |ui| {
+                        open_guide = button(ui, s.open_guide);
+                    },
+                );
+                widgets::row_divider(ui);
+            }
+            if !crate::platform::PHONE {
+                widgets::setting_row(ui, s.log_folder, Some(s.log_folder_desc), true, |ui| {
+                    if button(ui, s.show_in_finder) {
+                        finder::reveal(&log_dir);
+                    }
+                });
+                widgets::row_divider(ui);
+                widgets::setting_row(ui, s.data_folder, Some(s.data_folder_desc), true, |ui| {
+                    if button(ui, s.show_in_finder) {
+                        finder::reveal(&data_dir);
+                    }
+                });
+                widgets::row_divider(ui);
+            }
             let toggle = if self.licenses_shown {
                 s.licenses_hide
             } else {

@@ -1,6 +1,6 @@
 # OnEum
 
-폴더만 추가하면 바로 듣는 오프라인 로컬 음악 플레이어. Rust로 작성했고 macOS가 주 대상이며 Windows용으로도 빌드됩니다.
+폴더만 추가하면 바로 듣는 오프라인 로컬 음악 플레이어. Rust로 작성했고 macOS가 주 대상이며 Windows와 iPhone용으로도 빌드됩니다.
 이름은 우리말 **온음**(온전한 소리, 그리고 음악의 온음)에서 왔습니다.
 
 - 음악 폴더를 추가하면 스캔하면서 곧바로 재생할 수 있습니다.
@@ -51,6 +51,20 @@ scripts/package-windows.sh
 Mac에서 크로스 컴파일해 `dist/OnEum-<버전>-windows-x86_64.zip`을 만듭니다(`rustup target add x86_64-pc-windows-gnu`, `brew install mingw-w64` 필요).
 **Windows판은 컴파일과 링크까지만 확인했고 실제 Windows에서 실행해 보지 못했습니다.** Windows에서 다른 점(창 안 메뉴 막대, Ctrl 단축키, 지원하지 않는 기능)은
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "플랫폼"과 [docs/TESTING.md](docs/TESTING.md)의 "Windows"에 있습니다.
+
+## iPhone
+```bash
+scripts/ios-sim.sh
+```
+iOS 시뮬레이터에 설치해 실행합니다(`rustup target add aarch64-apple-ios aarch64-apple-ios-sim`, Xcode 필요). 실제 iPhone에는 아래로 설치합니다.
+```bash
+scripts/ios-device.sh
+```
+iPhone을 연결해 잠금을 풀고 이 Mac을 신뢰하게 한 뒤 실행합니다. Xcode에 Apple ID가 등록되어 있어야 하고, iPhone의 개발자 모드가 켜져 있어야 합니다.
+Xcode에서 `ios/OnEum.xcodeproj`를 열어 팀을 고르고 실행해도 됩니다.
+서명할 팀은 키체인의 개발 인증서에서 찾습니다. 다른 팀(예: 무료 개인 팀)으로 서명하려면 `ONEUM_IOS_TEAM`에 팀 ID를, 그 팀에서 쓸 수 있는 번들 ID를 `ONEUM_IOS_BUNDLE_ID`에 줍니다.
+**iPhone판은 iOS 27.0 시뮬레이터에서 확인했고, 실제 iPhone(iOS 27.2.1)에는 설치해서 실행되는 것까지만 확인했습니다.** 화면과 사용법은 [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md),
+다른 점과 확인 범위는 [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md)와 [docs/TESTING.md](docs/TESTING.md)의 "iPhone"에 있습니다.
 
 ## 개발
 

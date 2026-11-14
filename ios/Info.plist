@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The iPhone app's Info.plist. Xcode fills in the $(…) values from the project's
+     build settings (ios/OnEum.xcodeproj); scripts/ios-sim.sh fills them in itself. The
+     app's icon is added by whichever of the two makes the bundle. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>OnEum</string>
+  <key>CFBundleDisplayName</key><string>OnEum</string>
+  <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>CFBundleDevelopmentRegion</key><string>ko</string>
+  <key>CFBundleLocalizations</key>
+  <array><string>ko</string><string>en</string></array>
+  <key>LSRequiresIPhoneOS</key><true/>
+  <key>MinimumOSVersion</key><string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+  <key>UIRequiredDeviceCapabilities</key>
+  <array><string>arm64</string></array>
+  <key>UILaunchScreen</key>
+  <dict/>
+  <!-- The scene life cycle, which iOS requires. The delegate is defined in
+       src/platform/ios/scene.rs. -->
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key><false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+      <key>UIWindowSceneSessionRoleApplication</key>
+      <array>
+        <dict>
+          <key>UISceneConfigurationName</key><string>Default</string>
+          <key>UISceneDelegateClassName</key><string>OneumSceneDelegate</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
+  <key>UISupportedInterfaceOrientations</key>
+  <array><string>UIInterfaceOrientationPortrait</string></array>
+  <key>UIStatusBarStyle</key><string>UIStatusBarStyleDefault</string>
+  <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+  <!-- Music keeps playing with the screen off and while another app is in front. -->
+  <key>UIBackgroundModes</key>
+  <array><string>audio</string></array>
+  <!-- The app's Documents folder is where the music lives: the Files app ("On My
+       iPhone > OnEum") and Finder (with the iPhone connected) show it. -->
+  <key>UIFileSharingEnabled</key><true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+  <key>ITSAppUsesNonExemptEncryption</key><false/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Audio File</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.mp3</string>
+        <string>org.xiph.flac</string>
+        <string>com.microsoft.waveform-audio</string>
+        <string>public.aiff-audio</string>
+        <string>public.aifc-audio</string>
+        <string>com.apple.m4a-audio</string>
+        <string>public.mpeg-4-audio</string>
+        <string>org.xiph.ogg-audio</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>M3U Playlist</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.m3u-playlist</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>

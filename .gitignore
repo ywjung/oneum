@@ -3,3 +3,7 @@
 .DS_Store
 *.swp
 /.claude/
+# What Xcode keeps for one user of the iPhone project.
+/ios/OnEum.xcodeproj/xcuserdata/
+/ios/OnEum.xcodeproj/project.xcworkspace/
+/ios/build/

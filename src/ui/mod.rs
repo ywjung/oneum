@@ -15,6 +15,7 @@ mod markdown;
 mod menubar;
 mod meter;
 mod panels;
+mod phone;
 mod player_bar;
 pub mod renderer;
 mod settings_window;
@@ -32,7 +33,7 @@ use crate::model::{Track, TrackId};
 use crate::platform::MenuAction;
 use crate::platform::menu::AppMenu;
 use crate::platform::responder::{self, EditAction};
-use crate::platform::{app_hooks, finder, window};
+use crate::platform::{PickKind, PickRequest, app_hooks, files, finder, window};
 use crate::playback::{Command, Notice, PlayState, PlayerSnapshot, RepeatMode};
 use art::ArtCache;
 use dialogs::Dialog;
@@ -222,6 +223,22 @@ enum AppEvent {
     FolderAdded(PathBuf),
     /// A playlist was written to a file: how many entries, or that it could not be.
     PlaylistExported(Option<usize>),
+    /// The user chose these in a file dialog that was shown for this.
+    Picked(PickFor, Vec<PathBuf>),
+}
+
+/// What a file dialog was shown for.
+#[derive(Clone, Copy)]
+enum PickFor {
+    MusicFolder,
+    /// On a phone: music to bring into the app's own folder.
+    ImportMusic,
+    Open,
+    Correction,
+    Playlist,
+    AppleLibrary,
+    /// Where to write this playlist.
+    ExportPlaylist(i64),
 }
 
 /// Requests from the menu bar that need the window.
@@ -380,6 +397,10 @@ pub struct OneumApp {
     ui_requests: Arc<Mutex<Vec<UiRequest>>>,
     events_tx: Sender<AppEvent>,
     events_rx: Receiver<AppEvent>,
+    /// The phone screens are shown (always on a phone; `ONEUM_PHONE` asks for them in
+    /// a window on a desk, to work on them).
+    phone_mode: bool,
+    phone: phone::Phone,
     edits: background::Edits,
     settings_writer: background::SettingsWriter,
     /// Bumped for every version of the settings handed to the writer.
@@ -399,11 +420,19 @@ impl OneumApp {
             system_prefers_korean,
         } = startup;
         let ctx = cc.egui_ctx.clone();
-        theme::install(&ctx);
+        let phone_mode = crate::platform::PHONE
+            || (automation::AVAILABLE && std::env::var_os("ONEUM_PHONE").is_some());
+        theme::install(&ctx, phone_mode);
         theme::apply_choice(&ctx, settings.theme);
 
+        // Nothing is drawn while the app is in the background (a phone); what changed
+        // meanwhile is drawn when it comes back.
         let repaint_ctx = ctx.clone();
-        core.set_repaint(move || repaint_ctx.request_repaint());
+        core.set_repaint(move || {
+            if crate::platform::lifecycle::in_foreground() {
+                repaint_ctx.request_repaint();
+            }
+        });
         let bridge_ctx = ctx.clone();
         if !responder::install(move || bridge_ctx.request_repaint()) {
             tracing::warn!(
@@ -503,6 +532,8 @@ impl OneumApp {
             ui_requests: Arc::new(Mutex::new(Vec::new())),
             events_tx,
             events_rx,
+            phone_mode,
+            phone: phone::Phone::new(),
             edits: background::Edits::start(),
             settings_writer,
             settings_generation: 0,
@@ -756,6 +787,7 @@ impl OneumApp {
                 AppEvent::PlaylistExported(None) => {
                     self.warn_toast(self.s().notice_export_failed);
                 }
+                AppEvent::Picked(purpose, paths) => self.picked(purpose, paths),
                 AppEvent::FilesImported(ids) => {
                     self.core.player.send(Command::PlayTracks {
                         tracks: ids,
@@ -1231,37 +1263,87 @@ impl OneumApp {
         });
     }
 
-    fn pick_folder(&mut self) {
-        if let Some(folder) = rfd::FileDialog::new()
-            .set_title(self.s().dialog_choose_folder)
-            .pick_folder()
-        {
-            self.add_folder(folder);
+    /// Shows a file dialog. What the user chooses arrives as [`AppEvent::Picked`] (at
+    /// once where the dialog blocks, later on an iPhone); nothing arrives if they cancel.
+    fn pick(&self, purpose: PickFor, request: PickRequest) {
+        let (events, core) = (self.events_tx.clone(), self.core.clone());
+        files::pick(request, move |paths| {
+            let _ = events.send(AppEvent::Picked(purpose, paths));
+            core.request_repaint();
+        });
+    }
+
+    /// What was chosen in a file dialog shown by [`Self::pick`].
+    fn picked(&mut self, purpose: PickFor, mut paths: Vec<PathBuf>) {
+        match purpose {
+            // On a phone what was chosen has been copied into the app's own music
+            // folder, which is in the library already: it only has to be read.
+            PickFor::ImportMusic if crate::platform::PHONE => {
+                if paths.is_empty() {
+                    self.warn_toast(self.s().phone_import_failed);
+                } else {
+                    self.announce_scan = true;
+                    self.core.library.rescan();
+                }
+            }
+            // The phone screens on a desk: music is used where it is.
+            PickFor::ImportMusic => self.open_paths(paths),
+            PickFor::MusicFolder => {
+                for folder in paths {
+                    self.add_folder(folder);
+                }
+            }
+            PickFor::Open => self.open_paths(paths),
+            PickFor::Correction => {
+                if let Some(file) = paths.pop() {
+                    self.import_correction(&file);
+                }
+            }
+            PickFor::Playlist => {
+                if let Some(file) = paths.pop() {
+                    self.import_playlist(file);
+                }
+            }
+            PickFor::AppleLibrary => {
+                if let Some(file) = paths.pop() {
+                    self.import_apple_library(file);
+                }
+            }
+            PickFor::ExportPlaylist(id) => {
+                if let Some(dest) = paths.pop() {
+                    self.write_playlist(id, dest);
+                }
+            }
         }
+    }
+
+    fn pick_folder(&mut self) {
+        let request = PickRequest::new(PickKind::Folder).title(self.s().dialog_choose_folder);
+        self.pick(PickFor::MusicFolder, request);
+    }
+
+    /// On a phone: asks for music files, or for a folder of music, to bring into the
+    /// app's folder.
+    fn import_music(&mut self, kind: PickKind) {
+        self.pick(PickFor::ImportMusic, PickRequest::new(kind));
     }
 
     fn pick_files(&mut self) {
         let s = self.s();
-        let picked = rfd::FileDialog::new()
-            .set_title(s.dialog_choose_files)
-            .add_filter(s.dialog_filter_audio, AUDIO_EXTENSIONS)
-            .add_filter(s.dialog_filter_playlist, PLAYLIST_EXTENSIONS)
-            .pick_files();
-        if let Some(files) = picked {
-            self.open_paths(files);
-        }
+        let request = PickRequest::new(PickKind::Files)
+            .title(s.dialog_choose_files)
+            .filter(s.dialog_filter_audio, AUDIO_EXTENSIONS)
+            .filter(s.dialog_filter_playlist, PLAYLIST_EXTENSIONS);
+        self.pick(PickFor::Open, request);
     }
 
     /// Asks for a correction file (Equalizer APO format) and imports it.
     fn pick_correction_file(&mut self) {
         let s = self.s();
-        let picked = rfd::FileDialog::new()
-            .set_title(s.correction_choose)
-            .add_filter(s.correction_filter_text, &["txt"])
-            .pick_file();
-        if let Some(file) = picked {
-            self.import_correction(&file);
-        }
+        let request = PickRequest::new(PickKind::File)
+            .title(s.correction_choose)
+            .filter(s.correction_filter_text, &["txt"]);
+        self.pick(PickFor::Correction, request);
     }
 
     /// Reads a correction file, keeps it as a profile named after the file and applies
@@ -1316,13 +1398,9 @@ impl OneumApp {
     }
 
     fn pick_playlist_to_import(&mut self) {
-        let s = self.s();
-        let picked = rfd::FileDialog::new()
-            .add_filter(s.dialog_filter_playlist, PLAYLIST_EXTENSIONS)
-            .pick_file();
-        if let Some(file) = picked {
-            self.import_playlist(file);
-        }
+        let request = PickRequest::new(PickKind::File)
+            .filter(self.s().dialog_filter_playlist, PLAYLIST_EXTENSIONS);
+        self.pick(PickFor::Playlist, request);
     }
 
     /// Imports an M3U/M3U8 file as a playlist. Entries not yet in the library have their
@@ -1343,12 +1421,15 @@ impl OneumApp {
         }
     }
 
-    /// Asks for an Apple Music library export and takes it over, off the UI thread.
+    /// Asks for an Apple Music library export.
     fn pick_apple_library(&mut self) {
-        let picked = rfd::FileDialog::new()
-            .add_filter(self.s().dialog_filter_apple, &["xml"])
-            .pick_file();
-        let Some(file) = picked else { return };
+        let request =
+            PickRequest::new(PickKind::File).filter(self.s().dialog_filter_apple, &["xml"]);
+        self.pick(PickFor::AppleLibrary, request);
+    }
+
+    /// Takes over an Apple Music library export, off the UI thread.
+    fn import_apple_library(&mut self, file: PathBuf) {
         let library = self.core.library.clone();
         let tx = self.events_tx.clone();
         let core = self.core.clone();
@@ -1364,19 +1445,23 @@ impl OneumApp {
     }
 
     fn export_playlist(&mut self, id: i64, name: &str) {
-        let picked = rfd::FileDialog::new()
-            .set_file_name(format!("{name}.m3u8"))
-            .add_filter(self.s().dialog_filter_playlist, &["m3u8"])
-            .save_file();
-        let Some(dest) = picked else { return };
+        let request = PickRequest::new(PickKind::SaveAs(format!("{name}.m3u8")))
+            .filter(self.s().dialog_filter_playlist, &["m3u8"]);
+        self.pick(PickFor::ExportPlaylist(id), request);
+    }
+
+    /// Writes a playlist to the file the user chose for it.
+    fn write_playlist(&mut self, id: i64, dest: PathBuf) {
         // Written on the edit thread: the destination may be slow to answer.
         self.edit(move |library| {
-            Some(AppEvent::PlaylistExported(
-                library
-                    .export_m3u8(id, &dest)
-                    .inspect_err(|error| tracing::warn!("playlist export failed: {error}"))
-                    .ok(),
-            ))
+            let written = library
+                .export_m3u8(id, &dest)
+                .inspect_err(|error| tracing::warn!("playlist export failed: {error}"))
+                .ok();
+            if written.is_some() {
+                files::hand_out(&dest);
+            }
+            Some(AppEvent::PlaylistExported(written))
         });
     }
 
@@ -1576,7 +1661,12 @@ impl OneumApp {
             return;
         };
         let size = [rect.width().round(), rect.height().round()];
-        if self.settings.window_size != Some(size) && size[0] >= 100.0 && size[1] >= 100.0 {
+        // A phone's screen is not a window whose size is the user's choice.
+        if !self.phone_mode
+            && self.settings.window_size != Some(size)
+            && size[0] >= 100.0
+            && size[1] >= 100.0
+        {
             self.settings.window_size = Some(size);
         }
         if self.settings == self.saved_settings {
@@ -2104,6 +2194,14 @@ impl OneumApp {
                 .map_or(0, |(_, _, entries)| entries.len())
         );
         state["shuffle_by_album"] = serde_json::json!(self.settings.shuffle_by_album);
+        if self.phone_mode {
+            state["phone"] = self.phone.describe();
+            let (full, safe) = (ctx.viewport_rect(), ctx.content_rect());
+            state["screen"] = serde_json::json!({
+                "full": [full.left(), full.top(), full.right(), full.bottom()],
+                "safe": [safe.left(), safe.top(), safe.right(), safe.bottom()],
+            });
+        }
         state["crossfeed"] = serde_json::json!(format!("{:?}", p.crossfeed));
         state["rediscover"] = serde_json::json!(format!("{:?}", self.rediscover));
         let details = self.extras.as_ref().and_then(|e| e.details.as_ref());
@@ -2312,6 +2410,24 @@ impl eframe::App for OneumApp {
         if let Some(automation) = self.automation.as_mut() {
             automation.step(raw);
         }
+        // What the screen keeps for itself (status bar, home indicator), where the
+        // system says so; see `platform::ios::scene`.
+        // Whether the system is set to dark, where the window system does not tell.
+        if let Some(dark) = window::system_is_dark() {
+            raw.system_theme = Some(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+        }
+        if let Some([top, left, bottom, right]) = window::safe_area_insets() {
+            raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
+                left,
+                right,
+                top,
+                bottom,
+            }));
+        }
         // Control-click is a secondary click on a Mac; the window system delivers it as a
         // primary click with Control held. (Only there: on Windows, Ctrl+click is how
         // more than one row is selected.)
@@ -2361,33 +2477,40 @@ impl eframe::App for OneumApp {
         let ctx = ui.ctx().clone();
         self.sync_frame(&ctx);
         self.global_shortcuts(&ctx);
-        let mut actions: Vec<Action> = Vec::new();
+        if self.phone_mode {
+            self.phone_frame(ui);
+        } else {
+            let mut actions: Vec<Action> = Vec::new();
+            if crate::platform::MENU_IN_WINDOW {
+                self.menu_shortcuts(&ctx);
+            }
+            if self.window_menu {
+                self.menu_bar(ui);
+            }
+            self.top_bar(ui);
+            self.player_bar(ui);
+            self.meter_deck(ui);
+            self.toast_bar(ui);
+            self.sidebar(ui, &mut actions);
+            self.right_panel(ui, &mut actions);
+            egui::CentralPanel::default().show(ui, |ui| self.central(ui, &mut actions));
 
-        if crate::platform::MENU_IN_WINDOW {
-            self.menu_shortcuts(&ctx);
-        }
-        if self.window_menu {
-            self.menu_bar(ui);
-        }
-        self.top_bar(ui);
-        self.player_bar(ui);
-        self.meter_deck(ui);
-        self.toast_bar(ui);
-        self.sidebar(ui, &mut actions);
-        self.right_panel(ui, &mut actions);
-        egui::CentralPanel::default().show(ui, |ui| self.central(ui, &mut actions));
-
-        self.drop_overlay(&ctx);
-        self.drag_preview(&ctx);
-        self.settings_window(&ctx);
-        self.guide_window(&ctx);
-        self.equalizer_window(&ctx);
-        self.dialogs(&ctx);
-        for action in actions {
-            self.apply(action);
+            self.drop_overlay(&ctx);
+            self.drag_preview(&ctx);
+            self.settings_window(&ctx);
+            self.guide_window(&ctx);
+            self.equalizer_window(&ctx);
+            self.dialogs(&ctx);
+            for action in actions {
+                self.apply(action);
+            }
         }
 
         // Keep the progress display moving while playing; otherwise draw only on demand.
+        // (Not at all in the background: see `platform::lifecycle`.)
+        if !crate::platform::lifecycle::in_foreground() {
+            return;
+        }
         if matches!(
             self.player.state,
             PlayState::Playing | PlayState::Loading | PlayState::Seeking
