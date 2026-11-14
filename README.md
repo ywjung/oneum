@@ -120,6 +120,7 @@ cargo build --release --locked
 | [docs/PLAN.md](docs/PLAN.md) · [docs/STATUS.md](docs/STATUS.md) | 단계와 현재 상태 |
 | [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) · [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) | 결정 기록: GUI 스택, iPhone판 |
 | [docs/IOS_PLAN.md](docs/IOS_PLAN.md) | iPhone판 계획과 진행 결과 |
+| [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md) | Android판 계획(계획만 있고 아직 시작하지 않음) |
 
 ## 라이선스
 

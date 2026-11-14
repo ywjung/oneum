@@ -125,6 +125,7 @@ The user guides are in Korean and English; the other documents are in Korean.
 | [docs/PLAN.md](docs/PLAN.md) · [docs/STATUS.md](docs/STATUS.md) | Phases and the current state |
 | [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) · [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) | Decisions: the GUI stack, the iPhone version |
 | [docs/IOS_PLAN.md](docs/IOS_PLAN.md) | The plan for the iPhone version and how it went |
+| [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md) | The plan for an Android version (a plan only; not started) |
 
 ## License
 
