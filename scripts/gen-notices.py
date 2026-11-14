@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Writes THIRD_PARTY_NOTICES.md: every crate linked into the macOS build, with its
-license expression and source. Uses only `cargo metadata` (no extra tools).
+"""Writes THIRD_PARTY_NOTICES.md: every crate linked into the macOS build or the iPhone
+build (the document is shown in both apps), with its license expression and source.
+Uses only `cargo metadata` (no extra tools).
 
     python3 scripts/gen-notices.py
     python3 scripts/gen-notices.py --windows <output file>
@@ -17,27 +18,31 @@ root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 windows = len(sys.argv) == 3 and sys.argv[1] == "--windows"
 if len(sys.argv) > 1 and not windows:
     sys.exit(__doc__)
-platform, build_name = (
-    ("x86_64-pc-windows-gnu", "Windows x86_64") if windows else ("aarch64-apple-darwin", "macOS arm64"))
+platforms, build_name = (
+    (["x86_64-pc-windows-gnu"], "Windows x86_64") if windows
+    else (["aarch64-apple-darwin", "aarch64-apple-ios"], "macOS arm64 and iPhone"))
 env = dict(os.environ, PATH=os.path.expanduser("~/.cargo/bin") + os.pathsep + os.environ.get("PATH", ""))
-meta = json.loads(subprocess.check_output(
-    ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", platform],
-    cwd=root, env=env))
-packages = {p["id"]: p for p in meta["packages"]}
-nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+packages, seen = {}, set()
+for platform in platforms:
+    meta = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", platform],
+        cwd=root, env=env))
+    packages.update({p["id"]: p for p in meta["packages"]})
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
 
-# Walk normal (non-dev, non-build) dependencies from the app crate.
-start = meta["resolve"]["root"]
-seen, stack = set(), [start]
-while stack:
-    pid = stack.pop()
-    if pid in seen:
-        continue
-    seen.add(pid)
-    for dep in nodes[pid]["deps"]:
-        if any(k["kind"] is None for k in dep["dep_kinds"]):
-            stack.append(dep["pkg"])
-seen.discard(start)
+    # Walk normal (non-dev, non-build) dependencies from the app crate.
+    start = meta["resolve"]["root"]
+    linked, stack = set(), [start]
+    while stack:
+        pid = stack.pop()
+        if pid in linked:
+            continue
+        linked.add(pid)
+        for dep in nodes[pid]["deps"]:
+            if any(k["kind"] is None for k in dep["dep_kinds"]):
+                stack.append(dep["pkg"])
+    linked.discard(start)
+    seen |= linked
 
 rows = sorted(((packages[p]["name"].lower(), packages[p]["version"], packages[p]) for p in seen), key=lambda r: r[:2])
 by_license = {}
@@ -46,7 +51,7 @@ for _, _, p in rows:
 
 out = ["# Third-party notices", "",
        "OnEum is built from the open-source Rust crates listed below (as linked into the",
-       f"{build_name} build), and contains the data listed at the end. Each remains under its",
+       f"{build_name} builds), and contains the data listed at the end. Each remains under its",
        "own license. The full license texts come with the app in the file",
        "`THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows",
        "next to the program).", "",

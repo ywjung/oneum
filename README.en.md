@@ -1,0 +1,131 @@
+# OnEum
+
+[한국어](README.md) · **English**
+
+[![CI](https://github.com/ywjung/oneum/actions/workflows/ci.yml/badge.svg)](https://github.com/ywjung/oneum/actions/workflows/ci.yml)
+
+An offline player for the music files you own: add a folder and listen. Written in Rust, made for macOS first, and built for Windows and iPhone from the same code.
+The name is the Korean word **온음** ("on-eum"): a whole, unaltered sound, and the whole tone of music.
+
+- Add a music folder and play at once, while it is still being scanned.
+- Searching, sorting and scrolling answer immediately in a library of 50,000 songs (partial words, Korean initial consonants, and fields such as `artist:`, `genre:`, `year:1990-1999`, `plays:>=5`, `added:30d`).
+- FLAC, WAV, AIFF, ALAC, MP3, AAC and DSD play gapless. Mono and 5.1/7.1 files are mixed to stereo.
+- DSD (.dsf, .dff, DSD64 to DSD512) is converted to PCM (88.2/96 kHz); Matroska/WebM audio (.mka, .webm) and ADPCM WAV play too.
+- An album that is one file is split into its songs by the CUE sheet beside it, and those songs follow each other without a gap.
+- Queue, playlists (M3U8 import and export), smart playlists (saved searches), favourites, recently played, shuffle and repeat, stop after the current song, sleep timer.
+- Browse by album, artist, genre and folder; pin things to the sidebar; choose the columns of the song list (year, genre, plays, added, last played, format).
+- File check: damage (a FLAC is compared with the MD5 it carries), dynamic range (DR), true peak. Statistics (time listened per period, most played artists, albums, songs and genres). Play history and playlists can be brought over from an Apple Music library.
+- Volume leveling (ReplayGain): the file's tags are used, and songs without tags are measured by the app (EBU R 128). Music files are never changed.
+- Meter deck: analogue VU meters for left and right (needles that move to the standard, PEAK lamps), a 36-band spectrum between them, and the source and output path.
+- A ten-band equalizer (12 presets and your own), headphone correction (profiles for 34 widely used headphones, and correction files such as AutoEq's `ParametricEQ.txt`), headphone crossfeed, and a signal path that lists, in order, what the app does between the file and the device.
+- Listen Again (recently added, most played, not heard for long), lyrics (tags and `.lrc`, followed line by line when timed), credits and work information from the tags, a genre view, other versions of the same song, and radio (when the queue ends, similar songs from the library follow).
+- The user guide is inside the app (Help → OnEum User Guide), in Korean and English.
+- Optional output quality settings: set the device to the song's sample rate and play without resampling, exclusive output, memory playback. Dither is added only where an integer device needs it.
+- Where resampling is needed it is flat to 20 kHz (±0.001 dB; the measurements are in docs/ARCHITECTURE.md), and peaks above full scale are held down for that moment instead of being clipped (peak protection).
+- Drag songs and albums to playlists and the queue; select, play and tidy with the keyboard alone; type to find a song.
+- Media keys and the system's Now Playing, opening files from Finder, Korean and English, light and dark.
+- No account, no server, no advertising, no usage data. Music files are read and never changed.
+
+## Requirements
+
+| | |
+|---|---|
+| OS | Declared for macOS 14 and later. **Verified on macOS 27.2.1 only.** |
+| CPU | Apple Silicon (arm64). Intel Macs are not verified and not supported. |
+| Build | Rust 1.99.1 (`rust-toolchain.toml`), the Xcode command line tools |
+
+## Running
+
+```bash
+scripts/package.sh
+```
+
+```bash
+open dist/OnEum.app
+```
+
+`scripts/package.sh --dmg` makes a disk image for installing (`dist/OnEum-<version>-arm64.dmg`).
+The build is not signed with a Developer ID and not notarised, so Gatekeeper warns on other Macs.
+Details: [docs/RELEASE.md](docs/RELEASE.md) (Korean).
+
+## Windows
+
+```bash
+scripts/package-windows.sh
+```
+
+Cross-compiles on a Mac and makes `dist/OnEum-<version>-windows-x86_64.zip` (needs `rustup target add x86_64-pc-windows-gnu` and `brew install mingw-w64`).
+**The Windows build has only been compiled and linked. It has not been run on a real Windows machine.** (The CI workflow builds, tests and starts it on a Windows runner; that has not run yet.)
+What differs there (a menu bar inside the window, Ctrl shortcuts, features that are missing) is in the [Windows user guide](docs/USER_GUIDE_WINDOWS.en.md), and in "플랫폼" of [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and "Windows" of [docs/TESTING.md](docs/TESTING.md) (Korean).
+
+## iPhone
+
+```bash
+scripts/ios-sim.sh
+```
+
+Installs and starts the app in the iOS Simulator (needs `rustup target add aarch64-apple-ios aarch64-apple-ios-sim` and Xcode). For a real iPhone:
+
+```bash
+scripts/ios-device.sh
+```
+
+Connect the iPhone, unlock it and let it trust this Mac first. Xcode needs an Apple ID, and the iPhone needs Developer Mode switched on.
+Opening `ios/OnEum.xcodeproj` in Xcode, choosing a team and pressing Run does the same.
+The team to sign with is taken from the development certificate in the keychain. To sign with another one (a free personal team, say), give its ID in `ONEUM_IOS_TEAM` and an identifier that team can use in `ONEUM_IOS_BUNDLE_ID`.
+
+The iPhone has screens of its own: tabs for the library, search, playlists and settings; a player that shows the cover, the lyrics, the VU meters with the spectrum, or the queue; pins, sorting, choosing several songs at once, reordering playlists and the queue by dragging, smart playlists, song info with credits and the signal path, the file check, the equalizer and headphone correction; playback in the background.
+Not there: choosing an output device, output at the song's sample rate and exclusive output (the iPhone decides), the menu bar and keyboard shortcuts, the choice of list columns, and importing an Apple Music library.
+
+**The iPhone version is verified in the iOS 27.0 Simulator. On a real iPhone (iOS 27.2.1) it has been installed and seen to start, draw and keep its library across an update; how its screens look and feel on the device has not been checked by us.**
+Usage: [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md). What differs and what was verified: [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) and the "iPhone" section of [docs/TESTING.md](docs/TESTING.md) (both Korean).
+
+## Development
+
+```bash
+scripts/check.sh
+```
+
+runs what CI runs: formatting, lints (for macOS, and for Windows and iPhone when their targets are installed) and the tests. The single steps:
+
+```bash
+cargo fmt --all --check
+```
+
+```bash
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+```bash
+cargo test --workspace --locked
+```
+
+```bash
+cargo build --release --locked
+```
+
+- The tests need no audio device (sound is rendered offline and checked sample by sample).
+- The real app can be started with a throw-away profile and driven by a script: `scripts/dev/smoke.sh` (macOS) and `scripts/dev/smoke-ios.sh` (iOS Simulator); see [docs/TESTING.md](docs/TESTING.md).
+
+## Documents
+
+The user guides are in Korean and English; the other documents are in Korean.
+
+| Document | What it holds |
+|---|---|
+| [docs/USER_GUIDE.en.md](docs/USER_GUIDE.en.md) · [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | User guide for macOS (the text of the app's Help menu) |
+| [docs/USER_GUIDE_WINDOWS.en.md](docs/USER_GUIDE_WINDOWS.en.md) · [docs/USER_GUIDE_WINDOWS.md](docs/USER_GUIDE_WINDOWS.md) | User guide for Windows |
+| [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md) · [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md) | User guide for iPhone |
+| [CHANGELOG.md](CHANGELOG.md) | What changed |
+| [docs/PRD.md](docs/PRD.md) | Users, scope, what "done" means |
+| [docs/UX.md](docs/UX.md) | Screens, interaction, how playback behaves |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Modules, threads, the audio path, storage |
+| [docs/TESTING.md](docs/TESTING.md) | How it is tested, format and gapless tables, measurements, what is still unverified |
+| [docs/RELEASE.md](docs/RELEASE.md) | Packaging, signing, notarisation, distribution |
+| [docs/PLAN.md](docs/PLAN.md) · [docs/STATUS.md](docs/STATUS.md) | Phases and the current state |
+| [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) · [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) | Decisions: the GUI stack, the iPhone version |
+| [docs/IOS_PLAN.md](docs/IOS_PLAN.md) | The plan for the iPhone version and how it went |
+
+## License
+
+MIT ([LICENSE](LICENSE)). The open-source software and data used (the built-in headphone correction profiles are AutoEq's values): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

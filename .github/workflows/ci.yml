@@ -1,4 +1,5 @@
-# Checks on both systems the app is made for, and the dependencies' advisories.
+# Checks on the systems the app is made for (macOS, Windows, and the iPhone build's
+# lints), and the dependencies' advisories.
 # What this cannot cover (sound through a real device, VoiceOver/Narrator, a USB DAC,
 # signing and notarisation) is checked by hand before a release: docs/RELEASE.md.
 name: CI
@@ -22,6 +23,12 @@ jobs:
       - run: rustup show
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # The iPhone version is the same crate with other platform code and screens:
+      # it has to compile and pass the lints too (scripts/check.sh does the same).
+      - run: rustup target add aarch64-apple-ios-sim
+      - run: cargo clippy --locked --lib --bin oneum --target aarch64-apple-ios-sim -- -D warnings
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
       - run: cargo test --locked
 
   windows:

@@ -1,5 +1,9 @@
 # OnEum
 
+**한국어** · [English](README.en.md)
+
+[![CI](https://github.com/ywjung/oneum/actions/workflows/ci.yml/badge.svg)](https://github.com/ywjung/oneum/actions/workflows/ci.yml)
+
 폴더만 추가하면 바로 듣는 오프라인 로컬 음악 플레이어. Rust로 작성했고 macOS가 주 대상이며 Windows와 iPhone용으로도 빌드됩니다.
 이름은 우리말 **온음**(온전한 소리, 그리고 음악의 온음)에서 왔습니다.
 
@@ -49,8 +53,9 @@ Developer ID로 서명·공증하지 않은 빌드이므로 다른 Mac에서는 
 scripts/package-windows.sh
 ```
 Mac에서 크로스 컴파일해 `dist/OnEum-<버전>-windows-x86_64.zip`을 만듭니다(`rustup target add x86_64-pc-windows-gnu`, `brew install mingw-w64` 필요).
-**Windows판은 컴파일과 링크까지만 확인했고 실제 Windows에서 실행해 보지 못했습니다.** Windows에서 다른 점(창 안 메뉴 막대, Ctrl 단축키, 지원하지 않는 기능)은
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "플랫폼"과 [docs/TESTING.md](docs/TESTING.md)의 "Windows"에 있습니다.
+**Windows판은 컴파일과 링크까지만 확인했고 실제 Windows에서 실행해 보지 못했습니다.** (CI가 Windows 러너에서 빌드·테스트하고 띄워 보게 되어 있지만 아직 돌아간 적이 없습니다.)
+Windows에서 다른 점(창 안 메뉴 막대, Ctrl 단축키, 지원하지 않는 기능)은 [Windows 사용 안내](docs/USER_GUIDE_WINDOWS.md),
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "플랫폼", [docs/TESTING.md](docs/TESTING.md)의 "Windows"에 있습니다.
 
 ## iPhone
 ```bash
@@ -63,10 +68,21 @@ scripts/ios-device.sh
 iPhone을 연결해 잠금을 풀고 이 Mac을 신뢰하게 한 뒤 실행합니다. Xcode에 Apple ID가 등록되어 있어야 하고, iPhone의 개발자 모드가 켜져 있어야 합니다.
 Xcode에서 `ios/OnEum.xcodeproj`를 열어 팀을 고르고 실행해도 됩니다.
 서명할 팀은 키체인의 개발 인증서에서 찾습니다. 다른 팀(예: 무료 개인 팀)으로 서명하려면 `ONEUM_IOS_TEAM`에 팀 ID를, 그 팀에서 쓸 수 있는 번들 ID를 `ONEUM_IOS_BUNDLE_ID`에 줍니다.
-**iPhone판은 iOS 27.0 시뮬레이터에서 확인했고, 실제 iPhone(iOS 27.2.1)에는 설치해서 실행되는 것까지만 확인했습니다.** 화면과 사용법은 [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md),
-다른 점과 확인 범위는 [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md)와 [docs/TESTING.md](docs/TESTING.md)의 "iPhone"에 있습니다.
+
+iPhone에는 폰 전용 화면이 있습니다: 보관함 · 검색 · 플레이리스트 · 설정 탭, 표지 · 가사 · VU 미터와 스펙트럼 · 대기열을 보여 주는 플레이어, 고정, 정렬, 여러 곡 한꺼번에 고르기,
+플레이리스트와 대기열의 순서를 끌어서 바꾸기, 스마트 플레이리스트, 크레딧과 신호 경로까지 나오는 곡 정보, 파일 검사, 이퀄라이저와 헤드폰 보정, 백그라운드 재생.
+없는 것: 출력 장치 선택 · 곡의 샘플레이트로 출력 · 독점 출력(iPhone이 정함), 메뉴 막대와 키보드 단축키, 목록의 열 고르기, Apple Music 보관함 가져오기.
+
+**iPhone판은 iOS 27.0 시뮬레이터에서 확인했습니다. 실제 iPhone(iOS 27.2.1)에는 설치해서 시작되고, 그려지고, 업데이트 뒤에도 보관함이 그대로인 것까지 확인했습니다. 기기에서 화면이 어떻게 보이고 움직이는지는 저희가 확인하지 못했습니다.**
+화면과 사용법은 [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md), 다른 점과 확인 범위는 [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md)와 [docs/TESTING.md](docs/TESTING.md)의 "iPhone"에 있습니다.
 
 ## 개발
+
+```bash
+scripts/check.sh
+```
+
+CI가 하는 검사를 그대로 돌립니다: 포맷, 린트(macOS, 그리고 대상이 설치되어 있으면 Windows와 iPhone), 테스트. 하나씩 돌리려면:
 
 ```bash
 cargo fmt --all --check
@@ -85,20 +101,24 @@ cargo build --release --locked
 ```
 
 - 테스트는 오디오 장치 없이 돌아갑니다(오프라인 렌더로 샘플 단위 검증).
-- 실제 앱을 임시 프로필로 띄워 스크립트로 조작하는 방법: [docs/TESTING.md](docs/TESTING.md#앱-구동-검증).
+- 실제 앱을 임시 프로필로 띄워 스크립트로 조작하며 확인합니다: `scripts/dev/smoke.sh`(macOS), `scripts/dev/smoke-ios.sh`(iOS 시뮬레이터). 방법은 [docs/TESTING.md](docs/TESTING.md#앱-구동-검증).
 
 ## 문서
 
 | 문서 | 내용 |
 |---|---|
-| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · [docs/USER_GUIDE.en.md](docs/USER_GUIDE.en.md) | 사용 안내, 한국어와 영어(앱의 도움말 메뉴에서 보는 것과 같은 글) |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · [docs/USER_GUIDE.en.md](docs/USER_GUIDE.en.md) | macOS 사용 안내, 한국어와 영어(앱의 도움말 메뉴에서 보는 것과 같은 글) |
+| [docs/USER_GUIDE_WINDOWS.md](docs/USER_GUIDE_WINDOWS.md) · [docs/USER_GUIDE_WINDOWS.en.md](docs/USER_GUIDE_WINDOWS.en.md) | Windows 사용 안내 |
+| [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md) · [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md) | iPhone 사용 안내 |
+| [CHANGELOG.md](CHANGELOG.md) | 바뀐 것 |
 | [docs/PRD.md](docs/PRD.md) | 사용자, 범위, 완료 조건 |
 | [docs/UX.md](docs/UX.md) | 화면, 조작, 재생 동작 정의 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 모듈, 스레드, 오디오 경로, 저장 |
 | [docs/TESTING.md](docs/TESTING.md) | 테스트 방법, 포맷·gapless 지원표, 실측 결과, 검증 대기 항목 |
 | [docs/RELEASE.md](docs/RELEASE.md) | 패키징, 서명, 공증, 배포 |
 | [docs/PLAN.md](docs/PLAN.md) · [docs/STATUS.md](docs/STATUS.md) | 단계와 현재 상태 |
-| [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) | GUI 스택 결정 |
+| [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) · [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) | 결정 기록: GUI 스택, iPhone판 |
+| [docs/IOS_PLAN.md](docs/IOS_PLAN.md) | iPhone판 계획과 진행 결과 |
 
 ## 라이선스
 

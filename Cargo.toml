@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.95"
 description = "OnEum — a local music player for macOS, Windows and iPhone"
 license = "MIT"
+repository = "https://github.com/ywjung/oneum"
+readme = "README.md"
 publish = false
 default-run = "oneum"
 
