@@ -290,6 +290,40 @@ fn favourites_history_and_play_counts() {
     assert!(library.track(ids[3]).unwrap().favorite);
 }
 
+/// The list of what was played last is asked for by the window in a frame: it comes
+/// from memory and does not wait for the database, also not while a write is held up
+/// (another program has the database locked).
+#[test]
+fn recent_plays_do_not_wait_for_the_database() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    library.record_play(ids[1]);
+    library.record_play(ids[0]);
+    let other = rusqlite::Connection::open(env.paths().data_dir.join("library.db")).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    // A write that waits for the lock (and holds the library's own connection).
+    let writer = {
+        let library = library.clone();
+        let id = ids[2];
+        std::thread::spawn(move || library.record_play(id))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    assert_eq!(library.recent_plays(10), [ids[0], ids[1]]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "waited {:?}",
+        started.elapsed()
+    );
+    other.execute_batch("ROLLBACK").unwrap();
+    writer.join().unwrap();
+    // After a restart the list is read from the history.
+    library.shutdown();
+    let (reopened, _) = Library::open(env.paths()).unwrap();
+    let recent = reopened.recent_plays(10);
+    assert_eq!(&recent[recent.len() - 2..], [ids[0], ids[1]]);
+}
+
 #[test]
 fn kv_and_queue_persistence() {
     let env = TestEnv::new();
@@ -648,6 +682,20 @@ fn an_apple_music_library_export_is_taken_over() {
         .expect("playlist made");
     assert_eq!(track_ids(&library, playlist.id), [ids[1], ids[0]]);
     assert_eq!(library.snapshot().get(ids[0]).unwrap().play_count, 7);
+    // What the window shows (the snapshot) has the date too: sorting by date added
+    // and `added:` searches go by it.
+    let snapshot = library.snapshot();
+    assert_eq!(snapshot.get(ids[0]).unwrap().added_at, 978_307_200);
+    let recent: Vec<TrackId> = snapshot
+        .search("added:30d")
+        .into_iter()
+        .map(|i| snapshot.tracks[i as usize].id)
+        .collect();
+    assert!(
+        !recent.contains(&ids[0]),
+        "added in 2001, not in the last 30 days"
+    );
+    assert!(recent.contains(&ids[1]));
 
     // Again: nothing more.
     let again = library.import_apple_music(&file).expect("imports");

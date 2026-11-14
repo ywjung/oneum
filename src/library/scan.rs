@@ -22,7 +22,7 @@
 use super::tags::{self, FileTags, ReadError};
 use super::{FollowedLink, Inner, art, lock, unix_now};
 use crate::model::{Track, TrackId};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -1352,6 +1352,38 @@ fn read_worker(
     }
 }
 
+/// A sheet that was read: its key, what to record of it, and the path and state of
+/// each file read from it.
+pub(crate) type SheetRead = (String, super::SheetRecord, Vec<(PathBuf, i64)>);
+
+/// Records sheets as read. A sheet counts as read once all the files read from it are
+/// in the library as they were read (they may have come in an earlier batch; a failed
+/// commit leaves the sheet to be read again).
+pub(crate) fn record_sheets_read(inner: &Inner, sheets: Vec<SheetRead>) {
+    if sheets.is_empty() {
+        return;
+    }
+    let done: Vec<(String, super::SheetRecord)> = {
+        let state = lock(&inner.state);
+        sheets
+            .into_iter()
+            .filter(|(_, _, tracks)| {
+                tracks.iter().all(|(path, stamp)| {
+                    state
+                        .id_of_path(path)
+                        .and_then(|id| state.tracks.get(&id))
+                        .is_some_and(|entry| entry.track.mtime_ns == *stamp)
+                })
+            })
+            .map(|(key, record, _)| (key, record))
+            .collect()
+    };
+    if !done.is_empty() {
+        lock(&inner.sheets_read).extend(done);
+        inner.sheets_dirty.store(true, Ordering::Release);
+    }
+}
+
 fn commit_batch(
     inner: &Inner,
     root_id: i64,
@@ -1378,29 +1410,7 @@ fn commit_batch(
         }
     }
     let committed = inner.commit_scanned(files, &touches, Some(root_id), Some(cancel));
-    // A sheet counts as read once all its tracks are in as they were read (they may have
-    // come in an earlier batch; a failed commit leaves the sheet to be read again).
-    if !sheets.is_empty() {
-        let done: Vec<(String, super::SheetRecord)> = {
-            let state = lock(&inner.state);
-            sheets
-                .into_iter()
-                .filter(|(_, _, tracks)| {
-                    tracks.iter().all(|(path, stamp)| {
-                        state
-                            .id_of_path(path)
-                            .and_then(|id| state.tracks.get(&id))
-                            .is_some_and(|entry| entry.track.mtime_ns == *stamp)
-                    })
-                })
-                .map(|(key, record, _)| (key, record))
-                .collect()
-        };
-        if !done.is_empty() {
-            lock(&inner.sheets_read).extend(done);
-            inner.sheets_dirty.store(true, Ordering::Release);
-        }
-    }
+    record_sheets_read(inner, sheets);
     let mut added = 0;
     let mut updated = 0;
     for (id, is_new) in committed {
@@ -1920,9 +1930,20 @@ fn scan_loose(inner: &Inner, cancel: &AtomicBool) {
     let mut files = Vec::new();
     let mut back = Vec::new();
     let mut gone: Vec<(TrackId, bool)> = Vec::new();
+    // Tracks of CUE sheets (registered from a playlist that names them) are looked at
+    // sheet by sheet.
+    let mut of_sheets: BTreeMap<PathBuf, Vec<Arc<Track>>> = BTreeMap::new();
+    let mut sheets_read = Vec::new();
     for track in loose {
         if cancel.load(Ordering::Relaxed) {
             return;
+        }
+        if let Some(sheet) = super::cue::sheet_of(&track.path) {
+            of_sheets
+                .entry(sheet.to_path_buf())
+                .or_default()
+                .push(track);
+            continue;
         }
         match fs::metadata(&track.path) {
             Ok(meta) if meta.is_file() => {
@@ -1954,7 +1975,25 @@ fn scan_loose(inner: &Inner, cancel: &AtomicBool) {
             _ => {}
         }
     }
+    for (sheet_path, tracks) in &of_sheets {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        check_loose_sheet(
+            inner,
+            sheet_path,
+            tracks,
+            &folder_art,
+            LooseOutcome {
+                files: &mut files,
+                back: &mut back,
+                gone: &mut gone,
+                sheets_read: &mut sheets_read,
+            },
+        );
+    }
     let committed = inner.commit_scanned(files, &back, None, Some(cancel));
+    record_sheets_read(inner, sheets_read);
     inner
         .counters
         .tracks_updated
@@ -1962,6 +2001,126 @@ fn scan_loose(inner: &Inner, cancel: &AtomicBool) {
     inner.retire_missing(&gone, cancel);
     inner.reload_playlists();
     inner.publish();
+    inner.save_sheet_records();
+}
+
+/// Where `check_loose_sheet` puts what it finds (see `scan_loose`).
+struct LooseOutcome<'a> {
+    /// Tracks read again.
+    files: &'a mut Vec<ScannedFile>,
+    /// Tracks that are there again.
+    back: &'a mut Vec<TrackId>,
+    /// Tracks that are gone: `(track, keep it)`.
+    gone: &'a mut Vec<(TrackId, bool)>,
+    /// Sheets read, to be recorded once their tracks are in.
+    sheets_read: &'a mut Vec<SheetRead>,
+}
+
+/// Looks at the individually registered tracks of one CUE sheet: they are read again
+/// when the sheet or its file changed since the sheet was read (by its record, as for
+/// a music folder's sheets), are back when they were unavailable, and are gone when the
+/// sheet, its file or the track in it is. What cannot be examined is left as it is.
+fn check_loose_sheet(
+    inner: &Inner,
+    sheet_path: &Path,
+    tracks: &[Arc<Track>],
+    folder_art: &FolderArt,
+    out: LooseOutcome<'_>,
+) {
+    let counters = &inner.counters;
+    // A vanished folder may be an unplugged drive: its tracks are kept.
+    let folder_exists = sheet_path.parent().is_some_and(Path::is_dir);
+    let mut all_gone = |keep: bool| out.gone.extend(tracks.iter().map(|t| (t.id, keep)));
+    let read =
+        fs::metadata(sheet_path).and_then(|meta| Ok((meta, super::cue::read_checked(sheet_path)?)));
+    let (sheet_meta, sheet) = match read {
+        Ok((meta, Some(sheet))) => (meta, sheet),
+        // Not a sheet any more.
+        Ok((_, None)) => return all_gone(false),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return all_gone(!folder_exists);
+        }
+        Err(_) => return,
+    };
+    let audio = match super::cue::audio_of_checked(sheet_path, &sheet) {
+        Ok(Some(audio)) => audio,
+        Ok(None) => return all_gone(false),
+        Err(_) => return,
+    };
+    let audio_meta = match fs::metadata(&audio) {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return all_gone(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return all_gone(false),
+        Err(_) => return,
+    };
+    counters
+        .files_found
+        .fetch_add(tracks.len() as u64, Ordering::Relaxed);
+    counters
+        .files_done
+        .fetch_add(tracks.len() as u64, Ordering::Relaxed);
+    let (size, audio_mtime, sheet_mtime) = (
+        audio_meta.len(),
+        mtime_ns(&audio_meta),
+        mtime_ns(&sheet_meta),
+    );
+    let key = sheet_key(sheet_path);
+    let record = lock(&inner.sheets_read)
+        .get(&key)
+        .filter(|record| record.is_of(sheet_mtime, audio_mtime, size))
+        .cloned();
+    if let Some(record) = record {
+        // As it was read: the tracks it gave are there, the others are none.
+        for track in tracks {
+            let given = super::cue::track_number(&track.path)
+                .is_some_and(|number| record.tracks.contains(&number));
+            if !given {
+                out.gone.push((track.id, false));
+            } else if !track.available {
+                out.back.push(track.id);
+            }
+        }
+        return;
+    }
+    let read = match read_sheet(inner, sheet_path, &audio, size, audio_mtime, folder_art) {
+        Ok(read) => read,
+        Err(ReadError::Unsupported(_)) => {
+            counters.unsupported.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        Err(ReadError::Failed(_)) => {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    let record = super::SheetRecord {
+        mtime: sheet_mtime,
+        tracks: read
+            .iter()
+            .filter_map(|file| super::cue::track_number(&file.path))
+            .collect(),
+        audio_mtime,
+        audio_size: size,
+    };
+    let mut read = read;
+    let mut states = Vec::new();
+    for track in tracks {
+        match read.iter().position(|file| file.path == track.path) {
+            Some(at) => {
+                let file = read.swap_remove(at);
+                states.push((file.path.clone(), file.mtime_ns));
+                out.files.push(file);
+            }
+            // Not a track of the sheet as it is now (or not within its file).
+            None => out.gone.push((track.id, false)),
+        }
+    }
+    out.sheets_read.push((key, record, states));
 }
 
 #[cfg(test)]

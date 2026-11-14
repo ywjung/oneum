@@ -3168,6 +3168,114 @@ fn a_change_made_as_watching_begins_is_not_missed() {
     });
 }
 
+/// A folder that cannot be removed (the database is locked by another program, the
+/// disk is full) stays a music folder with its tracks: the library does not forget in
+/// memory what the database still holds. Once the database can be written, it goes.
+#[test]
+fn a_folder_that_cannot_be_removed_stays() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("a.wav"), 500, "A", "Band", "Album");
+    write_tagged_wav(&music.join("b.wav"), 500, "B", "Band", "Album");
+    let (library, root) = env.open_scanned();
+    {
+        // Another connection holds the write lock: nothing can be deleted.
+        let other = rusqlite::Connection::open(env.paths().data_dir.join("library.db")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(library.remove_folder(root).is_err());
+        other.execute_batch("ROLLBACK").unwrap();
+    }
+    assert_eq!(library.roots().len(), 1, "still a music folder");
+    wait_scan(&library);
+    assert_eq!(titles(&library), ["A", "B"]);
+    assert!(library.snapshot().tracks.iter().all(|t| t.available));
+    // The same after a restart: memory and database agree.
+    library.shutdown();
+    let (reopened, _) = Library::open(env.paths()).unwrap();
+    assert_eq!(reopened.roots().len(), 1);
+    assert_eq!(titles(&reopened), ["A", "B"]);
+
+    reopened.remove_folder(root).unwrap();
+    assert!(reopened.roots().is_empty());
+    assert!(titles(&reopened).is_empty());
+}
+
+/// A playlist with tracks of a sheet in it, read into a library that does not have the
+/// music folder (a new library, another profile): the tracks are found through the
+/// sheet, like files a playlist names. They are looked after like other individually
+/// registered files: read again when the sheet changes, gone with it; and they become
+/// the folder's own when the folder is added.
+#[test]
+fn a_playlist_with_sheet_tracks_is_read_into_an_empty_library() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    let sheet = music.join("Live/image.cue");
+    let write = |second: &str| {
+        fs::write(
+            &sheet,
+            format!(
+                "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+                 \x20 TRACK 02 AUDIO\n    TITLE \"{second}\"\n    INDEX 01 00:01:00\n"
+            ),
+        )
+        .unwrap();
+    };
+    write("Two");
+    let list = env.dir.path().join("mix.m3u8");
+    {
+        let (library, _) = env.open_scanned();
+        let playlist = library.create_playlist("Mix").unwrap();
+        let ids = [by_title(&library, "Two").id, by_title(&library, "One").id];
+        library.add_to_playlist(playlist, &ids).unwrap();
+        assert_eq!(library.export_m3u8(playlist, &list).unwrap(), 2);
+        library.shutdown();
+    }
+
+    // Another library, with no music folder.
+    let other = TestEnv::new();
+    let library = other.open();
+    let imported = library.import_m3u8(&list).unwrap();
+    assert!(imported.missing.is_empty(), "{:?}", imported.missing);
+    assert_eq!(imported.matched, 2);
+    assert_eq!(titles(&library), ["One", "Two"]);
+    let order: Vec<String> = library
+        .playlist_items(imported.playlist_id)
+        .into_iter()
+        .filter_map(|item| library.track(item.track_id))
+        .map(|t| t.title.clone())
+        .collect();
+    assert_eq!(order, ["Two", "One"]);
+    let one = by_title(&library, "One");
+    assert!(one.available && one.root_id.is_none());
+    assert_eq!(one.duration_ms, 1000);
+
+    // Nothing to do while nothing changes; a changed sheet is read again; a sheet
+    // that goes takes its tracks along (kept as unavailable: the playlist has them).
+    let reads = library.debug_tag_reads();
+    rescan(&library);
+    assert_eq!(library.debug_tag_reads(), reads, "not read again");
+    write("Second");
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Second"]);
+    assert_eq!(by_title(&library, "One").id, one.id);
+    let away = other.dir.path().join("image.cue");
+    fs::rename(&sheet, &away).unwrap();
+    rescan(&library);
+    assert!(library.snapshot().tracks.iter().all(|t| !t.available));
+    fs::rename(&away, &sheet).unwrap();
+    rescan(&library);
+    assert!(library.snapshot().tracks.iter().all(|t| t.available));
+
+    // The folder becomes a music folder: the same tracks, now its own.
+    library.add_folder(&music).unwrap();
+    wait_scan(&library);
+    assert_eq!(titles(&library), ["One", "Second"]);
+    let adopted = by_title(&library, "One");
+    assert_eq!(adopted.id, one.id);
+    assert!(adopted.root_id.is_some());
+}
+
 /// A music folder that is removed takes the record of its sheets with it.
 #[test]
 fn removing_a_folder_forgets_its_sheets() {

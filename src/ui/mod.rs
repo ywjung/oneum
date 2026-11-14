@@ -218,6 +218,10 @@ enum AppEvent {
     AppleImported(Result<crate::library::AppleImport, LibraryError>),
     /// The file to show in the file manager was found (a CUE sheet's audio file).
     Reveal(PathBuf),
+    /// A music folder was added.
+    FolderAdded(PathBuf),
+    /// A playlist was written to a file: how many entries, or that it could not be.
+    PlaylistExported(Option<usize>),
 }
 
 /// Requests from the menu bar that need the window.
@@ -738,6 +742,20 @@ impl OneumApp {
                 AppEvent::Reveal(path) => {
                     finder::reveal(&path);
                 }
+                AppEvent::FolderAdded(path) => {
+                    self.announce_scan = true;
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    self.info_toast(self.lang.folder_added(&name));
+                }
+                AppEvent::PlaylistExported(Some(count)) => {
+                    self.info_toast(self.lang.playlist_exported(count));
+                }
+                AppEvent::PlaylistExported(None) => {
+                    self.warn_toast(self.s().notice_export_failed);
+                }
                 AppEvent::FilesImported(ids) => {
                     self.core.player.send(Command::PlayTracks {
                         tracks: ids,
@@ -1201,18 +1219,16 @@ impl OneumApp {
 
     // ----- files ----------------------------------------------------------------------
 
+    /// Adds a music folder. The folder is looked at and written to the database on the
+    /// edit thread (a drive that is slow to answer, a database that is busy): what came
+    /// of it is told in a later frame.
     fn add_folder(&mut self, path: PathBuf) {
-        match self.core.library.add_folder(&path) {
-            Ok(_) => {
-                self.announce_scan = true;
-                let name = path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
-                self.info_toast(self.lang.folder_added(&name));
-            }
-            Err(error) => self.library_error_toast(&error),
-        }
+        self.edit(move |library| {
+            Some(match library.add_folder(&path) {
+                Ok(_) => AppEvent::FolderAdded(path),
+                Err(error) => AppEvent::EditFailed(error),
+            })
+        });
     }
 
     fn pick_folder(&mut self) {
@@ -1353,13 +1369,15 @@ impl OneumApp {
             .add_filter(self.s().dialog_filter_playlist, &["m3u8"])
             .save_file();
         let Some(dest) = picked else { return };
-        match self.core.library.export_m3u8(id, &dest) {
-            Ok(count) => self.info_toast(self.lang.playlist_exported(count)),
-            Err(error) => {
-                tracing::warn!("playlist export failed: {error}");
-                self.warn_toast(self.s().notice_export_failed);
-            }
-        }
+        // Written on the edit thread: the destination may be slow to answer.
+        self.edit(move |library| {
+            Some(AppEvent::PlaylistExported(
+                library
+                    .export_m3u8(id, &dest)
+                    .inspect_err(|error| tracing::warn!("playlist export failed: {error}"))
+                    .ok(),
+            ))
+        });
     }
 
     /// Handles paths from Finder, the Dock, drag-and-drop or the open panel: folders
@@ -2229,6 +2247,22 @@ fn restate_pins(pinned: &mut Vec<Pin>, restate: impl Fn(&Pin) -> Pin) {
     });
 }
 
+/// Turns a primary click with Control held into a secondary click (see
+/// `raw_input_hook`).
+fn control_click_is_secondary(events: &mut [egui::Event]) {
+    for event in events {
+        if let egui::Event::PointerButton {
+            button, modifiers, ..
+        } = event
+            && *button == egui::PointerButton::Primary
+            && modifiers.ctrl
+            && !modifiers.mac_cmd
+        {
+            *button = egui::PointerButton::Secondary;
+        }
+    }
+}
+
 /// A pin as the library shows its thing now: an album by the key it is shown under.
 fn shown_pin(snapshot: &LibrarySnapshot, pin: &Pin) -> Pin {
     match pin {
@@ -2279,17 +2313,10 @@ impl eframe::App for OneumApp {
             automation.step(raw);
         }
         // Control-click is a secondary click on a Mac; the window system delivers it as a
-        // primary click with Control held.
-        for event in &mut raw.events {
-            if let egui::Event::PointerButton {
-                button, modifiers, ..
-            } = event
-                && *button == egui::PointerButton::Primary
-                && modifiers.ctrl
-                && !modifiers.mac_cmd
-            {
-                *button = egui::PointerButton::Secondary;
-            }
+        // primary click with Control held. (Only there: on Windows, Ctrl+click is how
+        // more than one row is selected.)
+        if cfg!(target_os = "macos") {
+            control_click_is_secondary(&mut raw.events);
         }
         // Edit-menu actions arrive through the responder chain (see platform::macos::responder).
         for action in responder::drain() {
@@ -2416,6 +2443,40 @@ mod tests {
         // Toggling a pinned thing unpins it.
         toggle_pin(&mut pinned, Pin::Genre("Jazz".into()), |_| true);
         assert!(!pinned.contains(&Pin::Genre("Jazz".into())));
+    }
+
+    /// On a Mac a click with Control held is a secondary click; with Command held (or
+    /// with nothing) it stays what it is. (The conversion is applied on macOS only: on
+    /// Windows, Ctrl+click selects.)
+    #[test]
+    fn a_control_click_becomes_a_secondary_click() {
+        let click = |ctrl: bool, mac_cmd: bool| egui::Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers {
+                ctrl,
+                mac_cmd,
+                ..Default::default()
+            },
+        };
+        let mut events = vec![click(true, false), click(false, true), click(false, false)];
+        control_click_is_secondary(&mut events);
+        let buttons: Vec<egui::PointerButton> = events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::PointerButton { button, .. } => Some(*button),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            buttons,
+            [
+                egui::PointerButton::Secondary,
+                egui::PointerButton::Primary,
+                egui::PointerButton::Primary
+            ]
+        );
     }
 
     /// A smart playlist renamed to the name of another pinned one: one pin for it, at

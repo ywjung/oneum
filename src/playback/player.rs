@@ -1655,13 +1655,23 @@ impl<H: PlayerHost> Player<H> {
         }
     }
 
+    /// The current item could not be played (its file would not open, it gave no
+    /// audio): on to the next one, as `start_current` does for a track that is known
+    /// not to be there.
     fn skip_failed_current(&mut self) {
+        let failed = self.queue.current().map(|item| item.id);
         if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES.min(self.queue.len().max(1)) {
             self.give_up();
-        } else if self.queue.advance_after_failure().is_some() {
-            self.start_current(0, false);
-        } else {
+        } else if self.queue.advance_after_failure().is_none() {
             self.end_of_queue();
+        } else if failed.is_some() && self.stop_after == failed {
+            // "Stop after this song" and the song cannot be played: it is over, so
+            // playback stops here as it would have at its end, with the next one ready.
+            self.stop_after = None;
+            self.halt();
+            self.save_session(false);
+        } else {
+            self.start_current(0, false);
         }
     }
 

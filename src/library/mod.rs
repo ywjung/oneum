@@ -52,6 +52,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use unicode_normalization::UnicodeNormalization;
 use watch::WatchMsg;
 
+/// How many of the tracks played last are kept in memory (see `Inner::recent_plays`).
+const RECENT_PLAYS_KEPT: usize = 1000;
+
 /// The `kv` key of the record of read CUE sheets (see `Inner::sheets_read`).
 const SHEETS_READ_KEY: &str = "cue_sheets_read";
 
@@ -442,6 +445,11 @@ pub(crate) struct Inner {
     /// music folder or when the watcher reports the move in two parts; this lets the
     /// later scan still connect the two.
     recently_added: Mutex<std::collections::VecDeque<(TrackId, std::time::Instant)>>,
+    /// The tracks played last, most recent first, each once (at most
+    /// `RECENT_PLAYS_KEPT`): the window asks for them in a frame, which must not wait
+    /// for the database. Read from the history when the library is opened and kept up
+    /// by `record_play`; a track that has left the library since is passed over.
+    recent_plays: Mutex<Vec<TrackId>>,
     /// CUE sheets whose tracks are in the library, by `scan::sheet_key`, with what was
     /// recorded when they were read: a sheet changed since (or missing a track it gave)
     /// is read again. Kept in the `kv` table (see [`Inner::save_sheet_records`]).
@@ -671,6 +679,7 @@ impl Inner {
                         if published.favorite == current.favorite
                             && published.play_count == current.play_count
                             && published.last_played_at == current.last_played_at
+                            && published.added_at == current.added_at
                             && published.measured == current.measured
                             && published.unmeasurable == current.unmeasurable
                             && published.check == current.check
@@ -689,6 +698,7 @@ impl Inner {
                         track.favorite = current.favorite;
                         track.play_count = current.play_count;
                         track.last_played_at = current.last_played_at;
+                        track.added_at = current.added_at;
                         // Share the state's allocation when nothing else differs.
                         Some(if track == **current {
                             Arc::clone(current)
@@ -1267,6 +1277,10 @@ impl Library {
             .and_then(|json| serde_json::from_str::<Vec<(String, SheetRecord)>>(&json).ok())
             .map(|records| records.into_iter().collect())
             .unwrap_or_default();
+        let recent_plays = db.recent_plays(RECENT_PLAYS_KEPT).unwrap_or_else(|err| {
+            tracing::warn!(%err, "could not read play history");
+            Vec::new()
+        });
         let inner = Arc::new(Inner {
             db: Mutex::new(db),
             state: Mutex::new(state),
@@ -1286,6 +1300,7 @@ impl Library {
             checks: check::CheckJob::default(),
             skipped: Mutex::new(HashMap::new()),
             recently_added: Mutex::new(std::collections::VecDeque::new()),
+            recent_plays: Mutex::new(recent_plays),
             sheets_read: Mutex::new(sheets_read),
             sheets_dirty: AtomicBool::new(false),
             #[cfg(test)]
@@ -1409,23 +1424,53 @@ impl Library {
         // Forget the folder first: from here on no new scan of it can start, and the
         // watcher stops caring about it. Then stop a scan that is already running;
         // its batches check the cancel flag under the database lock.
-        let root_path;
-        {
+        let (at, root, links) = {
             let _db = lock(&self.inner.db);
             let mut state = lock(&self.inner.state);
-            let Some(root) = state.root(root_id) else {
+            let Some(at) = state.roots.iter().position(|root| root.id == root_id) else {
                 return Err(LibraryError::NotFound);
             };
-            root_path = root.path.clone();
-            state.roots.retain(|root| root.id != root_id);
-            state.links.retain(|link| link.root_id != root_id);
-        }
+            let root = state.roots.remove(at);
+            let (links, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.links)
+                .into_iter()
+                .partition(|link| link.root_id == root_id);
+            state.links = kept;
+            (at, root, links)
+        };
         self.inner.scan.cancel_root(root_id);
-        self.inner.forget_sheets_under(&root_path);
 
-        // Delete the tracks in chunks so that other threads get their turn at the
-        // database in between, then the folder row itself (which would also take any
-        // remaining track rows with it).
+        if let Err(error) = self.delete_folder_rows(root_id) {
+            // The folder is still in the database (the database is locked, the disk
+            // full): it stays a music folder, as before it was to be removed. What was
+            // deleted of it so far is found again by a scan.
+            tracing::warn!(root_id, %error, "a music folder could not be removed; it is kept");
+            {
+                let mut state = lock(&self.inner.state);
+                let at = at.min(state.roots.len());
+                state.roots.insert(at, root);
+                state.links.extend(links);
+            }
+            self.inner
+                .scan
+                .request_root(&self.inner.counters, root_id, None);
+            self.inner.reload_playlists();
+            self.poke_watcher();
+            self.inner.publish();
+            return Err(error);
+        }
+        self.inner.forget_sheets_under(&root.path);
+        tracing::info!(root_id, "music folder removed from the library");
+        self.inner.reload_playlists();
+        self.poke_watcher();
+        self.inner.publish();
+        Ok(())
+    }
+
+    /// Deletes the tracks of a music folder and the folder itself from the database
+    /// (and the tracks from memory as they go), in chunks so that other threads get
+    /// their turn at the database in between; the folder row goes last (which would
+    /// also take any remaining track rows with it).
+    fn delete_folder_rows(&self, root_id: i64) -> Result<(), LibraryError> {
         loop {
             let mut db = lock(&self.inner.db);
             let ids: Vec<TrackId> = lock(&self.inner.state)
@@ -1437,7 +1482,7 @@ impl Library {
                 .collect();
             if ids.is_empty() {
                 db.delete_root(root_id)?;
-                break;
+                return Ok(());
             }
             db.delete_tracks(&ids)?;
             let mut state = lock(&self.inner.state);
@@ -1445,11 +1490,6 @@ impl Library {
                 state.remove(id);
             }
         }
-        tracing::info!(root_id, "music folder removed from the library");
-        self.inner.reload_playlists();
-        self.poke_watcher();
-        self.inner.publish();
-        Ok(())
     }
 
     /// Starts an incremental background scan of every music folder (folders that are
@@ -1591,6 +1631,10 @@ impl Library {
         // New files: library path -> (folder it belongs to, result slots waiting for it).
         let mut fresh: Vec<(PathBuf, Option<i64>, Vec<usize>)> = Vec::new();
         let mut fresh_index: HashMap<PathBuf, usize> = HashMap::new();
+        // Tracks of CUE sheets that are not in the library, by sheet: (the sheet, the
+        // folder it belongs to, the track numbers asked for with their result slots).
+        type SheetWanted = (PathBuf, Option<i64>, Vec<(u32, usize)>);
+        let mut fresh_sheets: Vec<SheetWanted> = Vec::new();
         for (slot, path) in paths.iter().enumerate() {
             let Ok(absolute) = std::path::absolute(path) else {
                 continue;
@@ -1598,7 +1642,28 @@ impl Library {
             let absolute = m3u::lexical_normalize(&absolute);
             let mut known = lookup(&absolute);
             let mut location = None;
+            // A track of a CUE sheet, as a playlist written by this app names it
+            // (`…/Album.cue/03`): the sheet is the file to find.
             if known.is_none()
+                && let (Some(sheet), Some(number)) =
+                    (cue::sheet_of(&absolute), cue::track_number(&absolute))
+            {
+                let Ok(canonical) = fs::canonicalize(sheet) else {
+                    continue; // the sheet does not exist
+                };
+                let (sheet_path, root_id) = lock(&inner.state).library_path(&canonical);
+                known = lookup(&cue::track_path(&sheet_path, number));
+                if known.is_none() {
+                    match fresh_sheets
+                        .iter_mut()
+                        .find(|(path, _, _)| *path == sheet_path)
+                    {
+                        Some((_, _, wanted)) => wanted.push((number, slot)),
+                        None => fresh_sheets.push((sheet_path, root_id, vec![(number, slot)])),
+                    }
+                    continue;
+                }
+            } else if known.is_none()
                 && let Ok(canonical) = fs::canonicalize(&absolute)
             {
                 let (library_path, root_id) = lock(&inner.state).library_path(&canonical);
@@ -1707,9 +1772,83 @@ impl Library {
                 changed = true;
             }
         }
+        // The tracks of sheets: each sheet read once, the tracks asked for stored.
+        for (sheet_path, root_id, wanted) in fresh_sheets {
+            let Ok(sheet_meta) = fs::metadata(&sheet_path) else {
+                continue;
+            };
+            let Some(audio) =
+                cue::read(&sheet_path).and_then(|sheet| cue::audio_of(&sheet_path, &sheet))
+            else {
+                continue;
+            };
+            let Some(audio_meta) = fs::metadata(&audio).ok().filter(|m| m.is_file()) else {
+                continue;
+            };
+            let (size, audio_mtime) = (audio_meta.len(), scan::mtime_ns(&audio_meta));
+            let Ok(read) =
+                scan::read_sheet(inner, &sheet_path, &audio, size, audio_mtime, &folder_art)
+            else {
+                continue;
+            };
+            let given: Vec<u32> = read
+                .iter()
+                .filter_map(|file| cue::track_number(&file.path))
+                .collect();
+            // In a music folder its scan takes the sheet in whole; elsewhere (or where
+            // that scan does not go) these tracks are individually registered ones.
+            let root_id = root_id.filter(|id| {
+                lock(&inner.state)
+                    .root(*id)
+                    .is_some_and(|root| scan::is_walkable(&root.path, &sheet_path))
+            });
+            let mut files = Vec::new();
+            let mut slots: Vec<Vec<usize>> = Vec::new();
+            for mut file in read {
+                let waiting: Vec<usize> = cue::track_number(&file.path)
+                    .map(|number| {
+                        wanted
+                            .iter()
+                            .filter(|(asked, _)| *asked == number)
+                            .map(|(_, slot)| *slot)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if waiting.is_empty() {
+                    continue;
+                }
+                file.root_id = root_id;
+                files.push(file);
+                slots.push(waiting);
+            }
+            let states: Vec<(PathBuf, i64)> =
+                files.iter().map(|f| (f.path.clone(), f.mtime_ns)).collect();
+            let committed = inner.commit_scanned(files, &[], None, None);
+            for ((id, _), waiting) in committed.iter().zip(&slots) {
+                for &slot in waiting {
+                    results[slot] = vec![*id];
+                }
+                changed = true;
+            }
+            // Individually registered: the check of such files goes by this record
+            // (see `scan::check_loose_sheet`).
+            if root_id.is_none() {
+                let record = SheetRecord {
+                    mtime: scan::mtime_ns(&sheet_meta),
+                    tracks: given,
+                    audio_mtime,
+                    audio_size: size,
+                };
+                scan::record_sheets_read(
+                    inner,
+                    vec![(scan::sheet_key(&sheet_path), record, states)],
+                );
+            }
+        }
         if changed {
             inner.publish();
         }
+        inner.save_sheet_records();
         results
     }
 
@@ -1895,6 +2034,10 @@ impl Library {
                 t.play_count = t.play_count.saturating_add(1);
                 t.last_played_at = Some(now);
             });
+            let mut recent = lock(&self.inner.recent_plays);
+            recent.retain(|played| *played != id);
+            recent.insert(0, id);
+            recent.truncate(RECENT_PLAYS_KEPT);
         }
         self.inner.publish_patch(&[id]);
     }
@@ -1912,12 +2055,14 @@ impl Library {
 
     /// Recently played tracks, most recent first, each track once.
     pub fn recent_plays(&self, limit: usize) -> Vec<TrackId> {
-        lock(&self.inner.db)
-            .recent_plays(limit)
-            .unwrap_or_else(|err| {
-                tracing::warn!(%err, "could not read play history");
-                Vec::new()
-            })
+        // From memory (see `Inner::recent_plays`): no waiting for the database.
+        let recent = lock(&self.inner.recent_plays).clone();
+        let state = lock(&self.inner.state);
+        recent
+            .into_iter()
+            .filter(|id| state.tracks.contains_key(id))
+            .take(limit)
+            .collect()
     }
 
     // ---- playlists -----------------------------------------------------------------

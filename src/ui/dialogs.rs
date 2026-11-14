@@ -172,11 +172,15 @@ impl OneumApp {
         let result = match dialog {
             Dialog::RemoveFolder(id, _) => {
                 // Removing a large folder deletes many rows: keep it off the UI thread.
+                // If it cannot be removed (the folder then stays), the window says so.
+                let (events, core) = (self.events_tx.clone(), self.core.clone());
                 let spawned = std::thread::Builder::new()
                     .name("oneum-remove-folder".into())
                     .spawn(move || {
                         if let Err(error) = library.remove_folder(id) {
                             tracing::warn!("removing a music folder failed: {error}");
+                            let _ = events.send(AppEvent::EditFailed(error));
+                            core.request_repaint();
                         }
                     });
                 if spawned.is_err() {

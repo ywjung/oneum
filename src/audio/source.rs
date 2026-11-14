@@ -85,6 +85,11 @@ struct Shared {
     /// loader may hold them a moment longer than the [`FileInMemory`]).
     budget: Arc<Budget>,
     reserved: u64,
+    /// The file on disk, for reading what is not in memory yet. Let go of once the
+    /// whole file is in memory, whoever still holds the bytes (a decoder, the feed
+    /// that keeps them for the next track of the same file): the drive it is on can
+    /// then be ejected while it plays.
+    file: Mutex<Option<Arc<File>>>,
 }
 
 impl Drop for Shared {
@@ -98,14 +103,21 @@ impl Shared {
         // The loader only appends; a panic there leaves valid bytes behind.
         self.data.lock().unwrap_or_else(|p| p.into_inner())
     }
+
+    /// The file on disk, while it is still held (see `Shared::file`).
+    fn file(&self) -> Option<Arc<File>> {
+        self.file.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn let_go_of_file(&self) {
+        *self.file.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
 }
 
 /// A file being loaded (or already loaded) into memory.
 pub struct FileInMemory {
     path: PathBuf,
     len: u64,
-    /// Open until the whole file is in memory.
-    file: Option<Arc<File>>,
     shared: Arc<Shared>,
     /// Common to every handle of this file in memory (see [`FileInMemory::share`]):
     /// the loader is stopped when the last of them goes.
@@ -152,8 +164,9 @@ impl FileInMemory {
             cancel: AtomicBool::new(false),
             budget: budget.clone(),
             reserved: len,
+            file: Mutex::new(Some(file.clone())),
         });
-        let (loader_file, loader_shared) = (file.clone(), shared.clone());
+        let (loader_file, loader_shared) = (file, shared.clone());
         let spawned = std::thread::Builder::new()
             .name("oneum-preload".into())
             .spawn(move || load(&loader_file, &loader_shared, len));
@@ -163,7 +176,6 @@ impl FileInMemory {
         Ok(Some(Self {
             path: path.to_path_buf(),
             len,
-            file: Some(file),
             _alive: Arc::new(Alive(shared.clone())),
             shared,
         }))
@@ -176,7 +188,6 @@ impl FileInMemory {
         Self {
             path: self.path.clone(),
             len: self.len,
-            file: self.file.clone(),
             shared: self.shared.clone(),
             _alive: self._alive.clone(),
         }
@@ -250,6 +261,8 @@ fn load(file: &File, shared: &Shared, len: u64) {
         }
     }
     shared.complete.store(true, Ordering::Release);
+    // Everything is in memory: nobody reads the file any more.
+    shared.let_go_of_file();
 }
 
 /// Reads a [`FileInMemory`]: from memory where it is loaded, from the file elsewhere.
@@ -265,21 +278,23 @@ impl Read for MemorySource {
             return Ok(0);
         }
         let want = buf.len().min((len - self.pos) as usize);
-        let loaded = self.file.shared.loaded.load(Ordering::Acquire);
-        let n = if self.pos < loaded {
-            let n = want.min((loaded - self.pos) as usize);
-            let start = self.pos as usize;
-            buf[..n].copy_from_slice(&self.file.shared.data()[start..start + n]);
-            n
-        } else {
-            match &self.file.file {
-                Some(file) => read_at(file, &mut buf[..want], self.pos)?,
-                None => 0,
+        let shared = &self.file.shared;
+        let n = loop {
+            let loaded = shared.loaded.load(Ordering::Acquire);
+            if self.pos < loaded {
+                let n = want.min((loaded - self.pos) as usize);
+                let start = self.pos as usize;
+                buf[..n].copy_from_slice(&shared.data()[start..start + n]);
+                break n;
+            }
+            match shared.file() {
+                Some(file) => break read_at(&file, &mut buf[..want], self.pos)?,
+                // Let go of because everything has come into memory meanwhile: read
+                // it there. (Otherwise the loader gave up and so does this.)
+                None if shared.complete.load(Ordering::Acquire) => {}
+                None => break 0,
             }
         };
-        if self.file.file.is_some() && self.file.is_complete() {
-            self.file.file = None; // everything is in memory: let go of the file
-        }
         self.pos += n as u64;
         Ok(n)
     }
@@ -423,6 +438,15 @@ mod tests {
         assert_eq!(budget.used(), len, "one copy");
         drop(first);
         wait_complete(&second);
+        // With everything in memory the file on disk is let go of, although a handle to
+        // the bytes is still kept (as the feed keeps one for the next track of the
+        // same file): the drive can be ejected. The loader lets go right after it marks
+        // the load complete.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while second.shared.file().is_some() {
+            assert!(Instant::now() < deadline, "the file is still held");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let mut bytes = Vec::new();
         second
             .share()
