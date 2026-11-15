@@ -35,7 +35,8 @@ import android.view.KeyEvent;
  * call or another app takes it, and when headphones are pulled out.
  *
  * The service is started when music first plays and stays for as long as the app has
- * something to play; it is in the foreground only while music plays.
+ * something to play; it is in the foreground while music plays and for a while after a
+ * pause.
  */
 public final class PlaybackService extends Service {
     private static final String TAG = "OnEum";
@@ -44,6 +45,17 @@ public final class PlaybackService extends Service {
     private static final String ACTION_PREVIOUS = "app.oneum.android.PREVIOUS";
     private static final String ACTION_TOGGLE = "app.oneum.android.TOGGLE";
     private static final String ACTION_NEXT = "app.oneum.android.NEXT";
+    /**
+     * How long a paused service stays in the foreground. A service that leaves it at
+     * once is stopped by Android about a minute later when the app is off screen ("app
+     * idle"), and the notification and the lock screen lose their buttons: after a
+     * short break the listener could only play on by opening the app. Ten minutes is
+     * what media apps commonly keep. (Counted while the phone is awake: nothing holds
+     * it awake for this.)
+     */
+    private static final long PAUSED_FOREGROUND_MS = 10 * 60 * 1000L;
+    /** A verification run of a debuggable build may shorten it (see MainActivity). */
+    static long pausedForegroundMs = PAUSED_FOREGROUND_MS;
 
     /** What plays, as the app last told it. */
     static final class State {
@@ -86,8 +98,27 @@ public final class PlaybackService extends Service {
     private MediaSession session;
     private PowerManager.WakeLock awake;
     private boolean foreground;
+    /** Whether leaveForeground is waiting for its time. */
+    private boolean leaving;
     private String artShown;
     private Bitmap art;
+
+    /**
+     * A while after a pause (pausedForegroundMs): the service leaves the foreground.
+     * The notification stays, and the system may end the app when it needs the room.
+     * Not while the sound is only away for a while (a call): playing goes on by itself
+     * afterwards, and a service that has left the foreground cannot come back to it
+     * from behind the screen (it would play on unprotected). The time then starts
+     * again when that is over and nothing plays (see settled).
+     */
+    private final Runnable leaveForeground = () -> {
+        leaving = false;
+        State state = latest;
+        if (foreground && !lostForAWhile && (state == null || !state.playing)) {
+            stopForeground(STOP_FOREGROUND_DETACH);
+            foreground = false;
+        }
+    };
 
     private final BroadcastReceiver noisy = new BroadcastReceiver() {
         @Override
@@ -327,6 +358,7 @@ public final class PlaybackService extends Service {
     @Override
     public void onDestroy() {
         running = null;
+        MAIN.removeCallbacks(leaveForeground);
         try {
             unregisterReceiver(noisy);
         } catch (RuntimeException error) {
@@ -380,6 +412,8 @@ public final class PlaybackService extends Service {
             // from a foreground service (Android 15). Asked before, playing on from the
             // notification after another app had played was refused.
             goForeground(notification);
+            MAIN.removeCallbacks(leaveForeground);
+            leaving = false;
             // The app asks before it makes sound (claim); this is for a start that did
             // not get to ask. Without the sound the app is told as if it had been taken.
             if (!hasFocus && !ask()) {
@@ -389,14 +423,12 @@ public final class PlaybackService extends Service {
                 awake.acquire();
             }
         } else {
-            // Paused: the notification stays, but nothing holds the phone awake and the
-            // system may end the app when it needs the room. Not while the sound is only
-            // taken for a while (a call): playing goes on by itself afterwards, and a
-            // service that has left the foreground cannot come back to it from behind
-            // the screen (it would play on unprotected).
-            if (foreground && !lostForAWhile) {
-                stopForeground(STOP_FOREGROUND_DETACH);
-                foreground = false;
+            // Paused: the notification stays and nothing holds the phone awake. The
+            // service keeps the foreground for a while, counted from the pause, so
+            // that the notification's buttons stay (see PAUSED_FOREGROUND_MS).
+            if (foreground && !leaving) {
+                leaving = true;
+                MAIN.postDelayed(leaveForeground, pausedForegroundMs);
             }
             getSystemService(NotificationManager.class).notify(NOTIFICATION, notification);
             if (awake.isHeld()) {
@@ -470,7 +502,8 @@ public final class PlaybackService extends Service {
                 hasFocus = false;
                 lostForAWhile = false;
                 Native.onSound(1);
-                // A service that kept the foreground while paused need not any more.
+                // The time a paused service keeps the foreground starts now (it does not
+                // run out while the sound is only away for a while).
                 settled(false);
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:

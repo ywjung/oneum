@@ -82,8 +82,11 @@ holds() { # holds <description> <command…>: runs the command and says whether 
 start() { # (re)starts the installed app with the verification channel
   $ADB shell am force-stop $PKG
   $ADB shell "run-as $PKG sh -c 'mkdir -p files/verify && : > files/verify/script.txt'"
+  # (A paused service keeps the foreground for ten minutes; six seconds in this run,
+  # so that its leaving can be seen. Only a debuggable build takes this.)
   $ADB shell am start -n $PKG/.MainActivity \
-    --es ONEUM_SCRIPT "$VERIFY/script.txt" --es ONEUM_MUSIC_DIR "$REMOTE" >/dev/null
+    --es ONEUM_SCRIPT "$VERIFY/script.txt" --es ONEUM_MUSIC_DIR "$REMOTE" \
+    --es ONEUM_PAUSED_FOREGROUND_MS 6000 >/dev/null
   sleep 6
 }
 session() { # what the system's media session says of the app: "PLAYING" / "PAUSED" / ""
@@ -92,6 +95,7 @@ session() { # what the system's media session says of the app: "PLAYING" / "PAUS
 }
 session_is() { [ "$(session)" = "$1" ]; }
 in_foreground() { $ADB shell dumpsys activity services $PKG | grep -q 'isForeground=true'; }
+not_in_foreground() { ! in_foreground; }
 keyboard_away() { [ "$($ADB shell dumpsys input_method | grep -c 'mInputShown=true')" = 0 ]; }
 
 echo "== generating test library"
@@ -256,6 +260,24 @@ $ADB shell am start -n $PKG/.MainActivity >/dev/null 2>&1
 sleep 2
 ui 'wait 600' 'dump h1.json'
 check h1.json 'd["state"] == "Playing" and d["underruns"] == 0' "and the app comes back as it was"
+
+echo "== paused off screen"
+# The paused service keeps the foreground for a while: one that leaves it at once is
+# stopped by the system about a minute later, and the notification loses its buttons.
+$ADB shell input keyevent KEYCODE_HOME
+sleep 2
+$ADB shell cmd media_session dispatch pause >/dev/null
+sleep 1.5
+holds "a pause from outside pauses with the app off screen" session_is PAUSED
+holds "and the playback service keeps the foreground at first" in_foreground
+sleep 7
+holds "and leaves it when its time is over" not_in_foreground
+$ADB shell cmd media_session dispatch play >/dev/null
+sleep 2
+holds "a play from outside plays again" session_is PLAYING
+holds "from the foreground" in_foreground
+$ADB shell am start -n $PKG/.MainActivity >/dev/null 2>&1
+sleep 2
 
 echo "== restart"
 ui "tap $TAB_LIBRARY $TABS" 'wait 400' 'dump r0.json'

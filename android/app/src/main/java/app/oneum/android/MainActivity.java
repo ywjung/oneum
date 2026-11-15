@@ -130,6 +130,16 @@ public final class MainActivity extends NativeActivity {
                     if (key.startsWith("ONEUM_") && value != null) {
                         Os.setenv(key, value.toString(), true);
                     }
+                    if (key.equals("ONEUM_PAUSED_FOREGROUND_MS") && value != null) {
+                        // A verification run does not wait ten minutes to see the
+                        // paused service leave the foreground.
+                        try {
+                            PlaybackService.pausedForegroundMs = Math.max(
+                                    1000L, Math.min(3_600_000L, Long.parseLong(value.toString())));
+                        } catch (NumberFormatException error) {
+                            Log.w(TAG, "not a time: " + value, error);
+                        }
+                    }
                 }
             }
         } catch (ErrnoException error) {
