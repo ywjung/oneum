@@ -14,6 +14,18 @@ pub enum ThemeChoice {
     Dark,
 }
 
+/// What the screen is drawn through, where a system has more than one interface to its
+/// graphics hardware that works (Android: Vulkan and OpenGL ES).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GraphicsChoice {
+    /// The system's first interface, or the other one after a run lost its graphics
+    /// device on that.
+    #[default]
+    Auto,
+    Vulkan,
+    OpenGl,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RightPanel {
     #[default]
@@ -30,6 +42,14 @@ pub enum RightPanel {
 pub struct SmartPlaylist {
     pub name: String,
     pub query: String,
+}
+
+/// A media server of the network that the listener added by its address: its name, and
+/// where its device description is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedServer {
+    pub name: String,
+    pub location: String,
 }
 
 /// The optional columns of song lists (title, artist, album and length are always there;
@@ -78,6 +98,12 @@ pub struct Settings {
     /// Searches kept as smart playlists, in the order they were made.
     #[serde(deserialize_with = "lenient_list")]
     pub smart_playlists: Vec<SmartPlaylist>,
+    /// Media servers added by their address (those found by asking the network are
+    /// not kept: they are found again).
+    #[serde(deserialize_with = "lenient_list")]
+    pub network_servers: Vec<SavedServer>,
+    /// What the screen is drawn through (see [`GraphicsChoice`]).
+    pub graphics: GraphicsChoice,
     pub right_panel: RightPanel,
     /// Show the VU meter deck above the player bar.
     pub show_meter: bool,
@@ -116,6 +142,8 @@ pub const MAX_EQ_PRESET_NAME_CHARS: usize = 32;
 pub const MAX_CORRECTIONS: usize = 30;
 /// How many smart playlists are kept, and how long their names and searches may be.
 pub const MAX_SMART_PLAYLISTS: usize = 100;
+/// The most media servers kept.
+pub const MAX_NETWORK_SERVERS: usize = 16;
 pub const MAX_SMART_NAME_CHARS: usize = 60;
 pub const MAX_SMART_QUERY_CHARS: usize = 300;
 /// How long an artist or genre name kept in a pin may be.
@@ -199,6 +227,17 @@ impl Settings {
         self.smart_playlists.retain(|smart| {
             !smart.name.is_empty() && !smart.query.is_empty() && names.insert(smart.name.clone())
         });
+        self.network_servers.truncate(MAX_NETWORK_SERVERS);
+        let mut locations = std::collections::HashSet::new();
+        for server in &mut self.network_servers {
+            server.name = tidy_text(&server.name, MAX_SMART_NAME_CHARS);
+        }
+        // Only addresses the app would follow, each once.
+        self.network_servers.retain(|server| {
+            server.location.len() <= 2048
+                && crate::model::http_address(std::path::Path::new(&server.location)).is_some()
+                && locations.insert(server.location.clone())
+        });
         let mut seen = Vec::new();
         self.pinned = std::mem::take(&mut self.pinned)
             .into_iter()
@@ -269,6 +308,8 @@ impl Default for Settings {
             show_format_column: false,
             list_columns: ListColumns::default(),
             smart_playlists: Vec::new(),
+            network_servers: Vec::new(),
+            graphics: GraphicsChoice::Auto,
             right_panel: RightPanel::Hidden,
             show_meter: false,
             window_size: None,

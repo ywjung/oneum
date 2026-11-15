@@ -12,7 +12,8 @@ MODE=${1:-}
 WORK=$(mktemp -d /tmp/oneum-smoke.XXXXXX)
 MUSIC="$WORK/music"
 PROFILE="$WORK/profile"
-trap 'pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+DLNA_PID=
+trap 'pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true; [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 echo "== generating test library"
 scripts/dev/gen-test-library.sh "$MUSIC" >/dev/null
@@ -203,8 +204,8 @@ PY
 echo "== type-ahead, remaining time, drag and drop"
 ui 'click 60 99' 'wait 400' 'click 400 93' 'wait 300' 'text here' 'wait 300' 'dump ta.json' 'wait 1200' \
    'click 810 743' 'wait 400' 'dump rt1.json' 'click 810 743' 'wait 400' 'dump rt2.json' \
-   'dump dd0.json' 'drag 400 125 100 371' 'wait 700' 'dump dd1.json' 'drag 400 157 1118 20' 'wait 600' 'dump dd2.json' \
-   'click 100 371' 'wait 500' 'dump dd3.json' 'drag 400 132 400 175' 'wait 700' 'dump dd4.json' \
+   'dump dd0.json' 'drag 400 125 100 399' 'wait 700' 'dump dd1.json' 'drag 400 157 1118 20' 'wait 600' 'dump dd2.json' \
+   'click 100 399' 'wait 500' 'dump dd3.json' 'drag 400 132 400 175' 'wait 700' 'dump dd4.json' \
    'menu playlist_rename' 'wait 600' 'key A cmd' 'text 드라이브' 'wait 200' 'key Enter' 'wait 600' 'dump pm1.json' \
    'menu playlist_delete' 'wait 500' 'dump pm2.json' 'key Escape' 'wait 400' 'dump pm3.json' 'click 60 99' 'wait 300'
 check ta.json 'd["selected_titles"] == ["Here Comes the Sun"]' "typing letters jumps to the song"
@@ -311,6 +312,38 @@ done
 ui 'menu loudness_forget' 'wait 500' 'dump lo2.json'
 check lo1.json 'd["loudness"] == {"running": False, "total": 18, "done": 18, "failed": 0, "measured": 18, "waiting": 0}' "the songs without leveling tags are measured"
 check lo2.json 'd["loudness"]["measured"] == 0 and d["loudness"]["waiting"] == 18' "…and what was measured can be forgotten"
+
+echo "== a media server of the network"
+# A stand-in for a DLNA server shows the test library from this computer. The app is
+# given its address: nothing is asked of the real network.
+python3 scripts/dev/fake-dlna.py "$MUSIC" > "$WORK/dlna.out" 2>&1 &
+DLNA_PID=$!
+i=0
+until grep -q '^listening ' "$WORK/dlna.out" 2>/dev/null; do
+  sleep 0.2; i=$((i + 1))
+  [ $i -lt 50 ] || { echo "the stand-in media server did not start" >&2; exit 1; }
+done
+DLNA=$(sed -n 's/^listening //p' "$WORK/dlna.out")
+entry() { # entry <dump-file> <title>: the place of that entry in the open folder
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["titles"].index(sys.argv[2]))' "$PROFILE/$1" "$2"
+}
+ui 'dump n0.json' "net add $DLNA" 'wait 2000' 'dump n1.json'
+SONGS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["library_tracks"])' "$PROFILE/n0.json")
+check n1.json 'd["network"]["server"] == "OnEum test server" and d["network"]["entries"] == 7 and d["network"]["folders"] == 5' "a media server added by its address opens: 5 folders and 2 songs"
+check n1.json 'd["network"]["saved"] == ["OnEum test server"]' "and is kept in the list of servers"
+ui "net open $(entry n1.json 아이유)" 'wait 1200' 'dump n2.json' 'net open 0' 'wait 1200' 'dump n3.json'
+check n2.json 'd["network"]["depth"] == 1 and d["network"]["titles"] == ["꽃갈피"]' "a folder of the server opens"
+check n3.json 'd["network"]["depth"] == 2 and d["network"]["playable"] == 4' "the album in it has 4 songs that can be played"
+ui 'net open 1' 'wait 3000' 'dump n4.json' 'wait 1500' 'dump n5.json' 'menu seek_forward' 'wait 600' 'dump n6.json'
+check n4.json 'd["state"] == "Playing" and d["current"] == "02 꽃" and d["queue_len"] == 4 and d["queue_index"] == 1' "a song of the server plays, with its folder as the queue"
+check n4.json 'd["current_path"].startswith("http://127.0.0.1:")' "read from the server's address"
+check n5.json 'd["position_ms"] > 3500 and d["underruns"] == 0' "the music goes on without a break in the sound"
+check n6.json 'd["position_ms"] > 8500 and d["state"] == "Playing"' "skipping ahead works in it"
+check n6.json "d[\"library_tracks\"] == $SONGS" "the server's songs are not put into the library"
+ui 'net up' 'wait 500' 'net up' 'wait 500' 'net up' 'wait 300' 'net forget 0' 'wait 300' 'dump n7.json'
+check n7.json 'd["network"]["server"] is None and d["network"]["saved"] == []' "back out of the server, and it can be taken off the list"
+kill "$DLNA_PID" 2>/dev/null || true
+DLNA_PID=
 
 echo "== hidden window"
 ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json' \

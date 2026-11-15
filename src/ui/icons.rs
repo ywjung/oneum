@@ -48,6 +48,8 @@ pub enum Icon {
     Check,
     /// Three bars to take hold of a row by and carry it elsewhere.
     Grip,
+    /// A device with two below it, joined by lines: the network.
+    Network,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -288,6 +290,26 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
             painter.line_segment([p(0.5, 0.40), p(0.5, 0.62)], stroke);
             painter.circle_filled(p(0.5, 0.73), w * 0.8, color);
+        }
+        Icon::Network => {
+            let node =
+                |x: f32, y: f32| egui::Rect::from_center_size(p(x, y), egui::Vec2::splat(s * 0.24));
+            for (x, y) in [(0.5, 0.22), (0.22, 0.78), (0.78, 0.78)] {
+                painter.add(Shape::closed_line(
+                    vec![
+                        node(x, y).left_top(),
+                        node(x, y).right_top(),
+                        node(x, y).right_bottom(),
+                        node(x, y).left_bottom(),
+                    ],
+                    stroke,
+                ));
+            }
+            painter.line_segment([p(0.5, 0.34), p(0.5, 0.5)], stroke);
+            painter.add(Shape::line(
+                vec![p(0.22, 0.66), p(0.22, 0.5), p(0.78, 0.5), p(0.78, 0.66)],
+                stroke,
+            ));
         }
         Icon::Folder => {
             painter.add(Shape::closed_line(

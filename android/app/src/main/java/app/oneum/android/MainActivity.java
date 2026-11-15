@@ -82,6 +82,10 @@ public final class MainActivity extends NativeActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        recordCrashes();
+        // Off the main thread: the system's record of a crash can be large, and nothing
+        // reads the result before the app is up.
+        new Thread(this::recordLastExits, "exits").start();
         tellEnvironment();
         super.onCreate(savedInstanceState);
         Window window = getWindow();
@@ -106,6 +110,130 @@ public final class MainActivity extends NativeActivity {
         });
         tellTheme(getResources().getConfiguration());
         open(getIntent());
+    }
+
+    /**
+     * An exception nothing caught ends the app. What it was is written beside the app's
+     * log first, so that "Save the Log" has it: on a phone nobody can look at the
+     * system's own record, and the app's log has only what its native side said.
+     */
+    private void recordCrashes() {
+        final File record = new File(new File(getFilesDir(), "logs"), "crash-java.txt");
+        final Thread.UncaughtExceptionHandler next = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try {
+                record.getParentFile().mkdirs();
+                // Kept short: the last few are what is asked about.
+                boolean append = record.length() < 64 * 1024;
+                try (java.io.FileWriter out = new java.io.FileWriter(record, append)) {
+                    out.write(new java.util.Date() + " on thread " + thread.getName() + "\n"
+                            + Log.getStackTraceString(error) + "\n");
+                }
+            } catch (Throwable ignored) {
+                // Nothing more can be done for a crash that cannot be written down.
+            }
+            if (next != null) {
+                next.uncaughtException(thread, error);
+            }
+        });
+    }
+
+    /**
+     * How the app's earlier runs ended, as the system remembers it (a crash of the Java
+     * side, one of the native side, not answering, ended by the user or for memory),
+     * written beside the app's log for "Save the Log". A crash of the native side
+     * leaves nothing else that can be read on the phone: for the latest of them the
+     * signal and where the crashed thread was follow, on lines that begin with a tab
+     * (see {@link Tombstone}).
+     */
+    private void recordLastExits() {
+        try {
+            android.app.ActivityManager manager =
+                    getSystemService(android.app.ActivityManager.class);
+            StringBuilder text = new StringBuilder();
+            int detailed = 0;
+            for (android.app.ApplicationExitInfo exit
+                    : manager.getHistoricalProcessExitReasons(null, 0, 8)) {
+                String reason;
+                switch (exit.getReason()) {
+                    case android.app.ApplicationExitInfo.REASON_CRASH:
+                        reason = "crash (Java)";
+                        break;
+                    case android.app.ApplicationExitInfo.REASON_CRASH_NATIVE:
+                        reason = "crash (native)";
+                        break;
+                    case android.app.ApplicationExitInfo.REASON_ANR:
+                        reason = "not answering";
+                        break;
+                    case android.app.ApplicationExitInfo.REASON_LOW_MEMORY:
+                        reason = "low memory";
+                        break;
+                    case android.app.ApplicationExitInfo.REASON_SIGNALED:
+                        reason = "signal " + exit.getStatus();
+                        break;
+                    case android.app.ApplicationExitInfo.REASON_EXIT_SELF:
+                        reason = "exit " + exit.getStatus();
+                        break;
+                    case android.app.ApplicationExitInfo.REASON_USER_REQUESTED:
+                    case android.app.ApplicationExitInfo.REASON_USER_STOPPED:
+                        reason = "ended by the user";
+                        break;
+                    default:
+                        reason = "reason " + exit.getReason();
+                        break;
+                }
+                String description = exit.getDescription();
+                text.append(new java.util.Date(exit.getTimestamp())).append("  ").append(reason)
+                        .append(description == null ? "" : "  " + description).append('\n');
+                if (exit.getReason() == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE
+                        && detailed < 2) {
+                    detailed += 1;
+                    for (String line : crashDetails(exit)) {
+                        text.append('\t').append(line).append('\n');
+                    }
+                }
+            }
+            File record = new File(new File(getFilesDir(), "logs"), "exits.txt");
+            record.getParentFile().mkdirs();
+            try (java.io.FileWriter out = new java.io.FileWriter(record, false)) {
+                out.write(text.toString());
+            }
+        } catch (IOException | RuntimeException error) {
+            Log.w(TAG, "cannot write down how the app ended before", error);
+        }
+    }
+
+    /** What the system kept of a crash of the native side, in a few lines. */
+    private static List<String> crashDetails(android.app.ApplicationExitInfo exit) {
+        List<String> lines = new ArrayList<>();
+        try (InputStream in = exit.getTraceInputStream()) {
+            if (in == null) {
+                lines.add("(the system kept no record of it)");
+                return lines;
+            }
+            java.io.ByteArrayOutputStream record = new java.io.ByteArrayOutputStream();
+            byte[] part = new byte[64 * 1024];
+            int count;
+            // A record is a few hundred kilobytes; one far larger is not read to its end.
+            while ((count = in.read(part)) > 0 && record.size() < 32 * 1024 * 1024) {
+                record.write(part, 0, count);
+            }
+            byte[] bytes = record.toByteArray();
+            try {
+                lines.addAll(Tombstone.summary(bytes, 32));
+            } catch (IOException | RuntimeException error) {
+                // Not the form this was written for: how it begins tells which it is.
+                StringBuilder start = new StringBuilder();
+                for (int i = 0; i < Math.min(bytes.length, 24); i++) {
+                    start.append(String.format("%02x", bytes[i]));
+                }
+                lines.add("(the system's record of it cannot be read: " + error.getMessage()
+                        + "; it begins " + start + ")");
+            }
+        } catch (IOException | RuntimeException error) {
+            lines.add("(the system's record of it cannot be had: " + error + ")");
+        }
+        return lines;
     }
 
     /**
@@ -232,13 +360,32 @@ public final class MainActivity extends NativeActivity {
     public void alert(String title, String body) {
         runOnUiThread(() -> {
             if (!isFinishing()) {
+                // What went wrong can be copied, to be passed on as it is written.
                 new AlertDialog.Builder(this)
                         .setTitle(title)
                         .setMessage(body)
                         .setPositiveButton(android.R.string.ok, null)
+                        .setNeutralButton(android.R.string.copy,
+                                (dialog, which) -> putOnClipboard(title + "\n" + body))
                         .show();
             }
         });
+    }
+
+    /** For the app: puts a text on the system's clipboard (the app has none of its own). */
+    public void copyText(String text) {
+        runOnUiThread(() -> putOnClipboard(text));
+    }
+
+    private void putOnClipboard(String text) {
+        try {
+            android.content.ClipboardManager clipboard =
+                    getSystemService(android.content.ClipboardManager.class);
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("OnEum", text));
+        } catch (RuntimeException error) {
+            // (A text too large for the system to pass between apps, for one.)
+            Log.w(TAG, "cannot copy the text", error);
+        }
     }
 
     /**
@@ -284,6 +431,25 @@ public final class MainActivity extends NativeActivity {
     /** The input method starts from nothing (the field was changed by a touch). */
     public void resetKeyboard() {
         runOnUiThread(() -> input.clear());
+    }
+
+    /**
+     * For the app: it cannot go on in this process (its graphics device is gone) and is
+     * about to end itself. {@link RelaunchActivity}, in a process of its own, opens the
+     * app again once this process is gone. Not posted to the main thread: the app ends
+     * right after this call.
+     */
+    public void relaunch() {
+        PlaybackService.end();
+        startActivity(new Intent(this, RelaunchActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(RelaunchActivity.PID, android.os.Process.myPid()));
+    }
+
+    /** For the app: a line the system shows for a moment, also once the app is gone. */
+    public void notice(String text) {
+        runOnUiThread(() -> android.widget.Toast.makeText(
+                getApplicationContext(), text, android.widget.Toast.LENGTH_LONG).show());
     }
 
     /** Leaves the app without ending it: it goes behind what was there before. */

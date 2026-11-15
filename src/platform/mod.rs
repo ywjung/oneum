@@ -152,6 +152,25 @@ pub use android::{
 
 /// True for an address a browser can be sent to: `http://` or `https://`, nothing else,
 /// and nothing in it that is not part of an address.
+/// Puts `text` on the system's clipboard where the UI library cannot (it has no
+/// clipboard of a phone's). True when that was done; elsewhere false, and the caller
+/// leaves the text to the UI library.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        android::copy_text(text)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        ios::copy_text(text)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = text;
+        false
+    }
+}
+
 pub fn is_web_address(text: &str) -> bool {
     let rest = text
         .strip_prefix("https://")

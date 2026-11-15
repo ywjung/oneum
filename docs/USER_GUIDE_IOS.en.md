@@ -59,6 +59,13 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - A **smart playlist** is a saved search. It gathers the songs that match each time it is opened. ⋯ → **Edit Search** brings its search into the Search tab; change it and press ＋ to save it under the same name. Rename and Delete are under ⋯ too.
 - **Settings → Library → Import Playlist** reads an M3U8 file. A playlist that lies in OnEum's folder finds the music files beside it.
 
+## Media servers on the network
+- **Library → Network** looks for media servers on the same network (the DLNA server of a NAS, say). OnEum talks to the network only when this page is opened and when a server is added. While the library has no music, the **Media Servers on the Network** button of the first page opens it. The first time, you are asked whether OnEum may find devices on the local network.
+- If the server does not appear, give its address in **Add by Address…** (a numeric address like `192.168.0.10`). Asking the whole network needs a permission of its own, so a server may not be found by itself. An added server is remembered; press and hold it to remove it from the list.
+- Press a server for the folders it presents. Pressing a song puts the songs of that folder into the queue and plays from that one; press and hold for **Play Next** and **Add to Queue**. **Play** and **Add to Queue** above apply to the whole folder.
+- A server's songs do not become part of the library. They are not in the song lists, the search or the statistics, and cannot be made favorites or put into playlists. They stay in the queue, so listening can go on the next time OnEum is opened.
+- What plays is what the server gives as the original file: FLAC · WAV · AIFF · ALAC · AAC (MP4) · MP3 · Ogg Vorbis · DSD. A song is taken into memory as it arrives, and volume leveling (ReplayGain) is not applied to a server's songs.
+
 ## Settings
 - **Library**: where the music is, Rescan, importing files, folders and playlists, linking folders, and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.
 - **Importing an Apple Music library** (Settings → Library): save an XML file on the Mac with **File → Library → Export Library** in Apple Music, move it to the iPhone and choose it: play counts, last played, date added, loved songs and playlists are brought over. Songs are found by the folder they are in and their file name, so this fits songs whose folders were copied from the Mac as they are. Music files are not changed.
@@ -66,7 +73,7 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - **Playback**: volume leveling (ReplayGain) and the analysis of songs without tags, shuffle by album, resuming long tracks, crossfeed, headphone correction (34 built-in profiles and correction files), radio, memory playback.
 - **Equalizer**: ten bands and presets. Double-tap a slider to return it to 0 dB.
 - **General**: language and appearance (light · dark · system).
-- **About**: the version, the open source licenses, and **Save the Log**: it saves a copy of the records to look at when something goes wrong, where you want it.
+- **About**: the version, the open source licenses, and **Save the Log**: it saves a copy of the records to look at when something goes wrong, where you want it. If the app ever ended with an error, **Errors of Earlier Runs** is shown here. **Copy the Record** in it copies the version, that record and the warnings and errors of the log all at once: paste it when you report a problem.
 
 ## What differs from the Mac and Windows versions
 - The iPhone decides where the sound goes. There is no choice of output device and no exclusive output. The iPhone decides the sample rate too; **Output at the song's sample rate** asks it for one.

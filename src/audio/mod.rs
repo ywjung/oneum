@@ -17,6 +17,7 @@ pub mod loudness;
 pub mod mp4_edit;
 pub mod output;
 pub mod peq;
+pub mod remote;
 pub mod render;
 pub mod resample;
 pub mod source;

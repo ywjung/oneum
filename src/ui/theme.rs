@@ -82,8 +82,111 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
 }
 
+/// The face of a font file that has Korean: its number in the file (a file can hold
+/// several fonts), or `None` if the file has none or is not a font.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn korean_face(file: &[u8]) -> Option<u32> {
+    use skrifa::MetadataProvider;
+    // In the system's CJK font the second face is the Korean one (the others have the
+    // same letters, with the shapes another country gives the Chinese characters), so
+    // that one is looked at first. A file with one font has only number 0.
+    [1, 0, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().find(|&index| {
+        skrifa::FontRef::from_index(file, index).is_ok_and(|font| {
+            let letters = font.charmap();
+            // A syllable from each end of the block, and a consonant on its own.
+            ['가', '힣', 'ㄱ']
+                .into_iter()
+                .all(|c| letters.map(c).is_some())
+        })
+    })
+}
+
+/// How likely a font file of the system is the one for Korean, by its name: lower is
+/// tried sooner, `None` is never tried (a file is read whole to be looked into).
+#[cfg(any(target_os = "android", test))]
+fn korean_name_rank(name: &str) -> Option<u8> {
+    let name = name.to_lowercase();
+    let font = [".ttf", ".otf", ".ttc", ".otc"]
+        .iter()
+        .any(|e| name.ends_with(e));
+    if !font || name.contains("emoji") {
+        return None;
+    }
+    let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    let kind = if has(&["korean", "sanskr", "hangul", "kore"]) {
+        0
+    } else if name.contains("cjk") && !name.contains("serif") {
+        1
+    } else if has(&["cjk", "gothic", "nanum", "sec", "samsung", "oneui", "lg"]) {
+        2
+    } else {
+        4
+    };
+    // The regular weight before the others of the same family.
+    let weight = u8::from(has(&["bold", "light", "thin", "black", "medium", "italic"]));
+    Some(kind * 2 + weight)
+}
+
+/// Android: a font of the system that has Korean, with the number of its face.
+///
+/// Korean (like every script the bundled fonts lack) normally comes from the UI
+/// library's system-font fallback, which on Android goes by what `fonts.xml` says. It
+/// only understands entries that name their font in a certain way, and some phones'
+/// files do not (a maker's own, an older Android): there every Korean letter was an
+/// empty box, on a Korean phone the whole app. So the app finds the font itself, by
+/// looking into the system's font files for one that has the letters.
+#[cfg(target_os = "android")]
+fn android_korean_font() -> Option<(Vec<u8>, u32)> {
+    let mut files: Vec<(u8, std::path::PathBuf)> =
+        ["/system/fonts", "/product/fonts", "/system_ext/fonts"]
+            .iter()
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+            .filter_map(|path| {
+                let rank = korean_name_rank(path.file_name()?.to_str()?)?;
+                Some((rank, path))
+            })
+            .collect();
+    files.sort();
+    for (_, path) in files {
+        // A font with eleven thousand syllables is large; the many small ones for
+        // other scripts are not read at all.
+        let large =
+            std::fs::metadata(&path).is_ok_and(|meta| (500 << 10..=96 << 20).contains(&meta.len()));
+        if !large {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if let Some(index) = korean_face(&bytes) {
+            tracing::info!(font = %path.display(), index, "Korean is drawn with this font");
+            return Some((bytes, index));
+        }
+    }
+    tracing::warn!("no font of the system has Korean");
+    None
+}
+
+/// How a font that is there for Korean is drawn: every glyph once, at whole pixels.
+///
+/// The UI library keeps each glyph in up to four copies, shifted by quarters of a
+/// pixel, so that Latin text is spaced evenly. It leaves that out for Chinese
+/// characters and kana, which are many and square, but not (yet) for Hangul, of which
+/// a music library uses thousands: its picture of all glyphs then grows four times as
+/// fast, and it is sent whole to the graphics device every time it doubles (on a phone
+/// that is what the graphics memory ran out over, see `ui::memory`).
+#[cfg(any(windows, target_os = "android"))]
+fn korean_tweak() -> egui::epaint::text::FontTweak {
+    egui::epaint::text::FontTweak {
+        subpixel_binning: Some(false),
+        ..Default::default()
+    }
+}
+
 /// Uses the system UI font for Latin text (Korean and other scripts come from eframe's
-/// system-font fallback). If the system font cannot be read the bundled egui fonts are
+/// system-font fallback; on Android the app finds the Korean font itself, see
+/// `android_korean_font`). If the system font cannot be read the bundled egui fonts are
 /// used and "semibold" simply maps to the regular face.
 fn install_fonts(ctx: &egui::Context) {
     use egui::epaint::text::{FontData, FontTweak, VariationCoords};
@@ -133,10 +236,15 @@ fn install_fonts(ctx: &egui::Context) {
         let mut load = |name: &str, file: &str| -> bool {
             match std::fs::read(dir.join(file)) {
                 Ok(bytes) => {
-                    fonts.font_data.insert(
-                        name.into(),
-                        std::sync::Arc::new(FontData::from_owned(bytes)),
-                    );
+                    let data = FontData::from_owned(bytes);
+                    let data = if name.starts_with("win-korean") {
+                        data.tweak(korean_tweak())
+                    } else {
+                        data
+                    };
+                    fonts
+                        .font_data
+                        .insert(name.into(), std::sync::Arc::new(data));
                     true
                 }
                 Err(_) => false,
@@ -163,6 +271,23 @@ fn install_fonts(ctx: &egui::Context) {
         } else if latin {
             semibold_stack.insert(0, "win-ui".into());
         }
+    }
+    // Android: Korean from the font the app found, after the fonts for Latin text.
+    #[cfg(target_os = "android")]
+    if let Some((bytes, index)) = android_korean_font() {
+        let mut korean = FontData::from_owned(bytes).tweak(korean_tweak());
+        korean.index = index;
+        fonts
+            .font_data
+            .insert("android-korean".into(), std::sync::Arc::new(korean));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("android-korean".into());
+        }
+        semibold_stack.push("android-korean".into());
     }
     fonts
         .families
@@ -279,5 +404,46 @@ pub fn chrome_fill(ui: &egui::Ui) -> Color32 {
         Color32::from_rgb(0x16, 0x16, 0x1A)
     } else {
         Color32::from_rgb(0xF0, 0xF0, 0xF3)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_likely_korean_fonts_are_looked_into_first() {
+        let rank = |name: &str| korean_name_rank(name);
+        // A phone maker's Korean font, the system's CJK font, its serif sister, the
+        // font for Latin text: in that order.
+        let order = [
+            "SamsungKorean-Regular.ttf",
+            "NotoSansCJK-Regular.ttc",
+            "NotoSerifCJK-Regular.ttc",
+            "Roboto-Regular.ttf",
+        ];
+        for pair in order.windows(2) {
+            assert!(rank(pair[0]) < rank(pair[1]), "{pair:?}");
+        }
+        assert!(rank("NotoSansKR-Regular.otf") < rank("NotoSansKR-Bold.otf"));
+        assert!(rank("NotoSansCJK-Regular.ttc").is_some());
+        // Never read: the emoji font is large and has no letters, and what is not a
+        // font is not one.
+        assert_eq!(rank("NotoColorEmoji.ttf"), None);
+        assert_eq!(rank("fonts.xml"), None);
+    }
+
+    /// With the fonts of the computer the tests run on, where they are there (a Mac).
+    #[test]
+    fn a_font_file_is_asked_whether_it_has_korean() {
+        assert_eq!(korean_face(b"not a font at all"), None);
+        assert_eq!(korean_face(&[]), None);
+        let read = |path: &str| std::fs::read(path).ok();
+        if let Some(korean) = read("/System/Library/Fonts/AppleSDGothicNeo.ttc") {
+            assert!(korean_face(&korean).is_some(), "the Mac's Korean font");
+        }
+        if let Some(latin) = read("/System/Library/Fonts/Supplemental/Arial.ttf") {
+            assert_eq!(korean_face(&latin), None, "a font for Latin text");
+        }
     }
 }

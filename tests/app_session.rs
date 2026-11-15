@@ -210,3 +210,108 @@ fn the_player_is_given_measured_loudness() {
             .is_some_and(|peak| peak > 0.0 && peak <= 1.0)
     );
 }
+
+fn server_track(url: &str, title: &str) -> oneum::library::remote::RemoteTrack {
+    oneum::library::remote::RemoteTrack {
+        url: url.to_owned(),
+        server: "거실 NAS".to_owned(),
+        title: title.to_owned(),
+        artist: "누군가".to_owned(),
+        album_artist: "누군가".to_owned(),
+        album: "어떤 앨범".to_owned(),
+        track_no: Some(3),
+        genre: String::new(),
+        duration_ms: 61_000,
+        container: "flac".to_owned(),
+        sample_rate: 96_000,
+        channels: 2,
+        bit_depth: Some(24),
+        file_size: 12_345,
+        // No cover: nothing is fetched (there is no server).
+        art_url: None,
+    }
+}
+
+/// Tracks of a media server are kept apart from the library, under negative ids, for
+/// as long as the queue names them.
+#[test]
+fn a_queue_with_tracks_of_a_media_server_survives_a_restart() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let music = dir.path().join("music");
+    std::fs::create_dir_all(&music).expect("music dir");
+    write_wav(&music.join("하나.wav"), 4000);
+
+    let library = open(dir.path());
+    let local = library.import_files(&[music.join("하나.wav")])[0];
+    let first = "http://127.0.0.1:9/media/1.flac";
+    let remote = library.add_remote(&[
+        server_track(first, "첫 곡"),
+        server_track("http://127.0.0.1:9/media/2.flac", "둘째 곡"),
+        // Not an address the app follows: left out.
+        server_track("ftp://127.0.0.1/3.flac", "셋째"),
+        server_track("http://127.0.0.1:9/media/4.flac", "대기열에 넣지 않은 곡"),
+    ]);
+    assert_eq!(remote.len(), 3);
+    assert!(remote.iter().all(|id| *id < 0), "{remote:?}");
+    assert_eq!(
+        library.add_remote(&[server_track(first, "첫 곡 (새 제목)")]),
+        vec![remote[0]],
+        "the same address is the same track"
+    );
+    // Not part of the library: its lists do not have them, and what belongs to the
+    // library is not done to them.
+    assert_eq!(library.snapshot().len(), 1);
+    library.set_favorite(&[remote[0]], true).expect("ignored");
+    library.record_play(remote[0]);
+    assert!(library.recent_plays(10).is_empty());
+
+    let host = LibraryHost::new(library.clone(), || {});
+    let playable = host.track(remote[0]).expect("a server's track resolves");
+    assert_eq!(playable.path, Path::new(first));
+    assert!(playable.available);
+    assert_eq!(playable.duration_ms, 61_000);
+    assert_eq!(playable.sample_rate, 96_000);
+    assert_eq!(library.track(remote[0]).unwrap().title, "첫 곡 (새 제목)");
+    assert_eq!(
+        library.remote_server(remote[1]).as_deref(),
+        Some("거실 NAS")
+    );
+
+    let session = Session {
+        queue: QueueState {
+            items: vec![
+                QueueItem {
+                    id: 1,
+                    track: remote[0],
+                },
+                QueueItem {
+                    id: 2,
+                    track: local,
+                },
+                QueueItem {
+                    id: 3,
+                    track: remote[1],
+                },
+            ],
+            current: Some(0),
+            shuffle: false,
+            repeat: RepeatMode::Off,
+            unshuffled: vec![1, 2, 3],
+        },
+        position_ms: 5,
+        volume: 0.0,
+    };
+    assert!(host.save_session(&session, true));
+    drop(host);
+    library.shutdown();
+    drop(library);
+
+    let library = open(dir.path());
+    let host = LibraryHost::new(library.clone(), || {});
+    assert_eq!(host.load_session(), Some(session), "the order is kept");
+    let kept = library.remote_tracks();
+    assert_eq!(kept.len(), 2, "what the queue does not name is forgotten");
+    assert_eq!(kept[&remote[1]].title, "둘째 곡");
+    assert_eq!(kept[&remote[1]].bit_depth, Some(24));
+    assert!(library.track(remote[2]).is_none());
+}

@@ -42,7 +42,7 @@ fn main() {
             builder.with_default_menu(false);
         })),
         // Every graphics adapter that can show the window is tried, not only the first.
-        wgpu_options: oneum::ui::renderer::wgpu_options(),
+        wgpu_options: oneum::ui::renderer::wgpu_options(oneum::ui::renderer::Prefer::System),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -137,6 +137,7 @@ fn install_panic_report() {
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("unnamed");
         tracing::error!(thread = name, %location, "panic: {message}");
+        oneum::app::note_panic(format!("{message} ({location})"));
         previous(info);
         // A panic that is caught where it happens (`app::panics::catch`) does not end
         // the app: no dialog for it.

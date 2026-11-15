@@ -20,7 +20,7 @@ const HISTORY_KEEP_ROWS: i64 = 20_000;
 
 /// Ordered migration list. Entry `i` upgrades the schema from version `i` to `i + 1`;
 /// the current version is stored in `PRAGMA user_version`.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE roots (
@@ -152,6 +152,64 @@ CREATE TABLE checks (
     checked_at   INTEGER NOT NULL
 );
 ";
+
+/// Tracks of media servers on the network (see `library::remote`). They are not part of
+/// the library: they are kept so that the play queue can name them and be restored.
+/// Their queue entries have a table of their own, so that every entry still refers to
+/// a row that exists (`queue.track_id` refers to `tracks`).
+const SCHEMA_V5: &str = "
+CREATE TABLE remote_tracks (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    url          TEXT NOT NULL UNIQUE,
+    server       TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    artist       TEXT NOT NULL,
+    album_artist TEXT NOT NULL,
+    album        TEXT NOT NULL,
+    track_no     INTEGER,
+    genre        TEXT NOT NULL,
+    duration_ms  INTEGER NOT NULL,
+    container    TEXT NOT NULL,
+    sample_rate  INTEGER NOT NULL,
+    channels     INTEGER NOT NULL,
+    bit_depth    INTEGER,
+    file_size    INTEGER NOT NULL,
+    art_url      TEXT,
+    art_id       TEXT,
+    added_at     INTEGER NOT NULL
+);
+CREATE TABLE remote_queue (
+    position  INTEGER PRIMARY KEY,
+    item_id   INTEGER NOT NULL,
+    remote_id INTEGER NOT NULL REFERENCES remote_tracks(id) ON DELETE CASCADE
+);
+CREATE INDEX remote_queue_track ON remote_queue(remote_id);
+";
+
+/// A track of a media server on the network, as stored (see `library::remote`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteRow {
+    /// The row; the track's id in the app is its negative.
+    pub id: i64,
+    pub url: String,
+    /// The server's name, for showing where the track is.
+    pub server: String,
+    pub title: String,
+    pub artist: String,
+    pub album_artist: String,
+    pub album: String,
+    pub track_no: Option<u32>,
+    pub genre: String,
+    pub duration_ms: u64,
+    pub container: String,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub bit_depth: Option<u8>,
+    pub file_size: u64,
+    pub art_url: Option<String>,
+    pub art_id: Option<String>,
+    pub added_at: i64,
+}
 
 /// Columns filled from the file on disk (re-written on every rescan of a changed file).
 const SCAN_COLS: [&str; 27] = [
@@ -1190,6 +1248,8 @@ impl Db {
     /// given (it replaces the saved one; entries whose track does not exist are
     /// skipped), and the rest of the session as `value` under `key`. Both are written or
     /// neither is, so the saved current item always belongs to the saved queue.
+    /// A negative track id names a track of a media server (`remote_tracks`); its
+    /// entry goes to `remote_queue` under the same position.
     pub fn save_session(
         &mut self,
         queue: Option<&[(u64, TrackId)]>,
@@ -1199,16 +1259,22 @@ impl Db {
         let tx = self.conn.transaction()?;
         if let Some(items) = queue {
             tx.execute("DELETE FROM queue", [])?;
+            tx.execute("DELETE FROM remote_queue", [])?;
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO queue (position, item_id, track_id) \
                  SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?3)",
             )?;
+            let mut remote = tx.prepare_cached(
+                "INSERT INTO remote_queue (position, item_id, remote_id) \
+                 SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM remote_tracks WHERE id = ?3)",
+            )?;
             for (position, (item_id, track_id)) in items.iter().enumerate() {
-                stmt.execute(params![
-                    to_i64(position as u64),
-                    item_id.cast_signed(),
-                    track_id
-                ])?;
+                let position = to_i64(position as u64);
+                if *track_id < 0 {
+                    remote.execute(params![position, item_id.cast_signed(), -track_id])?;
+                } else {
+                    stmt.execute(params![position, item_id.cast_signed(), track_id])?;
+                }
             }
         }
         tx.execute(KV_UPSERT_SQL, params![key, value])?;
@@ -1251,11 +1317,108 @@ impl Db {
     }
 
     pub fn load_queue(&self) -> SqlResult<Vec<(u64, TrackId)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT item_id, track_id FROM queue ORDER BY position")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT item_id, track_id FROM ( \
+                 SELECT position, item_id, track_id FROM queue \
+                 UNION ALL \
+                 SELECT position, item_id, -remote_id FROM remote_queue \
+             ) ORDER BY position",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?.cast_unsigned(), r.get(1)?)))?;
         rows.collect()
+    }
+
+    /// The tracks of media servers that are kept.
+    pub fn remote_tracks(&self) -> SqlResult<Vec<RemoteRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, url, server, title, artist, album_artist, album, track_no, genre, \
+                    duration_ms, container, sample_rate, channels, bit_depth, file_size, \
+                    art_url, art_id, added_at \
+             FROM remote_tracks",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RemoteRow {
+                id: r.get(0)?,
+                url: r.get(1)?,
+                server: r.get(2)?,
+                title: r.get(3)?,
+                artist: r.get(4)?,
+                album_artist: r.get(5)?,
+                album: r.get(6)?,
+                track_no: r.get(7)?,
+                genre: r.get(8)?,
+                duration_ms: r.get::<_, i64>(9)?.max(0).cast_unsigned(),
+                container: r.get(10)?,
+                sample_rate: r.get(11)?,
+                channels: r.get(12)?,
+                bit_depth: r.get(13)?,
+                file_size: r.get::<_, i64>(14)?.max(0).cast_unsigned(),
+                art_url: r.get(15)?,
+                art_id: r.get(16)?,
+                added_at: r.get(17)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Keeps a track of a media server, or brings what is kept of it (by its address)
+    /// up to date, and returns its row. `row.id` and `row.art_id` are not used: a
+    /// cover that was fetched stays for as long as the cover's address is the same.
+    pub fn upsert_remote_track(&self, row: &RemoteRow) -> SqlResult<i64> {
+        self.conn.query_row(
+            "INSERT INTO remote_tracks (url, server, title, artist, album_artist, album, \
+                 track_no, genre, duration_ms, container, sample_rate, channels, bit_depth, \
+                 file_size, art_url, added_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+             ON CONFLICT(url) DO UPDATE SET \
+                 server = excluded.server, title = excluded.title, artist = excluded.artist, \
+                 album_artist = excluded.album_artist, album = excluded.album, \
+                 track_no = excluded.track_no, genre = excluded.genre, \
+                 duration_ms = excluded.duration_ms, container = excluded.container, \
+                 sample_rate = excluded.sample_rate, channels = excluded.channels, \
+                 bit_depth = excluded.bit_depth, file_size = excluded.file_size, \
+                 art_id = CASE WHEN remote_tracks.art_url IS excluded.art_url \
+                               THEN remote_tracks.art_id END, \
+                 art_url = excluded.art_url \
+             RETURNING id",
+            params![
+                row.url,
+                row.server,
+                row.title,
+                row.artist,
+                row.album_artist,
+                row.album,
+                row.track_no,
+                row.genre,
+                to_i64(row.duration_ms),
+                row.container,
+                row.sample_rate,
+                row.channels,
+                row.bit_depth,
+                to_i64(row.file_size),
+                row.art_url,
+                row.added_at,
+            ],
+            |r| r.get(0),
+        )
+    }
+
+    /// The cover that was fetched for a server's track (its id in the cover cache).
+    pub fn set_remote_art(&self, id: i64, art_id: Option<&str>) -> SqlResult<()> {
+        self.conn.execute(
+            "UPDATE remote_tracks SET art_id = ?2 WHERE id = ?1",
+            params![id, art_id],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets the servers' tracks that the saved queue does not name: they are kept
+    /// for the queue only. Returns how many went.
+    pub fn prune_remote_tracks(&self) -> SqlResult<usize> {
+        self.conn.execute(
+            "DELETE FROM remote_tracks WHERE id NOT IN (SELECT remote_id FROM remote_queue)",
+            [],
+        )
     }
 }
 

@@ -1258,6 +1258,118 @@ impl OneumApp {
             self.save_log();
         }
 
+        // A phone: what earlier runs left of their errors, to be read here (and passed
+        // on) without getting a file off the phone first.
+        let mut copy_record = false;
+        if crate::platform::PHONE {
+            let errors = self.past_errors().to_vec();
+            if !errors.is_empty() {
+                ui.add_space(14.0);
+                widgets::card(ui, |ui| {
+                    ui.label(egui::RichText::new(s.past_errors).strong());
+                    ui.label(
+                        egui::RichText::new(s.past_errors_desc)
+                            .small()
+                            .color(super::theme::dim(ui)),
+                    );
+                    ui.add_space(6.0);
+                    // All of it at once, and more than fits here: to be pasted where
+                    // the problem is reported, instead of a photo of this page.
+                    copy_record |= ui
+                        .add(egui::Button::new(s.copy_record).min_size(egui::vec2(0.0, 30.0)))
+                        .clicked();
+                    ui.add_space(6.0);
+                    for line in &errors {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(line).monospace().small()).wrap(),
+                        );
+                        ui.add_space(4.0);
+                    }
+                });
+            }
+        }
+
+        // Android has two interfaces to its graphics hardware, and drivers that fail
+        // on one of them: which one is used can be seen and chosen here, and what the
+        // app holds of memory is shown (a phone ran out of it, and nothing told why).
+        if cfg!(target_os = "android") {
+            use crate::app::settings::GraphicsChoice;
+            ui.add_space(14.0);
+            widgets::section_title(ui, s.graphics_section);
+            let before = self.settings.graphics;
+            widgets::card(ui, |ui| {
+                widgets::setting_row(
+                    ui,
+                    s.graphics_choice,
+                    Some(s.graphics_choice_desc),
+                    true,
+                    |ui| {
+                        widgets::segmented(
+                            ui,
+                            "graphics",
+                            &mut self.settings.graphics,
+                            &[
+                                (GraphicsChoice::Auto, s.graphics_auto),
+                                (GraphicsChoice::Vulkan, "Vulkan"),
+                                (GraphicsChoice::OpenGl, "OpenGL ES"),
+                            ],
+                        );
+                    },
+                );
+                if let Some((adapter, _)) = super::renderer::adapter() {
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{}: {adapter}", s.graphics_now))
+                                .small()
+                                .color(super::theme::dim(ui)),
+                        )
+                        .wrap(),
+                    );
+                }
+            });
+            if self.settings.graphics != before {
+                self.restart_for_graphics();
+            }
+        }
+        if let Some(reading) = super::memory::latest() {
+            ui.add_space(14.0);
+            widgets::section_title(ui, s.memory_section);
+            widgets::card(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(s.memory_desc)
+                        .small()
+                        .color(super::theme::dim(ui)),
+                );
+                ui.add_space(6.0);
+                widgets::setting_row(ui, s.copy_record, Some(s.copy_record_desc), true, |ui| {
+                    copy_record |= ui
+                        .add(egui::Button::new(s.copy_short).min_size(egui::vec2(0.0, 26.0)))
+                        .clicked();
+                });
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "{reading} (of {} mappings)",
+                            super::memory::MAPPINGS_ALLOWED
+                        ))
+                        .monospace()
+                        .small(),
+                    )
+                    .wrap(),
+                );
+            });
+            // The numbers are read every two seconds.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(1));
+        }
+
+        if copy_record {
+            let report = self.error_report();
+            self.copy_text(ui.ctx(), report);
+        }
+
         if self.licenses_shown {
             // The notices themselves (THIRD_PARTY_NOTICES.md), below the card.
             ui.add_space(14.0);

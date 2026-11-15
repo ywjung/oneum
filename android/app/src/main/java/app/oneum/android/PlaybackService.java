@@ -338,6 +338,14 @@ public final class PlaybackService extends Service {
             goForeground(notification(new State("OnEum", "", "", 0, 0, false, "")));
             stopSelf();
         } else {
+            // A service started with startForegroundService has to go to the foreground
+            // whatever has happened since it was asked for: the music may have been
+            // paused, or may have failed, before the service got here (show does not
+            // go there for a paused state). Without this the system ends the whole app
+            // a few seconds later, as one that has a bug.
+            if (!foreground) {
+                goForeground(notification(state));
+            }
             show(state);
         }
         return START_NOT_STICKY;

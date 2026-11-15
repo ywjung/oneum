@@ -7,6 +7,16 @@ use std::path::{Path, PathBuf};
 /// the row exists; survives rescans and relinking of moved files.
 pub type TrackId = i64;
 
+/// The address a track's "path" stands for when the track is on a media server of the
+/// network rather than in a file: such a track's `http://` address travels where a
+/// file's path does (see `library::remote`).
+pub fn http_address(path: &std::path::Path) -> Option<&str> {
+    let text = path.to_str()?;
+    text.get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+        .then_some(text)
+}
+
 /// ReplayGain values read from existing tags. Gains are in dB, peaks are linear (1.0 = full scale).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReplayGainTags {

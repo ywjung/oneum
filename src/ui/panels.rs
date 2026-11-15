@@ -904,6 +904,7 @@ impl OneumApp {
                         None,
                     ),
                     (Nav::Stats, Icon::Meter, s.stats, None),
+                    (Nav::Network, Icon::Network, s.network, None),
                 ];
                 for (nav, icon, label, trailing) in entries {
                     let selected = self.nav == nav

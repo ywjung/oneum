@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Media servers of the home network (DLNA): finding them and reading from them.
+         Nothing is sent anywhere else, and nothing before the network page is opened. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
@@ -41,6 +44,14 @@
                 <data android:mimeType="audio/*" />
             </intent-filter>
         </activity>
+
+        <!-- Opens the app again after its process ended itself (a lost graphics
+             device); in a process of its own, because it must outlive the app's. -->
+        <activity
+            android:name=".RelaunchActivity"
+            android:exported="false"
+            android:process=":relaunch"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
             android:name=".PlaybackService"

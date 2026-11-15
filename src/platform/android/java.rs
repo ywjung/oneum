@@ -188,6 +188,45 @@ pub(super) fn reset_keyboard() {
     ask(jni_str!("resetKeyboard"), "resetKeyboard");
 }
 
+/// Has the app opened again once this process is gone (see `RelaunchActivity`).
+/// False when that could not be asked for.
+pub(super) fn relaunch() -> bool {
+    with_activity("relaunch", |env, activity| {
+        env.call_method(activity, jni_str!("relaunch"), jni_sig!("()V"), &[])?;
+        Ok(())
+    })
+    .is_some()
+}
+
+/// Puts `text` on the system's clipboard. False when that could not be asked for.
+pub(super) fn copy_text(text: &str) -> bool {
+    with_activity("copyText", |env, activity| {
+        let text = env.new_string(text)?;
+        env.call_method(
+            activity,
+            jni_str!("copyText"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[JValue::Object(&text)],
+        )?;
+        Ok(())
+    })
+    .is_some()
+}
+
+/// A line the system shows for a moment, also once the app is gone.
+pub(super) fn notice(text: &str) {
+    with_activity("notice", |env, activity| {
+        let text = env.new_string(text)?;
+        env.call_method(
+            activity,
+            jni_str!("notice"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[JValue::Object(&text)],
+        )?;
+        Ok(())
+    });
+}
+
 pub(super) fn move_to_back() {
     ask(jni_str!("moveToBack"), "moveToBack");
 }

@@ -14,8 +14,10 @@ mod hardkeys;
 mod icons;
 mod lists;
 mod markdown;
+mod memory;
 mod menubar;
 mod meter;
+mod network;
 mod panels;
 mod phone;
 mod player_bar;
@@ -84,6 +86,8 @@ pub enum Nav {
     Folder(std::path::PathBuf),
     /// Listening statistics and what the library is made of.
     Stats,
+    /// The media servers of the network, and what the one that is open holds.
+    Network,
 }
 
 /// An optional column of the song lists.
@@ -298,6 +302,12 @@ pub struct OneumApp {
 
     snapshot: Arc<LibrarySnapshot>,
     lib_generation: u64,
+    /// The tracks of media servers that the play queue names (not in `snapshot`: they
+    /// are not part of the library), and the library's count of their changes.
+    remote: Arc<HashMap<TrackId, Arc<Track>>>,
+    remote_generation: u64,
+    /// The media servers of the network and the folder that is open on one.
+    network: network::Browser,
     /// The library's artist names by their folded form, and the library generation
     /// they were collected for (the info panel looks credits up in it every frame).
     artist_names: Option<(u64, Arc<HashMap<String, String>>)>,
@@ -347,6 +357,9 @@ pub struct OneumApp {
     /// `(target seconds, when)`. The thumb stays there instead of jumping back.
     seek_pending: Option<(f64, Instant)>,
     last_settings_save: Instant,
+    /// What earlier runs left of their errors (see `past_errors`): read once, when the
+    /// About page first asks.
+    past_errors: Option<Vec<String>>,
 
     art: ArtCache,
     /// Needles of the VU meter panel.
@@ -477,6 +490,9 @@ impl OneumApp {
             spectrum: spectrum::Spectrum::default(),
             snapshot: core.library.snapshot(),
             lib_generation: core.library.generation(),
+            remote: core.library.remote_tracks(),
+            remote_generation: core.library.remote_generation(),
+            network: network::Browser::new(ctx.clone()),
             artist_names: None,
             art_generation: core.library.art_generation(),
             playlists: core.library.playlists(),
@@ -507,6 +523,7 @@ impl OneumApp {
             seek_drag: None,
             seek_pending: None,
             last_settings_save: Instant::now(),
+            past_errors: None,
             about_icon: None,
             licenses_shown: false,
             extras: None,
@@ -553,7 +570,137 @@ impl OneumApp {
         };
         this.install_menu(&ctx);
         report_open_problems(&mut this, &open_report);
+        if let Some(state) = cc.wgpu_render_state.as_ref() {
+            renderer::watch(state);
+        }
+        // A phone that ran out of memory left nothing that said what had grown.
+        if cfg!(target_os = "android") {
+            memory::watch();
+        }
+        this.after_relaunch();
+        this.after_a_trial_given_up();
+        // An interface to the graphics hardware that is on trial has shown that it
+        // works once the app has drawn and lived a moment (a start that fails does not
+        // get that far). Not counted in frames alone: an app left alone draws few.
+        if app::relaunch::on_trial(&this.core.paths.data_dir) {
+            let dir = this.core.paths.data_dir.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs(3));
+                    if memory::frames() >= 3 {
+                        app::relaunch::end_trial(&dir);
+                        tracing::info!("graphics: the interface on trial works");
+                        break;
+                    }
+                }
+            });
+        }
         this
+    }
+
+    /// The run before was to draw through an interface that is not the system's first
+    /// choice and did not get far, so this run goes by the system's order (see
+    /// `app::relaunch::begin_trial`). So that the next start does not try the same
+    /// again: a choice of the settings goes back to "automatic", and what a device
+    /// was lost on is forgotten.
+    fn after_a_trial_given_up(&mut self) {
+        if !app::relaunch::gave_up() {
+            return;
+        }
+        self.settings.graphics = app::settings::GraphicsChoice::Auto;
+        app::relaunch::forget_lost_interface(&self.core.paths.data_dir);
+        self.warn_toast(self.s().graphics_gave_up);
+    }
+
+    /// The setting of what the screen is drawn through was changed: it holds from the
+    /// next start, which is now (Android, the only system with the choice).
+    pub(super) fn restart_for_graphics(&mut self) {
+        tracing::info!(choice = ?self.settings.graphics, "graphics: starting anew for another interface");
+        #[cfg(target_os = "android")]
+        {
+            // What a device was lost on belongs to the choice that was left.
+            app::relaunch::forget_lost_interface(&self.core.paths.data_dir);
+            if crate::platform::android::open_again_after_exit() {
+                self.shutdown();
+                std::process::exit(0);
+            }
+        }
+    }
+
+    /// A run that the one before started because it could not go on (see
+    /// [`Self::graphics_lost`]): it says so, and the music goes on where it was.
+    fn after_relaunch(&mut self) {
+        let dir = &self.core.paths.data_dir;
+        let Some(note) = app::relaunch::read(dir) else {
+            return;
+        };
+        if note.taken || !note.recent(app::relaunch::now()) {
+            return;
+        }
+        let taken = app::relaunch::Note {
+            taken: true,
+            ..note
+        };
+        if let Err(error) = app::relaunch::write(dir, taken) {
+            tracing::warn!("the note of the new start cannot be kept: {error}");
+        }
+        tracing::info!(
+            playing = note.playing,
+            "graphics: started anew after the device was lost"
+        );
+        if note.playing {
+            self.core.player.send(Command::Play);
+        }
+        self.warn_toast(self.s().graphics_restarted);
+    }
+
+    /// The device the window is drawn with is gone ([`renderer::watch`]). Nothing can
+    /// be drawn any more, in this process for good: the frame that would follow ends
+    /// the app inside the UI library, without saving anything. So this one does not
+    /// follow. What the app keeps is saved, and on Android the app is opened again in
+    /// a new process, where the music goes on; elsewhere a message says what happened.
+    /// Does not return.
+    fn graphics_lost(&mut self) -> ! {
+        let playing = matches!(
+            self.player.state,
+            PlayState::Playing | PlayState::Loading | PlayState::Seeking
+        );
+        tracing::error!(
+            playing,
+            "graphics: nothing can be drawn any more; ending this run"
+        );
+        // What was held of memory when it happened: the usual reason on a phone.
+        tracing::error!("memory: {}", memory::read());
+        #[cfg(target_os = "android")]
+        {
+            let dir = self.core.paths.data_dir.clone();
+            let now = app::relaunch::now();
+            // A new start a moment ago that ends the same way is not followed by another.
+            let again = app::relaunch::read(&dir).is_some_and(|note| note.recent(now));
+            // The interface it happened on is written down either way: while the
+            // settings leave the choice to the app, the next start tries the other one.
+            let note = app::relaunch::Note {
+                at: now,
+                playing,
+                taken: again,
+                lost_on: renderer::backend_word(),
+            };
+            let written = app::relaunch::write(&dir, note).is_ok();
+            if again {
+                tracing::error!("graphics: lost again right after a new start; not starting anew");
+                crate::platform::android::notice(self.s().graphics_lost_again);
+            } else if !written || !crate::platform::android::open_again_after_exit() {
+                crate::platform::android::notice(self.s().graphics_lost_body);
+            }
+            self.shutdown();
+            std::process::exit(0);
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.shutdown();
+            crate::platform::fatal_alert(self.s().graphics_lost_title, self.s().graphics_lost_body);
+            std::process::exit(1);
+        }
     }
 
     fn s(&self) -> &'static Strings {
@@ -657,6 +804,12 @@ impl OneumApp {
             self.snapshot = self.core.library.snapshot();
             self.art.library_changed();
         }
+        let remote_generation = self.core.library.remote_generation();
+        if remote_generation != self.remote_generation {
+            self.remote_generation = remote_generation;
+            self.remote = self.core.library.remote_tracks();
+        }
+        self.sync_network();
         let art_generation = self.core.library.art_generation();
         if art_generation != self.art_generation {
             // Covers that were missing a moment ago exist again: ask for them once more.
@@ -1492,6 +1645,84 @@ impl OneumApp {
         self.pick(PickFor::ExportPlaylist(id), request);
     }
 
+    /// What earlier runs left of their errors, a few lines at most: how the system says
+    /// they ended when that was not the listener's doing (Android: `exits.txt`, see
+    /// `MainActivity.recordLastExits`), the app's own last panics from its log, and the
+    /// last exception of the Java side. Shown on the About page of a phone, where
+    /// nobody can look into the app's folders: it is what to pass on with a report.
+    pub(super) fn past_errors(&mut self) -> &[String] {
+        let log_dir = self.core.paths.log_dir.clone();
+        self.past_errors.get_or_insert_with(|| {
+            let short = |line: &str| line.chars().take(400).collect::<String>();
+            let mut lines = Vec::new();
+            if let Ok(text) = std::fs::read_to_string(log_dir.join("exits.txt")) {
+                lines.extend(bad_exits(&text).into_iter().map(short));
+            }
+            if let Ok(bytes) = std::fs::read(log_dir.join("oneum.log")) {
+                let text = String::from_utf8_lossy(&bytes);
+                // What the app said of itself: a panic, or the graphics device failing.
+                let said: Vec<&str> = text
+                    .lines()
+                    .filter(|l| l.contains("panic:") || l.contains(" ERROR graphics:"))
+                    .collect();
+                lines.extend(said.iter().rev().take(4).rev().map(|line| short(line)));
+                lines.extend(memory_of_earlier_runs(&text).into_iter().map(short));
+            }
+            if let Ok(text) = std::fs::read_to_string(log_dir.join("crash-java.txt")) {
+                // Of the last record: when, and what was thrown (not where from).
+                let heads: Vec<&str> = text
+                    .lines()
+                    .filter(|l| !l.starts_with('\t') && !l.trim().is_empty())
+                    .collect();
+                lines.extend(heads.iter().rev().take(2).rev().map(|line| short(line)));
+            }
+            lines
+        })
+    }
+
+    /// Puts `text` on the clipboard and says so.
+    pub(super) fn copy_text(&mut self, ctx: &egui::Context, text: String) {
+        if !crate::platform::copy_to_clipboard(&text) {
+            ctx.copy_text(text);
+        }
+        self.info_toast(self.s().copied);
+    }
+
+    /// What is passed on when something went wrong, as one text for the clipboard:
+    /// which app and what it draws with, how earlier runs ended (with what the system
+    /// kept of a crash), what the log says of warnings, errors, the graphics and the
+    /// memory, what the Java side wrote down, and the memory as it is now. More than
+    /// the About page shows: a screen has room for a few lines, the clipboard for all.
+    pub(super) fn error_report(&self) -> String {
+        let log_dir = &self.core.paths.log_dir;
+        let read = |name: &str| {
+            std::fs::read(log_dir.join(name))
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default()
+        };
+        let mut about = vec![format!("OnEum {} ({})", app::VERSION, std::env::consts::OS)];
+        if let Some((adapter, _)) = renderer::adapter() {
+            about.push(format!("drawn with: {adapter}"));
+        }
+        about.push(format!("graphics setting: {:?}", self.settings.graphics));
+        if let Some(note) = app::relaunch::read(&self.core.paths.data_dir) {
+            about.push(format!(
+                "last start anew: at {} (seconds since 1970), device lost on {}",
+                note.at,
+                note.lost_on.unwrap_or("-")
+            ));
+        }
+        // The thread that watches has the list of mappings; here only what is cheap.
+        let memory = memory::latest().unwrap_or_else(memory::read);
+        report_text(
+            &about,
+            &read("exits.txt"),
+            &read("oneum.log"),
+            &read("crash-java.txt"),
+            &memory.to_string(),
+        )
+    }
+
     /// On a phone, where the app's folders cannot be looked into: asks where to keep a
     /// copy of the log.
     pub(super) fn save_log(&mut self) {
@@ -1503,14 +1734,31 @@ impl OneumApp {
     fn write_log(&mut self, dest: PathBuf) {
         let log = self.core.paths.log_dir.join("oneum.log");
         // Off the UI thread, after the edits before it: the place may be slow to answer.
-        self.edit(move |_| match std::fs::copy(&log, &dest) {
-            Ok(_) => {
-                files::hand_out(&dest);
-                None
-            }
-            Err(error) => {
-                tracing::warn!("the log could not be copied: {error}");
-                Some(AppEvent::LogNotSaved)
+        self.edit(move |_| {
+            let copied = std::fs::read(&log).and_then(|mut text| {
+                // Android: how earlier runs ended as the system tells it, and what the
+                // Java side wrote down of a crash of its own (see `MainActivity`), go
+                // with it.
+                for (name, title) in [
+                    ("exits.txt", "how earlier runs ended"),
+                    ("crash-java.txt", "crashes of the Java side"),
+                ] {
+                    if let Ok(more) = std::fs::read(log.with_file_name(name)) {
+                        text.extend_from_slice(format!("\n--- {title} ---\n").as_bytes());
+                        text.extend_from_slice(&more);
+                    }
+                }
+                std::fs::write(&dest, text)
+            });
+            match copied {
+                Ok(()) => {
+                    files::hand_out(&dest);
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!("the log could not be copied: {error}");
+                    Some(AppEvent::LogNotSaved)
+                }
             }
         });
     }
@@ -1590,6 +1838,44 @@ impl OneumApp {
     // ----- actions --------------------------------------------------------------------
 
     fn apply(&mut self, action: Action) {
+        // A media server's track is not in the library: what belongs to the library
+        // (favourites, playlists, removal) is not done to it.
+        let local = |tracks: Vec<TrackId>| -> Vec<TrackId> {
+            tracks
+                .into_iter()
+                .filter(|id| !Library::is_remote(*id))
+                .collect()
+        };
+        let had_remote = |tracks: &[TrackId]| tracks.iter().any(|id| Library::is_remote(*id));
+        let action = match action {
+            Action::AddToPlaylist(_, ref tracks)
+            | Action::NewPlaylistWith(ref tracks)
+            | Action::SetFavorite(ref tracks, _)
+            | Action::RemoveFromLibrary(ref tracks)
+                if had_remote(tracks) =>
+            {
+                let action = match action {
+                    Action::AddToPlaylist(id, tracks) => Action::AddToPlaylist(id, local(tracks)),
+                    Action::NewPlaylistWith(tracks) => Action::NewPlaylistWith(local(tracks)),
+                    Action::SetFavorite(tracks, on) => Action::SetFavorite(local(tracks), on),
+                    Action::RemoveFromLibrary(tracks) => Action::RemoveFromLibrary(local(tracks)),
+                    other => other,
+                };
+                let empty = match &action {
+                    Action::AddToPlaylist(_, tracks)
+                    | Action::NewPlaylistWith(tracks)
+                    | Action::SetFavorite(tracks, _)
+                    | Action::RemoveFromLibrary(tracks) => tracks.is_empty(),
+                    _ => false,
+                };
+                if empty {
+                    self.info_toast(self.s().notice_not_for_network);
+                    return;
+                }
+                action
+            }
+            other => other,
+        };
         match action {
             // "Play" on nothing (an empty playlist) must not stop what is playing.
             Action::PlayTracks(tracks, _) if tracks.is_empty() => {}
@@ -1749,22 +2035,26 @@ impl OneumApp {
     }
 
     fn track(&self, id: TrackId) -> Option<&Arc<Track>> {
+        if Library::is_remote(id) {
+            return self.remote.get(&id);
+        }
         self.snapshot.get(id)
     }
 
-    /// Remembers the window size (saved with the other settings, at most every few seconds).
+    /// Remembers the window size, and saves the settings when they have changed (the
+    /// size at most every few seconds).
     fn track_window_size(&mut self, ctx: &egui::Context) {
-        let Some(rect) = ctx.input(|i| i.viewport().inner_rect) else {
-            return;
-        };
-        let size = [rect.width().round(), rect.height().round()];
-        // A phone's screen is not a window whose size is the user's choice.
+        // A phone's screen is not a window whose size is the user's choice, and not
+        // every system tells a size at all (Android does not). Whether the settings
+        // are saved must not hang on it: with an early return here for "no size",
+        // nothing was ever saved on Android.
         if !self.phone_mode
-            && self.settings.window_size != Some(size)
-            && size[0] >= 100.0
-            && size[1] >= 100.0
+            && let Some(rect) = ctx.input(|i| i.viewport().inner_rect)
         {
-            self.settings.window_size = Some(size);
+            let size = [rect.width().round(), rect.height().round()];
+            if self.settings.window_size != Some(size) && size[0] >= 100.0 && size[1] >= 100.0 {
+                self.settings.window_size = Some(size);
+            }
         }
         if self.settings == self.saved_settings {
             self.note_unsaved_settings(false);
@@ -2140,6 +2430,13 @@ impl OneumApp {
                         None => tracing::warn!("menu: unknown id"),
                     }
                 }
+                automation::AppStep::Network(words) => self.network_script(&words),
+                automation::AppStep::FailMeters => self.phone.fail_meters(),
+                automation::AppStep::CopyReport => {
+                    let report = self.error_report();
+                    self.copy_text(ctx, report);
+                }
+                automation::AppStep::LoseDevice { told } => renderer::lose_device(told),
                 automation::AppStep::Activate => window::show_main_window(),
                 automation::AppStep::Front => window::order_front_without_activating(),
                 automation::AppStep::Back => window::send_back(),
@@ -2158,7 +2455,7 @@ impl OneumApp {
     /// Machine-readable summary of what the app currently shows (for verification scripts).
     fn state_json(&self, ctx: &egui::Context) -> serde_json::Value {
         let p = &self.player;
-        let title = |id: TrackId| self.snapshot.get(id).map(|t| t.title.clone());
+        let title = |id: TrackId| self.track(id).map(|t| t.title.clone());
         let view = self.views.get(&self.nav);
         let scan = self.core.library.scan_status();
         let mut state = serde_json::json!({
@@ -2211,6 +2508,15 @@ impl OneumApp {
             "pixels_per_point": ctx.pixels_per_point(),
             "window_size": ctx.input(|i| i.viewport().inner_rect).map(|r| [r.width(), r.height()]),
         });
+        // (Added here: the list above is as long as the macro takes.)
+        state["network"] = self.network_state();
+        state["memory"] = serde_json::json!(memory::read().to_string());
+        state["adapter"] = serde_json::json!(renderer::adapter().map(|(name, _)| name.as_str()));
+        state["current_path"] = serde_json::json!(
+            p.current
+                .and_then(|c| self.track(c.track_id))
+                .map(|t| t.path.to_string_lossy().into_owned())
+        );
         // Added piecewise: one big `json!` literal exceeds the macro recursion limit.
         let shown = self.toast.as_ref().or(self.alert.as_ref());
         state["toast_action"] = serde_json::json!(
@@ -2425,6 +2731,109 @@ impl OneumApp {
     }
 }
 
+/// Of the system's list of how earlier runs ended (newest first, as `MainActivity`
+/// writes it): the first three that ended badly. The newest crash the system kept a
+/// record of is followed by the lines about it (the signal, where the thread was),
+/// which begin with a tab in the list.
+fn bad_exits(text: &str) -> Vec<&str> {
+    const BAD: [&str; 4] = ["crash", "not answering", "signal", "low memory"];
+    let mut lines = Vec::new();
+    let (mut heads, mut detailed, mut taking) = (0, false, false);
+    for line in text.lines() {
+        if let Some(detail) = line.strip_prefix('\t') {
+            if taking {
+                detailed = true;
+                lines.push(detail);
+            }
+            continue;
+        }
+        if heads == 3 {
+            break;
+        }
+        taking = false;
+        if BAD.iter().any(|word| line.contains(word)) {
+            heads += 1;
+            taking = !detailed;
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// The side of the picture a phone keeps its glyphs in, at most (see `raw_input_hook`).
+const PHONE_GLYPH_PICTURE_SIDE: usize = 4096;
+
+/// The text of [`OneumApp::error_report`], from its parts. Of the log the last 80
+/// lines that warn, report an error, tell of the graphics or the memory or begin a
+/// run; of what the Java side wrote down the last 40 lines. Lines are cut at 600
+/// characters and the whole at 60,000: a clipboard passes only so much between apps.
+fn report_text(about: &[String], exits: &str, log: &str, java: &str, memory: &str) -> String {
+    const WANTED: [&str; 6] = [
+        " WARN ",
+        " ERROR ",
+        " memory: ",
+        " graphics",
+        "starting OnEum",
+        "panic:",
+    ];
+    fn last(lines: Vec<&str>, count: usize) -> Vec<&str> {
+        let from = lines.len().saturating_sub(count);
+        lines[from..].to_vec()
+    }
+    let cut = |line: &str| line.chars().take(600).collect::<String>();
+    let mut text = String::new();
+    let mut part = |title: &str, lines: Vec<String>| {
+        if lines.is_empty() {
+            return;
+        }
+        text.push_str("--- ");
+        text.push_str(title);
+        text.push_str(" ---\n");
+        for line in lines {
+            text.push_str(&line);
+            text.push('\n');
+        }
+    };
+    part("the app", about.to_vec());
+    part("how earlier runs ended", exits.lines().map(cut).collect());
+    let said = log
+        .lines()
+        .filter(|line| WANTED.iter().any(|word| line.contains(word)))
+        .collect();
+    part("the log", last(said, 80).into_iter().map(cut).collect());
+    part(
+        "crashes of the Java side",
+        last(java.lines().collect(), 40)
+            .into_iter()
+            .map(cut)
+            .collect(),
+    );
+    part("memory now", vec![memory.to_string()]);
+    if text.chars().count() > 60_000 {
+        text = text.chars().take(60_000).collect();
+        text.push_str("\n(cut here)\n");
+    }
+    text
+}
+
+/// Of the app's log: what the runs before the last start wrote of their memory, the
+/// last line of each of the two latest ("memory: …", see `memory`). A run that ended
+/// for lack of memory says with it what had grown.
+fn memory_of_earlier_runs(log: &str) -> Vec<&str> {
+    let mut last_of_run: Vec<&str> = Vec::new();
+    let mut current: Option<&str> = None;
+    for line in log.lines() {
+        if line.contains("starting OnEum") {
+            last_of_run.extend(current.take());
+        } else if line.contains(" memory: ") {
+            current = Some(line);
+        }
+    }
+    // (`current` is what this run wrote: not an earlier one.)
+    let from = last_of_run.len().saturating_sub(2);
+    last_of_run.split_off(from)
+}
+
 fn report_open_problems(app: &mut OneumApp, report: &OpenReport) {
     if report.recovered_corrupt_db.is_some() {
         app.alert = Some(Toast {
@@ -2546,6 +2955,15 @@ impl eframe::App for OneumApp {
         }
         #[cfg(not(target_os = "android"))]
         let _ = ctx;
+        // The picture all glyphs are kept in is as wide as the largest texture the
+        // device takes (8192 pixels here) and doubles its height when it is full, up
+        // to a square: 256 MB, sent whole to the graphics device at every doubling.
+        // A phone gets a quarter of that side; a full picture is started afresh.
+        if crate::platform::PHONE
+            && let Some(side) = raw.max_texture_side.as_mut()
+        {
+            *side = (*side).min(PHONE_GLYPH_PICTURE_SIDE);
+        }
         if let Some(automation) = self.automation.as_mut() {
             automation.step(raw);
         }
@@ -2645,6 +3063,12 @@ impl eframe::App for OneumApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync(ctx);
         self.run_automation(ctx);
+        // Asked last, right before this pass is drawn: a device that went while the
+        // frame before was drawn (or was taken away by a verification step just now)
+        // must not be drawn with again.
+        if renderer::device_lost() {
+            self.graphics_lost();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2653,6 +3077,13 @@ impl eframe::App for OneumApp {
             self.perf.first_frame_ms = Some(crate::app::process_uptime().as_secs_f64() * 1000.0);
         }
         let ctx = ui.ctx().clone();
+        let (atlas, rows_used) = ctx.fonts(|fonts| {
+            let [width, height] = fonts.font_image_size();
+            // (Its fill is told as a share of the height it may grow to: its width.)
+            let rows = fonts.font_atlas_fill_ratio() * width.max(height) as f32;
+            ([width, height], rows as usize)
+        });
+        memory::note_frame(atlas, rows_used);
         self.sync_frame(&ctx);
         self.global_shortcuts(&ctx);
         if self.phone_mode {
@@ -2726,6 +3157,111 @@ impl Drop for OneumApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_report_to_copy_has_every_part_that_has_something() {
+        let about = ["OnEum 0.1.0 (android)".to_string()];
+        let exits =
+            "Sun Nov 15 20:20:31  crash (native)  crash\n\tSIGABRT, on thread \"android_main\"\n";
+        let log = "t1  INFO starting OnEum version=\"0.1.0\"\n\
+                   t2  INFO library opened tracks=1500\n\
+                   t3  INFO graphics: the window is drawn with this adapter\n\
+                   t4  WARN a file could not be read\n\
+                   t5  INFO memory: mappings=3000\n\
+                   t6 ERROR graphics: the device is lost: Out of memory\n";
+        let text = report_text(&about, exits, log, "", "mappings=3100");
+        assert_eq!(
+            text,
+            "--- the app ---\n\
+             OnEum 0.1.0 (android)\n\
+             --- how earlier runs ended ---\n\
+             Sun Nov 15 20:20:31  crash (native)  crash\n\
+             \tSIGABRT, on thread \"android_main\"\n\
+             --- the log ---\n\
+             t1  INFO starting OnEum version=\"0.1.0\"\n\
+             t3  INFO graphics: the window is drawn with this adapter\n\
+             t4  WARN a file could not be read\n\
+             t5  INFO memory: mappings=3000\n\
+             t6 ERROR graphics: the device is lost: Out of memory\n\
+             --- memory now ---\n\
+             mappings=3100\n"
+        );
+        // Nothing went wrong yet: the app and its memory are still told.
+        let text = report_text(&about, "", "t  INFO library opened\n", "", "mappings=1");
+        assert_eq!(
+            text,
+            "--- the app ---\nOnEum 0.1.0 (android)\n--- memory now ---\nmappings=1\n"
+        );
+        // Of a long log the last lines, and a long line cut.
+        let long: String = (0..200)
+            .map(|n| format!("t{n} ERROR {}\n", "x".repeat(900)))
+            .collect();
+        let text = report_text(&about, "", &long, "", "m");
+        assert!(
+            !text.contains("t119 ERROR")
+                && text.contains("t120 ERROR")
+                && text.contains("t199 ERROR")
+        );
+        assert!(text.lines().all(|line| line.chars().count() <= 600));
+        assert!(text.chars().count() <= 60_100);
+    }
+
+    #[test]
+    fn the_memory_shown_is_what_earlier_runs_wrote_last() {
+        let log = "\
+t1  INFO starting OnEum version=\"0.1.0\"\n\
+t2  INFO memory: mappings=3000 first run, early\n\
+t3  INFO memory: mappings=60000 first run, late\n\
+t4  INFO starting OnEum version=\"0.1.0\"\n\
+t5  INFO starting OnEum version=\"0.1.0\"\n\
+t6 ERROR memory: mappings=65000 third run\n\
+t7  INFO starting OnEum version=\"0.1.0\"\n\
+t8  INFO memory: mappings=3100 this run\n";
+        assert_eq!(
+            memory_of_earlier_runs(log),
+            [
+                "t3  INFO memory: mappings=60000 first run, late",
+                "t6 ERROR memory: mappings=65000 third run",
+            ]
+        );
+        assert!(memory_of_earlier_runs("t  INFO starting OnEum\nt  INFO memory: now\n").is_empty());
+    }
+
+    /// The list `MainActivity` writes of how earlier runs ended, as the About page of
+    /// a phone shows it.
+    #[test]
+    fn the_exits_shown_are_the_bad_ones_and_the_newest_crash_has_its_details() {
+        let list = "Sun Nov 15 19:10:01  exit 0\n\
+                    Sun Nov 15 19:09:00  crash (native)  crash\n\
+                    \tSIGSEGV (SEGV_MAPERR) at 0x10, on thread \"oneum\"\n\
+                    \t#00 libgpu.so+0x1234 (draw+12)\n\
+                    Sun Nov 15 18:35:29  ended by the user\n\
+                    Sun Nov 15 18:35:09  crash (native)  crash\n\
+                    \t#00 libother.so+0x10\n\
+                    Sun Nov 15 18:00:58  not answering\n\
+                    Sun Nov 15 17:00:00  low memory\n";
+        assert_eq!(
+            bad_exits(list),
+            [
+                "Sun Nov 15 19:09:00  crash (native)  crash",
+                "SIGSEGV (SEGV_MAPERR) at 0x10, on thread \"oneum\"",
+                "#00 libgpu.so+0x1234 (draw+12)",
+                "Sun Nov 15 18:35:09  crash (native)  crash",
+                "Sun Nov 15 18:00:58  not answering",
+            ]
+        );
+        // A crash the system kept nothing of: the details of the next one are shown.
+        let list = "a  crash (native)  crash\nb  crash (native)  crash\n\t#00 lib.so+0x1\n";
+        assert_eq!(
+            bad_exits(list),
+            [
+                "a  crash (native)  crash",
+                "b  crash (native)  crash",
+                "#00 lib.so+0x1"
+            ]
+        );
+        assert!(bad_exits("x  exit 0\ny  ended by the user\n").is_empty());
+    }
 
     /// Pins of things that are gone (a deleted playlist) do not hold places: when the
     /// visible pins leave room, a new pin takes it and the gone ones are dropped.

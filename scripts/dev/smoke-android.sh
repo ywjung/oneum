@@ -10,6 +10,8 @@
 #   scripts/dev/smoke-android.sh
 #
 #   ONEUM_ANDROID_SERIAL   the emulator to use (as `adb devices` names it); default: the only one
+#   ONEUM_GRAPHICS         gl or vulkan: the interface every start of the app draws through
+#                          (default: the app's own choice, Vulkan first)
 #
 # The app and its data on that emulator are removed first and again at the end, and so
 # is the folder the test puts there. It refuses to run on a real phone (which has an
@@ -29,7 +31,11 @@ mkdir -p "$OUT"
 # shellcheck disable=SC2086
 [ "$($ADB shell getprop ro.kernel.qemu | tr -d '\r')" = 1 ] || [ "$($ADB shell getprop ro.boot.qemu | tr -d '\r')" = 1 ] \
   || { echo "this is not an emulator: the smoke test only runs on one" >&2; exit 1; }
+GRAPHICS=
+[ -z "${ONEUM_GRAPHICS:-}" ] || GRAPHICS="--es ONEUM_GRAPHICS $ONEUM_GRAPHICS"
+DLNA_PID=
 cleanup() {
+  [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true
   $ADB shell am force-stop $PKG >/dev/null 2>&1 || true
   $ADB uninstall $PKG >/dev/null 2>&1 || true
   $ADB shell rm -rf "$REMOTE" >/dev/null 2>&1 || true
@@ -84,9 +90,10 @@ start() { # (re)starts the installed app with the verification channel
   $ADB shell "run-as $PKG sh -c 'mkdir -p files/verify && : > files/verify/script.txt'"
   # (A paused service keeps the foreground for ten minutes; six seconds in this run,
   # so that its leaving can be seen. Only a debuggable build takes this.)
+  # shellcheck disable=SC2086
   $ADB shell am start -n $PKG/.MainActivity \
     --es ONEUM_SCRIPT "$VERIFY/script.txt" --es ONEUM_MUSIC_DIR "$REMOTE" \
-    --es ONEUM_PAUSED_FOREGROUND_MS 6000 >/dev/null
+    --es ONEUM_PAUSED_FOREGROUND_MS 6000 $GRAPHICS >/dev/null
   sleep 6
 }
 session() { # what the system's media session says of the app: "PLAYING" / "PAUSED" / ""
@@ -119,6 +126,7 @@ ui 'volume 0' 'wait 500' 'dump a.json'
 check a.json 'd["library_tracks"] == 0 and d["state"] == "Idle"' "starts with an empty library, idle"
 check a.json 'p["tab"] == "Library" and p["page"] is None' "the phone screens are shown, on the library tab"
 check a.json 'd["screen"]["full"][3] > d["screen"]["full"][2] > 300' "the whole screen is drawn on, upright"
+check a.json 'd["adapter"] and int(d["memory"].split()[0].split("=")[1]) > 100 and " atlas=4096x" in d["memory"]' "the app tells what it draws with and what it holds of memory (the glyphs in a picture 4096 wide)"
 check a.json 'd["screen"]["safe"][1] > 0 and d["screen"]["safe"][3] < d["screen"]["full"][3]' "the status bar and the navigation bar are kept clear"
 # Where things are on this screen (the constants of src/ui/phone.rs).
 eval "$(python3 - "$OUT/a.json" <<'PY'
@@ -291,5 +299,88 @@ ok = bool(before) and before == after
 print(("  ok   " if ok else "  FAIL ") + "with the song that was on")
 sys.exit(0 if ok else 1)
 PY
+
+echo "== a media server of the network"
+# A stand-in for a DLNA server shows the test library from this computer, which the
+# emulator reaches at 10.0.2.2. The app is given its address: nothing is asked of the
+# real network.
+python3 scripts/dev/fake-dlna.py "$MUSIC" --host 0.0.0.0 > "$WORK/dlna.out" 2>&1 &
+DLNA_PID=$!
+i=0
+until grep -q '^listening ' "$WORK/dlna.out" 2>/dev/null; do
+  sleep 0.2; i=$((i + 1))
+  [ $i -lt 50 ] || { echo "the stand-in media server did not start" >&2; exit 1; }
+done
+DLNA=$(sed -n 's/^listening http:\/\/0\.0\.0\.0/http:\/\/10.0.2.2/p' "$WORK/dlna.out")
+entry() { # entry <dump-file> <title>: the place of that entry in the open folder
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["titles"].index(sys.argv[2]))' "$OUT/$1" "$2"
+}
+ui 'volume 0' "net add $DLNA" 'wait 2500' 'dump n1.json'
+check n1.json 'd["network"]["server"] == "OnEum test server" and d["network"]["entries"] == 7 and d["network"]["folders"] == 5' "a media server added by its address opens: 5 folders and 2 songs"
+check n1.json 'd["network"]["saved"] == ["OnEum test server"]' "and is kept in the list of servers"
+ui "net open $(entry n1.json 아이유)" 'wait 1200' 'net open 0' 'wait 1200' 'dump n3.json'
+check n3.json 'd["network"]["depth"] == 2 and d["network"]["playable"] == 4' "the album in a folder of it has 4 songs that can be played"
+ui 'net open 1' 'wait 3000' 'dump n4.json' 'wait 1500' 'dump n5.json'
+check n4.json 'd["state"] == "Playing" and d["current"] == "02 꽃" and d["queue_len"] == 4 and d["queue_index"] == 1' "a song of the server plays, with its folder as the queue"
+check n4.json 'd["current_path"].startswith("http://10.0.2.2:")' "read from the server's address"
+check n5.json 'd["position_ms"] > 3500 and d["underruns"] == 0 and d["library_tracks"] == 20' "the music goes on, and the library is as it was"
+# What was added is a setting, and settings are written to their file. (On Android none
+# were, once: the app there is told no window size, and saving hung on having one.)
+start
+ui 'wait 800' 'dump n6.json'
+check n6.json 'd["network"]["saved"] == ["OnEum test server"] and d["current"] == "02 꽃"' "after a restart the server is still listed, and its song is the one that was on"
+kill "$DLNA_PID" 2>/dev/null || true
+DLNA_PID=
+
+echo "== the graphics device is lost"
+# A driver can take away the device the screen is drawn with at any time (on a phone
+# one did, 2026-11-15), and the app then ended at the next frame. The step takes the
+# device away as a driver does. The app saves what it keeps, opens again in a new
+# process and plays on; that run has no verification channel (it was not started with
+# one), so it is asked about through the system and its log.
+pid() { $ADB shell pidof $PKG 2>/dev/null | tr -d '\r'; }
+log_has() { $ADB shell "run-as $PKG grep -q '$1' files/logs/oneum.log" </dev/null; }
+panics() { $ADB shell "run-as $PKG grep -c 'panic:' files/logs/oneum.log" </dev/null | tr -d '\r'; }
+opened_again() { [ -n "$after" ] && [ "$after" != "$before" ]; }
+no_new_panic() { [ "$(panics)" = "$panics_before" ]; }
+app_gone() { [ -z "$(pid)" ]; }
+ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
+check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
+before=$(pid)
+panics_before=$(panics)
+ui 'fail device'
+i=0; after=$(pid)
+while { [ -z "$after" ] || [ "$after" = "$before" ]; } && [ $i -lt 75 ]; do
+  sleep 0.2; i=$((i + 1)); after=$(pid)
+done
+sleep 4
+holds "the app opened again in a new process" opened_again
+holds "its log says that it started anew, and that music was playing" log_has 'graphics: started anew after the device was lost playing=true'
+# While the settings leave the choice to the app, the new run draws through the other
+# interface than the one the device was lost on.
+other=gl; [ "${ONEUM_GRAPHICS:-}" != gl ] || other=vulkan
+holds "the new run draws through the other interface ($other)" log_has "graphics: this interface is tried first interface=.$other."
+holds "which has shown that it works" log_has 'graphics: the interface on trial works'
+holds "the music goes on: the system's media session says it is playing" session_is PLAYING
+holds "nothing ended in a panic" no_new_panic
+# The same again within a minute: what failed twice in a row is not tried a third time.
+start
+ui 'volume 0' 'wait 500' 'fail device'
+sleep 6
+holds "a second loss right after closes the app instead of opening it once more" app_gone
+holds "and the log says why" log_has 'graphics: lost again right after a new start'
+
+echo "== a crash of the native side"
+# What the system kept of it (the signal, where the thread was) is written beside the
+# log at the next start, for Settings → About: nothing else of such a crash can be
+# read on a phone. The crash here is a signal sent to the app.
+exits_have() { $ADB shell "run-as $PKG cat files/logs/exits.txt" </dev/null | grep -q "$1"; }
+start
+$ADB shell "run-as $PKG kill -SEGV $(pid)" </dev/null
+sleep 4
+start
+holds "the crash is in the list of how earlier runs ended" exits_have 'crash (native)'
+holds "with the signal" exits_have "^$(printf '\t')SIGSEGV"
+holds "and where the thread was" exits_have "^$(printf '\t')#00 "
 
 echo "SMOKE TEST PASSED (Android emulator)"

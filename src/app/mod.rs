@@ -5,6 +5,7 @@ mod hostile;
 pub mod logging;
 pub mod panics;
 pub mod paths;
+pub mod relaunch;
 pub mod settings;
 
 use crate::i18n::Lang;
@@ -284,6 +285,20 @@ pub fn delete_own_copies(copies: &std::path::Path, files: &[std::path::PathBuf])
             tracing::warn!("a copy the app made could not be removed: {error}");
         }
     }
+}
+
+/// What the last panic was (its message and where it happened), as the panic hooks
+/// tell it: for code that catches a panic and wants to say what it was.
+static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Called by the panic hooks.
+pub fn note_panic(what: String) {
+    *LAST_PANIC.lock().unwrap_or_else(|p| p.into_inner()) = Some(what);
+}
+
+/// The last panic of this run, if there was one.
+pub fn last_panic() -> Option<String> {
+    LAST_PANIC.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 /// The app's own copies (files directly in `copies`) that no song stands for and that

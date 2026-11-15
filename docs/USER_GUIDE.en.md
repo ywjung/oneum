@@ -97,6 +97,15 @@
   Songs close in genre, artist and year come first; songs heard in the last two hours, and more than two songs in a row by one artist, are avoided. Nothing goes online.
   It does nothing while Repeat is on. The songs it adds can be removed or moved in the queue like any others.
 
+## Media Servers on the Network
+Music on a media server of the same network (the DLNA/UPnP server of a NAS, say) can be looked through and played without connecting a shared folder.
+- **Network** at the left looks for servers. OnEum talks to the network only when this view is opened and when a server is added.
+- If no server is found, give its address in **Add by Address…** (a numeric address like `192.168.0.10`, or the address of its device description, starting with `http://`). An added server is remembered; a right-click removes it from the list.
+- Click a server for the folders it presents. Click a folder to go in, and the Back button to go up. Double-clicking a song puts the songs of that folder into the queue and plays from that one. A right-click offers **Play Next** and **Add to Queue**, and **Play** and **Add to Queue** above apply to the whole folder.
+- A server's songs do not become part of the library. They are not in the song lists, the search or the statistics, and cannot be made favorites or put into playlists. They stay in the queue, so listening can go on the next time OnEum is opened.
+- What plays is what the server gives as the original file: FLAC · WAV · AIFF · ALAC · AAC (MP4) · MP3 · Ogg Vorbis · DSD. A song the server only gives converted to another format is shown faint and does not play.
+- A song is taken into memory as it arrives, so it plays on if the network drops out for a moment. Volume leveling (ReplayGain) is not applied to a server's songs.
+
 ## Song Info (⌘I)
 Open it with the ⓘ button at the top right or with ⌘I. It shows the song that is playing; for another song, right-click it → **Song Info** (⌥⌘I).
 - Cover art, title, artist, album, track number, year, genre, length, format, sample rate, channels, bit depth, bitrate, file size, volume leveling values, play count, and where the file is (**Show in Finder**).

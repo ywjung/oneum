@@ -16,7 +16,8 @@ BUNDLE=app.oneum.OnEum
 WORK=$(mktemp -d /tmp/oneum-ios-smoke.XXXXXX)
 MUSIC="$WORK/music"
 PROFILE="$WORK/profile"
-trap 'xcrun simctl terminate "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; xcrun simctl uninstall "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+DLNA_PID=
+trap '[ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; xcrun simctl terminate "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; xcrun simctl uninstall "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
 export ONEUM_NO_MEDIA_SESSION=1
 
 ui() { # ui <command>…: sends commands and waits for the files of any shot/dump
@@ -335,5 +336,56 @@ while [ $i -lt 12 ]; do
   i=$((i + 1))
 done
 check f1.json 'd["library_tracks"] == 21' "a file put into the Documents folder is found without being asked for"
+
+echo "== a media server of the network"
+# A stand-in for a DLNA server shows the test library from this computer (which the
+# Simulator shares its network with). The app is given its address: nothing is asked
+# of the real network.
+python3 scripts/dev/fake-dlna.py "$MUSIC" > "$WORK/dlna.out" 2>&1 &
+DLNA_PID=$!
+i=0
+until grep -q '^listening ' "$WORK/dlna.out" 2>/dev/null; do
+  sleep 0.2; i=$((i + 1))
+  [ $i -lt 50 ] || { echo "the stand-in media server did not start" >&2; exit 1; }
+done
+DLNA=$(sed -n 's/^listening //p' "$WORK/dlna.out")
+entry() { # entry <dump-file> <title>: the place of that entry in the open folder
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["titles"].index(sys.argv[2]))' "$PROFILE/$1" "$2"
+}
+ui "net add $DLNA" 'wait 2500' 'dump n1.json'
+check n1.json 'd["network"]["server"] == "OnEum test server" and d["network"]["entries"] == 7 and d["network"]["folders"] == 5' "a media server added by its address opens: 5 folders and 2 songs"
+check n1.json 'd["network"]["saved"] == ["OnEum test server"]' "and is kept in the list of servers"
+ui "net open $(entry n1.json 아이유)" 'wait 1200' 'net open 0' 'wait 1200' 'dump n3.json'
+check n3.json 'd["network"]["depth"] == 2 and d["network"]["playable"] == 4' "the album in a folder of it has 4 songs that can be played"
+ui 'net open 1' 'wait 3000' 'dump n4.json' 'wait 1500' 'dump n5.json'
+check n4.json 'd["state"] == "Playing" and d["current"] == "02 꽃" and d["queue_len"] == 4 and d["queue_index"] == 1' "a song of the server plays, with its folder as the queue"
+check n4.json 'd["current_path"].startswith("http://127.0.0.1:")' "read from the server's address"
+check n5.json 'd["position_ms"] > 3500 and d["underruns"] == 0 and d["library_tracks"] == 21' "the music goes on, and the library is as it was"
+# What was added is a setting, and settings are written to their file. (On Android none
+# were, once: the app there is told no window size, and saving hung on having one.)
+start
+ui 'wait 800' 'dump n6.json'
+check n6.json 'd["network"]["saved"] == ["OnEum test server"] and d["current"] == "02 꽃"' "after a restart the server is still listed, and its song is the one that was on"
+kill "$DLNA_PID" 2>/dev/null || true
+DLNA_PID=
+
+echo "== copying the record"
+# What "Copy the Record" under Settings → About does: on a phone the app puts the text
+# on the system's pasteboard itself (the UI library has none there). Read back from the
+# simulator's own pasteboard. Left out while the Simulator app is open: that shares the
+# simulator's pasteboard with the Mac's, and the test would replace what the user copied.
+if pgrep -x Simulator >/dev/null; then
+  echo "  skip the Simulator app is open (its pasteboard is the Mac's)"
+else
+  ui 'copy report' 'wait 800' 'dump k1.json'
+  xcrun simctl pbpaste "$DEVICE" > "$WORK/pasted.txt"
+  for part in '^--- the app ---$' '^OnEum [0-9.]* (ios)$' '^--- the log ---$' '^--- memory now ---$'; do
+    if grep -q "$part" "$WORK/pasted.txt"; then
+      echo "  ok   the record on the pasteboard has: $part"
+    else
+      echo "  FAIL the record on the pasteboard has: $part"; head -5 "$WORK/pasted.txt"; exit 1
+    fi
+  done
+fi
 
 echo "SMOKE TEST PASSED (iPhone Simulator)"

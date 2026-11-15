@@ -12,7 +12,7 @@ use super::limiter::PeakLimiter;
 use super::peq::{Corrector, PeqShared};
 use super::render::FeedConsumer;
 use super::resample::StereoResampler;
-use super::source::{FileInMemory, LoadCompletion};
+use super::source::{Budget, FileInMemory, LoadCompletion};
 use super::{PlaybackError, PlaybackErrorKind};
 use crate::model::{ReplayGainTags, TrackId};
 use std::path::PathBuf;
@@ -295,9 +295,18 @@ impl Preload {
             .spawn(move || {
                 // A failure is not reported from here: the track is opened again when
                 // its turn comes, and fails then if it is still unreadable.
-                // A track of a CUE sheet loads the sheet's audio file.
-                let file = crate::library::cue::real_file(&target);
-                let _ = tx.send(FileInMemory::start(&file).ok().flatten());
+                let opened = match crate::model::http_address(&target) {
+                    // A track of a media server: connected to, and loaded if it fits.
+                    Some(url) => super::remote::RemoteFile::open(url)
+                        .ok()
+                        .and_then(|file| file.into_memory(Budget::global()).ok()),
+                    // A track of a CUE sheet loads the sheet's audio file.
+                    None => {
+                        let file = crate::library::cue::real_file(&target);
+                        FileInMemory::start(&file).ok().flatten()
+                    }
+                };
+                let _ = tx.send(opened);
             })
             .ok()?;
         Some(Self {
@@ -317,7 +326,33 @@ impl Worker {
     /// file loaded ahead, if it is this one), from the file otherwise.
     fn open_decoder(&mut self, req: &TrackRequest) -> Result<TrackDecoder, PlaybackError> {
         self.current_load = None;
+        // A track of a media server on the network: read into memory while it plays
+        // when it fits, whatever the memory playback setting says (see `remote.rs`).
+        if let Some(url) = crate::model::http_address(&req.path) {
+            self.next_in_memory = None;
+            self.current_file = None;
+            let ahead = self
+                .preload
+                .take()
+                .filter(|p| p.path == req.path)
+                .and_then(Preload::take);
+            return match ahead {
+                Some(file) => {
+                    self.current_load = Some(file.completion());
+                    TrackDecoder::open_in_memory(file)
+                }
+                None => {
+                    let file =
+                        super::remote::RemoteFile::open(url).map_err(|e| map_file_error(&e))?;
+                    let (decoder, load) = TrackDecoder::open_remote(file)?;
+                    self.current_load = load;
+                    Ok(decoder)
+                }
+            };
+        }
         if !self.params.memory {
+            // (What was loaded ahead for a server's track that did not get its turn.)
+            self.preload = None;
             return TrackDecoder::open(&req.path);
         }
         // What is decided about the track after the one opened now is decided again.
@@ -362,7 +397,17 @@ impl Worker {
     /// used long before the track boundary: a drive that went to sleep during a long
     /// track has the whole track to wake up.
     fn preload_next(&mut self) {
-        if !self.params.memory || self.last_preload_check.elapsed() < PRELOAD_CHECK {
+        if self.last_preload_check.elapsed() < PRELOAD_CHECK {
+            return;
+        }
+        // Memory playback, or the next track is one of a media server: that one is
+        // connected to (and loaded) before its turn whatever the setting says, so
+        // that the music does not wait for the network at the end of this track.
+        let remote_next = matches!(
+            self.params.next.peek(),
+            NextTrack::Track(next) if crate::model::http_address(&next.path).is_some()
+        );
+        if !self.params.memory && !remote_next {
             return;
         }
         self.last_preload_check = Instant::now();

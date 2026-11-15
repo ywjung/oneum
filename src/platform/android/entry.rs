@@ -29,7 +29,7 @@ fn android_main(app: AndroidApp) {
     let options = eframe::NativeOptions {
         android_app: Some(app),
         // Every graphics adapter that can show the window is tried, not only the first.
-        wgpu_options: crate::ui::renderer::wgpu_options(),
+        wgpu_options: crate::ui::renderer::wgpu_options(graphics_preference(&startup)),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -50,10 +50,50 @@ fn android_main(app: AndroidApp) {
     std::process::exit(0);
 }
 
+/// Which interface to the graphics hardware this run tries first: what the settings
+/// say, and while they leave it to the app, the other one than a run lost its device
+/// on. An interface that is not the system's first choice is tried on probation (see
+/// `app::relaunch::begin_trial`): if the run before was trying it and did not get far,
+/// this run goes by the system's order.
+fn graphics_preference(startup: &crate::app::Startup) -> crate::ui::renderer::Prefer {
+    use crate::app::relaunch;
+    use crate::ui::renderer::Prefer;
+    let dir = &startup.core.paths.data_dir;
+    let lost_on = relaunch::read(dir).and_then(|note| note.lost_on);
+    // A verification run may name the interface, so that all of it can be run on
+    // either (not on trial: such a run is ended and started again at any moment).
+    if cfg!(feature = "automation") {
+        match std::env::var("ONEUM_GRAPHICS").as_deref() {
+            Ok("gl") => return Prefer::OpenGl,
+            Ok("vulkan") => return Prefer::Vulkan,
+            _ => {}
+        }
+    }
+    let prefer = Prefer::from_choice(startup.settings.graphics, lost_on);
+    let word = match prefer {
+        Prefer::System => return prefer,
+        Prefer::Vulkan => "vulkan",
+        Prefer::OpenGl => "gl",
+    };
+    if relaunch::begin_trial(dir, word) {
+        tracing::info!(interface = word, "graphics: this interface is tried first");
+        prefer
+    } else {
+        tracing::error!(
+            interface = word,
+            "graphics: the last start with this interface did not get far; \
+             the system's order is used"
+        );
+        Prefer::System
+    }
+}
+
 /// The activity is gone for good: the session is saved and the process ends.
 pub(super) fn end() {
     tracing::info!("the activity is gone: ending");
     if let Some(core) = CORE.get() {
+        // An end of this kind is no failure of an interface that was on trial.
+        crate::app::relaunch::end_trial(&core.paths.data_dir);
         core.shutdown();
     }
     tracing::info!("OnEum stopped");
@@ -77,6 +117,7 @@ fn install_panic_report() {
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("unnamed");
         tracing::error!(thread = name, %location, "panic: {message}");
+        crate::app::note_panic(format!("{message} ({location})"));
         previous(info);
     }));
 }

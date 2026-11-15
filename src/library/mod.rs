@@ -20,6 +20,7 @@ mod loudness;
 pub mod lyrics;
 mod m3u;
 pub mod radio;
+pub mod remote;
 mod scan;
 mod search;
 mod snapshot;
@@ -426,6 +427,9 @@ pub(crate) struct Inner {
     playlists: Mutex<Vec<PlaylistData>>,
     playlists_generation: AtomicU64,
     notifier: RwLock<Option<Notifier>>,
+    /// Tracks of media servers on the network that the play queue names.
+    remote: Mutex<remote::Catalog>,
+    remote_generation: AtomicU64,
     art: ArtCache,
     art_jobs: Mutex<ArtJobs>,
     art_wake: Condvar,
@@ -1336,6 +1340,15 @@ impl Library {
             tracing::warn!(%err, "could not read play history");
             Vec::new()
         });
+        // Servers' tracks are kept for the saved queue only: what it does not name of
+        // an earlier run goes now.
+        if let Err(err) = db.prune_remote_tracks() {
+            tracing::warn!(%err, "could not forget servers' tracks that are not queued");
+        }
+        let remote = remote::Catalog::from_rows(db.remote_tracks().unwrap_or_else(|err| {
+            tracing::warn!(%err, "could not read the servers' tracks");
+            Vec::new()
+        }));
         let inner = Arc::new(Inner {
             db: Mutex::new(db),
             state: Mutex::new(state),
@@ -1345,6 +1358,8 @@ impl Library {
             playlists: Mutex::new(Vec::new()),
             playlists_generation: AtomicU64::new(0),
             notifier: RwLock::new(None),
+            remote: Mutex::new(remote),
+            remote_generation: AtomicU64::new(0),
             art: ArtCache::new(&paths.cache_dir),
             art_jobs: Mutex::new(ArtJobs::default()),
             art_wake: Condvar::new(),
@@ -1377,11 +1392,13 @@ impl Library {
         inner.spawn("oneum-scan", scan::run_scan_thread);
         inner.spawn("oneum-art", run_art_worker);
         inner.spawn("oneum-art-cleanup", |inner| {
-            let referenced: HashSet<String> = lock(&inner.state)
+            let mut referenced: HashSet<String> = lock(&inner.state)
                 .tracks
                 .values()
                 .filter_map(|e| e.track.art_id.clone())
                 .collect();
+            // The covers of servers' tracks in the queue are kept too.
+            referenced.extend(lock(&inner.remote).art_ids().cloned());
             inner.art.cleanup(&referenced, &inner.shutdown);
         });
 
@@ -1960,6 +1977,9 @@ impl Library {
     }
 
     pub fn track(&self, id: TrackId) -> Option<Arc<Track>> {
+        if Library::is_remote(id) {
+            return self.remote_track(id);
+        }
         lock(&self.inner.state)
             .tracks
             .get(&id)

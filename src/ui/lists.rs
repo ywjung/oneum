@@ -210,7 +210,7 @@ fn build_rows(
                 .collect()
         }
         // Not a list of songs: nothing to build.
-        Nav::Stats => Vec::new(),
+        Nav::Stats | Nav::Network => Vec::new(),
         Nav::Folder(folder) => {
             // In the order of the paths: the way the folders are laid out on disk.
             let mut indices: Vec<u32> = (0..snap.len() as u32)
@@ -571,8 +571,10 @@ impl OneumApp {
     pub(super) fn central(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let nav = self.nav.clone();
         let library_empty = self.snapshot.is_empty() && self.core.library.roots().is_empty();
+        // (A playlist can be there without music, and a media server of the network
+        // does not need any.)
         if library_empty
-            && !matches!(nav, Nav::Playlist(_))
+            && !matches!(nav, Nav::Playlist(_) | Nav::Network)
             && !self.core.library.scan_status().running
         {
             self.empty_library(ui);
@@ -642,6 +644,7 @@ impl OneumApp {
                 self.genre_list_view(ui, &nav, actions);
             }
             Nav::Stats => self.stats_view(ui, actions),
+            Nav::Network => self.network_view(ui, actions),
             Nav::Folder(folder) => {
                 self.folder_header(ui, folder, actions);
                 self.track_list(

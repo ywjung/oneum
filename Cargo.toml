@@ -45,6 +45,13 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 unicode-normalization = "0.1"
 walkdir = "2"
 fastrand = "2"
+# Reads a font file's table of characters (to find the system's Korean font on Android).
+# Already part of the build through the UI library's font lookup.
+skrifa = "0.44"
+# The graphics library eframe draws with, named here only to switch on its count of
+# live objects (buffers, textures, views, encoders): a phone ran out of graphics
+# memory, and the count says whether something of ours piles up (src/ui/memory.rs).
+wgpu = { version = "30", default-features = false, features = ["counters"] }
 winit = { version = "0.30", default-features = false }
 
 # File dialogs. There is none for iOS or Android (the system's document picker is used

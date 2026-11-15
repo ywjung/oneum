@@ -60,6 +60,13 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - A **smart playlist** is a saved search. It gathers the songs that match each time it is opened. ⋯ → **Edit Search** brings its search into the Search tab; change it and press ＋ to save it under the same name. Rename and Delete are under ⋯ too.
 - **Settings → Library → Import Playlist** reads an M3U8 file. **Export as M3U8** asks where to keep the file.
 
+## Media servers on the network
+- **Library → Network** looks for media servers on the same network (the DLNA server of a NAS, say). OnEum talks to the network only when this page is opened and when a server is added. While the library has no music, the **Media Servers on the Network** button of the first page opens it.
+- If the server does not appear, give its address in **Add by Address…** (a numeric address like `192.168.0.10`). An added server is remembered; press and hold it to remove it from the list.
+- Press a server for the folders it presents. Pressing a song puts the songs of that folder into the queue and plays from that one; press and hold for **Play Next** and **Add to Queue**. **Play** and **Add to Queue** above apply to the whole folder.
+- A server's songs do not become part of the library. They are not in the song lists, the search or the statistics, and cannot be made favorites or put into playlists. They stay in the queue, so listening can go on the next time OnEum is opened.
+- What plays is what the server gives as the original file: FLAC · WAV · AIFF · ALAC · AAC (MP4) · MP3 · Ogg Vorbis · DSD. A song is taken into memory as it arrives, and volume leveling (ReplayGain) is not applied to a server's songs.
+
 ## Settings
 - **Library**: Rescan, Open Music Files, importing a playlist, the music folders (adding, removing, and **Show** in the Files app), and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.
 - **Importing an Apple Music library** (Settings → Library): save an XML file on the Mac with **File → Library → Export Library** in Apple Music, move it to the phone and choose it: play counts, last played, date added, loved songs and playlists are brought over. Songs are found by the folder they are in and their file name, so this fits songs whose folders were copied from the Mac as they are. Music files are not changed.
@@ -67,7 +74,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - **Equalizer**: ten bands and presets. Double-tap a slider to return it to 0 dB.
 - **General**: language and appearance (light · dark · system).
 - **Shortcuts**: the list of the shortcuts of a keyboard (see "Keyboard").
-- **About**: the version, the open source licenses, and **Save the Log**: it saves a copy of the records to look at when something goes wrong, where you want it.
+- **About**: the version, the open source licenses, and **Save the Log**: it saves a copy of the records to look at when something goes wrong, where you want it. If the app ever ended with an error, **Errors of Earlier Runs** is shown here. **Copy the Record** copies the version, that record, the warnings and errors of the log and the memory all at once: paste it when you report a problem. When the phone takes away the device the screen is drawn with, so that nothing more can be drawn, the app opens again by itself and goes on playing the song, and from then on draws in the other way. Under **Drawing the Screen** you can choose the way yourself (Automatic · Vulkan · OpenGL ES; changing it starts the app anew). **Memory** shows in numbers what the app holds of memory at the moment.
 
 ## Keyboard
 A keyboard that is plugged into the phone or paired with it has these shortcuts.

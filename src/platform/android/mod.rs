@@ -57,6 +57,24 @@ pub fn fatal_alert(title: &str, body: &str) {
     java::alert(title, body);
 }
 
+/// Asks for the app to be opened again once this process is gone: for a process that
+/// cannot go on (its graphics device is lost, and a process gets no second one). The
+/// caller saves what it keeps and ends the process. False when it could not be asked
+/// for.
+pub fn open_again_after_exit() -> bool {
+    java::relaunch()
+}
+
+/// Puts `text` on the system's clipboard. False when that could not be asked for.
+pub fn copy_text(text: &str) -> bool {
+    java::copy_text(text)
+}
+
+/// A line the system shows for a moment, also once the app is gone.
+pub fn notice(text: &str) {
+    java::notice(text);
+}
+
 pub mod finder {
     use super::Path;
 

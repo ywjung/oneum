@@ -19,6 +19,7 @@
   <key>LSRequiresIPhoneOS</key><true/>
   <key>MinimumOSVersion</key><string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+  <key>NSLocalNetworkUsageDescription</key><string>같은 네트워크의 미디어 서버(DLNA)를 찾아 그 음악을 재생합니다. 네트워크 화면을 열 때만 씁니다.</string>
   <key>UIRequiredDeviceCapabilities</key>
   <array><string>arm64</string></array>
   <key>UILaunchScreen</key>

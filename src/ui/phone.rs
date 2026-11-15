@@ -185,6 +185,12 @@ pub(super) struct Phone {
     seen_nav: Nav,
     /// How many favourites the library has: (library generation, count).
     favorites: Option<(u64, usize)>,
+    /// What went wrong drawing the meters, once it has: they are not tried again in
+    /// this run (see `phone_meters_guarded`).
+    meters_failed: Option<String>,
+    /// A verification script asked for the meters to fail once (`fail meters`), to see
+    /// that the app survives it.
+    fail_meters: bool,
     transition: Option<Transition>,
     /// How far the open page has been pulled back from the left edge, in points, and
     /// whether a finger is still on it.
@@ -223,6 +229,11 @@ pub(super) struct Phone {
 }
 
 impl Phone {
+    /// See the field of that name.
+    pub(super) fn fail_meters(&mut self) {
+        self.fail_meters = true;
+    }
+
     pub(super) fn new() -> Self {
         Self {
             tab: Tab::Library,
@@ -238,6 +249,8 @@ impl Phone {
             search_offset: 0.0,
             seen_nav: Nav::Songs,
             favorites: None,
+            meters_failed: None,
+            fail_meters: false,
             transition: None,
             back_drag: 0.0,
             back_dragging: false,
@@ -911,6 +924,9 @@ impl OneumApp {
             if let Some(state) = self.views.get_mut(&nav) {
                 state.query.clear();
             }
+        } else if matches!(self.phone.page(), Some(Page::List(Nav::Network))) && self.network.up() {
+            // Out of the folder that is open on a media server, one at a time; from
+            // the list of servers Back leaves the page like any other.
         } else if self.phone.page().is_some() {
             self.phone.pop(0.0);
         } else if self.phone.tab != Tab::Library {
@@ -1162,7 +1178,13 @@ impl OneumApp {
                 theme::accent(ui.visuals().dark_mode),
             );
             if response.clicked() {
-                self.phone.pop(0.0);
+                // On a media server: out of the folder that is open, one at a time
+                // (as the system's Back does), and out of the page from the list of
+                // servers.
+                let in_server = matches!(page, Some(Page::List(Nav::Network)));
+                if !(in_server && self.network.up()) {
+                    self.phone.pop(0.0);
+                }
                 return;
             }
             left = back.right();
@@ -1304,6 +1326,11 @@ impl OneumApp {
             Nav::Favorites => s.favorites.into(),
             Nav::Recent => s.recently_played.into(),
             Nav::Stats => s.stats.into(),
+            // The folder that is open on a media server, if one is.
+            Nav::Network => self
+                .network
+                .place()
+                .map_or_else(|| s.network.into(), |(here, _)| here),
             Nav::Album(key) => self
                 .snapshot
                 .album_index(*key)
@@ -1350,7 +1377,7 @@ impl OneumApp {
                 count
             }
         };
-        let entries: [(Icon, &str, Option<usize>, Nav); 8] = [
+        let entries: [(Icon, &str, Option<usize>, Nav); 9] = [
             (
                 Icon::Note,
                 s.phone_songs,
@@ -1374,6 +1401,7 @@ impl OneumApp {
             (Icon::Clock, s.recently_played, None, Nav::Recent),
             (Icon::Folder, s.folders, None, folders),
             (Icon::Meter, s.stats, None, Nav::Stats),
+            (Icon::Network, s.network, None, Nav::Network),
         ];
         // What was pinned comes first, as at the top of the sidebar on a desk.
         let pins: Vec<(Pin, Icon, String)> = self
@@ -1520,6 +1548,7 @@ impl OneumApp {
         let mut add_folder = false;
         let mut allow = false;
         let mut rescan = false;
+        let mut network = false;
         egui::ScrollArea::vertical()
             .id_salt("phone-empty")
             .auto_shrink(false)
@@ -1577,8 +1606,17 @@ impl OneumApp {
                     }
                     ui.add_space(10.0);
                     rescan = pill_button(ui, Icon::Repeat, s.rescan, width, false).clicked();
+                    // Music need not be on the phone: a media server of the network
+                    // has it too, and this page is all there is of the library tab
+                    // while the library is empty.
+                    ui.add_space(10.0);
+                    network =
+                        pill_button(ui, Icon::Network, s.network_open, width, false).clicked();
                 });
             });
+        if network {
+            self.phone.push(Page::List(Nav::Network));
+        }
         if add_folder {
             self.link_folder();
         }
@@ -1618,6 +1656,16 @@ impl OneumApp {
                         .layout(Layout::top_down(Align::Min)),
                 );
                 self.stats_view(&mut stats_ui, actions);
+            }
+            Nav::Network => {
+                let inside = ui.max_rect().shrink2(vec2(SIDE - 4.0, 0.0));
+                let mut network_ui = ui.new_child(
+                    UiBuilder::new()
+                        .id_salt("phone-network")
+                        .max_rect(inside)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                self.network_view(&mut network_ui, actions);
             }
             Nav::Albums | Nav::Artist(_) => {
                 egui::ScrollArea::vertical()
@@ -3156,7 +3204,7 @@ impl OneumApp {
             return;
         }
         match view {
-            PlayerView::Meters => self.phone_meters(ui, art),
+            PlayerView::Meters => self.phone_meters_guarded(ui, art),
             PlayerView::Lyrics => self.phone_lyrics(ui, art, track.as_ref(), full),
             PlayerView::Cover | PlayerView::Queue => {
                 let texture = self
@@ -3268,6 +3316,55 @@ impl OneumApp {
         self.phone_transport(ui);
         ui.add_space(14.0);
         self.phone_volume(ui);
+    }
+
+    /// The meters, kept from taking the whole app down with them. On one phone the app
+    /// ended whenever this view was shown, for a reason that could not be seen from
+    /// outside (it does not happen on an emulator). A panic in drawing them is caught
+    /// here: the panic hook has written it to the log, and the view says what it was
+    /// in the meters' place, so that it can be read off the screen and passed on.
+    fn phone_meters_guarded(&mut self, ui: &mut Ui, rect: Rect) {
+        if self.phone.meters_failed.is_none() {
+            let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if std::mem::take(&mut self.phone.fail_meters) {
+                    panic!("asked for by a verification script");
+                }
+                self.phone_meters(ui, rect);
+            }));
+            if let Err(payload) = drawn {
+                // What the panic hook noted (with the place); else the message alone.
+                let message = crate::app::last_panic().unwrap_or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_owned())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_default()
+                });
+                self.phone.meters_failed = Some(message);
+            }
+        }
+        let Some(message) = self.phone.meters_failed.clone() else {
+            return;
+        };
+        let s = self.s();
+        ui.painter()
+            .rect_filled(rect, 14.0, meter::deck_fill(ui.visuals().dark_mode));
+        let mut told = ui.new_child(
+            UiBuilder::new()
+                .id_salt("phone-meters-failed")
+                .max_rect(rect.shrink(16.0))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        told.label(RichText::new(s.meter_failed).color(theme::dim(ui)));
+        told.add_space(8.0);
+        told.add(egui::Label::new(RichText::new(&message).monospace().small()).wrap());
+        told.add_space(8.0);
+        if told
+            .add(egui::Button::new(s.copy_short).min_size(vec2(0.0, 30.0)))
+            .clicked()
+        {
+            self.copy_text(ui.ctx(), message);
+        }
     }
 
     /// The VU meters, the spectrum and where the sound comes from and goes to, in the

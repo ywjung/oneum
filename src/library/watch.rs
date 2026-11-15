@@ -570,7 +570,11 @@ mod tests {
         let timing = Timing {
             coalesce: Duration::from_millis(50),
             online_check: Duration::from_millis(50),
-            watcher_retry: Duration::from_millis(3000),
+            // Long enough for the rescan below to find its file first, also when the
+            // computer is busy with the other tests (with three seconds it was not,
+            // once there were more of them: the second attempt came before the file
+            // was found, and the test could no longer tell who found it).
+            watcher_retry: Duration::from_millis(8000),
             unwatched_rescan: Duration::from_millis(200),
             remote_rescan: Duration::from_millis(200),
             watch_settle: Duration::from_millis(200),

@@ -27,6 +27,7 @@
   <key>NSDesktopFolderUsageDescription</key><string>추가한 음악 폴더의 파일을 읽어 재생합니다. 파일을 바꾸지 않습니다.</string>
   <key>NSRemovableVolumesUsageDescription</key><string>추가한 음악 폴더의 파일을 읽어 재생합니다. 파일을 바꾸지 않습니다.</string>
   <key>NSNetworkVolumesUsageDescription</key><string>추가한 음악 폴더의 파일을 읽어 재생합니다. 파일을 바꾸지 않습니다.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>같은 네트워크의 미디어 서버(DLNA)를 찾아 그 음악을 재생합니다. 네트워크 화면을 열 때만 씁니다.</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

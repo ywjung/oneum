@@ -24,6 +24,11 @@ pub(super) enum Dialog {
         name: String,
         focus: bool,
     },
+    /// The address of a media server to add (in `name`, like the other text entries).
+    AddServer {
+        name: String,
+        focus: bool,
+    },
     /// Name a smart playlist: a new one for `query`, or `original` under a new name.
     SmartPlaylist {
         name: String,
@@ -144,6 +149,7 @@ impl OneumApp {
                 }
                 Dialog::NewPlaylist { .. } => (s.new_playlist, String::new(), s.ok),
                 Dialog::RenamePlaylist { .. } => (s.rename, String::new(), s.ok),
+                Dialog::AddServer { .. } => (s.network_add_title, String::new(), s.ok),
                 Dialog::SmartPlaylist { query, .. } => (s.smart_playlist, query.clone(), s.ok),
             };
             // On a phone: larger text, and two buttons a finger cannot miss, side by side.
@@ -160,13 +166,14 @@ impl OneumApp {
                 ui.label(RichText::new(&body).monospace().weak());
                 ui.add_space(4.0);
             }
-            let hint = if matches!(dialog, Dialog::SmartPlaylist { .. }) {
-                s.smart_name
-            } else {
-                s.playlist_name
+            let hint = match dialog {
+                Dialog::SmartPlaylist { .. } => s.smart_name,
+                Dialog::AddServer { .. } => s.network_add_hint,
+                _ => s.playlist_name,
             };
             if let Dialog::NewPlaylist { name, focus, .. }
             | Dialog::RenamePlaylist { name, focus, .. }
+            | Dialog::AddServer { name, focus }
             | Dialog::SmartPlaylist { name, focus, .. } = &mut dialog
             {
                 let mut edit = egui::TextEdit::singleline(name)
@@ -207,6 +214,7 @@ impl OneumApp {
                     dialog,
                     Dialog::NewPlaylist { .. }
                         | Dialog::RenamePlaylist { .. }
+                        | Dialog::AddServer { .. }
                         | Dialog::SmartPlaylist { .. }
                 );
                 let (fill, ink) = if destructive {
@@ -357,6 +365,11 @@ impl OneumApp {
                 }
                 self.go(Nav::Smart(name));
                 return;
+            }
+            Dialog::AddServer { name, .. } => {
+                // Looked for in the background; the network view says how it went.
+                self.network.add_by_address(&name);
+                Ok(())
             }
             Dialog::NewPlaylist { name, tracks, .. } => {
                 // Created with its songs in one step: a failure leaves no empty

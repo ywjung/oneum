@@ -7,6 +7,10 @@
 //! track no longer depends on the disk: a drive that spins down, a slow network share or
 //! a cable pulled mid-track cannot interrupt it. The feed loads the next track the same
 //! way ahead of time (see `feed.rs`).
+//!
+//! The same serves a track of a media server on the network (`remote.rs`): there the
+//! bytes come over one connection in order, and a reader that is ahead of them waits
+//! for them rather than asking the server again.
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -24,6 +28,9 @@ const MEMORY_SHARE: u64 = 8;
 const MAX_TOTAL_BYTES: u64 = 3 << 29; // 1.5 GiB
 /// …and on a phone never more than this.
 const PHONE_MAX_TOTAL_BYTES: u64 = 256 << 20;
+/// How long a reader sleeps between looks at what the loader has brought (see
+/// [`Origin::wait_for_loader`]).
+const LOADER_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
 /// The budget when the installed memory cannot be found out.
 const FALLBACK_TOTAL_BYTES: u64 = 1 << 29; // 512 MiB
 
@@ -85,21 +92,45 @@ impl Budget {
     }
 }
 
+/// Where the bytes are before they are in memory: a file on disk, or an address on the
+/// network.
+pub(crate) trait Origin: Send + Sync {
+    /// Reads at `offset`: as much as is there, up to `buf.len()` (0 at the end).
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
+
+    /// Whether a reader that is `ahead` bytes ahead of the loader should wait for the
+    /// loader rather than read there itself. A file is read anywhere at once; reading
+    /// a network address out of order costs a request of its own (and some servers
+    /// cannot do it at all).
+    fn wait_for_loader(&self, _ahead: u64) -> bool {
+        false
+    }
+}
+
+impl Origin for File {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        read_at(self, buf, offset)
+    }
+}
+
 struct Shared {
     data: Mutex<Vec<u8>>,
     /// Bytes at the start of the file that are in `data`.
     loaded: AtomicU64,
     complete: AtomicBool,
+    /// The loader ended without the whole file (it failed, or the file shrank): what
+    /// is not in memory has to be read from the origin.
+    stopped: AtomicBool,
     cancel: AtomicBool,
     /// What this file takes of the budget, given back when the bytes are freed (the
     /// loader may hold them a moment longer than the [`FileInMemory`]).
     budget: Arc<Budget>,
     reserved: u64,
-    /// The file on disk, for reading what is not in memory yet. Let go of once the
-    /// whole file is in memory, whoever still holds the bytes (a decoder, the feed
-    /// that keeps them for the next track of the same file): the drive it is on can
-    /// then be ejected while it plays.
-    file: Mutex<Option<Arc<File>>>,
+    /// The file on disk (or the address on the network), for reading what is not in
+    /// memory yet. Let go of once the whole file is in memory, whoever still holds the
+    /// bytes (a decoder, the feed that keeps them for the next track of the same
+    /// file): the drive it is on can then be ejected while it plays.
+    origin: Mutex<Option<Arc<dyn Origin>>>,
 }
 
 impl Drop for Shared {
@@ -114,13 +145,16 @@ impl Shared {
         self.data.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The file on disk, while it is still held (see `Shared::file`).
-    fn file(&self) -> Option<Arc<File>> {
-        self.file.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    /// Where the file comes from, while that is still held (see `Shared::origin`).
+    fn origin(&self) -> Option<Arc<dyn Origin>> {
+        self.origin
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
-    fn let_go_of_file(&self) {
-        *self.file.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    fn let_go_of_origin(&self) {
+        *self.origin.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 
@@ -156,39 +190,62 @@ impl FileInMemory {
     pub fn start_within(path: &Path, budget: &Arc<Budget>) -> io::Result<Option<Self>> {
         let file = File::open(path)?;
         let meta = file.metadata()?;
-        let len = meta.len();
-        if !meta.is_file() || len == 0 || len > MAX_FILE_BYTES || !budget.take(len) {
+        if !meta.is_file() {
             return Ok(None);
+        }
+        Ok(Self::start_from(
+            path.to_path_buf(),
+            Arc::new(file),
+            meta.len(),
+            budget,
+        ))
+    }
+
+    /// Starts loading `len` bytes from `origin` (named `path` to whoever asks). `None`
+    /// as for [`FileInMemory::start`].
+    pub(crate) fn start_from(
+        path: PathBuf,
+        origin: Arc<dyn Origin>,
+        len: u64,
+        budget: &Arc<Budget>,
+    ) -> Option<Self> {
+        if len == 0 || len > MAX_FILE_BYTES || !budget.take(len) {
+            return None;
         }
         // From here on the budget is given back when `shared` goes (or right here).
         let mut data = Vec::new();
         if data.try_reserve_exact(len as usize).is_err() {
             budget.give_back(len);
-            return Ok(None);
+            return None;
         }
-        let file = Arc::new(file);
         let shared = Arc::new(Shared {
             data: Mutex::new(data),
             loaded: AtomicU64::new(0),
             complete: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
             budget: budget.clone(),
             reserved: len,
-            file: Mutex::new(Some(file.clone())),
+            origin: Mutex::new(Some(origin.clone())),
         });
-        let (loader_file, loader_shared) = (file, shared.clone());
+        let loader_shared = shared.clone();
         let spawned = std::thread::Builder::new()
             .name("oneum-preload".into())
-            .spawn(move || load(&loader_file, &loader_shared, len));
+            .spawn(move || {
+                load(&*origin, &loader_shared, len);
+                if !loader_shared.complete.load(Ordering::Acquire) {
+                    loader_shared.stopped.store(true, Ordering::Release);
+                }
+            });
         if spawned.is_err() {
-            return Ok(None);
+            return None;
         }
-        Ok(Some(Self {
-            path: path.to_path_buf(),
+        Some(Self {
+            path,
             len,
             _alive: Arc::new(Alive(shared.clone())),
             shared,
-        }))
+        })
     }
 
     /// Another handle to the same bytes: one file in memory read by two decoders (two
@@ -249,7 +306,7 @@ fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
     }
 }
 
-fn load(file: &File, shared: &Shared, len: u64) {
+fn load(origin: &dyn Origin, shared: &Shared, len: u64) {
     let mut chunk = vec![0u8; CHUNK_BYTES.min(len as usize)];
     let mut offset = 0u64;
     while offset < len {
@@ -257,7 +314,7 @@ fn load(file: &File, shared: &Shared, len: u64) {
             return;
         }
         let want = chunk.len().min((len - offset) as usize);
-        match read_at(file, &mut chunk[..want], offset) {
+        match origin.read_at(&mut chunk[..want], offset) {
             // The file shrank, or the drive failed. What is in memory stays valid; the
             // reader goes on reading the file itself and reports whatever that returns.
             Ok(0) => return,
@@ -272,7 +329,7 @@ fn load(file: &File, shared: &Shared, len: u64) {
     }
     shared.complete.store(true, Ordering::Release);
     // Everything is in memory: nobody reads the file any more.
-    shared.let_go_of_file();
+    shared.let_go_of_origin();
 }
 
 /// Reads a [`FileInMemory`]: from memory where it is loaded, from the file elsewhere.
@@ -297,8 +354,16 @@ impl Read for MemorySource {
                 buf[..n].copy_from_slice(&shared.data()[start..start + n]);
                 break n;
             }
-            match shared.file() {
-                Some(file) => break read_at(&file, &mut buf[..want], self.pos)?,
+            match shared.origin() {
+                // The bytes are on their way (a network address): they are waited
+                // for, unless the loader has ended without them.
+                Some(origin)
+                    if origin.wait_for_loader(self.pos - loaded)
+                        && !shared.stopped.load(Ordering::Acquire) =>
+                {
+                    std::thread::sleep(LOADER_WAIT);
+                }
+                Some(origin) => break origin.read_at(&mut buf[..want], self.pos)?,
                 // Let go of because everything has come into memory meanwhile: read
                 // it there. (Otherwise the loader gave up and so does this.)
                 None if shared.complete.load(Ordering::Acquire) => {}
@@ -453,7 +518,7 @@ mod tests {
         // same file): the drive can be ejected. The loader lets go right after it marks
         // the load complete.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while second.shared.file().is_some() {
+        while second.shared.origin().is_some() {
             assert!(Instant::now() < deadline, "the file is still held");
             std::thread::sleep(Duration::from_millis(1));
         }

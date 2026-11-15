@@ -47,7 +47,7 @@ pub(super) fn sortable(nav: &Nav) -> bool {
 /// Whether the list of this view has a search field of its own (the search tab looks
 /// through the whole library; this narrows what one view shows).
 pub(super) fn searchable(nav: &Nav) -> bool {
-    !matches!(nav, Nav::Stats | Nav::Recent)
+    !matches!(nav, Nav::Stats | Nav::Recent | Nav::Network)
 }
 
 /// Whether several songs of this list can be chosen at once.

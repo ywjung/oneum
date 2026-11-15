@@ -283,6 +283,19 @@ fn starts_as_dsd<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Result<boo
     Ok(read == 4 && super::dsd::is_dsd_magic(&magic))
 }
 
+/// The file once more, for what the pass that decodes it does not give (AAC's priming
+/// and padding are written in tables the reader does not pass on): the file on disk,
+/// or the track of a media server through a connection of its own.
+fn second_look(path: &Path) -> Option<Box<dyn super::dsd::ReadSeek>> {
+    match crate::model::http_address(path) {
+        Some(url) => {
+            let file = super::remote::RemoteFile::open(url).ok()?;
+            Some(Box::new(file.into_source()))
+        }
+        None => Some(Box::new(std::fs::File::open(path).ok()?)),
+    }
+}
+
 fn dsd_info(decoder: &DsdDecoder, in_memory: bool) -> SourceInfo {
     let info = decoder.info();
     SourceInfo {
@@ -325,6 +338,7 @@ impl TrackDecoder {
             Inner::Media(Box::new(MediaDecoder::from_source(
                 path,
                 Box::new(file),
+                None,
                 false,
                 false,
             )?))
@@ -354,6 +368,7 @@ impl TrackDecoder {
             Inner::Media(Box::new(MediaDecoder::from_source(
                 path,
                 Box::new(file),
+                None,
                 false,
                 true,
             )?))
@@ -377,6 +392,9 @@ impl TrackDecoder {
     /// Opens a file that is being loaded into memory (memory playback).
     pub fn open_in_memory(file: FileInMemory) -> Result<Self, PlaybackError> {
         let path = file.path().to_path_buf();
+        // The same bytes once more, for what a second pass over the file gives (see
+        // `second_look`): from memory, not from where the file came from.
+        let again = file.share().into_source();
         let mut source = file.into_source();
         let inner = if starts_as_dsd(&mut source)? {
             let decoder = DsdDecoder::from_memory(source)?;
@@ -386,11 +404,52 @@ impl TrackDecoder {
             Inner::Media(Box::new(MediaDecoder::from_source(
                 &path,
                 Box::new(source),
+                Some(Box::new(again)),
                 true,
                 false,
             )?))
         };
         Ok(TrackDecoder { inner, range: None })
+    }
+
+    /// Opens a track of a media server on the network (see `remote.rs`): read into
+    /// memory while it plays when it fits there (the second value then tells when all
+    /// of it is), and as it comes otherwise.
+    pub fn open_remote(
+        file: super::remote::RemoteFile,
+    ) -> Result<(Self, Option<super::source::LoadCompletion>), PlaybackError> {
+        Self::open_remote_within(file, super::source::Budget::global())
+    }
+
+    /// [`TrackDecoder::open_remote`] with the memory it may take given.
+    pub fn open_remote_within(
+        file: super::remote::RemoteFile,
+        budget: &std::sync::Arc<super::source::Budget>,
+    ) -> Result<(Self, Option<super::source::LoadCompletion>), PlaybackError> {
+        match file.into_memory(budget) {
+            Ok(in_memory) => {
+                let completion = in_memory.completion();
+                Ok((Self::open_in_memory(in_memory)?, Some(completion)))
+            }
+            Err(file) => {
+                let name = file.name();
+                let mut source = file.into_source();
+                let inner = if starts_as_dsd(&mut source)? {
+                    let decoder = DsdDecoder::new(Box::new(source))?;
+                    let info = dsd_info(&decoder, false);
+                    Inner::Dsd(Box::new(decoder), info)
+                } else {
+                    Inner::Media(Box::new(MediaDecoder::from_source(
+                        &name,
+                        Box::new(source),
+                        None,
+                        false,
+                        false,
+                    )?))
+                };
+                Ok((TrackDecoder { inner, range: None }, None))
+            }
+        }
     }
 
     /// Plays only `segment` of the file, if given (a track of a CUE sheet, for a decoder
@@ -541,9 +600,12 @@ impl TrackDecoder {
 }
 
 impl MediaDecoder {
+    /// `again`: the same file to read a second time, if the caller has it at hand
+    /// (see `second_look`).
     fn from_source(
         path: &Path,
         source: Box<dyn MediaSource>,
+        again: Option<Box<dyn super::dsd::ReadSeek>>,
         in_memory: bool,
         verify: bool,
     ) -> Result<Self, PlaybackError> {
@@ -613,7 +675,7 @@ impl MediaDecoder {
         // AAC's priming and padding: the reader passes them on as audio. What the file
         // says about them is read here and applied while decoding.
         let trim = (codec == "aac" && !has_gapless_info)
-            .then(|| std::fs::File::open(path).ok())
+            .then(|| again.or_else(|| second_look(path)))
             .flatten()
             .and_then(|file| mp4_edit::read(std::io::BufReader::new(file), sample_rate))
             // A note that claims more music than the track holds is wrong about the

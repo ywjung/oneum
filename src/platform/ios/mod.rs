@@ -52,6 +52,16 @@ pub(super) fn open_in_browser(address: &str) -> bool {
     true
 }
 
+/// Puts `text` on the general pasteboard. Main thread (the UI's).
+pub fn copy_text(text: &str) -> bool {
+    use objc2_foundation::NSString;
+    use objc2_ui_kit::UIPasteboard;
+    let pasteboard = UIPasteboard::generalPasteboard();
+    // SAFETY: called on the main thread, with a string that lives for the call.
+    unsafe { pasteboard.setString(Some(&NSString::from_str(text))) };
+    true
+}
+
 /// A start-up failure. Before the app's view exists nothing can be shown on an iPhone,
 /// so it goes to the log (Console.app shows it).
 pub fn fatal_alert(title: &str, body: &str) {

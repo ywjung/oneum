@@ -1,5 +1,7 @@
 //! End-to-end checks of the player thread against an offline engine: commands in,
 //! snapshots and rendered audio out. No audio device is used.
+mod net_support;
+
 use oneum::audio::decoder::TrackDecoder;
 use oneum::audio::output::{OutputError, OutputSignals};
 use oneum::audio::render::Renderer;
@@ -2359,4 +2361,73 @@ fn stop_after_a_song_that_cannot_be_played_stops_there() {
     rig.send(Command::Play);
     rig.wait("the rest of the queue", |s| s.state == PlayState::Ended);
     assert!(rig.host.plays().contains(&B));
+}
+
+/// A media server of the network (the stand-in of the tests) that holds these fixtures.
+fn media_server(files: &[&str]) -> net_support::FakeServer {
+    net_support::FakeServer::start(
+        files
+            .iter()
+            .map(|name| {
+                let body = std::fs::read(fixture(name)).expect("fixture");
+                net_support::Track::new(name, "audio/wav", body).into()
+            })
+            .collect(),
+    )
+}
+
+/// Tracks of a media server play like files: one into the next without a gap, and what
+/// is heard is the uncut signal. (The player knows them by the address that stands
+/// where a file's path does; their ids are negative.)
+#[test]
+fn a_queue_of_a_media_servers_tracks_plays_gaplessly() {
+    const NET_A: TrackId = -1;
+    const NET_B: TrackId = -2;
+    let server = media_server(&["gap_a.wav", "gap_b.wav"]);
+    let host = TestHost::new()
+        .with_track(NET_A, PathBuf::from(server.media_url(0)), 1000)
+        .with_track(NET_B, PathBuf::from(server.media_url(1)), 1000);
+    let rig = Rig::start(host);
+    rig.send(play(&[NET_A, NET_B], 0));
+    rig.wait("second track", |s| Rig::track(s) == Some(NET_B));
+    let ended = rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(Rig::track(&ended), Some(NET_B));
+    assert_eq!(rig.host.plays(), vec![NET_A, NET_B]);
+
+    let audio = rig.audio.lock().expect("lock").clone();
+    assert_eq!(audio.len(), 1, "the transition must not start a new feed");
+    let expected: Vec<f32> = decode_all("gap_a.wav")
+        .into_iter()
+        .chain(decode_all("gap_b.wav"))
+        .collect();
+    assert_eq!(audio[0].1.len(), expected.len());
+    assert_eq!(
+        max_abs_diff(&audio[0].1[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]),
+        0.0
+    );
+    assert_eq!(server.media_requests(), 2, "each file is fetched once");
+}
+
+/// A server that does not answer any more is like a file that is not there: its track
+/// is skipped with a notice and the queue goes on.
+#[test]
+fn a_track_of_a_server_that_is_gone_is_skipped() {
+    const NET_GONE: TrackId = -3;
+    let mut server = media_server(&["gap_a.wav"]);
+    let url = server.media_url(0);
+    server.stop();
+    let rig = Rig::start(TestHost::new().with_track(NET_GONE, PathBuf::from(url), 1000));
+    rig.send(play(&[A, NET_GONE, B], 0));
+    let snap = rig.wait("skipped to the track after it", |s| {
+        Rig::track(s) == Some(B)
+    });
+    assert!(matches!(
+        snap.notice,
+        Some(Notice::TrackSkipped {
+            track_id: NET_GONE,
+            ..
+        })
+    ));
+    rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, B]);
 }

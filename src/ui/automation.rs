@@ -44,6 +44,20 @@ pub(super) enum AppStep {
     /// Keep the window in front without taking keyboard focus, until `Back`.
     Front,
     Back,
+    /// Makes the phone's meters fail once when they are next drawn ("fail meters"): the
+    /// app is to survive that and say what happened.
+    FailMeters,
+    /// `copy report`: what the "Copy the Record" button of the About page does.
+    CopyReport,
+    /// `fail device`: takes the graphics device away, as a driver does that loses it.
+    /// `fail device untold` does so without the app being told, which is how the app
+    /// ended on a phone before it looked out for this.
+    LoseDevice {
+        told: bool,
+    },
+    /// The network view, by words instead of clicks ("add <address>", "open <n>", "up",
+    /// "reload", "saved <n>", "forget <n>").
+    Network(String),
 }
 
 enum Step {
@@ -320,6 +334,18 @@ impl Automation {
                 .steps
                 .push_back(Step::App(AppStep::Volume(num(1).unwrap_or(0.0)))),
             Some("quit") => self.steps.push_back(Step::App(AppStep::Quit)),
+            Some("copy") if words.get(1) == Some(&"report") => {
+                self.steps.push_back(Step::App(AppStep::CopyReport));
+            }
+            Some("fail") if words.get(1) == Some(&"meters") => {
+                self.steps.push_back(Step::App(AppStep::FailMeters));
+            }
+            Some("fail") if words.get(1) == Some(&"device") => {
+                let told = words.get(2) != Some(&"untold");
+                self.steps
+                    .push_back(Step::App(AppStep::LoseDevice { told }));
+            }
+            Some("net") => self.steps.push_back(Step::App(AppStep::Network(rest(1)))),
             Some("oskey") => {
                 let Some(code) = words.get(1).and_then(|w| w.parse::<u16>().ok()) else {
                     return;
