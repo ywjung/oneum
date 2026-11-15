@@ -20,6 +20,9 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// When this program was built, as "2026-11-16 00:52 UTC" (see build.rs): it tells two
+/// builds of one version apart.
+pub const BUILT: &str = env!("ONEUM_BUILT");
 /// How long quitting waits for the player thread (a format switch back on a slow DAC
 /// can take a few seconds).
 const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);

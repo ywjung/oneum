@@ -122,6 +122,7 @@ strings! {
     graphics_lost_again: "화면을 그리는 장치를 다시 잃어 앱을 닫습니다. 기록은 설정 → 정보에 있습니다.", "The graphics device was lost again: OnEum closes. See Settings → About.";
     graphics_lost_title: "화면을 더 그릴 수 없습니다", "Nothing More Can Be Drawn";
     graphics_lost_body: "화면을 그리는 장치를 잃었습니다. 재생 목록과 듣던 위치는 저장했습니다. 앱을 다시 열어 주세요.", "The graphics device was lost. The queue and the position are saved. Please open the app again.";
+    built: "빌드", "built";
     copy_record: "기록 복사", "Copy the Record";
     copy_record_desc: "버전, 그리는 장치, 지난 실행이 끝난 이유, 로그의 경고와 오류, 메모리를 한꺼번에 복사합니다. 문제를 알릴 때 붙여 넣어 주세요.", "Copies the version, what the screen is drawn with, how earlier runs ended, the warnings and errors of the log and the memory, all at once. Paste it when you report a problem.";
     copy_short: "복사", "Copy";
@@ -327,8 +328,11 @@ strings! {
     confirm_delete_playlist_body: "플레이리스트만 삭제됩니다. 원본 파일은 삭제되지 않습니다.",
         "Only the playlist is deleted. The original files are not deleted.";
     confirm_remove_tracks_title: "선택한 곡을 라이브러리에서 제거할까요?", "Remove the selected songs from the library?";
-    confirm_remove_tracks_body: "라이브러리와 플레이리스트에서만 빠집니다. 원본 파일은 삭제되지 않습니다.",
-        "They are only removed from the library and playlists. The original files are not deleted.";
+    confirm_remove_tracks_body: "라이브러리와 플레이리스트에서만 빠집니다. 원본 파일은 삭제되지 않습니다. 폴더를 다시 스캔해도 돌아오지 않으며, 설정의 \"제거한 곡 되돌리기\"로 다시 넣을 수 있습니다.",
+        "They are only removed from the library and playlists. The original files are not deleted. A scan of their folder does not bring them back; \"Bring Back Removed Songs\" in the settings does.";
+    restore_removed: "제거한 곡 되돌리기", "Bring Back Removed Songs";
+    restore_removed_desc: "라이브러리에서 제거한 곡은 파일이 남아 있어도 스캔이 다시 넣지 않습니다. 그 곡들을 모두 다시 넣습니다.", "Songs removed from the library are not taken in again by a scan, though their files are still there. This takes all of them in again.";
+    restore_removed_button: "되돌리기", "Bring Back";
     playlist_name: "플레이리스트 이름", "Playlist name";
     untitled_playlist: "새 플레이리스트", "New Playlist";
     // Info panel

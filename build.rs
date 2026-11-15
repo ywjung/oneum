@@ -1,6 +1,9 @@
-//! Build script. It has one job, and only for Windows: the program's icon and version
-//! details (assets/windows/oneum.rc) are compiled and linked into `oneum.exe`, so that
-//! File Explorer, the taskbar and the Start menu show the app's icon.
+//! Build script. For every system it notes when the program was built (`ONEUM_BUILT`,
+//! shown under Settings → About): two builds of one version are told apart by it, on a
+//! phone where nothing else says which one is installed. The rest is for Windows only:
+//! the program's icon and version details (assets/windows/oneum.rc) are compiled and
+//! linked into `oneum.exe`, so that File Explorer, the taskbar and the Start menu show
+//! the app's icon.
 //!
 //! The resource compiler is the one of the toolchain that links the program: `windres`
 //! of mingw-w64 for the GNU target (the cross-build on a Mac: `scripts/package-windows.sh`),
@@ -16,6 +19,11 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/windows/oneum.ico");
     println!("cargo:rerun-if-env-changed=WINDRES");
     println!("cargo:rerun-if-env-changed=RC");
+    // Taken again whenever the program's sources change (then it is another build).
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=docs");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rustc-env=ONEUM_BUILT={}", built_at());
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -38,6 +46,44 @@ fn main() {
              (set WINDRES or RC to a resource compiler)"
         ),
     }
+}
+
+/// The time of this build as "2026-11-16 00:52 UTC" (`SOURCE_DATE_EPOCH`, where a
+/// build is to be repeatable, takes the clock's place).
+fn built_at() -> String {
+    let seconds = env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|epoch| epoch.parse::<u64>().ok())
+        .or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|since| since.as_secs())
+        })
+        .unwrap_or(0);
+    let (year, month, day) = civil_date(seconds / 86_400);
+    let (hour, minute) = ((seconds % 86_400) / 3600, (seconds % 3600) / 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// The date of a day counted from 1970-01-01 (the usual calendar arithmetic, with
+/// years that begin in March so that the leap day comes last).
+fn civil_date(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+    let month = if month_from_march < 10 {
+        month_from_march + 3
+    } else {
+        month_from_march - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    (year, month, day)
 }
 
 /// "0.1.0" as the four numbers a Windows version is: "0,1,0,0".

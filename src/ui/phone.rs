@@ -2611,6 +2611,7 @@ impl OneumApp {
         let mut import_files = false;
         let mut import_folder = false;
         let mut rescan = false;
+        let mut restore_removed = false;
         let mut show_damaged = false;
         let mut import_apple = false;
         let mut link_folder = false;
@@ -2681,6 +2682,31 @@ impl OneumApp {
                                         rescan = true;
                                     }
                                     ui.label(RichText::new(status).small().color(theme::dim(ui)));
+                                },
+                            );
+                            // Songs that were removed stay out of every scan: this is
+                            // the way back for them. Always there, also with nothing to
+                            // bring back: a row that comes and goes is not found.
+                            let removed = self.core.library.removed_count();
+                            widgets::row_divider(ui);
+                            widgets::setting_row(
+                                ui,
+                                s.restore_removed,
+                                Some(s.restore_removed_desc),
+                                true,
+                                |ui| {
+                                    let button = egui::Button::new(s.restore_removed_button);
+                                    if ui
+                                        .add_enabled(removed > 0 && !scan.running, button)
+                                        .clicked()
+                                    {
+                                        restore_removed = true;
+                                    }
+                                    ui.label(
+                                        RichText::new(self.lang.song_count(removed))
+                                            .small()
+                                            .color(theme::dim(ui)),
+                                    );
                                 },
                             );
                         });
@@ -2815,6 +2841,9 @@ impl OneumApp {
         }
         if import_apple {
             self.pick_apple_library();
+        }
+        if restore_removed {
+            self.core.library.restore_removed();
         }
         if import_files {
             self.import_music(crate::platform::PickKind::Files);

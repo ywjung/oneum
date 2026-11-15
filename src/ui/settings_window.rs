@@ -464,6 +464,35 @@ impl OneumApp {
             }
         });
 
+        // Songs that were removed stay out of every scan: this is the way back. Always
+        // there, also with nothing to bring back: a row that comes and goes is not found.
+        let removed = self.core.library.removed_count();
+        ui.add_space(12.0);
+        widgets::card(ui, |ui| {
+            widgets::setting_row(
+                ui,
+                s.restore_removed,
+                Some(s.restore_removed_desc),
+                true,
+                |ui| {
+                    let button =
+                        egui::Button::new(s.restore_removed_button).min_size(egui::vec2(0.0, 26.0));
+                    if ui
+                        .add_enabled(removed > 0 && !scan.running, button)
+                        .clicked()
+                    {
+                        self.announce_scan = true;
+                        self.core.library.restore_removed();
+                    }
+                    ui.label(
+                        RichText::new(self.lang.song_count(removed))
+                            .small()
+                            .color(dim),
+                    );
+                },
+            );
+        });
+
         ui.add_space(18.0);
         if self.check_card(ui) {
             self.settings_open = false;
@@ -1188,7 +1217,14 @@ impl OneumApp {
                         .color(ui.visuals().strong_text_color()),
                 );
                 ui.label(
-                    RichText::new(format!("{} {}", s.version, crate::app::VERSION)).color(dim),
+                    RichText::new(format!(
+                        "{} {} · {} {}",
+                        s.version,
+                        crate::app::VERSION,
+                        s.built,
+                        crate::app::BUILT
+                    ))
+                    .color(dim),
                 );
                 ui.label(RichText::new(s.about_body).small().color(dim));
             });

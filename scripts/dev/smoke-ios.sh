@@ -369,6 +369,21 @@ check n6.json 'd["network"]["saved"] == ["OnEum test server"] and d["current"] =
 kill "$DLNA_PID" 2>/dev/null || true
 DLNA_PID=
 
+echo "== a song removed from the library stays out"
+# Removed through the song's sheet, as it is done by hand. Its file stays where it is,
+# and the next scan of its folder (every start begins with one) must not bring the song
+# back: it did (reported from an iPhone, 2026-11-15), because only the library's row
+# went. "Bring Back Removed Songs" is the way back.
+ui "tap $TAB_LIBRARY $TABS" 'wait 500' "tap 200 $MENU0" 'wait 700' 'dump x0.json'
+SONGS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["library_tracks"])' "$PROFILE/x0.json")
+ui "tap $((W - 30)) $SONG0" 'wait 700' "tap 200 $SHEET_UP0" 'wait 700' 'key Enter' 'wait 900' 'dump x1.json'
+check x1.json "d['library_tracks'] == $SONGS - 1 and d['removed_songs'] == 1" "the song's sheet removes it from the library"
+start
+ui 'volume 0' 'wait 3000' 'dump x2.json'
+check x2.json "d['library_tracks'] == $SONGS - 1 and not d['scan_running'] and d['removed_songs'] == 1" "after a restart and its scan the song is still out"
+ui 'restore removed' 'wait 3000' 'dump x3.json'
+check x3.json "d['library_tracks'] == $SONGS and d['removed_songs'] == 0" "\"Bring Back Removed Songs\" takes it in again"
+
 echo "== copying the record"
 # What "Copy the Record" under Settings → About does: on a phone the app puts the text
 # on the system's pasteboard itself (the UI library has none there). Read back from the
@@ -379,7 +394,7 @@ if pgrep -x Simulator >/dev/null; then
 else
   ui 'copy report' 'wait 800' 'dump k1.json'
   xcrun simctl pbpaste "$DEVICE" > "$WORK/pasted.txt"
-  for part in '^--- the app ---$' '^OnEum [0-9.]* (ios)$' '^--- the log ---$' '^--- memory now ---$'; do
+  for part in '^--- the app ---$' '^OnEum [0-9.]* (ios), built 20[0-9-]* [0-9:]* UTC$' '^--- the log ---$' '^--- memory now ---$'; do
     if grep -q "$part" "$WORK/pasted.txt"; then
       echo "  ok   the record on the pasteboard has: $part"
     else

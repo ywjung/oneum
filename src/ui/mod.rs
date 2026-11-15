@@ -1700,7 +1700,12 @@ impl OneumApp {
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_default()
         };
-        let mut about = vec![format!("OnEum {} ({})", app::VERSION, std::env::consts::OS)];
+        let mut about = vec![format!(
+            "OnEum {} ({}), built {}",
+            app::VERSION,
+            std::env::consts::OS,
+            app::BUILT
+        )];
         if let Some((adapter, _)) = renderer::adapter() {
             about.push(format!("drawn with: {adapter}"));
         }
@@ -2432,6 +2437,7 @@ impl OneumApp {
                 }
                 automation::AppStep::Network(words) => self.network_script(&words),
                 automation::AppStep::FailMeters => self.phone.fail_meters(),
+                automation::AppStep::RestoreRemoved => self.core.library.restore_removed(),
                 automation::AppStep::CopyReport => {
                     let report = self.error_report();
                     self.copy_text(ctx, report);
@@ -2510,6 +2516,7 @@ impl OneumApp {
         });
         // (Added here: the list above is as long as the macro takes.)
         state["network"] = self.network_state();
+        state["removed_songs"] = serde_json::json!(self.core.library.removed_count());
         state["memory"] = serde_json::json!(memory::read().to_string());
         state["adapter"] = serde_json::json!(renderer::adapter().map(|(name, _)| name.as_str()));
         state["current_path"] = serde_json::json!(

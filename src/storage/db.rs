@@ -20,7 +20,9 @@ const HISTORY_KEEP_ROWS: i64 = 20_000;
 
 /// Ordered migration list. Entry `i` upgrades the schema from version `i` to `i + 1`;
 /// the current version is stored in `PRAGMA user_version`.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
+const MIGRATIONS: &[&str] = &[
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE roots (
@@ -151,6 +153,16 @@ CREATE TABLE checks (
     c_true_peak  REAL,
     checked_at   INTEGER NOT NULL
 );
+";
+
+/// Files whose songs the user removed from the library while the files stayed where
+/// they are: a scan of their folder passes them by, so that what was removed stays
+/// removed (see `Library::remove_tracks`). A track of a CUE sheet is here under the
+/// path the library gives it.
+const SCHEMA_V6: &str = "
+CREATE TABLE removed_files (
+    path BLOB PRIMARY KEY
+) WITHOUT ROWID;
 ";
 
 /// Tracks of media servers on the network (see `library::remote`). They are not part of
@@ -650,6 +662,49 @@ impl Db {
             let mut stmt = tx.prepare_cached("DELETE FROM tracks WHERE id = ?1")?;
             for id in ids {
                 stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Deletes track rows as [`Self::delete_tracks`] does and writes down the files
+    /// they were of (`removed_files`), all or nothing: a song that was removed and not
+    /// written down would be back with the next scan of its folder.
+    pub fn delete_tracks_remembering(&mut self, tracks: &[(TrackId, PathBuf)]) -> SqlResult<()> {
+        if tracks.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut remember =
+                tx.prepare_cached("INSERT OR IGNORE INTO removed_files (path) VALUES (?1)")?;
+            let mut delete = tx.prepare_cached("DELETE FROM tracks WHERE id = ?1")?;
+            for (id, path) in tracks {
+                remember.execute(params![path_to_blob(path).as_ref()])?;
+                delete.execute(params![id])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// The files whose songs were removed from the library by the user.
+    pub fn removed_files(&self) -> SqlResult<Vec<PathBuf>> {
+        let mut stmt = self.conn.prepare("SELECT path FROM removed_files")?;
+        let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.map(|blob| blob.map(blob_to_path)).collect()
+    }
+
+    /// Takes files off the list of removed ones (they were added again, are gone, or
+    /// their folder is no music folder any more).
+    pub fn forget_removed_files(&mut self, paths: &[PathBuf]) -> SqlResult<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("DELETE FROM removed_files WHERE path = ?1")?;
+            for path in paths {
+                stmt.execute(params![path_to_blob(path).as_ref()])?;
             }
         }
         tx.commit()
@@ -1575,8 +1630,9 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Rewrites every path at or below the folder `before` to lie at or below `now`: music
-/// folders, tracks, and the record of read CUE sheets (the JSON under `sheets_key`, a
-/// list of pairs keyed by path). Returns how many paths were rewritten.
+/// folders, tracks, the files remembered as removed from the library, and the record
+/// of read CUE sheets (the JSON under `sheets_key`, a list of pairs keyed by path).
+/// Returns how many paths were rewritten.
 fn rewrite_below(
     tx: &rusqlite::Transaction<'_>,
     before: &str,
@@ -1598,6 +1654,23 @@ fn rewrite_below(
         for (id, path) in rows {
             if let Some(path) = below(&path) {
                 update.execute(params![id, path])?;
+                moved += 1;
+            }
+        }
+    }
+    // What was removed from the library is known by its path as well: left behind, a
+    // removed song would be back after the move (on an iPhone: after every update of
+    // the app), and the list would name files that are nowhere.
+    let removed: Vec<Vec<u8>> = tx
+        .prepare("SELECT path FROM removed_files")?
+        .query_map([], |row| row.get(0))?
+        .collect::<SqlResult<_>>()?;
+    {
+        let mut update =
+            tx.prepare("UPDATE OR REPLACE removed_files SET path = ?2 WHERE path = ?1")?;
+        for path in removed {
+            if let Some(moved_to) = below(&path) {
+                update.execute(params![path, moved_to])?;
                 moved += 1;
             }
         }
@@ -1764,6 +1837,94 @@ mod tests {
             compilation: true,
             art_from_folder: false,
         }
+    }
+
+    /// A song that is removed is written down as removed in the same step, and the
+    /// list survives the database being opened again.
+    #[test]
+    fn removed_files_are_remembered_with_the_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kept, gone, also_gone) = {
+            let mut db = Db::open(&db_path(&dir)).unwrap().db;
+            let ids = db
+                .upsert_tracks(&[
+                    sample_track("/music/kept.flac", None),
+                    sample_track("/music/gone.flac", None),
+                    sample_track("/music/also gone.flac", None),
+                ])
+                .unwrap();
+            assert!(db.removed_files().unwrap().is_empty());
+            db.delete_tracks_remembering(&[
+                (ids[1], PathBuf::from("/music/gone.flac")),
+                (ids[2], PathBuf::from("/music/also gone.flac")),
+            ])
+            .unwrap();
+            // The same file removed twice is on the list once.
+            db.delete_tracks_remembering(&[(ids[1], PathBuf::from("/music/gone.flac"))])
+                .unwrap();
+            (ids[0], ids[1], ids[2])
+        };
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        assert!(db.get_track(kept).unwrap().is_some());
+        assert!(db.get_track(gone).unwrap().is_none());
+        assert!(db.get_track(also_gone).unwrap().is_none());
+        let mut removed = db.removed_files().unwrap();
+        removed.sort();
+        assert_eq!(
+            removed,
+            [
+                PathBuf::from("/music/also gone.flac"),
+                PathBuf::from("/music/gone.flac")
+            ]
+        );
+        db.forget_removed_files(&[
+            PathBuf::from("/music/gone.flac"),
+            PathBuf::from("/music/never there.flac"),
+        ])
+        .unwrap();
+        assert_eq!(
+            db.removed_files().unwrap(),
+            [PathBuf::from("/music/also gone.flac")]
+        );
+    }
+
+    /// The folder the library lives in has moved (an iPhone app after an update): what
+    /// was removed from the library moves with the tracks, or it would be back.
+    #[test]
+    fn removed_files_follow_the_library_when_its_folder_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        let old = "/var/mobile/Containers/Data/Application/AAAA/Documents";
+        let new = "/var/mobile/Containers/Data/Application/BBBB/Documents";
+        assert_eq!(db.follow_home(Path::new(old), "sheets").unwrap(), 0);
+        let ids = db
+            .upsert_tracks(&[
+                sample_track(&format!("{old}/Album/kept.flac"), None),
+                sample_track(&format!("{old}/Album/gone.flac"), None),
+                sample_track("/elsewhere/also gone.flac", None),
+            ])
+            .unwrap();
+        db.delete_tracks_remembering(&[
+            (ids[1], PathBuf::from(format!("{old}/Album/gone.flac"))),
+            (ids[2], PathBuf::from("/elsewhere/also gone.flac")),
+        ])
+        .unwrap();
+
+        // One track and one removed file lie below the folder that moved.
+        assert_eq!(db.follow_home(Path::new(new), "sheets").unwrap(), 2);
+        let mut removed = db.removed_files().unwrap();
+        removed.sort();
+        assert_eq!(
+            removed,
+            [
+                PathBuf::from("/elsewhere/also gone.flac"),
+                PathBuf::from(format!("{new}/Album/gone.flac")),
+            ]
+        );
+        assert_eq!(
+            db.get_track(ids[0]).unwrap().unwrap().track.path,
+            PathBuf::from(format!("{new}/Album/kept.flac"))
+        );
     }
 
     /// The current migration list plus one more step, to simulate a future upgrade.

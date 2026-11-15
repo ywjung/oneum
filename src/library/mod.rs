@@ -454,6 +454,13 @@ pub(crate) struct Inner {
     /// for the database. Read from the history when the library is opened and kept up
     /// by `record_play`; a track that has left the library since is passed over.
     recent_plays: Mutex<Vec<TrackId>>,
+    /// Files whose songs the user removed from the library while the files stayed on
+    /// disk (a CUE sheet's track under its track path). A scan passes them by: without
+    /// this a removed song was back as a new one when its folder was scanned again,
+    /// which is at every start. A file leaves the list when it is opened by hand, when
+    /// it is gone from the disk, or when its folder is no music folder any more. Kept
+    /// in the database (`removed_files`).
+    removed: Mutex<HashSet<PathBuf>>,
     /// CUE sheets whose tracks are in the library, by `scan::sheet_key`, with what was
     /// recorded when they were read: a sheet changed since (or missing a track it gave)
     /// is read again. Kept in the `kv` table (see [`Inner::save_sheet_records`]).
@@ -763,13 +770,74 @@ impl Inner {
     /// written). `touches` are unchanged files to mark as present and assign to
     /// `touch_root`. Nothing is written once `cancel` is set (checked under the database
     /// lock, see `Library::remove_folder`).
+    /// Whether the user removed the song of this file from the library (see
+    /// [`Inner::removed`]): a scan leaves such a file alone.
+    pub(crate) fn is_removed(&self, path: &Path) -> bool {
+        lock(&self.removed).contains(path)
+    }
+
+    /// Takes the files `gone` picks off the list of removed ones.
+    fn forget_removed(&self, gone: impl Fn(&Path) -> bool) {
+        let forgotten: Vec<PathBuf> = {
+            let mut removed = lock(&self.removed);
+            let forgotten: Vec<PathBuf> =
+                removed.iter().filter(|path| gone(path)).cloned().collect();
+            for path in &forgotten {
+                removed.remove(path);
+            }
+            forgotten
+        };
+        if forgotten.is_empty() {
+            return;
+        }
+        if let Err(err) = lock(&self.db).forget_removed_files(&forgotten) {
+            // They are off the list for this run; the next run has them on it again.
+            tracing::warn!(%err, "the list of removed files could not be written");
+        }
+    }
+
+    /// After a folder was scanned in full: files that were removed from the library
+    /// and are not on the disk any more are forgotten (a file that turns up under such
+    /// a name later is a new one). For a CUE sheet's track that is the sheet.
+    pub(crate) fn forget_removed_that_are_gone(&self, root: &Path) {
+        let under_root: Vec<PathBuf> = lock(&self.removed)
+            .iter()
+            .filter(|path| path.starts_with(root))
+            .cloned()
+            .collect();
+        let gone: HashSet<PathBuf> = under_root
+            .into_iter()
+            .filter(|path| {
+                matches!(
+                    std::fs::metadata(cue::backing_file(path)),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound
+                )
+            })
+            .collect();
+        if !gone.is_empty() {
+            self.forget_removed(|path| gone.contains(path));
+        }
+    }
+
     fn commit_scanned(
         &self,
-        files: Vec<ScannedFile>,
+        mut files: Vec<ScannedFile>,
         touches: &[TrackId],
         touch_root: Option<i64>,
         cancel: Option<&AtomicBool>,
     ) -> Vec<(TrackId, bool)> {
+        if touch_root.is_some() {
+            // A scan: what the user removed from the library stays out (a CUE sheet
+            // that is read again gives all of its tracks, the removed ones too).
+            let removed = lock(&self.removed);
+            if !removed.is_empty() {
+                files.retain(|file| !removed.contains(&file.path));
+            }
+        } else {
+            // Opened by hand: that takes a file back in, and it is removed no longer.
+            let opened: HashSet<&Path> = files.iter().map(|file| file.path.as_path()).collect();
+            self.forget_removed(|path| opened.contains(path));
+        }
         if files.is_empty() && touches.is_empty() {
             return Vec::new();
         }
@@ -1336,6 +1404,14 @@ impl Library {
             .and_then(|json| serde_json::from_str::<Vec<(String, SheetRecord)>>(&json).ok())
             .map(|records| records.into_iter().collect())
             .unwrap_or_default();
+        let removed: HashSet<PathBuf> = db
+            .removed_files()
+            .unwrap_or_else(|err| {
+                tracing::warn!(%err, "could not read the list of removed files");
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
         let recent_plays = db.recent_plays(RECENT_PLAYS_KEPT).unwrap_or_else(|err| {
             tracing::warn!(%err, "could not read play history");
             Vec::new()
@@ -1371,6 +1447,7 @@ impl Library {
             skipped: Mutex::new(HashMap::new()),
             recently_added: Mutex::new(std::collections::VecDeque::new()),
             recent_plays: Mutex::new(recent_plays),
+            removed: Mutex::new(removed),
             sheets_read: Mutex::new(sheets_read),
             sheets_dirty: AtomicBool::new(false),
             #[cfg(test)]
@@ -1532,6 +1609,10 @@ impl Library {
             return Err(error);
         }
         self.inner.forget_sheets_under(&root.path);
+        // What was removed from this folder song by song: with the folder gone nothing
+        // scans it, and added again it is taken in whole.
+        self.inner
+            .forget_removed(|path| path.starts_with(&root.path));
         tracing::info!(root_id, "music folder removed from the library");
         self.inner.reload_playlists();
         self.poke_watcher();
@@ -1922,24 +2003,49 @@ impl Library {
         results
     }
 
-    /// Removes tracks from the library (database only; files are not touched).
+    /// Removes tracks from the library. Their files are not touched, and are
+    /// remembered as removed: scans of their folders pass them by from now on, so the
+    /// songs do not come back by themselves (see [`Inner::removed`]). Opening such a
+    /// file by hand takes it in again.
     pub fn remove_tracks(&self, ids: &[TrackId]) {
         if ids.is_empty() {
             return;
         }
         {
             let mut db = lock(&self.inner.db);
-            if let Err(err) = db.delete_tracks(ids) {
+            // (The tracks' lock is not held while the database writes.)
+            let tracks: Vec<(TrackId, PathBuf)> = {
+                let state = lock(&self.inner.state);
+                ids.iter()
+                    .filter_map(|&id| Some((id, state.tracks.get(&id)?.track.path.clone())))
+                    .collect()
+            };
+            if let Err(err) = db.delete_tracks_remembering(&tracks) {
                 tracing::warn!(%err, "could not remove tracks");
                 return;
             }
             let mut state = lock(&self.inner.state);
-            for &id in ids {
+            let mut removed = lock(&self.inner.removed);
+            for (id, path) in tracks {
                 state.remove(id);
+                removed.insert(path);
             }
         }
         self.inner.reload_playlists();
         self.inner.publish();
+    }
+
+    /// How many files are remembered as removed from the library (see
+    /// [`Library::remove_tracks`]).
+    pub fn removed_count(&self) -> usize {
+        lock(&self.inner.removed).len()
+    }
+
+    /// Forgets every removal and scans the music folders: the songs that were removed
+    /// one by one, and whose files are still there, are in the library again.
+    pub fn restore_removed(&self) {
+        self.inner.forget_removed(|_| true);
+        self.rescan();
     }
 
     /// The current data of a track (may be newer than the published snapshot).

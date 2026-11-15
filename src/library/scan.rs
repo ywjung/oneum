@@ -771,6 +771,9 @@ fn walk_sheet(
                 unchanged &= k.size == size && k.mtime_ns == stamp && !k.reread;
                 tracks.push(k);
             }
+            // Removed from the library by the user: not missing, and not a reason to
+            // read the sheet again.
+            None if inner.is_removed(path) => {}
             None => unchanged = false,
         }
     }
@@ -1072,6 +1075,9 @@ fn scan_root(
                 newest_before,
                 cancel,
             );
+            if full {
+                inner.forget_removed_that_are_gone(root_path);
+            }
         } else {
             // Part of the folder could not be read. New and changed files have been
             // taken in, but nothing is concluded from what was not seen: no track is
@@ -1228,6 +1234,9 @@ fn walk(
             let known_file = known.get(path);
             if known_file.is_some() {
                 result.encountered.insert(path.to_path_buf());
+            } else if inner.is_removed(path) {
+                // Removed from the library by the user: it is not taken in again.
+                continue;
             }
             counters.files_found.fetch_add(1, Ordering::Relaxed);
             let Ok(meta) = entry.metadata() else {
@@ -1386,10 +1395,13 @@ pub(crate) fn record_sheets_read(inner: &Inner, sheets: Vec<SheetRead>) {
             .into_iter()
             .filter(|(_, _, tracks)| {
                 tracks.iter().all(|(path, stamp)| {
-                    state
-                        .id_of_path(path)
-                        .and_then(|id| state.tracks.get(&id))
-                        .is_some_and(|entry| entry.track.mtime_ns == *stamp)
+                    // (A track the user removed is as good as in: it was read, and is
+                    // kept out on purpose.)
+                    inner.is_removed(path)
+                        || state
+                            .id_of_path(path)
+                            .and_then(|id| state.tracks.get(&id))
+                            .is_some_and(|entry| entry.track.mtime_ns == *stamp)
                 })
             })
             .map(|(key, record, _)| (key, record))
@@ -1784,16 +1796,23 @@ fn finish_scan(
                 continue;
             }
             let of_sheet = super::cue::sheet_of(path).is_some();
-            let heirs: Vec<TrackId> = replacements
+            let takers: Vec<&PathBuf> = replacements
                 .iter()
                 .filter(|r| given(r) == Some(true))
                 .filter(|r| !of_sheet || r.file_name() == path.file_name())
-                .filter_map(|r| state.id_of_path(r))
                 .collect();
+            let heirs: Vec<TrackId> = takers.iter().filter_map(|r| state.id_of_path(r)).collect();
             if !heirs.is_empty() {
                 handovers.push((old.id, heirs));
             } else if of_sheet && replacements.first().is_some_and(|r| given(r).is_some()) {
                 outdone.insert(old.id);
+            } else if !takers.is_empty() && takers.iter().all(|r| inner.is_removed(r)) {
+                // The sheet has its tracks for this, and the user removed every one of
+                // them from the library: what they would take the place of goes all
+                // the same, with nobody to hand its places to. (Kept as a track that
+                // is merely missing, it would be back as soon as a scan met the file
+                // without its sheet.)
+                handovers.push((old.id, Vec::new()));
             }
         }
     }

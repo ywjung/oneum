@@ -47,6 +47,8 @@ pub(super) enum AppStep {
     /// Makes the phone's meters fail once when they are next drawn ("fail meters"): the
     /// app is to survive that and say what happened.
     FailMeters,
+    /// `restore removed`: what "Bring Back Removed Songs" of the library settings does.
+    RestoreRemoved,
     /// `copy report`: what the "Copy the Record" button of the About page does.
     CopyReport,
     /// `fail device`: takes the graphics device away, as a driver does that loses it.
@@ -334,6 +336,9 @@ impl Automation {
                 .steps
                 .push_back(Step::App(AppStep::Volume(num(1).unwrap_or(0.0)))),
             Some("quit") => self.steps.push_back(Step::App(AppStep::Quit)),
+            Some("restore") if words.get(1) == Some(&"removed") => {
+                self.steps.push_back(Step::App(AppStep::RestoreRemoved));
+            }
             Some("copy") if words.get(1) == Some(&"report") => {
                 self.steps.push_back(Step::App(AppStep::CopyReport));
             }

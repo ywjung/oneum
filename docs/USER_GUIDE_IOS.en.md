@@ -25,7 +25,7 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 
 ## Listening
 - Pressing a song in a list puts the whole list into the queue and plays from that song. **Play** and **Shuffle** above a list start from the top or in a shuffled order.
-- **⋯** at the right of a song (or a long press on it): Play Next · Add to Queue · Add to Playlist · Favorite · Go to Album · Go to Artist · Song Info · Remove.
+- **⋯** at the right of a song (or a long press on it): Play Next · Add to Queue · Add to Playlist · Favorite · Go to Album · Go to Artist · Song Info · Remove. A removed song leaves the library and the playlists only; its file stays. A scan (as at every start) does not bring it back; **Settings → Library → Bring Back Removed Songs** takes all of them in again.
 - A long press on an album, artist, genre or playlist: Play · Play Next · Add to Queue · Add to Playlist · Pin.
 - **The player**: cover, title (press it for the album), heart (favourite), position, shuffle · previous · play · next · repeat, app volume. Under shuffle and repeat is what each stands at, in words (Shuffle Off · Shuffle On; Repeat Off · Repeat All · Repeat One); one that is on is coloured and stands on a tinted ground. **⌄** at the top left closes it, and so does pulling the cover down.
 - The three buttons at the top right of the player choose what is shown in the cover's place: **Lyrics · VU Meter · Up Next**. Pressing the same button again brings the cover back.

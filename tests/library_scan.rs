@@ -2464,8 +2464,8 @@ fn a_sheet_that_spells_its_file_otherwise_still_covers_it() {
 /// A sheet may say tracks start beyond the end of its file (a sheet for a longer rip):
 /// those are no tracks, and the one before them ends with the file (its length, what
 /// plays of it, and the file check agree). The sheet is not read again for that at
-/// every scan; a track removed from the library comes back with the next one, as a
-/// file's does.
+/// every scan, nor for a track the user removed from the library, which stays out as
+/// a file's does.
 #[test]
 fn a_sheet_track_past_the_end_is_not_read_again_and_again() {
     let env = TestEnv::new();
@@ -2503,7 +2503,226 @@ fn a_sheet_track_past_the_end_is_not_read_again_and_again() {
 
     library.remove_tracks(&[by_title(&library, "Two").id]);
     rescan(&library);
-    assert_eq!(titles(&library), ["One", "Two"], "back with the next scan");
+    rescan(&library);
+    assert_eq!(titles(&library), ["One"], "what was removed stays out");
+    assert_eq!(
+        library.debug_tag_reads(),
+        reads,
+        "and the sheet is not read for it"
+    );
+}
+
+/// A song removed from the library is not taken in again by the next scan of its
+/// folder (which runs at every start): the file is still there, but it is remembered
+/// as removed, also by the next run. (It used to be back as a new song.) Opening the
+/// file by hand takes it in again.
+#[test]
+fn a_removed_song_stays_out_until_its_file_is_opened_again() {
+    let env = TestEnv::new();
+    let music = env.music();
+    // Two files with the same tags: removing one must not depend on the other.
+    write_tagged_wav(&music.join("a/song.wav"), 300, "Same", "Artist", "Album");
+    write_tagged_wav(&music.join("b/song.wav"), 320, "Same", "Artist", "Album");
+    write_tagged_wav(&music.join("a/other.wav"), 340, "Other", "Artist", "Album");
+    let removed_file = music.join("a/song.wav");
+    {
+        let (library, _) = env.open_scanned();
+        assert_eq!(titles(&library), ["Other", "Same", "Same"]);
+        let reads = library.debug_tag_reads();
+        let id = library
+            .snapshot()
+            .tracks
+            .iter()
+            .find(|t| t.path == removed_file)
+            .unwrap()
+            .id;
+        library.remove_tracks(&[id]);
+        assert!(removed_file.is_file(), "the file is not touched");
+        assert_eq!(titles(&library), ["Other", "Same"]);
+
+        rescan(&library);
+        rescan(&library);
+        assert_eq!(titles(&library), ["Other", "Same"], "a scan leaves it out");
+        assert_eq!(library.debug_tag_reads(), reads, "without reading it again");
+        library.shutdown();
+    }
+
+    // The next run scans the folder as every start does: still out.
+    let library = env.open();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Other", "Same"]);
+    assert!(
+        library
+            .snapshot()
+            .tracks
+            .iter()
+            .all(|t| t.path != removed_file),
+        "the one that was removed, not its namesake"
+    );
+
+    // Opened by hand, it is in again, and stays in.
+    assert_eq!(
+        library
+            .import_files(std::slice::from_ref(&removed_file))
+            .len(),
+        1
+    );
+    assert_eq!(titles(&library), ["Other", "Same", "Same"]);
+    rescan(&library);
+    assert_eq!(titles(&library), ["Other", "Same", "Same"]);
+    library.shutdown();
+    let library = env.open();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Other", "Same", "Same"]);
+}
+
+/// An iPhone app's container moves when the app is updated: what was removed from the
+/// library is still removed in the new place (it is known by its path, which moves
+/// with the tracks'), and can still be brought back.
+#[test]
+fn removed_songs_stay_out_when_the_apps_container_moves() {
+    use oneum::library::LibraryPaths;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = |home: &Path| LibraryPaths {
+        data_dir: home.join("Library/data"),
+        cache_dir: home.join("Library/cache"),
+    };
+    let before = dir.path().join("Application/A");
+    let music = before.join("Documents");
+    write_tagged_wav(&music.join("Album/one.wav"), 1000, "One", "Band", "Album");
+    write_tagged_wav(&music.join("Album/two.wav"), 1100, "Two", "Band", "Album");
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Second\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    {
+        let (library, _) = Library::open_in_home(paths(&before), &before).unwrap();
+        library.add_folder(&music).unwrap();
+        wait_scan(&library);
+        assert_eq!(titles(&library), ["First", "One", "Second", "Two"]);
+        library.remove_tracks(&[
+            by_title(&library, "Two").id,
+            by_title(&library, "Second").id,
+        ]);
+        rescan(&library);
+        assert_eq!(titles(&library), ["First", "One"]);
+        library.shutdown();
+    }
+
+    let after = dir.path().join("Application/B");
+    fs::rename(&before, &after).unwrap();
+    let (library, _) = Library::open_in_home(paths(&after), &after).unwrap();
+    assert_eq!(library.removed_count(), 2);
+    rescan(&library);
+    rescan(&library);
+    assert_eq!(
+        titles(&library),
+        ["First", "One"],
+        "still out in the new place"
+    );
+    assert_eq!(library.removed_count(), 2, "and still known as removed");
+
+    library.restore_removed();
+    wait_scan(&library);
+    assert_eq!(titles(&library), ["First", "One", "Second", "Two"]);
+    assert_eq!(library.removed_count(), 0);
+}
+
+/// "Bring Back Removed Songs": everything that was removed is in the library again
+/// with one scan, and nothing is remembered as removed any more.
+#[test]
+fn removed_songs_can_all_be_brought_back() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("one.wav"), 300, "One", "Artist", "Album");
+    write_tagged_wav(&music.join("two.wav"), 320, "Two", "Artist", "Album");
+    write_tagged_wav(&music.join("three.wav"), 340, "Three", "Artist", "Album");
+    let (library, _) = env.open_scanned();
+    assert_eq!(library.removed_count(), 0);
+    library.remove_tracks(&[by_title(&library, "One").id, by_title(&library, "Two").id]);
+    rescan(&library);
+    assert_eq!(titles(&library), ["Three"]);
+    assert_eq!(library.removed_count(), 2);
+    library.shutdown();
+
+    let library = env.open();
+    assert_eq!(library.removed_count(), 2, "the next run still knows");
+    library.restore_removed();
+    wait_scan(&library);
+    assert_eq!(titles(&library), ["One", "Three", "Two"]);
+    assert_eq!(library.removed_count(), 0);
+}
+
+/// What was removed is forgotten with its folder (added again, the folder is taken in
+/// whole), and when the file itself is gone: a file that turns up under that name
+/// later is a new one.
+#[test]
+fn removed_songs_are_forgotten_with_their_folder_or_their_file() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("one.wav"), 300, "One", "Artist", "Album");
+    write_tagged_wav(&music.join("two.wav"), 320, "Two", "Artist", "Album");
+    let (library, _) = env.open_scanned();
+    library.remove_tracks(&[by_title(&library, "Two").id]);
+    rescan(&library);
+    assert_eq!(titles(&library), ["One"]);
+
+    // The file goes, a full scan sees that, and another file comes under its name.
+    fs::remove_file(music.join("two.wav")).unwrap();
+    rescan(&library);
+    write_tagged_wav(&music.join("two.wav"), 500, "Two Again", "Artist", "Album");
+    rescan(&library);
+    assert_eq!(titles(&library), ["One", "Two Again"]);
+
+    // Removed, and then the folder is removed and added again: all of it is there.
+    library.remove_tracks(&[by_title(&library, "One").id]);
+    rescan(&library);
+    assert_eq!(titles(&library), ["Two Again"]);
+    let root = library.roots()[0].id;
+    library.remove_folder(root).unwrap();
+    library.add_folder(&music).unwrap();
+    wait_scan(&library);
+    assert_eq!(titles(&library), ["One", "Two Again"]);
+}
+
+/// Every track of a CUE sheet removed: the sheet's file does not come back in their
+/// place as one long song.
+#[test]
+fn removing_every_track_of_a_sheet_does_not_bring_its_file_back_whole() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("Live/image.wav"), 3000, "Whole", "Band", "Live");
+    fs::write(
+        music.join("Live/image.cue"),
+        "FILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n",
+    )
+    .unwrap();
+    write_tagged_wav(
+        &music.join("Live/single.wav"),
+        300,
+        "Single",
+        "Band",
+        "Live",
+    );
+    {
+        let (library, _) = env.open_scanned();
+        assert_eq!(titles(&library), ["One", "Single", "Two"]);
+        let ids: Vec<_> = ["One", "Two"]
+            .iter()
+            .map(|title| by_title(&library, title).id)
+            .collect();
+        library.remove_tracks(&ids);
+        rescan(&library);
+        assert_eq!(titles(&library), ["Single"]);
+        library.shutdown();
+    }
+    let library = env.open();
+    rescan(&library);
+    assert_eq!(titles(&library), ["Single"], "after a restart too");
 }
 
 /// A sheet none of whose tracks lie within its file (another disc's sheet under this
@@ -2663,19 +2882,25 @@ impl ModelAlbum {
     /// The titles the album's folder gives, with their lengths. The first sheet that is
     /// for the file has it; with no track of that sheet within the file, or no such
     /// sheet, the file is there alone.
-    fn expected(&self, album: usize) -> Vec<(String, u64)> {
+    /// Each with the path the library knows it by (`dir` is the album's folder): the
+    /// file itself, or the sheet's path with the track's number.
+    fn expected_at(&self, album: usize, dir: &Path) -> Vec<(std::path::PathBuf, String, u64)> {
         let Some(total) = self.audio_ms else {
             return Vec::new();
         };
-        let alone = vec![(format!("W{album}"), total)];
-        let claiming = self.sheets.iter().find_map(|sheet| match sheet {
-            ModelSheet::Tracks(letter, tracks) => Some((letter, tracks)),
-            _ => None,
-        });
-        let Some((letter, tracks)) = claiming else {
+        let alone = vec![(dir.join("image.wav"), format!("W{album}"), total)];
+        let claiming = self
+            .sheets
+            .iter()
+            .zip(["image.cue", "zz.cue"])
+            .find_map(|(sheet, name)| match sheet {
+                ModelSheet::Tracks(letter, tracks) => Some((letter, tracks, name)),
+                _ => None,
+            });
+        let Some((letter, tracks, name)) = claiming else {
             return alone;
         };
-        let fitting: Vec<(String, u64)> = tracks
+        let fitting: Vec<(std::path::PathBuf, String, u64)> = tracks
             .iter()
             .enumerate()
             .filter(|(_, (_, start))| start * 1000 < total)
@@ -2683,7 +2908,11 @@ impl ModelAlbum {
                 let end = tracks
                     .get(i + 1)
                     .map_or(total, |(_, next)| (next * 1000).min(total));
-                (format!("{letter}{album}-{number}"), end - start * 1000)
+                (
+                    dir.join(name).join(format!("{number:02}")),
+                    format!("{letter}{album}-{number}"),
+                    end - start * 1000,
+                )
             })
             .collect();
         if fitting.is_empty() { alone } else { fitting }
@@ -2722,7 +2951,9 @@ fn write_model_sheet(path: &Path, album: usize, sheet: &ModelSheet, spelling: us
 /// that cannot finish (a folder that cannot be read). After every scan that finished,
 /// the library has to be exactly what the folders say: the tracks that are there, each
 /// once, with the right lengths; nothing else available; nothing kept that nobody
-/// refers to. And a scan right after it has to find nothing to read.
+/// refers to. Except what was removed from the library: that stays out, until its
+/// file is opened by hand or is gone. And a scan right after it has to find nothing
+/// to read.
 #[test]
 fn random_changes_to_sheets_and_files_leave_the_library_right() {
     // More seeds for a longer search: ONEUM_MODEL_SEEDS=2000 cargo test … random_changes
@@ -2771,6 +3002,23 @@ fn sheet_model_run(seed: u64, steps: usize) {
     // Whether only a scan of the whole music folder can bring the library up to date
     // (something outside the folder scanned last is still open).
     let mut whole_due = false;
+    // What was removed from the library, by the path it was known by: scans leave it
+    // out. It is forgotten when its file is opened, or (after a scan of everything
+    // that finished) when its file, for a sheet's track the sheet, is not there.
+    let mut removed: std::collections::HashSet<std::path::PathBuf> = Default::default();
+    let forget_what_is_gone = |removed: &mut std::collections::HashSet<std::path::PathBuf>| {
+        removed.retain(|path| {
+            let is_sheet_track = path
+                .parent()
+                .is_some_and(|sheet| sheet.extension().is_some_and(|ext| ext == "cue"));
+            let file = if is_sheet_track {
+                path.parent().unwrap()
+            } else {
+                path
+            };
+            file.exists()
+        });
+    };
     let mut log: Vec<String> = Vec::new();
     for step in 0..steps {
         let a = roll(2) as usize;
@@ -2840,7 +3088,18 @@ fn sheet_model_run(seed: u64, steps: usize) {
             15 => {
                 // The album's file is opened (from the file manager, say): that gives
                 // the tracks the folder stands for, and changes nothing in the library.
-                if settled && albums[a].audio_ms.is_some() {
+                // Of what was removed from the library, a file opened like this is in
+                // again; the tracks of a sheet are not (they come back through
+                // `restore_removed`), and stay out of what the opening gives.
+                let all = albums[a].expected_at(a, &dir);
+                let by_sheet = all.iter().any(|(path, _, _)| {
+                    path.parent()
+                        .is_some_and(|sheet| sheet.extension().is_some_and(|ext| ext == "cue"))
+                });
+                // (A sheet all of whose tracks were removed: opening its file is left
+                // out of this model.)
+                let none_left = all.iter().all(|(path, _, _)| removed.contains(path));
+                if settled && albums[a].audio_ms.is_some() && !(by_sheet && none_left) {
                     let titles_of = |library: &Library| {
                         let mut all: Vec<(String, bool)> = library
                             .snapshot()
@@ -2851,7 +3110,19 @@ fn sheet_model_run(seed: u64, steps: usize) {
                         all.sort();
                         all
                     };
-                    let before = titles_of(&library);
+                    let mut before = titles_of(&library);
+                    let mut want: Vec<String> = Vec::new();
+                    for (path, title, _) in all {
+                        if by_sheet && removed.contains(&path) {
+                            continue;
+                        }
+                        if removed.remove(&path) {
+                            before.push((title.clone(), true));
+                        }
+                        want.push(title);
+                    }
+                    before.sort();
+                    want.sort();
                     let opened = library.import_files(std::slice::from_ref(&image));
                     let mut got: Vec<String> = opened
                         .iter()
@@ -2859,19 +3130,13 @@ fn sheet_model_run(seed: u64, steps: usize) {
                         .map(|t| t.title.clone())
                         .collect();
                     got.sort();
-                    let mut want: Vec<String> = albums[a]
-                        .expected(a)
-                        .into_iter()
-                        .map(|(title, _)| title)
-                        .collect();
-                    want.sort();
                     log.push(format!("{step}: A{a} file opened"));
                     let context = format!("seed {seed}, after:\n  {}", log.join("\n  "));
                     assert_eq!(got, want, "opened: {context}");
                     assert_eq!(
                         titles_of(&library),
                         before,
-                        "opening changed the library: {context}"
+                        "opening changed more than what was removed of it: {context}"
                     );
                 }
             }
@@ -2907,6 +3172,7 @@ fn sheet_model_run(seed: u64, steps: usize) {
                         }) =>
                     {
                         library.remove_tracks(&[track.id]);
+                        removed.insert(track.path.clone());
                     }
                     12 => {}
                     _ => library.set_favorite(&[track.id], false).unwrap(),
@@ -2926,6 +3192,9 @@ fn sheet_model_run(seed: u64, steps: usize) {
         } else {
             rescan(&library);
             whole_due = cannot_finish;
+            if !cannot_finish {
+                forget_what_is_gone(&mut removed);
+            }
         }
         settled = !whole_due;
         if whole_due {
@@ -2933,7 +3202,13 @@ fn sheet_model_run(seed: u64, steps: usize) {
         }
         let mut expected: Vec<(String, u64)> = vec![("Anchor".into(), 1000)];
         for (a, album) in albums.iter().enumerate() {
-            expected.extend(album.expected(a));
+            expected.extend(
+                album
+                    .expected_at(a, &music.join(format!("A{a}")))
+                    .into_iter()
+                    .filter(|(path, _, _)| !removed.contains(path))
+                    .map(|(_, title, length)| (title, length)),
+            );
         }
         expected.sort();
         let look = |library: &Library| {
@@ -2983,6 +3258,7 @@ fn sheet_model_run(seed: u64, steps: usize) {
             context()
         );
         assert_eq!(look(&library).0, expected, "second scan: {}", context());
+        forget_what_is_gone(&mut removed);
     }
     lock_dir(false);
     for a in 0..2 {

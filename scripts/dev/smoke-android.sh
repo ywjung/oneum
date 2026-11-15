@@ -332,6 +332,21 @@ check n6.json 'd["network"]["saved"] == ["OnEum test server"] and d["current"] =
 kill "$DLNA_PID" 2>/dev/null || true
 DLNA_PID=
 
+echo "== a song removed from the library stays out"
+# Removed through the song's sheet, as it is done by hand. Its file stays where it is,
+# and the next scan of its folder (every start begins with one) must not bring the song
+# back: it did (reported from an iPhone, 2026-11-15), because only the library's row
+# went. "Bring Back Removed Songs" is the way back.
+ui "tap $TAB_LIBRARY $TABS" 'wait 500' "tap 200 $MENU0" 'wait 700' 'dump x0.json'
+SONGS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["library_tracks"])' "$OUT/x0.json")
+ui "tap $((W - 30)) $SONG0" 'wait 700' "tap 200 $SHEET_UP0" 'wait 700' 'key Enter' 'wait 900' 'dump x1.json'
+check x1.json "d['library_tracks'] == $SONGS - 1 and d['removed_songs'] == 1" "the song's sheet removes it from the library"
+start
+ui 'volume 0' 'wait 3000' 'dump x2.json'
+check x2.json "d['library_tracks'] == $SONGS - 1 and not d['scan_running'] and d['removed_songs'] == 1" "after a restart and its scan the song is still out"
+ui 'restore removed' 'wait 3000' 'dump x3.json'
+check x3.json "d['library_tracks'] == $SONGS and d['removed_songs'] == 0" "\"Bring Back Removed Songs\" takes it in again"
+
 echo "== the graphics device is lost"
 # A driver can take away the device the screen is drawn with at any time (on a phone
 # one did, 2026-11-15), and the app then ended at the next frame. The step takes the

@@ -1463,17 +1463,19 @@ impl OneumApp {
                 ui.close();
             }
         }
-        // Only individually opened files can be removed here; tracks inside a music
-        // folder would simply come back on the next scan.
-        let loose: Vec<TrackId> = tracks
+        // Songs of the library, wherever their files are: one inside a music folder
+        // stays out when the folder is scanned again (`Library::remove_tracks`). (This
+        // was offered for individually opened files only, while such a song came back
+        // with the next scan; the phone's sheet offered it for all, and they did.)
+        let removable: Vec<TrackId> = tracks
             .iter()
             .copied()
-            .filter(|id| snap.get(*id).is_some_and(|t| t.root_id.is_none()))
+            .filter(|id| snap.get(*id).is_some())
             .collect();
-        if !loose.is_empty() && loose.len() == tracks.len() {
+        if !removable.is_empty() && removable.len() == tracks.len() {
             ui.separator();
             if ui.button(s.remove_from_library).clicked() {
-                actions.push(Action::RemoveFromLibrary(loose));
+                actions.push(Action::RemoveFromLibrary(removable));
                 ui.close();
             }
         }

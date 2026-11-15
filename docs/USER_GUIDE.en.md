@@ -48,7 +48,7 @@
 ## Song Lists
 - Click a column title to sort by it. Click again to reverse, and once more for the original order (artist → album → track number).
 - Select several songs with ⌘-click or ⇧-click; ⌘A selects all. Move with ↑↓ and extend or shrink the selection with ⇧↑↓. Home/End and Page Up/Down work too.
-- Right-click a song for **Play**, **Play Next**, **Add to Queue**, **Add to Playlist**, **Add to Favorites**, **Go to Album**, **Go to Artist**, **Show in Finder** and **Song Info**. With several songs selected, playing, adding and favorites apply to all of them.
+- Right-click a song for **Play**, **Play Next**, **Add to Queue**, **Add to Playlist**, **Add to Favorites**, **Go to Album**, **Go to Artist**, **Show in Finder** and **Song Info**. With several songs selected, playing, adding and favorites apply to all of them. **Remove from Library** takes songs out of the library and the playlists only; the files stay where they are. A scan of their folder (as at every start) does not bring them back; **Settings → Library → Bring Back Removed Songs** takes all of them in again (a file that is not cut into songs by a CUE sheet is also taken in again when you open it yourself or drop it on the window).
 - The same commands are in the **Song** menu of the menu bar. They apply to the selected songs, or to the song playing when nothing is selected.
 - **Favorites**: click the heart in a song's row or press ⌘D. They gather under Favorites on the left.
 - Click the list once, then type: the list jumps to the first song beginning with what you typed.
