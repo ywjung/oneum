@@ -6,6 +6,7 @@ pub mod audio;
 pub mod i18n;
 pub mod library;
 pub mod model;
+pub mod net;
 pub mod platform;
 pub mod playback;
 pub mod storage;
