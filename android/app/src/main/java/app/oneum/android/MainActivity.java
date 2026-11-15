@@ -44,6 +44,10 @@ import java.nio.charset.CodingErrorAction;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * The one screen of OnEum. The app itself is liboneum.so (Rust), which this native
@@ -338,6 +342,33 @@ public final class MainActivity extends NativeActivity {
     }
 
     /** What plays, for the notification and the lock screen. Times in milliseconds. */
+    /**
+     * The app is about to make sound (it calls this from its own thread, not the main
+     * one): true if the sound is this app's or is now, false while something else
+     * keeps it. See PlaybackService.claim.
+     */
+    public boolean claimSound() {
+        if (PlaybackService.hasSound()) {
+            return true;
+        }
+        FutureTask<Boolean> asked =
+                new FutureTask<>(() -> PlaybackService.claim(getApplicationContext()));
+        runOnUiThread(asked);
+        try {
+            return asked.get(1500, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException | ExecutionException | TimeoutException error) {
+            // The main thread is busy: the music is not held back for it. The service
+            // asks when it hears of the playing (PlaybackService.show).
+            Log.w(TAG, "could not ask for the sound in time", error);
+            return true;
+        }
+    }
+
+    /** The app's answer to the end of an interruption: it plays on, or it does not. */
+    public void soundSettled(boolean resumed) {
+        runOnUiThread(() -> PlaybackService.settled(resumed));
+    }
+
     public void updatePlayback(String title, String artist, String album, long durationMs,
             long positionMs, boolean playing, String artPath) {
         PlaybackService.State state = new PlaybackService.State(

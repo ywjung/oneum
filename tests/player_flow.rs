@@ -59,6 +59,10 @@ struct TestHost {
     radio_pool: Vec<TrackId>,
     /// Seeds the radio was asked about.
     radio_asked: Mutex<Vec<TrackId>>,
+    /// While set, something else has the sound (a call): none may be made.
+    silenced: AtomicBool,
+    /// The player's answers to the ends of interruptions: played on, or not.
+    settled: Mutex<Vec<bool>>,
 }
 
 impl TestHost {
@@ -169,6 +173,12 @@ impl PlayerHost for TestHost {
     }
     fn changed(&self) {
         self.changes.fetch_add(1, Ordering::Relaxed);
+    }
+    fn may_sound(&self) -> bool {
+        !self.silenced.load(Ordering::Relaxed)
+    }
+    fn interruption_settled(&self, resumed: bool) {
+        self.settled.lock().expect("lock").push(resumed);
     }
 }
 
@@ -1182,6 +1192,18 @@ fn sleep_pauses_keeps_the_position_and_never_resumes_on_its_own() {
     assert!(awake.position_ms >= asleep.position_ms);
 }
 
+/// Ends an interruption and waits for the player's answer to it (so that what was
+/// sent before has been handled): whether it plays on.
+fn end_interruption(rig: &Rig, resume: bool) -> bool {
+    let answers = rig.host.settled.lock().expect("lock").len();
+    rig.send(Command::InterruptionOver { resume });
+    rig.wait_host(
+        "the player's answer to the end of the interruption",
+        |host| host.settled.lock().expect("lock").len() > answers,
+    );
+    rig.host.settled.lock().expect("lock")[answers]
+}
+
 /// Something else takes the sound (a call): playing stops, and goes on when the sound
 /// comes back and the system says it may. Not when it says it may not, and an end of
 /// an interruption that never began changes nothing.
@@ -1195,18 +1217,16 @@ fn playing_goes_on_after_an_interruption() {
     });
     rig.send(Command::Interrupted);
     let silent = rig.wait("paused for the call", |s| s.state == PlayState::Paused);
-    rig.send(Command::InterruptionOver { resume: true });
+    assert!(end_interruption(&rig, true), "plays on");
     let again = rig.wait("playing after the call", |s| s.state == PlayState::Playing);
     assert!(again.position_ms >= silent.position_ms);
 
     rig.send(Command::Interrupted);
     rig.wait("paused again", |s| s.state == PlayState::Paused);
-    rig.send(Command::InterruptionOver { resume: false });
-    std::thread::sleep(Duration::from_millis(150));
+    assert!(!end_interruption(&rig, false), "the system said not to");
     assert_eq!(rig.player.snapshot().state, PlayState::Paused);
     // That interruption is over: a later "it is over" finds nothing to play on.
-    rig.send(Command::InterruptionOver { resume: true });
-    std::thread::sleep(Duration::from_millis(150));
+    assert!(!end_interruption(&rig, true));
     assert_eq!(rig.player.snapshot().state, PlayState::Paused);
 }
 
@@ -1225,32 +1245,100 @@ fn an_interruption_does_not_undo_what_the_listener_did_meanwhile() {
         rig.send(Command::Interrupted);
         rig.wait("paused for the call", |s| s.state == PlayState::Paused);
         rig.send(then);
-        rig.send(Command::InterruptionOver { resume: true });
-        std::thread::sleep(Duration::from_millis(200));
-        rig.player.snapshot()
+        let resumed = end_interruption(&rig, true);
+        (resumed, rig.player.snapshot())
     };
-    assert_eq!(
-        interrupted_while_playing(Command::Stop).state,
-        PlayState::Paused,
+    let (resumed, after) = interrupted_while_playing(Command::Stop);
+    assert!(
+        !resumed && after.state == PlayState::Paused,
         "stopped during the call"
     );
-    assert_eq!(
-        interrupted_while_playing(Command::Pause).state,
-        PlayState::Paused,
+    let (resumed, after) = interrupted_while_playing(Command::Pause);
+    assert!(
+        !resumed && after.state == PlayState::Paused,
         "paused during the call"
     );
     // Seeking or the volume is not a word on playing: it goes on.
-    let moved = interrupted_while_playing(Command::SeekTo(6_000));
-    assert_eq!(moved.state, PlayState::Playing);
+    let (resumed, _) = interrupted_while_playing(Command::SeekTo(6_000));
+    assert!(resumed);
+    let moved = rig.wait("playing from where it was moved to", |s| {
+        s.state == PlayState::Playing
+    });
     assert!(moved.position_ms >= 6_000);
 
     // Paused before the call: the call's end starts nothing.
     rig.send(Command::Pause);
     rig.wait("paused by the listener", |s| s.state == PlayState::Paused);
     rig.send(Command::Interrupted);
-    rig.send(Command::InterruptionOver { resume: true });
-    std::thread::sleep(Duration::from_millis(200));
+    assert!(!end_interruption(&rig, true));
     assert_eq!(rig.player.snapshot().state, PlayState::Paused);
+}
+
+/// A queue that the listener ran to its end while something else had the sound (Next
+/// at the last song) is not started over when the sound comes back. ("Play" on a queue
+/// that has ended starts it from the top, and the end of the interruption did that.)
+#[test]
+fn a_queue_that_ended_during_an_interruption_is_not_started_over() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[A, LONG], 1));
+    rig.wait("playing the last song", |s| {
+        s.state == PlayState::Playing && Rig::track(s) == Some(LONG)
+    });
+    rig.send(Command::Interrupted);
+    rig.wait("paused for the call", |s| s.state == PlayState::Paused);
+    rig.send(Command::Next);
+    rig.wait("the queue is at its end", |s| s.state == PlayState::Ended);
+    assert!(!end_interruption(&rig, true));
+    assert_eq!(rig.player.snapshot().state, PlayState::Ended);
+    assert_eq!(
+        rig.host.plays(),
+        Vec::<TrackId>::new(),
+        "nothing was played on"
+    );
+}
+
+/// No sound is made while something else has it: a song that is started then stands
+/// ready, paused, and starts when the sound comes. So does a paused song that is told
+/// to play.
+#[test]
+fn no_sound_is_made_while_something_else_has_the_sound() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.host.silenced.store(true, Ordering::Relaxed);
+    rig.send(play(&[LONG], 0));
+    let ready = rig.wait("the song stands ready", |s| {
+        s.state == PlayState::Paused && Rig::track(s) == Some(LONG)
+    });
+    assert_eq!(ready.position_ms, 0);
+    assert_eq!(rig.total_frames(), 0, "no sound was made");
+    // Still not: the end of an interruption that the system does not follow with the
+    // sound leaves it waiting.
+    assert!(!end_interruption(&rig, true));
+    assert_eq!(rig.total_frames(), 0);
+
+    rig.host.silenced.store(false, Ordering::Relaxed);
+    assert!(end_interruption(&rig, true), "the sound came: it plays");
+    rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 300
+    });
+
+    // A song that was paused in the middle and is told to play while the sound is away.
+    rig.send(Command::Pause);
+    let paused = rig.wait("paused", |s| s.state == PlayState::Paused);
+    rig.host.silenced.store(true, Ordering::Relaxed);
+    let frames = rig.total_frames();
+    rig.send(Command::Play);
+    assert!(!end_interruption(&rig, true));
+    assert_eq!(rig.player.snapshot().state, PlayState::Paused);
+    assert!(
+        rig.total_frames() <= frames + 600,
+        "no sound while it is away"
+    );
+    rig.host.silenced.store(false, Ordering::Relaxed);
+    assert!(end_interruption(&rig, true));
+    let on = rig.wait("playing on", |s| s.state == PlayState::Playing);
+    assert!(on.position_ms >= paused.position_ms);
 }
 
 /// Where the song stands and the volume are saved soon after they change while the
@@ -1268,21 +1356,30 @@ fn position_and_volume_changed_while_paused_are_saved() {
             .clone()
             .expect("session saved")
     };
+    let saved_at = |rig: &Rig, what: &str, position_ms: u64| {
+        rig.wait_host(what, |host| {
+            host.saved
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .is_some_and(|session| session.position_ms == position_ms)
+        });
+    };
     rig.send(Command::SetVolume(0.5));
     rig.send(play(&[LONG], 0));
     rig.wait("playing", |s| s.state == PlayState::Playing);
     rig.send(Command::Pause);
-    rig.wait("paused", |s| s.state == PlayState::Paused);
-    assert!(saved(&rig).position_ms < 5_000);
+    let paused = rig.wait("paused", |s| s.state == PlayState::Paused);
+    // Somewhere else in the song than where it stands and where it was saved.
+    let far = if paused.position_ms < 6_000 {
+        9_000
+    } else {
+        1_000
+    };
+    let near = if far == 9_000 { 8_000 } else { 2_000 };
 
-    rig.send(Command::SeekTo(8_000));
-    rig.wait_host("the new position to be saved", |host| {
-        host.saved
-            .lock()
-            .expect("lock")
-            .as_ref()
-            .is_some_and(|session| session.position_ms == 8_000)
-    });
+    rig.send(Command::SeekTo(far));
+    saved_at(&rig, "the new position to be saved", far);
     rig.send(Command::SetVolume(0.25));
     rig.wait_host("the new volume to be saved", |host| {
         host.saved
@@ -1292,21 +1389,13 @@ fn position_and_volume_changed_while_paused_are_saved() {
             .is_some_and(|session| session.volume == 0.25)
     });
 
-    // Leaving the screen: saved at once, not after the usual moment.
-    rig.send(Command::SeekTo(2_000));
+    // Leaving the screen: saved when asked, not after the usual moment. (The command
+    // after it has been handled: the save was made before that.)
+    rig.send(Command::SeekTo(near));
     rig.send(Command::SaveSession);
-    let before = Instant::now();
-    rig.wait_host("the save that was asked for", |host| {
-        host.saved
-            .lock()
-            .expect("lock")
-            .as_ref()
-            .is_some_and(|session| session.position_ms == 2_000)
-    });
-    assert!(
-        before.elapsed() < Duration::from_millis(500),
-        "saved at once"
-    );
+    rig.send(Command::SetStopAfterCurrent(true));
+    rig.wait("what followed the save", |s| s.stop_after_current);
+    assert_eq!(saved(&rig).position_ms, near);
     assert_eq!(saved(&rig).volume, 0.25);
 }
 

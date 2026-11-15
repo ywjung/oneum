@@ -60,6 +60,14 @@ impl PlayerHost for LibraryHost {
         self.library.record_play(id);
     }
 
+    fn may_sound(&self) -> bool {
+        crate::platform::sound::claim()
+    }
+
+    fn interruption_settled(&self, resumed: bool) {
+        crate::platform::sound::interruption_settled(resumed);
+    }
+
     fn resume_point(&self, id: TrackId) -> Option<u64> {
         self.library.resume_point(id)
     }

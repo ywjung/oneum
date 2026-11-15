@@ -97,6 +97,29 @@ pub(super) fn open_web_page(address: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Asks for the sound before any is made; true if it is the app's (see `sound::claim`).
+/// True also when the question could not be put: the music is not held back for that.
+pub(super) fn claim_sound() -> bool {
+    with_activity("claimSound", |env, activity| {
+        env.call_method(activity, jni_str!("claimSound"), jni_sig!("()Z"), &[])?
+            .z()
+    })
+    .unwrap_or(true)
+}
+
+/// Tells the playback service how an interruption ended for the app.
+pub(super) fn sound_settled(resumed: bool) {
+    with_activity("soundSettled", |env, activity| {
+        env.call_method(
+            activity,
+            jni_str!("soundSettled"),
+            jni_sig!("(Z)V"),
+            &[JValue::Bool(resumed)],
+        )?;
+        Ok(())
+    });
+}
+
 /// Shows the folder `path` in the system's file manager; false if that cannot be done.
 pub(super) fn show_folder(path: &str) -> bool {
     with_activity("showFolder", |env, activity| {

@@ -45,6 +45,15 @@ pub fn activate() -> bool {
     }
 }
 
+/// Asked right before sound is made. The session was made the active one when the
+/// stream was opened ([`activate`]): there is nothing more to ask for here.
+pub fn claim() -> bool {
+    true
+}
+
+/// The player has answered the end of an interruption. Nothing depends on it here.
+pub fn interruption_settled(_resumed: bool) {}
+
 /// The number stored under `key` in a notification's `userInfo`.
 fn number(notification: &NSNotification, key: Option<&NSString>) -> Option<usize> {
     let info = notification.userInfo()?;

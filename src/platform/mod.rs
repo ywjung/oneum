@@ -44,6 +44,13 @@ pub mod sound {
         true
     }
 
+    /// On a desk the sound is not given to one program at a time.
+    pub fn claim() -> bool {
+        true
+    }
+
+    pub fn interruption_settled(_resumed: bool) {}
+
     pub fn observe(_on_event: impl Fn(SoundEvent) + Send + Sync + 'static) {}
 }
 

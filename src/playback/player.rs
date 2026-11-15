@@ -111,6 +111,16 @@ pub trait PlayerHost: Send + Sync + 'static {
     fn save_session(&self, session: &Session, queue_changed: bool) -> bool;
     /// The snapshot changed (repaint, update Now Playing). Called from the player thread.
     fn changed(&self);
+    /// Asked right before sound is made: whether it may be made now. A phone gives the
+    /// sound to one app at a time; where something else has it (a call), the answer is
+    /// no, the player waits as through an interruption, and the host says when it is
+    /// over ([`Command::InterruptionOver`]).
+    fn may_sound(&self) -> bool {
+        true
+    }
+    /// An interruption is over and the player has answered it: it plays on (`true`) or
+    /// stays as it is.
+    fn interruption_settled(&self, _resumed: bool) {}
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1188,6 +1198,12 @@ impl<H: PlayerHost> Player<H> {
                 return;
             };
             self.resume_ms = start_ms;
+            if self.want_playing && !self.host.may_sound() {
+                // Something else has the sound: the song stands ready and starts when
+                // the sound comes, as after an interruption.
+                self.want_playing = false;
+                self.interrupted = true;
+            }
             if !self.want_playing {
                 // Prepared but silent: no device and no decoding until "play".
                 self.drop_chain();
@@ -1512,9 +1528,16 @@ impl<H: PlayerHost> Player<H> {
                 }
             }
             Command::InterruptionOver { resume } => {
-                if std::mem::take(&mut self.interrupted) && resume {
+                // Only a song that still stands paused where the interruption left it:
+                // a queue that was run to its end meanwhile (Next at the last song) is
+                // not started over, which "play" would do.
+                let waiting = std::mem::take(&mut self.interrupted)
+                    && self.state == PlayState::Paused
+                    && self.queue.current().is_some();
+                if waiting && resume {
                     self.play();
                 }
+                self.host.interruption_settled(self.want_playing);
             }
             Command::SaveSession => self.save_session(false),
             Command::LibraryChanged => {
@@ -1575,13 +1598,20 @@ impl<H: PlayerHost> Player<H> {
             self.start_current(0, false);
             return;
         }
-        self.want_playing = true;
         if self.chain.is_some() {
+            if !self.host.may_sound() {
+                // Something else has the sound: it stays paused, and goes on when the
+                // sound comes.
+                self.interrupted = true;
+                return;
+            }
+            self.want_playing = true;
             self.engine.set_playing(true);
             if self.state == PlayState::Paused {
                 self.state = PlayState::Playing;
             }
         } else {
+            self.want_playing = true;
             let position = self.resume_ms;
             self.start_current(position, false);
         }

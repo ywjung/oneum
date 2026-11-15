@@ -71,12 +71,19 @@ public final class PlaybackService extends Service {
     private static PlaybackService running;
     private static State latest;
 
-    private final Handler main = new Handler(Looper.getMainLooper());
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    /**
+     * Who has the sound ("audio focus"). Kept apart from the running service: the app
+     * asks for the sound before it makes any (see claim), which may be before the
+     * service exists. Changed on the main thread only; hasFocus is also read elsewhere.
+     */
+    private static AudioManager audio;
+    private static AudioFocusRequest focusRequest;
+    private static volatile boolean hasFocus;
+    /** The sound is with something else for a while (a call) and comes back by itself. */
+    private static boolean lostForAWhile;
+
     private MediaSession session;
-    private AudioManager audio;
-    private AudioFocusRequest focusRequest;
-    private boolean hasFocus;
-    private boolean lostForAWhile;
     private PowerManager.WakeLock awake;
     private boolean foreground;
     private String artShown;
@@ -149,6 +156,82 @@ public final class PlaybackService extends Service {
         return true;
     }
 
+    private static void prepareFocus(Context context) {
+        if (focusRequest != null) {
+            return;
+        }
+        audio = context.getApplicationContext().getSystemService(AudioManager.class);
+        focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build())
+                // During a call the sound is not refused for good but given afterwards.
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener(PlaybackService::focusChanged, MAIN)
+                .build();
+    }
+
+    /** Whether the sound is this app's right now (any thread). */
+    static boolean hasSound() {
+        return hasFocus;
+    }
+
+    /**
+     * The app is about to make sound: true if the sound is this app's, or is now. False
+     * while something else keeps it (a call): the app stays silent, and is told when
+     * the sound comes (if it comes by itself). Main thread.
+     */
+    static boolean claim(Context context) {
+        if (hasFocus) {
+            return true;
+        }
+        prepareFocus(context);
+        PlaybackService service = running;
+        State state = latest;
+        if (service != null && state != null) {
+            // An app that is not on the screen may ask for the sound only from a
+            // foreground service (Android 15): the service goes there first.
+            service.goForeground(service.notification(state));
+        }
+        boolean got = ask();
+        if (!got && service != null && state != null && !state.playing) {
+            // Nothing plays after all: back to how a paused service is kept.
+            service.show(state);
+        }
+        return got;
+    }
+
+    /** Asks the system for the sound. */
+    private static boolean ask() {
+        int answer = audio.requestAudioFocus(focusRequest);
+        if (answer == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            hasFocus = true;
+            lostForAWhile = false;
+            return true;
+        }
+        if (answer == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
+            // A call is on: the sound is given when it is over.
+            lostForAWhile = true;
+        }
+        // Refused: an interruption that was on before is still on, and still ends by
+        // giving the sound back (lostForAWhile stays as it was).
+        return false;
+    }
+
+    /**
+     * The app has answered the end of an interruption: it plays on, or it does not
+     * (the listener stopped it meanwhile). A service that kept the foreground through
+     * the interruption and does not play leaves it like any paused one.
+     */
+    static void settled(boolean resumed) {
+        PlaybackService service = running;
+        State state = latest;
+        if (!resumed && service != null && state != null && !state.playing) {
+            service.show(state);
+        }
+    }
+
     /** Nothing is left to play (or the app is going). */
     static void end() {
         latest = null;
@@ -198,17 +281,10 @@ public final class PlaybackService extends Service {
             public void onSeekTo(long position) {
                 Native.onMedia(6, position);
             }
-        }, main);
+        }, MAIN);
         session.setSessionActivity(openApp());
 
-        audio = getSystemService(AudioManager.class);
-        focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build())
-                .setOnAudioFocusChangeListener(this::focusChanged, main)
-                .build();
+        prepareFocus(this);
         PowerManager power = getSystemService(PowerManager.class);
         awake = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OnEum:playback");
         awake.setReferenceCounted(false);
@@ -256,10 +332,14 @@ public final class PlaybackService extends Service {
         } catch (RuntimeException error) {
             Log.w(TAG, "the headphone receiver was not registered", error);
         }
-        if (hasFocus) {
+        // Given back whatever it stands at: also a request the system still holds while
+        // something else has the sound for a while (it would answer a service that is
+        // gone when that ends).
+        if (focusRequest != null) {
             audio.abandonAudioFocusRequest(focusRequest);
-            hasFocus = false;
         }
+        hasFocus = false;
+        lostForAWhile = false;
         if (awake.isHeld()) {
             awake.release();
         }
@@ -300,14 +380,10 @@ public final class PlaybackService extends Service {
             // from a foreground service (Android 15). Asked before, playing on from the
             // notification after another app had played was refused.
             goForeground(notification);
-            if (!hasFocus) {
-                int answer = audio.requestAudioFocus(focusRequest);
-                hasFocus = answer == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
-                lostForAWhile = false;
-                if (!hasFocus) {
-                    // A call is on, say: the app is told as if the sound had been taken.
-                    Native.onSound(1);
-                }
+            // The app asks before it makes sound (claim); this is for a start that did
+            // not get to ask. Without the sound the app is told as if it had been taken.
+            if (!hasFocus && !ask()) {
+                Native.onSound(1);
             }
             if (!awake.isHeld()) {
                 awake.acquire();
@@ -387,28 +463,15 @@ public final class PlaybackService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
-    /**
-     * After the sound was lost for good or came back: once the app has had the time to
-     * answer, a service that kept the foreground through an interruption and does not
-     * play (the listener paused meanwhile) leaves it like any paused one.
-     */
-    private void settleLater() {
-        main.postDelayed(() -> {
-            State state = latest;
-            if (running == this && state != null && !state.playing) {
-                show(state);
-            }
-        }, 3000);
-    }
-
-    private void focusChanged(int change) {
+    private static void focusChanged(int change) {
         switch (change) {
             case AudioManager.AUDIOFOCUS_LOSS:
                 // Another app plays now: this one stops and does not start by itself.
                 hasFocus = false;
                 lostForAWhile = false;
                 Native.onSound(1);
-                settleLater();
+                // A service that kept the foreground while paused need not any more.
+                settled(false);
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
                 // A call, an alarm: silent until it is over. The sound is not this
@@ -421,8 +484,9 @@ public final class PlaybackService extends Service {
                 hasFocus = true;
                 if (lostForAWhile) {
                     lostForAWhile = false;
+                    // The app answers with settled(): no guessing here how long it
+                    // takes to play on.
                     Native.onSound(2);
-                    settleLater();
                 }
                 break;
             default:
