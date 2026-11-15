@@ -14,6 +14,7 @@ use crate::platform::{self, app_hooks};
 use crate::playback::{self, Command, PlayState, PlayerConfig, PlayerHandle};
 use paths::AppPaths;
 use settings::Settings;
+#[cfg(not(target_os = "android"))]
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -98,9 +99,52 @@ impl Core {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 thread_local! {
     /// Main-thread-only media session (Objective-C objects are not `Send`).
     static MEDIA: RefCell<Option<MediaSession>> = const { RefCell::new(None) };
+}
+
+/// Keeps the media session (or drops it, with `None`). Main thread.
+#[cfg(not(target_os = "android"))]
+fn set_media(session: Option<MediaSession>) {
+    MEDIA.with(|media| *media.borrow_mut() = session);
+}
+
+/// Tells the media session what plays. Any thread: it is done on the main one.
+#[cfg(not(target_os = "android"))]
+fn update_media(info: Option<platform::nowplaying::NowPlayingInfo>) {
+    platform::run_on_main(move || {
+        MEDIA.with(|media| {
+            if let Some(session) = media.borrow_mut().as_mut() {
+                session.update(info.as_ref());
+            }
+        });
+    });
+}
+
+/// On Android the session lives in Java and is bound to no thread of the app's. (The
+/// thread that draws does not run while the app is off screen, which is when the
+/// session matters most.)
+#[cfg(target_os = "android")]
+static MEDIA: std::sync::Mutex<Option<MediaSession>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "android")]
+fn set_media(session: Option<MediaSession>) {
+    *MEDIA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = session;
+}
+
+#[cfg(target_os = "android")]
+fn update_media(info: Option<platform::nowplaying::NowPlayingInfo>) {
+    if let Some(session) = MEDIA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        session.update(info.as_ref());
+    }
 }
 
 /// Pushes the current playback state to the system. Any thread.
@@ -116,13 +160,7 @@ fn refresh_now_playing(core: &Arc<Core>) {
     if !ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    platform::run_on_main(move || {
-        MEDIA.with(|media| {
-            if let Some(session) = media.borrow_mut().as_mut() {
-                session.update(info.as_ref());
-            }
-        });
-    });
+    update_media(info);
 }
 
 /// Registers media keys / Control Center commands. Main thread, after launch.
@@ -153,13 +191,13 @@ pub fn install_media_session(core: &Arc<Core>) {
             RemoteCommand::Seek(seconds) => Command::SeekTo((seconds * 1000.0) as u64),
         });
     });
-    MEDIA.with(|media| *media.borrow_mut() = Some(session));
+    set_media(Some(session));
     refresh_now_playing(core);
 }
 
 /// Unregisters the media session. Main thread.
 pub fn remove_media_session() {
-    MEDIA.with(|media| *media.borrow_mut() = None);
+    set_media(None);
 }
 
 pub struct Startup {
@@ -226,20 +264,39 @@ fn observe_sound(player: &PlayerHandle) {
 /// On an iPhone the music folder is not chosen: it is the app's Documents folder, the
 /// one place the user can put files into. It is made a music folder of the library
 /// the first time the app starts.
-fn add_phone_music_folder(library: &Library) {
+///
+/// On Android the phone's shared Music folder takes that place, but only as a first
+/// choice: it is added once (`marker` says that it was), and the user may take it out
+/// and add others.
+fn add_phone_music_folder(library: &Library, marker: &std::path::Path) {
     let Some(folder) = AppPaths::phone_music_dir() else {
-        tracing::warn!("the app's Documents folder cannot be told: no music folder");
+        tracing::warn!("the phone's music folder cannot be told: none is added");
         return;
     };
-    if let Err(error) = std::fs::create_dir_all(&folder) {
+    // Noted once the folder is in the library: a start before the app may read the
+    // phone's storage leaves it for the next one.
+    let note = || {
+        if !platform::COPIES_MUSIC_IN
+            && let Err(error) = std::fs::write(marker, b"")
+        {
+            tracing::warn!("cannot note that the music folder was added: {error}");
+        }
+    };
+    if !platform::COPIES_MUSIC_IN {
+        if marker.exists() {
+            return;
+        }
+    } else if let Err(error) = std::fs::create_dir_all(&folder) {
         tracing::warn!("cannot make the music folder: {error}");
         return;
     }
     if library.roots().iter().any(|root| root.path == folder) {
+        note();
         return;
     }
-    if let Err(error) = library.add_folder(&folder) {
-        tracing::warn!("cannot add the music folder: {error}");
+    match library.add_folder(&folder) {
+        Ok(_) => note(),
+        Err(error) => tracing::warn!("cannot add the music folder: {error}"),
     }
 }
 
@@ -262,7 +319,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     // app is updated or restored: the library follows it.
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
-        .filter(|_| platform::PHONE);
+        .filter(|_| platform::CONTAINER_MOVES);
     // Folders that were linked on a phone (used where they are): the right to read
     // them has to be there before the library looks into them, and one that was moved
     // since is followed to its new place.
@@ -278,7 +335,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     };
 
     if platform::PHONE {
-        add_phone_music_folder(&library);
+        add_phone_music_folder(&library, &paths.data_dir.join("music-folder-added"));
     }
     // A linked folder that was moved and could not be followed is at least read at
     // its new place.

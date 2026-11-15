@@ -52,7 +52,7 @@ struct Timing {
 }
 
 /// True on a phone: folders are not watched but looked through again now and then.
-const POLLED_ONLY: bool = cfg!(target_os = "ios");
+const POLLED_ONLY: bool = cfg!(any(target_os = "ios", target_os = "android"));
 
 const TIMING: Timing = Timing {
     coalesce: Duration::from_secs(2),

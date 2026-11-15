@@ -423,6 +423,34 @@ Windows판은 `x86_64-pc-windows-gnu`로 Mac에서 크로스 컴파일한다(`sc
 | 사용 안내 | `USER_GUIDE_IOS.md`, `USER_GUIDE_IOS.en.md` |
 | 번들 | 시뮬레이터: `scripts/ios-sim.sh`가 직접 묶는다. 기기: `ios/OnEum.xcodeproj`가 cargo로 만든 실행 파일을 넣고 서명한다. Info.plist는 하나(`ios/Info.plist`) |
 
+### Android
+같은 crate를 `aarch64-linux-android`용 공유 라이브러리(`liboneum.so`)로 빌드하고(`cargo rustc --lib --crate-type cdylib`, crate의 종류는 다른 시스템을 위해 그대로 둔다), 얇은 Java 껍데기(`android/`)와 함께 APK로 묶는다. 계획과 실제로 달라진 점은 [ANDROID_PLAN.md](ANDROID_PLAN.md).
+
+| 항목 | Android |
+|---|---|
+| 화면 | iPhone과 같은 `ui::phone`(`platform::PHONE`). 시스템별로 갈리는 곳은 상수 셋이다: `CONTAINER_MOVES`(iOS: 보관 공간의 경로가 바뀜), `COPIES_MUSIC_IN`(iOS: 고른 음악을 복사해 들임), `STORAGE_NEEDS_ACCESS`(Android: 저장소 권한을 받아야 함) |
+| 시작 | `MainActivity`(NativeActivity의 하위 클래스)가 라이브러리를 올리고 `android_main`(`platform::android::entry`)이 eframe을 시작한다. 데이터 폴더·임시 폴더·Music 폴더의 경로는 Java가 라이브러리를 올리기 전에 환경 변수(`ONEUM_DATA_DIR`, `TMPDIR`, `ONEUM_MUSIC_DIR`)로 넘긴다 |
+| Java와 Rust 사이 | Rust → Java는 `platform::android::java`(액티비티의 메서드 호출, `jni` 0.22), Java → Rust는 `Native` 클래스의 `native` 메서드(`platform::android::natives`): 여백, 어두운 모드, 앞/뒤, 글자, 미디어 명령, 소리 사건, 고른 파일, 열기, 종료 |
+| 그리는 크기 | 화면 전체에 그리고(edge-to-edge), 상태 표시줄·내비게이션 막대·키보드의 여백은 Java가 `WindowInsets`에서 읽어 넘긴 값을 앱이 egui에 넘긴다(`raw_input_hook`) |
+| 글자 입력 | NativeActivity는 입력기의 조합(한글)을 넘겨주지 않는다. 보이지 않는 `InputView`가 입력기와 이야기하면서 지금 들고 있는 글 전체를 알려 주고, Rust가 직전 글과의 차이를 Backspace·Text·Enter 사건으로 바꾼다(`platform::typed::difference`, `platform::android::text_input`). 다른 곳을 누르면 들고 있던 글을 비우고, 키보드가 내려가면 입력 칸의 포커스를 놓는다 |
+| 뒤로 가기 | 시스템의 뒤로 가기는 `phone_back`이 한 단계씩 받는다: 확인 창 → 시트 → 입력 칸 → 플레이어·대기열 → 고르기 → 목록 안 검색 → 쌓인 화면 → 첫 탭. 더 돌아갈 곳이 없으면 앱을 뒤로 보낸다(`moveTaskToBack`, 재생은 이어짐) |
+| 음악의 위치 | 공용 저장소를 경로로 읽는다("모든 파일에 대한 접근", `MANAGE_EXTERNAL_STORAGE`). 권한을 받으면 휴대폰의 Music 폴더를 한 번 음악 폴더로 등록하고(등록된 뒤에야 표시 파일 `music-folder-added`를 쓴다), 다른 폴더는 폴더 선택기로 고른 것을 경로로 바꿔 추가한다(`primary:` → 내장 저장소, 그 밖은 `/storage/<볼륨>`). 복사하지 않는다 |
+| 파일 고르기 | 시스템 선택기(`platform::android::files`). 고른 파일(음악 파일 열기, 플레이리스트·보정값 파일 가져오기)이 공용 저장소의 파일이면 그 경로를 그대로 쓴다(`MainActivity.filePath`: 저장소 문서는 문서 ID에서, 미디어·다운로드 문서는 미디어 저장소가 아는 경로에서, 읽을 수 있을 때만). 그 밖의 것은 캐시로 복사해 읽는다. 내보내기(플레이리스트, 로그)는 캐시에 쓴 뒤 저장 위치를 고르게 한다 |
+| 파일 열기 | 다른 앱이 넘긴 음악 파일(`ACTION_VIEW`, `audio/*`)을 `Native.onOpen`으로 받는다. `content:` 주소도 위와 같이 경로를 찾고, 못 찾으면 캐시로 복사한 뒤 연다 |
+| 파일 관리자 | `finder::reveal`이 폴더(파일이면 그 파일이 든 폴더)를 시스템의 파일 앱으로 연다(`MainActivity.showFolder`: 경로를 저장소 문서의 주소로 바꿔 `ACTION_VIEW`, 종류는 폴더). 공용 저장소 밖의 경로는 거짓을 돌려주고 화면이 알림으로 알린다(`platform::PHONE_FILE_MANAGER`) |
+| 키보드 | 꽂거나 블루투스로 연결한 키보드의 키는 창에 오지만, 그대로 두면 입력기가 먼저 받는다(포커스를 가진 `InputView`가 글자 입력 뷰이므로): 입력 칸이 없는데도 화면 키보드가 올라오고(Ctrl만 눌러도) 키는 앱에 오지 않는다. 그래서 `InputView.onKeyPreIme`가 입력기보다 먼저 받아, 입력 칸에 글자를 넣는 중이 아니면 시스템 키(뒤로, 음량)를 뺀 모든 키를 입력기에 주지 않고, 단축키에 쓰는 키(글자·숫자·Space·Enter·Esc·화살표·쉼표·마침표·지우기)는 `Native.onHardKey`로 앱에 넘긴다. 글자를 넣는 중에는 Ctrl과 함께 누른 키와 Esc만 앱에 넘기고 나머지는 입력기가 글자로 만든다. 앱은 그것을 egui의 키 사건으로 바꿔(`ui::hardkeys`, Ctrl이 "command") 데스크톱의 단축키 표(`menubar::shortcuts`)로 읽고, 폰 화면이 명령을 제 방식으로 수행한다(`OneumApp::phone_request`, `platform::PHONE_KEYBOARD`) |
+| 소리 | cpal의 AAudio. 기본 출력은 장치 목록에 없는 이름 없는 장치이므로 기본 장치의 ID와 같으면 그것을 쓴다(`audio::output`). 장치 선택·독점·샘플레이트 맞춤은 없다(`DEVICE_CONTROL`, `RATE_CONTROL` 거짓) |
+| 재생 서비스 | 재생이 시작되면 `PlaybackService`(전경 서비스, `mediaPlayback`)가 뜬다: 미디어 세션(잠금 화면·알림·이어폰 버튼), 알림, 부분 wake lock, 오디오 포커스. 포커스를 잃으면 일시정지하고, 잠깐 잃은 것이면(전화) 돌아올 때 이어 재생한다. 출력이 사라지면(이어폰 분리) 일시정지한다 |
+| 미디어 키 | 앱이 뒤에 있으면 시스템이 미디어 세션으로 보낸다. 앞에 있으면 시스템은 그 키를 창에 먼저 주고, 네이티브 쪽(winit)은 받은 키를 모두 "처리함"으로 돌려주므로 그대로 두면 사라진다. 그래서 창의 포커스를 가진 `InputView`가 입력기 앞 단계(`onKeyPreIme`)에서 미디어 키를 꺼내 세션으로 넘기고(`PlaybackService.mediaKey`), 세션이 아직 없으면 앱에 바로 알린다 |
+| 백그라운드와 종료 | 뒤로 가도 재생은 이어지고 화면은 그리지 않는다. 최근 앱에서 밀어 내 액티비티가 없어지면 세션을 저장하고 프로세스를 끝낸다(`Native.onDestroy` → `entry::end`) |
+| 폴더 감시 | iPhone과 같이 감시기를 쓰지 않고 앞에 있는 동안 30초마다 다시 스캔한다(`POLLED_ONLY`) |
+| 그래픽 | Vulkan(wgpu). 디버그 이름을 붙이는 인스턴스 플래그는 끈다(에뮬레이터의 Vulkan 드라이버가 `SetDebugUtilsObjectName`에서 죽는다, `ui::renderer::instance_flags`) |
+| 글꼴 | Roboto(`/system/fonts/Roboto-Regular.ttf`) + 시스템 한글 글꼴 |
+| 화면 모드 | 시스템의 밝기 모드를 Java가 넘겨주고, 앱에서 고른 모드에 맞춰 상태 표시줄과 내비게이션 막대의 아이콘 색을 바꾼다 |
+| 접근성 | 화면 낭독기(TalkBack)는 지원하지 않는다: eframe의 `accesskit` 기능은 Android의 NativeActivity에서 쓸 수 없어 Android 빌드에서만 뺀다 |
+| 사용 안내 | `USER_GUIDE_ANDROID.md`, `USER_GUIDE_ANDROID.en.md` |
+| 묶음 | `scripts/android-build.sh`가 라이브러리를 만들어 `android/app/src/main/jniLibs/arm64-v8a`에 두고 Gradle로 APK를 만든다(arm64 전용, minSdk 30). 릴리스 서명은 `ONEUM_ANDROID_KEYSTORE*` 환경 변수, 없으면 디버그 키 |
+
 ## 추상화 원칙
 trait은 테스트 경계에만 둔다: 플레이어가 바깥을 보는 창구 `PlayerHost`(곡 조회, 재생 기록, 세션 저장) 하나다.
 오디오 출력은 trait 없이 엔진의 오프라인 모드(`Engine::new_offline`)로 장치 없이 검증한다. 그 외에는 구체 타입을 쓴다.

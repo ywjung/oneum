@@ -40,6 +40,14 @@ pub fn restore_linked_folders(
     Vec::new()
 }
 
+/// Whether music folders can be read at all: always on a desk. (Android needs a right
+/// the user gives in the system's settings.)
+pub fn has_storage_access() -> bool {
+    true
+}
+
+pub fn ask_storage_access() {}
+
 /// Tries again to reach linked folders that could not be reached: nothing to do on a
 /// desk.
 pub fn reach_linked_folders() -> bool {

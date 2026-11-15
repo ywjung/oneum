@@ -69,7 +69,15 @@ impl AppPaths {
     /// The folder the music is in on an iPhone: the Documents folder of the app's
     /// container, which the Files app shows as "On My iPhone › OnEum" and Finder shows
     /// when the phone is connected. `None` if the container cannot be told.
+    ///
+    /// On Android it is the phone's shared Music folder, which the activity tells
+    /// through the environment (see `android/`).
     pub fn phone_music_dir() -> Option<PathBuf> {
+        if cfg!(target_os = "android") {
+            return std::env::var_os("ONEUM_MUSIC_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from);
+        }
         let home = std::env::var_os("HOME").filter(|v| !v.is_empty())?;
         Some(PathBuf::from(home).join("Documents"))
     }

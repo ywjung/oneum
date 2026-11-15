@@ -48,10 +48,13 @@ pub fn apply_choice(ctx: &egui::Context, choice: ThemeChoice) {
 
 /// Family name of the semibold UI face (always defined, see [`install_fonts`]).
 const SEMIBOLD: &str = "oneum-semibold";
-/// The system UI font of macOS and iOS (San Francisco). A variable font: one file,
-/// several weights.
+/// The system UI font: San Francisco on macOS and iOS, Roboto on Android. A variable
+/// font: one file, several weights. (Windows has its fonts in files of their own, see
+/// `install_fonts`.)
 const SYSTEM_UI_FONT: &str = if cfg!(target_os = "ios") {
     "/System/Library/Fonts/Core/SFUI.ttf"
+} else if cfg!(target_os = "android") {
+    "/system/fonts/Roboto-Regular.ttf"
 } else {
     "/System/Library/Fonts/SFNS.ttf"
 };
@@ -66,7 +69,13 @@ fn system_ui_font() -> Option<Vec<u8>> {
     };
     std::fs::read(path).ok()
 }
-const SYSTEM_UI_Y_OFFSET: f32 = -0.06;
+/// How far the system UI font is raised in its line (as a part of the font size), so
+/// that it shares a baseline with the Korean fallback font.
+const SYSTEM_UI_Y_OFFSET: f32 = if cfg!(target_os = "android") {
+    0.0
+} else {
+    -0.06
+};
 
 /// A semibold font for titles and the names of things that are playing.
 pub fn semibold(size: f32) -> FontId {
@@ -91,7 +100,8 @@ fn install_fonts(ctx: &egui::Context) {
             FontData::from_blob(blob.clone(), 0).tweak(FontTweak {
                 coords: VariationCoords::new([("wght", weight)]),
                 // San Francisco sits lower in its line box than the Korean fallback font;
-                // raise it so mixed Korean/Latin text shares a baseline.
+                // raise it so mixed Korean/Latin text shares a baseline. (Roboto and
+                // Android's Korean font agree as they are.)
                 y_offset_factor: SYSTEM_UI_Y_OFFSET,
                 ..Default::default()
             })

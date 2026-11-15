@@ -1,0 +1,18 @@
+// The Android project of OnEum: a thin Java shell around the app, which is built by
+// cargo as a shared library (see scripts/android-build.sh and docs/ANDROID_PLAN.md).
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "OnEum"
+include ':app'

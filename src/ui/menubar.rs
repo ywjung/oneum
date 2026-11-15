@@ -151,6 +151,15 @@ pub(super) fn shortcuts(s: &'static Strings) -> Vec<(KeyboardShortcut, MenuActio
     list
 }
 
+/// Whether the shortcut of a menu command works on the phone screens: all but those
+/// that act on the songs chosen in a list, which no key chooses there.
+fn on_phone(action: MenuAction) -> bool {
+    !matches!(
+        action,
+        MenuAction::SongPlay | MenuAction::SongPlayNext | MenuAction::SongAddToQueue
+    )
+}
+
 /// Keys that move the cursor or end a line while text is being typed: their shortcuts
 /// stand back then, like on a Mac.
 fn is_text_editing_key(key: Key) -> bool {
@@ -235,11 +244,18 @@ impl OneumApp {
             if typing && is_text_editing_key(shortcut.logical_key) {
                 continue;
             }
+            // On the phone screens (with a keyboard) only what has a meaning there.
+            if self.phone_mode && !on_phone(action) {
+                continue;
+            }
             if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
                 dispatch(action);
             }
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(CMD, Key::Q))) {
+        // A phone's app is not quit with a key.
+        if !self.phone_mode
+            && ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(CMD, Key::Q)))
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }

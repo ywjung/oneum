@@ -1,0 +1,64 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The version and the build number come from Cargo.toml and git (the build script
+// passes them); the defaults are for a build started from Android Studio.
+def oneumVersion = providers.gradleProperty('oneumVersion').getOrElse('0.1.0')
+def oneumBuild = providers.gradleProperty('oneumBuild').getOrElse('1').toInteger()
+
+android {
+    namespace 'app.oneum.android'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'app.oneum.android'
+        // Android 11: the first with "all files access", which the library needs.
+        minSdk 30
+        targetSdk 35
+        versionCode oneumBuild
+        versionName oneumVersion
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    signingConfigs {
+        // A key of the user's own, told through the environment (never kept in the
+        // repository). Without one the release is signed with the debug key, which
+        // is enough to install it on one's own phone.
+        release {
+            def store = System.getenv('ONEUM_ANDROID_KEYSTORE')
+            if (store) {
+                storeFile file(store)
+                storePassword System.getenv('ONEUM_ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ONEUM_ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('ONEUM_ANDROID_KEY_PASSWORD') ?: System.getenv('ONEUM_ANDROID_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv('ONEUM_ANDROID_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    packaging {
+        jniLibs {
+            // The library is loaded from the APK's own folder of libraries.
+            useLegacyPackaging = true
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}

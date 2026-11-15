@@ -17,6 +17,9 @@ const GUIDE_EN: &str = include_str!("../../docs/USER_GUIDE.en.md");
 /// The guide to the phone screens, shown in the iPhone app instead of the one above.
 const PHONE_GUIDE_KO: &str = include_str!("../../docs/USER_GUIDE_IOS.md");
 const PHONE_GUIDE_EN: &str = include_str!("../../docs/USER_GUIDE_IOS.en.md");
+/// The same for Android, where music comes in and plays on in other ways.
+const ANDROID_GUIDE_KO: &str = include_str!("../../docs/USER_GUIDE_ANDROID.md");
+const ANDROID_GUIDE_EN: &str = include_str!("../../docs/USER_GUIDE_ANDROID.en.md");
 /// What is different on Windows; put in front of the second section there.
 const WINDOWS_NOTES_KO: &str = include_str!("../../docs/USER_GUIDE_WINDOWS.md");
 const WINDOWS_NOTES_EN: &str = include_str!("../../docs/USER_GUIDE_WINDOWS.en.md");
@@ -76,18 +79,21 @@ fn guide(lang: Lang) -> &'static [Block] {
     };
     cell.get_or_init(|| {
         if crate::platform::PHONE {
-            parse(phone_guide_markdown(lang))
+            parse(phone_guide_markdown(lang, cfg!(target_os = "android")))
         } else {
             parse(&guide_markdown(lang, cfg!(windows)))
         }
     })
 }
 
-/// The guide to the phone screens as Markdown, in `lang`.
-pub(super) fn phone_guide_markdown(lang: Lang) -> &'static str {
-    match lang {
-        Lang::Ko => PHONE_GUIDE_KO,
-        Lang::En => PHONE_GUIDE_EN,
+/// The guide to the phone screens as Markdown, in `lang`: the one for Android, or
+/// the one for the iPhone.
+pub(super) fn phone_guide_markdown(lang: Lang, android: bool) -> &'static str {
+    match (lang, android) {
+        (Lang::Ko, false) => PHONE_GUIDE_KO,
+        (Lang::En, false) => PHONE_GUIDE_EN,
+        (Lang::Ko, true) => ANDROID_GUIDE_KO,
+        (Lang::En, true) => ANDROID_GUIDE_EN,
     }
 }
 
@@ -447,9 +453,9 @@ mod tests {
     /// the same sections, with as many points in each.
     #[test]
     fn the_phone_guides_are_understood_and_tell_the_same() {
-        let outline = |lang: Lang| -> Vec<usize> {
+        let outline = |lang: Lang, android: bool| -> Vec<usize> {
             let mut sections: Vec<usize> = Vec::new();
-            for block in parse(phone_guide_markdown(lang)) {
+            for block in parse(phone_guide_markdown(lang, android)) {
                 match block {
                     Block::Heading(_) => sections.push(0),
                     Block::Item { .. } => {
@@ -462,17 +468,35 @@ mod tests {
             }
             sections
         };
-        for (lang, needles) in [
-            (Lang::Ko, ["나의 iPhone", "플레이리스트", "잠금 화면"]),
-            (Lang::En, ["On My iPhone", "Playlists", "lock screen"]),
+        for (lang, android, needles) in [
+            (
+                Lang::Ko,
+                false,
+                ["나의 iPhone", "플레이리스트", "잠금 화면"],
+            ),
+            (
+                Lang::En,
+                false,
+                ["On My iPhone", "Playlists", "lock screen"],
+            ),
+            (
+                Lang::Ko,
+                true,
+                ["모든 파일에 대한 접근", "플레이리스트", "알림"],
+            ),
+            (
+                Lang::En,
+                true,
+                ["All files access", "Playlists", "notification"],
+            ),
         ] {
-            let blocks = parse(phone_guide_markdown(lang));
+            let blocks = parse(phone_guide_markdown(lang, android));
             let titles = blocks
                 .iter()
                 .filter(|b| matches!(b, Block::Title(_)))
                 .count();
             assert_eq!(titles, 1);
-            assert!(headings(&blocks).len() >= 7, "{lang:?}");
+            assert!(headings(&blocks).len() >= 7, "{lang:?} {android}");
             let mut texts: Vec<String> = Vec::new();
             for block in &blocks {
                 match block {
@@ -493,8 +517,13 @@ mod tests {
             for needle in needles {
                 assert!(all.contains(needle), "{needle} is missing in {lang:?}");
             }
+            // Each guide is about its own system and does not name the other one.
+            let other = if android { "iPhone" } else { "Android" };
+            assert!(!all.contains(other), "{other} named in {lang:?} {android}");
         }
-        assert_eq!(outline(Lang::En), outline(Lang::Ko));
+        for android in [false, true] {
+            assert_eq!(outline(Lang::En, android), outline(Lang::Ko, android));
+        }
     }
 
     /// The two guides tell the same thing: the same sections in the same order, and

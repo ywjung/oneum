@@ -453,6 +453,14 @@ pub fn reach_linked_folders() -> bool {
     any
 }
 
+/// Whether music folders can be read at all: the app's own folder always can. (Android
+/// needs a right the user gives in the system's settings.)
+pub fn has_storage_access() -> bool {
+    true
+}
+
+pub fn ask_storage_access() {}
+
 /// Forgets the link to `folder` (it was taken out of the library).
 pub fn forget_linked_folder(folder: &Path) {
     let mut links = load_links();

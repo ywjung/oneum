@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Writes THIRD_PARTY_NOTICES.md: every crate linked into the macOS build or the iPhone
-build (the document is shown in both apps), with its license expression and source.
+"""Writes THIRD_PARTY_NOTICES.md: every crate linked into the macOS build, the iPhone
+build or the Android build (the document is shown in all three apps), with its license
+expression and source.
 Uses only `cargo metadata` (no extra tools).
 
     python3 scripts/gen-notices.py
@@ -20,7 +21,8 @@ if len(sys.argv) > 1 and not windows:
     sys.exit(__doc__)
 platforms, build_name = (
     (["x86_64-pc-windows-gnu"], "Windows x86_64") if windows
-    else (["aarch64-apple-darwin", "aarch64-apple-ios"], "macOS arm64 and iPhone"))
+    else (["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-linux-android"],
+          "macOS arm64, iPhone and Android"))
 env = dict(os.environ, PATH=os.path.expanduser("~/.cargo/bin") + os.pathsep + os.environ.get("PATH", ""))
 packages, seen = {}, set()
 for platform in platforms:

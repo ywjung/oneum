@@ -18,6 +18,7 @@ pub fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
         wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL);
     let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = backends;
+    setup.instance_descriptor.flags = instance_flags();
     setup.device_descriptor = Arc::new(device_descriptor);
     setup.native_adapter_selector = Some(Arc::new(move |adapters, surface| {
         select(adapters, surface, backends)
@@ -25,6 +26,17 @@ pub fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
     egui_wgpu::WgpuConfiguration {
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
         ..Default::default()
+    }
+}
+
+/// What a graphics instance is made with: wgpu's choice for the build (checks and
+/// names for its objects in a debug build), but none of that on Android, where the
+/// emulator's Vulkan driver crashes when an object is given a name.
+fn instance_flags() -> wgpu::InstanceFlags {
+    if cfg!(target_os = "android") {
+        wgpu::InstanceFlags::empty()
+    } else {
+        wgpu::InstanceFlags::from_build_config().with_env()
     }
 }
 
@@ -91,7 +103,7 @@ fn select(
 
     let trial = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
-        flags: wgpu::InstanceFlags::from_build_config().with_env(),
+        flags: instance_flags(),
         backend_options: wgpu::BackendOptions::from_env_or_default(),
         memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
         display: None,

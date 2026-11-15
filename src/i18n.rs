@@ -141,8 +141,20 @@ strings! {
     add_to_playlist: "플레이리스트에 추가", "Add to Playlist";
     add_favorite: "즐겨찾기에 추가", "Add to Favorites";
     remove_favorite: "즐겨찾기에서 제거", "Remove from Favorites";
-    show_in_finder: if cfg!(windows) { "탐색기에서 보기" } else { "Finder에서 보기" },
-        if cfg!(windows) { "Show in Explorer" } else { "Show in Finder" };
+    show_in_finder: if cfg!(windows) {
+            "탐색기에서 보기"
+        } else if cfg!(target_os = "android") {
+            "파일 앱에서 보기"
+        } else {
+            "Finder에서 보기"
+        },
+        if cfg!(windows) {
+            "Show in Explorer"
+        } else if cfg!(target_os = "android") {
+            "Show in Files"
+        } else {
+            "Show in Finder"
+        };
     remove_from_playlist: "플레이리스트에서 제거", "Remove from Playlist";
     remove_from_library: "라이브러리에서 제거", "Remove from Library";
     song_info: "곡 정보", "Song Info";
@@ -593,7 +605,7 @@ strings! {
     phone_import_failed: "가져오지 못했습니다.", "Could not import.";
     phone_eq_note: "조절한 소리는 1초 안에 들립니다. 슬라이더를 두 번 탭하면 0 dB로 돌아갑니다. 대역을 올린 만큼 프리앰프를 내려 두면 소리가 최대 음량을 넘지 않습니다(기본 프리셋은 그렇게 맞춰져 있습니다). 그래도 넘는 순간은 잘리지 않고 피크 보호가 눌러 줍니다.",
         "Changes are heard within a second. Double-tap a slider to return it to 0 dB. Lowering the pre-amp by as much as the highest band is raised keeps the sound within full scale (the built-in presets are set that way). What still goes over is not clipped: peak protection brings it down.";
-    phone_stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 iPhone에만 있습니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this iPhone.";
+    phone_stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 휴대폰에만 있습니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this phone.";
     phone_pin: "보관함에 고정", "Pin to Library";
     phone_pins_full: "고정은 12개까지 할 수 있습니다. 하나를 해제한 뒤 다시 고정하세요.", "Up to 12 things can be pinned. Unpin one, then pin again.";
     phone_sort: "정렬", "Sort";
@@ -609,6 +621,14 @@ strings! {
     phone_show_left: "남은 시간 보기", "Show the time left";
     phone_search_tips: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y\n파일 검사 결과로: check:damaged · dr:<8\n여러 낱말을 하나로: \"let it be\"\n곡을 검색한 뒤 ＋를 누르면 그 검색이 스마트 플레이리스트로 저장됩니다.",
         "A search can be narrowed to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac\nBy what was listened to: plays:>=5 · fav:yes · added:30d · played:1y\nBy what the file check found: check:damaged · dr:<8\nSeveral words as one: \"let it be\"\nSearch for songs, then press ＋ to keep the search as a smart playlist.";
+    phone_empty_body_folders: "휴대폰의 Music 폴더에 있는 음악이 여기에 나타납니다. 다른 폴더는 아래에서 추가할 수 있습니다.", "Music in the phone's Music folder appears here. Other folders can be added below.";
+    phone_storage_needed: "음악 파일을 읽으려면 ‘모든 파일에 대한 접근’을 허용해야 합니다. 아래 버튼이 여는 설정 화면에서 OnEum을 허용해 주세요.", "To read music files OnEum needs “All files access”. The button below opens the settings page where it is allowed.";
+    phone_storage_allow: "접근 허용", "Allow Access";
+    phone_storage_row: "파일 접근", "File Access";
+    phone_storage_missing: "허용되지 않아 음악을 읽을 수 없습니다.", "Not allowed: music cannot be read.";
+    phone_add_folder: "폴더 추가", "Add Folder";
+    phone_music_folders: "음악 폴더", "Music Folders";
+    phone_folders_hint: "폴더는 있는 자리에서 읽습니다. SD 카드나 꽂은 저장 장치의 폴더도 추가할 수 있습니다. 제거해도 파일은 그대로입니다.", "Folders are read where they are. A folder on a card or a plugged-in drive can be added too. Removing one leaves its files as they are.";
     phone_link_folder: "폴더 연결", "Link Folder";
     phone_link_folder_desc: "복사하지 않고 있는 자리에서 읽습니다. iCloud Drive의 폴더나 꽂은 저장 장치의 폴더에 씁니다.", "Reads a folder where it is, without copying: one in iCloud Drive or on a drive that is plugged in.";
     phone_linked_folders: "연결한 폴더", "Linked Folders";
@@ -618,12 +638,27 @@ strings! {
     phone_search_here: "이 목록에서 검색", "Search This List";
     phone_search_here_hint: "이 목록에서 찾기", "Find in this list";
     phone_show_in_songs: "곡 목록에서 보기", "Show in Songs";
-    phone_apple_import_hint: "Mac의 Apple Music에서 파일 ▸ 보관함 ▸ 보관함 내보내기로 저장한 XML 파일을 iPhone으로 옮긴 뒤 고르세요. 곡은 들어 있는 폴더와 파일 이름으로 찾으므로, Mac의 음악 폴더를 그대로 복사해 넣은 곡에 적용됩니다. 재생 횟수는 더하지 않고 큰 쪽을 남깁니다. 음악 파일은 바꾸지 않습니다.",
-        "Bring the XML file saved with File ▸ Library ▸ Export Library… in Apple Music on a Mac over to the iPhone, then choose it. Songs are found by the folders they are in and their file names, so it applies to music copied from the Mac's music folder as it is. Play counts are not added up: the larger one is kept. Music files are not changed.";
+    phone_apple_import_hint: "Mac의 Apple Music에서 파일 ▸ 보관함 ▸ 보관함 내보내기로 저장한 XML 파일을 이 휴대폰으로 옮긴 뒤 고르세요. 곡은 들어 있는 폴더와 파일 이름으로 찾으므로, Mac의 음악 폴더를 그대로 복사해 넣은 곡에 적용됩니다. 재생 횟수는 더하지 않고 큰 쪽을 남깁니다. 음악 파일은 바꾸지 않습니다.",
+        "Bring the XML file saved with File ▸ Library ▸ Export Library… in Apple Music on a Mac over to this phone, then choose it. Songs are found by the folders they are in and their file names, so it applies to music copied from the Mac's music folder as it is. Play counts are not added up: the larger one is kept. Music files are not changed.";
     phone_match_rate_desc: "곡마다 그 곡의 샘플레이트로 내보내 달라고 iPhone에 요청합니다. 받아 주면 변환 없이 나갑니다.",
         "Asks the iPhone to play each song at the song's own sample rate. Where it does, nothing is converted.";
     phone_quality_hint: "샘플레이트를 정하는 것은 iPhone입니다. 내장 출력은 44.1kHz와 48kHz 사이에서, USB DAC은 그 DAC이 받는 샘플레이트까지 따라옵니다. 따라오지 않으면 평소처럼 변환해 재생합니다. 샘플레이트가 다른 곡으로 넘어갈 때는 1초 안쪽으로 끊기고, 같은 샘플레이트의 곡은 끊김 없이 이어집니다. 지금 어떻게 나가고 있는지는 곡 정보의 신호 경로에 나옵니다.",
         "The iPhone decides the sample rate. The built-in output follows between 44.1 and 48 kHz, a USB DAC up to what it accepts. Where the output does not follow, the sound is converted as usual. Going on to a song of another sample rate takes a break of less than a second; songs of the same rate follow each other without one. How the sound goes out right now is shown in the signal path of Song Info.";
+    phone_quality_hint_fixed: "출력의 샘플레이트는 시스템이 정합니다. 곡의 샘플레이트가 그와 다르면 변환해 재생합니다. 지금 어떻게 나가고 있는지는 곡 정보의 신호 경로에 나옵니다.",
+        "The system decides the output's sample rate. A song of another sample rate is converted. How the sound goes out right now is shown in the signal path of Song Info.";
+    phone_open_files: "음악 파일 열기", "Open Music Files";
+    phone_open_files_desc: "폴더를 추가하지 않고 고른 파일만 재생합니다. 그 곡은 보관함에 남습니다.",
+        "Plays the files you choose without adding their folder. The songs stay in the library.";
+    phone_show_folder: "보기", "Show";
+    notice_cannot_show_folder: "이 폴더는 파일 앱에서 보여 줄 수 없습니다.", "The Files app cannot show this folder.";
+    log_save: "로그 저장", "Save the Log";
+    log_save_button: "저장…", "Save…";
+    notice_log_failed: "로그를 저장하지 못했습니다.", "The log could not be saved.";
+    phone_shortcuts_song: "재생 중인 곡", "The Song That Is Playing";
+    phone_shortcuts_screen: "화면", "Screens";
+    phone_shortcut_back: "뒤로", "Back";
+    phone_shortcuts_note: "휴대폰에 꽂거나 블루투스로 연결한 키보드에서 씁니다. 글자를 입력하는 동안에는 Space가 글자 입력에 쓰입니다.",
+        "For a keyboard that is plugged into the phone or paired with it. While text is being typed, Space types a space.";
     phone_no_lyrics: "가사가 없습니다", "No lyrics";
     phone_no_lyrics_hint: "파일의 태그나 같은 이름의 .lrc 파일에 든 가사를 보여 줍니다.", "Lyrics come from the file's tags or an .lrc file of the same name.";
 }

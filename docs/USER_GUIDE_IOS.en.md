@@ -66,6 +66,7 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - **Playback**: volume leveling (ReplayGain) and the analysis of songs without tags, shuffle by album, resuming long tracks, crossfeed, headphone correction (34 built-in profiles and correction files), radio, memory playback.
 - **Equalizer**: ten bands and presets. Double-tap a slider to return it to 0 dB.
 - **General**: language and appearance (light · dark · system).
+- **About**: the version, the open source licenses, and **Save the Log**: it saves a copy of the records to look at when something goes wrong, where you want it.
 
 ## What differs from the Mac and Windows versions
 - The iPhone decides where the sound goes. There is no choice of output device and no exclusive output. The iPhone decides the sample rate too; **Output at the song's sample rate** asks it for one.

@@ -7,3 +7,10 @@
 /ios/OnEum.xcodeproj/xcuserdata/
 /ios/OnEum.xcodeproj/project.xcworkspace/
 /ios/build/
+
+# Android: what the build makes (the app's library, Gradle's folders, local paths).
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/src/main/jniLibs/
+/android/local.properties

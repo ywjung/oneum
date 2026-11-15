@@ -207,7 +207,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "x11rb",
 ]
 
@@ -2593,8 +2593,10 @@ dependencies = [
  "egui_extras",
  "fastrand",
  "image",
+ "jni",
  "lofty",
  "muda",
+ "ndk-context",
  "notify",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

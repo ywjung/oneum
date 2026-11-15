@@ -3,7 +3,7 @@ name = "oneum"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "OnEum — a local music player for macOS, Windows and iPhone"
+description = "OnEum — a local music player for macOS, Windows, iPhone and Android"
 license = "MIT"
 repository = "https://github.com/ywjung/oneum"
 readme = "README.md"
@@ -24,7 +24,7 @@ path = "src/main.rs"
 automation = []
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "system_fonts", "wgpu"] }
 egui_extras = { version = "0.37", default-features = false }
 cpal = "0.18"
 symphonia = { version = "0.6", default-features = false, features = ["opt-simd", "all-meta", "flac", "mp1", "mp2", "mp3", "wav", "aiff", "pcm", "aac", "alac", "isomp4", "caf", "ogg", "vorbis", "mkv", "adpcm"] }
@@ -47,10 +47,22 @@ walkdir = "2"
 fastrand = "2"
 winit = { version = "0.30", default-features = false }
 
-# File dialogs. There is none for iOS (the document picker is used there, see
-# src/platform/ios).
-[target.'cfg(not(target_os = "ios"))'.dependencies]
+# File dialogs. There is none for iOS or Android (the system's document picker is used
+# there, see src/platform/ios and src/platform/android).
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 rfd = "0.18"
+
+# The accessibility tree (VoiceOver, Narrator). On Android eframe offers it only with
+# the "game activity", which the app does not use (see docs/ANDROID_PLAN.md).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["accesskit"] }
+
+# Android: the app is a shared library loaded by a native activity; Java is reached
+# through JNI (src/platform/android).
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["android-native-activity"] }
+jni = "0.22"
+ndk-context = "0.1"
 
 # What macOS and iOS share: Foundation, CoreFoundation and the MediaPlayer framework.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

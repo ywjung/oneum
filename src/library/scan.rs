@@ -45,7 +45,11 @@ const MAX_TAG_READERS: usize = 4;
 const SMALL_CHUNK: usize = 50;
 /// `errno` for "too many levels of symbolic links" (`std::io::ErrorKind` has no stable
 /// name for it): 40 on Linux, 62 on macOS and the BSDs.
-const ELOOP: i32 = if cfg!(target_os = "linux") { 40 } else { 62 };
+const ELOOP: i32 = if cfg!(any(target_os = "linux", target_os = "android")) {
+    40
+} else {
+    62
+};
 /// How long a newly added track remains a candidate for taking over the row of a file
 /// that goes missing afterwards.
 const RELINK_WINDOW: Duration = Duration::from_secs(120);
@@ -250,7 +254,7 @@ pub(crate) fn run_scan_thread(inner: Arc<Inner>) {
                 );
                 // On a phone the folders are looked through again every half minute
                 // (see `watch`): a look that brought nothing is not worth a line.
-                if cfg!(target_os = "ios") && added == 0 && updated == 0 {
+                if crate::platform::PHONE && added == 0 && updated == 0 {
                     tracing::debug!(files, unsupported, errors, "library scan finished");
                 } else {
                     tracing::info!(

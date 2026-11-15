@@ -402,8 +402,13 @@ pub fn list_output_devices() -> Vec<OutputDeviceInfo> {
 /// Whether the device is connected. `None` when the system could not be asked, which
 /// says nothing about the device and must not be read as "gone".
 pub fn device_present(id: &str) -> Option<bool> {
-    let devices = cpal::default_host().output_devices().ok()?;
-    let mut found = false;
+    let host = cpal::default_host();
+    let devices = host.output_devices().ok()?;
+    // The system's default output is there for as long as the system has one, also
+    // where it is not one of the listed devices (Android, see `OutputStream::open`).
+    let mut found = host
+        .default_output_device()
+        .is_some_and(|device| device.id().is_ok_and(|d| d.to_string() == id));
     for device in devices {
         if device.id().is_ok_and(|d| d.to_string() == id) {
             found = true;
@@ -439,9 +444,16 @@ impl OutputStream {
         };
         // Resolve by id so the stream is pinned to this device (never "follow default").
         let parsed: cpal::DeviceId = wanted.parse().map_err(|_| OutputError::DeviceNotFound)?;
-        let device = host
-            .device_by_id(&parsed)
-            .ok_or(OutputError::DeviceNotFound)?;
+        let device = match host.device_by_id(&parsed) {
+            Some(device) => device,
+            // On Android the default output is not one of the listed devices but a
+            // device of its own, which the system routes (speaker, headphones): it is
+            // found only by asking for the default.
+            None => host
+                .default_output_device()
+                .filter(|device| device.id().is_ok_and(|id| id.to_string() == wanted))
+                .ok_or(OutputError::DeviceNotFound)?,
+        };
         let supported = device.default_output_config().map_err(|e| match e.kind() {
             cpal::ErrorKind::DeviceNotAvailable => OutputError::DeviceNotFound,
             _ => OutputError::Backend(e.to_string()),

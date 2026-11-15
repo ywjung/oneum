@@ -1,28 +1,30 @@
 # Third-party notices
 
 OnEum is built from the open-source Rust crates listed below (as linked into the
-macOS arm64 and iPhone builds), and contains the data listed at the end. Each remains under its
+macOS arm64, iPhone and Android builds), and contains the data listed at the end. Each remains under its
 own license. The full license texts come with the app in the file
 `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
 next to the program).
 
-Crates: 278
+Crates: 308
 
 ## License summary
 
-- `MIT OR Apache-2.0` — 116
-- `MIT` — 48
+- `MIT OR Apache-2.0` — 137
+- `MIT` — 52
 - `Zlib OR Apache-2.0 OR MIT` — 26
-- `Apache-2.0 OR MIT` — 20
+- `Apache-2.0 OR MIT` — 21
 - `MPL-2.0` — 16
 - `MIT/Apache-2.0` — 11
 - `Apache-2.0` — 7
 - `MIT OR Apache-2.0 OR Zlib` — 5
 - `Unlicense OR MIT` — 4
 - `(MIT OR Apache-2.0) AND Unicode-3.0` — 3
+- `ISC` — 3
 - `Apache-2.0/MIT` — 2
 - `BSD-2-Clause OR Apache-2.0 OR MIT` — 2
 - `BSD-3-Clause OR Apache-2.0` — 2
+- `BSD-3-Clause OR MIT OR Apache-2.0` — 2
 - `MIT OR Zlib OR Apache-2.0` — 2
 - `Unlicense/MIT` — 2
 - `Zlib` — 2
@@ -34,7 +36,6 @@ Crates: 278
 - `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` — 1
 - `BSD-2-Clause OR MIT OR Apache-2.0` — 1
 - `CC0-1.0` — 1
-- `ISC` — 1
 - `Zlib OR MIT OR Apache-2.0` — 1
 
 Notes:
@@ -54,6 +55,9 @@ Notes:
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | https://github.com/oyvindln/adler2 |
 | ahash | 0.8.12 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | https://github.com/zakarumych/allocator-api2 |
+| android-activity | 0.6.1 | MIT OR Apache-2.0 | https://github.com/rust-mobile/android-activity |
+| android-properties | 0.2.2 | MIT | https://github.com/miklelappo/android-properties |
+| android_system_properties | 0.1.6 | MIT OR Apache-2.0 | https://github.com/nical/android_system_properties |
 | arboard | 3.7.0 | MIT OR Apache-2.0 | https://github.com/1Password/arboard |
 | arrayvec | 0.7.8 | MIT OR Apache-2.0 | https://github.com/bluss/arrayvec |
 | as-raw-xcb-connection | 1.0.1 | MIT OR Apache-2.0 | https://github.com/psychon/as-raw-xcb-connection |
@@ -72,9 +76,11 @@ Notes:
 | bytemuck_derive | 1.12.1 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/bytemuck |
 | byteorder | 1.5.0 | Unlicense OR MIT | https://github.com/BurntSushi/byteorder |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | https://github.com/image-rs/byteorder-lite |
+| bytes | 1.12.1 | MIT | https://github.com/tokio-rs/bytes |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
 | codespan-reporting | 0.13.1 | Apache-2.0 | https://github.com/brendanzab/codespan |
 | color | 0.3.3 | Apache-2.0 OR MIT | https://github.com/linebender/color |
+| combine | 4.6.9 | MIT | https://github.com/Marwes/combine |
 | core-foundation | 0.9.4 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-graphics | 0.23.2 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
@@ -135,8 +141,15 @@ Notes:
 | hashlink | 0.12.2 | MIT OR Apache-2.0 | https://github.com/djc/hashlink |
 | image | 0.25.10 | MIT OR Apache-2.0 | https://github.com/image-rs/image |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
+| inotify | 0.11.5 | ISC | https://github.com/hannobraun/inotify-rs |
+| inotify-sys | 0.1.8 | ISC | https://github.com/hannobraun/inotify-sys |
 | itertools | 0.15.0 | MIT OR Apache-2.0 | https://github.com/rust-itertools/itertools |
 | itoa | 1.0.19 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa |
+| jni | 0.22.4 | MIT OR Apache-2.0 | https://github.com/jni-rs/jni-rs |
+| jni-macros | 0.22.4 | MIT OR Apache-2.0 | https://github.com/jni-rs/jni-rs |
+| jni-sys | 0.3.1 | MIT OR Apache-2.0 | https://github.com/jni-rs/jni-sys |
+| jni-sys | 0.4.1 | MIT OR Apache-2.0 | https://github.com/jni-rs/jni-sys |
+| jni-sys-macros | 0.4.1 | MIT OR Apache-2.0 | https://github.com/jni-rs/jni-sys |
 | keyboard-types | 0.8.3 | MIT OR Apache-2.0 | https://github.com/rust-windowing/keyboard-types |
 | khronos-egl | 6.0.0 | MIT/Apache-2.0 | https://github.com/timothee-haudebourg/khronos-egl |
 | kqueue | 1.2.1 | MIT | https://gitlab.com/rust-kqueue/rust-kqueue |
@@ -163,13 +176,19 @@ Notes:
 | muda | 0.21.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/muda |
 | naga | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | naga-types | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
+| ndk | 0.9.0 | MIT OR Apache-2.0 | https://github.com/rust-mobile/ndk |
+| ndk-context | 0.1.1 | MIT OR Apache-2.0 | https://github.com/rust-windowing/android-ndk-rs |
+| ndk-sys | 0.6.0+11769913 | MIT OR Apache-2.0 | https://github.com/rust-mobile/ndk |
 | nohash-hasher | 0.2.0 | Apache-2.0 OR MIT | https://github.com/paritytech/nohash-hasher |
 | notify | 8.2.2 | CC0-1.0 | https://github.com/notify-rs/notify.git |
 | notify-types | 2.3.0 | MIT OR Apache-2.0 | https://github.com/notify-rs/notify.git |
 | nu-ansi-term | 0.50.3 | MIT | https://github.com/nushell/nu-ansi-term |
 | num-complex | 0.4.6 | MIT OR Apache-2.0 | https://github.com/rust-num/num-complex |
+| num-derive | 0.4.2 | MIT OR Apache-2.0 | https://github.com/rust-num/num-derive |
 | num-integer | 0.1.47 | MIT OR Apache-2.0 | https://github.com/rust-num/num-integer |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits |
+| num_enum | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 | https://github.com/illicitonion/num_enum |
+| num_enum_derive | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 | https://github.com/illicitonion/num_enum |
 | objc-sys | 0.3.5 | MIT | https://github.com/madsmtm/objc2 |
 | objc2 | 0.5.3 | MIT | https://github.com/madsmtm/objc2 |
 | objc2 | 0.6.5 | MIT | https://github.com/madsmtm/objc2 |
@@ -227,6 +246,7 @@ Notes:
 | polycool | 0.4.0 | MIT OR Apache-2.0 | https://github.com/linebender/kurbo |
 | presser | 0.3.1 | MIT OR Apache-2.0 | https://github.com/EmbarkStudios/presser |
 | primal-check | 0.3.4 | MIT OR Apache-2.0 | https://github.com/huonw/primal |
+| proc-macro-crate | 3.5.0 | MIT OR Apache-2.0 | https://github.com/bkchr/proc-macro-crate |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
 | profiling | 1.0.18 | MIT OR Apache-2.0 | https://github.com/aclysma/profiling |
 | pxfm | 0.1.30 | BSD-3-Clause OR Apache-2.0 | https://github.com/awxkee/pxfm |
@@ -239,6 +259,7 @@ Notes:
 | regex-lite | 0.1.9 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | renderdoc-sys | 1.1.0 | MIT OR Apache-2.0 | https://github.com/ebkalderon/renderdoc-rs |
 | rfd | 0.18.0 | MIT | https://github.com/PolyMeilex/rfd |
+| roxmltree | 0.21.2 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
 | rtrb | 0.4.1 | MIT OR Apache-2.0 | https://github.com/mgeier/rtrb |
 | rubato | 5.0.1 | MIT OR Apache-2.0 | https://github.com/HEnquist/rubato |
 | rusqlite | 0.42.0 | MIT | https://github.com/rusqlite/rusqlite |
@@ -246,6 +267,7 @@ Notes:
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustfft | 6.4.1 | MIT OR Apache-2.0 | https://github.com/ejmahler/RustFFT |
 | rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
+| rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
 | self_cell | 1.3.0 | Apache-2.0 OR GPL-2.0-only | https://github.com/Voultapher/self_cell |
@@ -255,6 +277,8 @@ Notes:
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json |
 | sharded-slab | 0.1.7 | MIT | https://github.com/hawkw/sharded-slab |
 | simd-adler32 | 0.3.10 | MIT | https://github.com/mcountryman/simd-adler32 |
+| simd_cesu8 | 1.2.0 | Apache-2.0 OR MIT | https://github.com/seancroach/simd_cesu8 |
+| simdutf8 | 0.1.5 | MIT OR Apache-2.0 | https://github.com/rusticstuff/simdutf8 |
 | skrifa | 0.44.0 | MIT OR Apache-2.0 | https://github.com/googlefonts/fontations |
 | smallvec | 1.16.5 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec |
 | smol_str | 0.2.2 | MIT OR Apache-2.0 | https://github.com/rust-analyzer/smol_str |
@@ -281,11 +305,16 @@ Notes:
 | syn | 3.0.10 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | sys-locale | 0.3.2 | MIT OR Apache-2.0 | https://github.com/1Password/sys-locale |
 | termcolor | 1.4.1 | Unlicense OR MIT | https://github.com/BurntSushi/termcolor |
+| thiserror | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
+| thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thread_local | 1.1.10 | MIT OR Apache-2.0 | https://github.com/Amanieu/thread_local-rs |
 | tiff | 0.11.3 | MIT | https://github.com/image-rs/image-tiff |
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/tinyvec |
+| toml_datetime | 1.1.3+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_edit | 0.25.19+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_parser | 1.1.5+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | tracing | 0.1.44 | MIT | https://github.com/tokio-rs/tracing |
 | tracing-attributes | 0.1.31 | MIT | https://github.com/tokio-rs/tracing |
 | tracing-core | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
@@ -311,11 +340,13 @@ Notes:
 | wgpu | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-core | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-core-deps-apple | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
+| wgpu-core-deps-windows-linux-android | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-hal | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-naga-bridge | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-types | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | windowfunctions | 0.1.1 | MIT | https://github.com/HEnquist/windowfunctions-rs |
 | winit | 0.30.13 | Apache-2.0 | https://github.com/rust-windowing/winit |
+| winnow | 1.0.5 | MIT | https://github.com/winnow-rs/winnow |
 | x11rb | 0.13.2 | MIT OR Apache-2.0 | https://github.com/psychon/x11rb |
 | x11rb-protocol | 0.13.2 | MIT OR Apache-2.0 | https://github.com/psychon/x11rb |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |

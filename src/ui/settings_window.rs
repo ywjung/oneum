@@ -60,6 +60,43 @@ fn fit(screen: egui::Vec2, header: f32) -> (f32, f32, f32) {
     (width, body, lift)
 }
 
+/// A table of keys and what they do, in groups under their titles.
+fn shortcut_table(ui: &mut egui::Ui, groups: &[(&str, &[(&str, &str)])]) {
+    for (index, (title, rows)) in groups.iter().enumerate() {
+        if index > 0 {
+            ui.add_space(12.0);
+        }
+        widgets::section_title(ui, title);
+        widgets::card(ui, |ui| {
+            for (row, (keys, what)) in rows.iter().enumerate() {
+                if row > 0 {
+                    widgets::row_divider(ui);
+                }
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
+                let mut keys_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(Layout::right_to_left(Align::Center)),
+                );
+                widgets::key_caps(&mut keys_ui, keys);
+                let left = keys_ui.min_rect().left();
+                let text_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.center().y - 7.0),
+                    egui::pos2(left - 10.0, rect.bottom()),
+                );
+                let mut text_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(text_rect)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                // Menu titles end in "…" where they open a panel; a reference does not.
+                text_ui.add(egui::Label::new(what.trim_end_matches('…')).truncate());
+            }
+        });
+    }
+}
+
 impl OneumApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
@@ -623,14 +660,16 @@ impl OneumApp {
                     s.out_macos_only
                 })
             };
-            if phone {
+            if phone && !crate::platform::RATE_CONTROL {
+                // The system cannot be asked for a rate (Android): nothing to switch.
+            } else if phone {
                 // The system is asked for the song's rate and decides: the built-in
                 // output follows between 44.1 and 48 kHz, a USB DAC as far as it can.
                 widgets::setting_row(
                     ui,
                     s.out_match_rate,
                     Some(s.phone_match_rate_desc),
-                    crate::platform::RATE_CONTROL,
+                    true,
                     |ui| {
                         widgets::toggle(
                             ui,
@@ -670,7 +709,9 @@ impl OneumApp {
                 widgets::toggle(ui, &mut self.settings.output.memory_playback, s.out_memory);
             });
         });
-        if phone {
+        if phone && !crate::platform::RATE_CONTROL {
+            widgets::section_note(ui, s.phone_quality_hint_fixed);
+        } else if phone {
             widgets::section_note(ui, s.phone_quality_hint);
         } else {
             widgets::section_note(ui, s.out_quality_hint);
@@ -1055,42 +1096,63 @@ impl OneumApp {
                 ],
             ),
         ];
-        for (index, (title, rows)) in groups.iter().enumerate() {
-            if index > 0 {
-                ui.add_space(12.0);
-            }
-            widgets::section_title(ui, title);
-            widgets::card(ui, |ui| {
-                for (row, (keys, what)) in rows.iter().enumerate() {
-                    if row > 0 {
-                        widgets::row_divider(ui);
-                    }
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 34.0),
-                        Sense::hover(),
-                    );
-                    let mut keys_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(rect)
-                            .layout(Layout::right_to_left(Align::Center)),
-                    );
-                    widgets::key_caps(&mut keys_ui, keys);
-                    let left = keys_ui.min_rect().left();
-                    let text_rect = egui::Rect::from_min_max(
-                        egui::pos2(rect.left(), rect.center().y - 7.0),
-                        egui::pos2(left - 10.0, rect.bottom()),
-                    );
-                    let mut text_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(text_rect)
-                            .layout(Layout::top_down(Align::Min)),
-                    );
-                    // Menu titles end in "…" where they open a panel; a reference does not.
-                    text_ui.add(egui::Label::new(what.trim_end_matches('…')).truncate());
-                }
-            });
-        }
+        shortcut_table(ui, &groups);
         widgets::section_note(ui, s.shortcuts_note);
+    }
+
+    /// The keys of a keyboard that work on the phone screens (where the phone passes
+    /// keys on): those of the menu commands that have a meaning there.
+    pub(super) fn phone_settings_shortcuts(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let groups: [(&str, &[(&str, &str)]); 4] = [
+            (
+                s.settings_playback,
+                &[
+                    ("Space", s.menu_play_pause),
+                    ("⌘ →", s.menu_next),
+                    ("⌘ ←", s.menu_previous),
+                    ("⌥ ⌘ →", s.menu_seek_forward),
+                    ("⌥ ⌘ ←", s.menu_seek_back),
+                    ("⇧ ⌘ .", s.menu_stop_after_current),
+                    ("⌘ ↑", s.menu_volume_up),
+                    ("⌘ ↓", s.menu_volume_down),
+                    ("⇧ ⌘ M", s.menu_mute),
+                    ("⌘ S", s.menu_toggle_shuffle),
+                    ("⇧ ⌘ R", s.menu_cycle_repeat),
+                ],
+            ),
+            (
+                s.phone_shortcuts_song,
+                &[
+                    ("⌘ D", s.menu_song_favorite),
+                    ("⌘ I", s.song_info),
+                    ("⌘ L", s.phone_show_in_songs),
+                    ("⇧ ⌘ F", s.show_in_finder),
+                ],
+            ),
+            (
+                s.phone_shortcuts_screen,
+                &[
+                    ("⌘ F", s.menu_find),
+                    ("⌘ U", s.menu_show_queue),
+                    ("⇧ ⌘ U", s.menu_show_meter),
+                    ("⌘ E", s.equalizer),
+                    ("⌘ ,", s.menu_settings),
+                    ("Esc", s.phone_shortcut_back),
+                ],
+            ),
+            (
+                s.library,
+                &[
+                    ("⌘ O", s.menu_open_files),
+                    ("⇧ ⌘ O", s.menu_add_folder),
+                    ("⌘ N", s.menu_new_playlist),
+                    ("⌘ R", s.menu_rescan),
+                ],
+            ),
+        ];
+        shortcut_table(ui, &groups);
+        widgets::section_note(ui, s.phone_shortcuts_note);
     }
 
     pub(super) fn settings_about(&mut self, ui: &mut egui::Ui) {
@@ -1134,6 +1196,7 @@ impl OneumApp {
 
         ui.add_space(14.0);
         let mut open_guide = false;
+        let mut save_log = false;
         let log_dir = self.core.paths.log_dir.clone();
         let data_dir = self.core.paths.data_dir.clone();
         widgets::card(ui, |ui| {
@@ -1168,6 +1231,13 @@ impl OneumApp {
                     }
                 });
                 widgets::row_divider(ui);
+            } else {
+                // A phone's app folders cannot be looked into: a copy of the log is
+                // handed out instead.
+                widgets::setting_row(ui, s.log_save, Some(s.log_folder_desc), true, |ui| {
+                    save_log = button(ui, s.log_save_button);
+                });
+                widgets::row_divider(ui);
             }
             let toggle = if self.licenses_shown {
                 s.licenses_hide
@@ -1183,6 +1253,9 @@ impl OneumApp {
 
         if open_guide {
             self.open_guide();
+        }
+        if save_log {
+            self.save_log();
         }
 
         if self.licenses_shown {

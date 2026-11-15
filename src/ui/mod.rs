@@ -9,6 +9,8 @@ mod background;
 mod dialogs;
 mod equalizer;
 mod guide;
+#[cfg(any(target_os = "android", test))]
+mod hardkeys;
 mod icons;
 mod lists;
 mod markdown;
@@ -223,6 +225,8 @@ enum AppEvent {
     FolderAdded(PathBuf),
     /// A playlist was written to a file: how many entries, or that it could not be.
     PlaylistExported(Option<usize>),
+    /// The log could not be written to the file the user is to keep.
+    LogNotSaved,
     /// The user chose these in a file dialog that was shown for this.
     Picked(PickFor, Vec<PathBuf>),
 }
@@ -239,6 +243,8 @@ enum PickFor {
     AppleLibrary,
     /// Where to write this playlist.
     ExportPlaylist(i64),
+    /// Where to write a copy of the log.
+    SaveLog,
 }
 
 /// Requests from the menu bar that need the window.
@@ -771,7 +777,7 @@ impl OneumApp {
                     self.warn_toast(self.s().notice_no_playable_files)
                 }
                 AppEvent::Reveal(path) => {
-                    finder::reveal(&path);
+                    self.reveal_path(&path);
                 }
                 AppEvent::FolderAdded(path) => {
                     self.announce_scan = true;
@@ -787,6 +793,7 @@ impl OneumApp {
                 AppEvent::PlaylistExported(None) => {
                     self.warn_toast(self.s().notice_export_failed);
                 }
+                AppEvent::LogNotSaved => self.warn_toast(self.s().notice_log_failed),
                 AppEvent::Picked(purpose, paths) => self.picked(purpose, paths),
                 AppEvent::FilesImported(ids) => {
                     self.core.player.send(Command::PlayTracks {
@@ -1026,6 +1033,9 @@ impl OneumApp {
     }
 
     fn handle_request(&mut self, request: UiRequest) {
+        if self.phone_mode {
+            return self.phone_request(request);
+        }
         match request {
             UiRequest::Settings => self.open_settings(),
             UiRequest::OpenFiles => self.pick_files(),
@@ -1327,6 +1337,11 @@ impl OneumApp {
                     self.write_playlist(id, dest);
                 }
             }
+            PickFor::SaveLog => {
+                if let Some(dest) = paths.pop() {
+                    self.write_log(dest);
+                }
+            }
         }
     }
 
@@ -1477,6 +1492,37 @@ impl OneumApp {
         self.pick(PickFor::ExportPlaylist(id), request);
     }
 
+    /// On a phone, where the app's folders cannot be looked into: asks where to keep a
+    /// copy of the log.
+    pub(super) fn save_log(&mut self) {
+        let request = PickRequest::new(PickKind::SaveAs("OnEum-log.txt".into()));
+        self.pick(PickFor::SaveLog, request);
+    }
+
+    /// Copies the log to the file the user is to keep.
+    fn write_log(&mut self, dest: PathBuf) {
+        let log = self.core.paths.log_dir.join("oneum.log");
+        // Off the UI thread, after the edits before it: the place may be slow to answer.
+        self.edit(move |_| match std::fs::copy(&log, &dest) {
+            Ok(_) => {
+                files::hand_out(&dest);
+                None
+            }
+            Err(error) => {
+                tracing::warn!("the log could not be copied: {error}");
+                Some(AppEvent::LogNotSaved)
+            }
+        });
+    }
+
+    /// Shows `path` in the file manager. A phone's shows folders of shared storage
+    /// only (the one a song is in): the user is told when it cannot show this one.
+    pub(super) fn reveal_path(&mut self, path: &Path) {
+        if !finder::reveal(path) && crate::platform::PHONE_FILE_MANAGER {
+            self.warn_toast(self.s().notice_cannot_show_folder);
+        }
+    }
+
     /// Writes a playlist to the file the user chose for it.
     fn write_playlist(&mut self, id: i64, dest: PathBuf) {
         // Written on the edit thread: the destination may be slow to answer.
@@ -1564,7 +1610,7 @@ impl OneumApp {
                     .map(AppEvent::EditFailed)
             }),
             Action::Reveal(id) => {
-                if let Some(track) = self.snapshot.get(id) {
+                if let Some(track) = self.snapshot.get(id).cloned() {
                     if crate::library::cue::sheet_of(&track.path).is_some() {
                         // Its audio file is found by reading the sheet: not in a frame.
                         let (tx, core, sheet_track) =
@@ -1578,10 +1624,10 @@ impl OneumApp {
                             });
                         if spawned.is_err() {
                             // The sheet, then: it is beside its audio file.
-                            finder::reveal(track.file());
+                            self.reveal_path(track.file());
                         }
                     } else {
-                        finder::reveal(&track.path);
+                        self.reveal_path(&track.path);
                     }
                 }
             }
@@ -1789,7 +1835,7 @@ impl OneumApp {
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
         let typing = ctx.text_edit_focused();
         responder::set_text_input_active(typing);
-        self.typing = typing;
+        let was_typing = std::mem::replace(&mut self.typing, typing);
         self.widget_focused = !typing && ctx.memory(|m| m.focused()).is_some();
         if self.dialog.is_some() {
             return;
@@ -1813,7 +1859,14 @@ impl OneumApp {
         if space && !typing && !self.widget_focused && !finding {
             self.core.player.send(Command::TogglePlayPause);
         }
-        if escape {
+        if escape && self.phone_mode {
+            // On the phone screens Escape is the system's Back. From a field that was
+            // typed into, egui has taken the keyboard already (before the frame
+            // starts): that is all the key does then.
+            if !was_typing {
+                self.phone_back(ctx);
+            }
+        } else if escape {
             // egui drops keyboard focus on Escape before the frame starts, so "was the
             // search field focused" has to come from the previous frame.
             if self.guide_open {
@@ -2439,7 +2492,17 @@ pub(crate) fn next_repeat(mode: RepeatMode) -> RepeatMode {
 }
 
 impl eframe::App for OneumApp {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // The on-screen keyboard of Android was put away by the user: the field that
+        // was typed into lets go, so that a tap on it brings the keyboard back.
+        #[cfg(target_os = "android")]
+        if crate::platform::text_input::take_dismissed()
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = ctx;
         if let Some(automation) = self.automation.as_mut() {
             automation.step(raw);
         }
@@ -2492,6 +2555,45 @@ impl eframe::App for OneumApp {
                 EditAction::Redo => key(egui::Key::Z, true),
             });
         }
+        // A touch may change the field that is typed into (move its caret, empty it):
+        // the on-screen keyboard of Android starts from nothing then.
+        #[cfg(target_os = "android")]
+        if raw.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::PointerButton { pressed: true, .. }
+                    | egui::Event::Touch {
+                        phase: egui::TouchPhase::Start,
+                        ..
+                    }
+            )
+        }) {
+            crate::platform::text_input::reset();
+        }
+        // The keys of a keyboard on Android that are the app's (its shortcuts).
+        #[cfg(target_os = "android")]
+        raw.events.extend(
+            crate::platform::text_input::drain_keys()
+                .iter()
+                .filter_map(hardkeys::event),
+        );
+        // What the on-screen keyboard of Android typed (see platform::android::text_input).
+        #[cfg(target_os = "android")]
+        for typed in crate::platform::text_input::drain() {
+            use crate::platform::text_input::Typed;
+            let key = |key| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            };
+            raw.events.push(match typed {
+                Typed::Text(text) => egui::Event::Text(text),
+                Typed::Backspace => key(egui::Key::Backspace),
+                Typed::Enter => key(egui::Key::Enter),
+            });
+        }
     }
 
     /// Runs for every pass, also while the window is hidden or fully covered (then
@@ -2511,6 +2613,9 @@ impl eframe::App for OneumApp {
         self.sync_frame(&ctx);
         self.global_shortcuts(&ctx);
         if self.phone_mode {
+            if crate::platform::PHONE_KEYBOARD {
+                self.menu_shortcuts(&ctx);
+            }
             self.phone_frame(ui);
         } else {
             let mut actions: Vec<Action> = Vec::new();

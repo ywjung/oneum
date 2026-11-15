@@ -230,6 +230,30 @@ impl OneumApp {
                 .wrap(),
             );
         });
+        // Where a file manager can show it: the folder it is in, and the way there.
+        if crate::platform::PHONE_FILE_MANAGER
+            && let Some(folder) = track.file().parent()
+        {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(SIDE + 4.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(folder.display().to_string())
+                            .font(font(12.0))
+                            .color(theme::dim(ui)),
+                    )
+                    .wrap(),
+                );
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(SIDE + 4.0);
+                if ui.button(s.show_in_finder).clicked() {
+                    actions.push(Action::Reveal(track.id));
+                }
+            });
+        }
         ui.add_space(8.0);
         close
     }

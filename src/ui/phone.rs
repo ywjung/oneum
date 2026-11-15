@@ -4,7 +4,8 @@
 //! laid out for a phone: tabs at the bottom, a stack of pages in each, the player as a
 //! bar above the tabs that opens to the full screen, and sheets from below for what a
 //! right-click offers on a desk. Rows are tall enough to hit with a finger, and nothing
-//! depends on a pointer hovering or on a keyboard.
+//! depends on a pointer hovering or on a keyboard (where a phone passes on the keys of
+//! one, the shortcuts of the menus work: [`OneumApp::phone_request`]).
 //!
 //! The module is compiled everywhere: `ONEUM_PHONE=1` shows these screens in a window on
 //! a Mac, which is how they are worked on and checked without a phone.
@@ -12,7 +13,8 @@ use super::dialogs::Dialog;
 use super::icons::{self, Icon};
 use super::lists::{self, Rediscover};
 use super::{
-    Action, Nav, OneumApp, Row, ToastAction, meter, next_repeat, spectrum, theme, widgets,
+    Action, Nav, OneumApp, Row, ToastAction, UiRequest, meter, next_repeat, spectrum, theme,
+    widgets,
 };
 use crate::app::settings::{MAX_PINS, Pin};
 use crate::i18n::format_time;
@@ -71,6 +73,8 @@ enum SettingsPage {
     Playback,
     Equalizer,
     General,
+    /// The keys of a keyboard, where the phone passes them on.
+    Shortcuts,
     Guide,
     About,
 }
@@ -213,6 +217,9 @@ pub(super) struct Phone {
     reveal: Option<(Nav, TrackId)>,
     /// Several entries of the queue are being chosen.
     queue_selecting: bool,
+    /// Whether music folders can be read (Android's "all files access"), and when that
+    /// was last asked of the system.
+    storage_access: Option<(Instant, bool)>,
 }
 
 impl Phone {
@@ -249,6 +256,7 @@ impl Phone {
             focus_list_search: false,
             reveal: None,
             queue_selecting: false,
+            storage_access: None,
         }
     }
 
@@ -610,6 +618,10 @@ impl OneumApp {
     pub(super) fn phone_frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.phone_follow_nav();
+        // The system's Back (a gesture or a button on Android).
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)) {
+            self.phone_back(&ctx);
+        }
         let full = ctx.viewport_rect();
         let safe = ctx.content_rect();
         ui.painter().rect_filled(full, 0.0, ui.visuals().panel_fill);
@@ -742,6 +754,126 @@ impl OneumApp {
         }
     }
 
+    /// What a command of the menus does on these screens. It comes from a key of a
+    /// keyboard (where the phone passes those on), or from the menu bar of a Mac on
+    /// which these screens are tried out.
+    pub(super) fn phone_request(&mut self, request: UiRequest) {
+        let current = self.player.current.map(|current| current.track_id);
+        match request {
+            UiRequest::Settings => self.phone_show_settings(None),
+            UiRequest::Equalizer => self.phone_show_settings(Some(SettingsPage::Equalizer)),
+            UiRequest::UserGuide => self.phone_show_settings(Some(SettingsPage::Guide)),
+            UiRequest::Find => {
+                self.phone.player_open = false;
+                if self.phone.tab != Tab::Search {
+                    self.phone.show_tab(Tab::Search);
+                }
+                self.phone.stack().clear();
+                self.phone.focus_search = true;
+            }
+            UiRequest::NewPlaylist => {
+                self.phone.player_open = false;
+                if self.phone.tab != Tab::Playlists {
+                    self.phone.show_tab(Tab::Playlists);
+                }
+                self.dialog = Some(Dialog::new_playlist(self.s().untitled_playlist, Vec::new()));
+            }
+            UiRequest::OpenFiles => {
+                if crate::platform::COPIES_MUSIC_IN {
+                    self.import_music(crate::platform::PickKind::Files);
+                } else {
+                    self.pick_files();
+                }
+            }
+            UiRequest::AddFolder => {
+                if self.storage_access() {
+                    self.link_folder();
+                } else {
+                    self.warn_toast(self.s().phone_storage_missing);
+                }
+            }
+            UiRequest::ImportPlaylist => self.pick_playlist_to_import(),
+            UiRequest::GoToCurrent => {
+                if let Some(track) = current {
+                    if let Some(state) = self.views.get_mut(&Nav::Songs) {
+                        state.query.clear();
+                    }
+                    self.phone.player_open = false;
+                    self.phone.reveal = Some((Nav::Songs, track));
+                    self.phone_open(Nav::Songs);
+                }
+            }
+            UiRequest::ToggleQueue => self.phone_toggle_player(PlayerView::Queue),
+            UiRequest::ToggleMeter => self.phone_toggle_player(PlayerView::Meters),
+            UiRequest::ToggleInfo | UiRequest::SongInfo => {
+                if let Some(track) = current {
+                    let sheet = Sheet::Info(track);
+                    if self.phone.sheet.as_ref() != Some(&sheet) {
+                        self.phone.sheet = Some(sheet);
+                    } else if self.phone.sheet_leaving.is_none() {
+                        self.phone.sheet_leaving = Some((Instant::now(), sheet));
+                    }
+                }
+            }
+            UiRequest::ToggleMute => self.toggle_mute(),
+            // No key chooses songs in a list here: these are about the song that plays.
+            UiRequest::SongToggleFavorite => {
+                if let Some(track) = current {
+                    let favorite = self.snapshot.get(track).is_some_and(|t| t.favorite);
+                    self.apply(Action::SetFavorite(vec![track], !favorite));
+                }
+            }
+            UiRequest::SongShowInFinder => {
+                if let Some(track) = current {
+                    self.apply(Action::Reveal(track));
+                }
+            }
+            // What these do on a desk (to the playlist that is open, to the songs
+            // chosen in a list) is in the sheets of these screens; no key asks for them.
+            UiRequest::PlaylistRename
+            | UiRequest::PlaylistExport
+            | UiRequest::PlaylistDelete
+            | UiRequest::SongPlay
+            | UiRequest::SongPlayNext
+            | UiRequest::SongAddToQueue => {}
+        }
+    }
+
+    /// Shows the settings tab: its first page, or `page` (put away again if it is the
+    /// one that is open, as the same key closes a window on a desk).
+    fn phone_show_settings(&mut self, page: Option<SettingsPage>) {
+        self.phone.player_open = false;
+        if self.phone.tab != Tab::Settings {
+            self.phone.show_tab(Tab::Settings);
+        }
+        match page.map(Page::Settings) {
+            None => self.phone.stack().clear(),
+            Some(page) if self.phone.page() == Some(&page) => self.phone.pop(0.0),
+            Some(page) => {
+                self.phone.stack().clear();
+                self.phone.push(page);
+            }
+        }
+    }
+
+    /// Opens the player with `view` in the place of the cover; the cover comes back if
+    /// that is what it shows already. Nothing without a song.
+    fn phone_toggle_player(&mut self, view: PlayerView) {
+        if self.player.current.is_none() {
+            return;
+        }
+        if self.phone.player_open && self.phone.player_view == view {
+            self.phone.player_view = PlayerView::Cover;
+        } else {
+            self.phone.player_open = true;
+            self.phone.player_view = view;
+            if view == PlayerView::Queue {
+                self.queue_scroll_forced = true;
+            }
+        }
+        self.phone.lyrics_line = None;
+    }
+
     /// Shows the songs that `query` finds, in the search tab.
     fn phone_show_search(&mut self, query: &str) {
         self.phone.player_open = false;
@@ -750,6 +882,42 @@ impl OneumApp {
         self.phone.query = query.to_string();
         self.phone.search_kind = SearchKind::Songs;
         self.phone.editing_smart = None;
+    }
+
+    /// The system's Back: what lies topmost goes first (a dialog, a sheet, the keyboard,
+    /// the player), then what a list is in the middle of (choosing songs, its search),
+    /// then the page, then the tab. On the first page of the first tab the app itself
+    /// steps back behind what was there before, and plays on.
+    pub(super) fn phone_back(&mut self, ctx: &egui::Context) {
+        if self.dialog.is_some() {
+            self.dialog = None;
+        } else if let Some(sheet) = self.phone.sheet.clone() {
+            if self.phone.sheet_leaving.is_none() {
+                self.phone.sheet_leaving = Some((Instant::now(), sheet));
+            }
+        } else if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            // A field that is typed into gives up the keyboard.
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        } else if self.phone.player_open {
+            if self.phone.queue_selecting {
+                self.phone.queue_selecting = false;
+                self.queue_selection.clear();
+            } else {
+                self.phone.player_open = false;
+            }
+        } else if self.phone.selecting.is_some() {
+            self.phone_end_selection();
+        } else if let Some(nav) = self.phone.searching.take() {
+            if let Some(state) = self.views.get_mut(&nav) {
+                state.query.clear();
+            }
+        } else if self.phone.page().is_some() {
+            self.phone.pop(0.0);
+        } else if self.phone.tab != Tab::Library {
+            self.phone.show_tab(Tab::Library);
+        } else {
+            crate::platform::window::send_back();
+        }
     }
 
     /// Shows `nav` as a page above the ones of the tab it belongs to.
@@ -971,6 +1139,7 @@ impl OneumApp {
                 SettingsPage::Playback => s.settings_playback,
                 SettingsPage::Equalizer => s.equalizer,
                 SettingsPage::General => s.settings_general,
+                SettingsPage::Shortcuts => s.settings_shortcuts,
                 SettingsPage::Guide => s.menu_user_guide,
                 SettingsPage::About => s.settings_about,
             }
@@ -1323,10 +1492,33 @@ impl OneumApp {
     }
 
     /// Nothing in the library: where music goes and how it gets there.
+    /// Whether music folders can be read. Where that takes a right of the system's
+    /// (Android), it is asked again about once a second while a page shows it: the
+    /// user gives the right in the system's settings and comes back.
+    fn storage_access(&mut self) -> bool {
+        if !crate::platform::STORAGE_NEEDS_ACCESS {
+            return true;
+        }
+        match self.phone.storage_access {
+            Some((asked, access)) if asked.elapsed() < Duration::from_secs(1) => access,
+            _ => {
+                let access = crate::platform::files::has_storage_access();
+                self.phone.storage_access = Some((Instant::now(), access));
+                access
+            }
+        }
+    }
+
     fn phone_empty_library(&mut self, ui: &mut Ui) {
         let s = self.s();
+        // Where a folder is copied into the app's own (an iPhone) music is imported;
+        // elsewhere folders are added and read where they are.
+        let copies = crate::platform::COPIES_MUSIC_IN;
+        let access = self.storage_access();
         let mut import_files = false;
         let mut import_folder = false;
+        let mut add_folder = false;
+        let mut allow = false;
         let mut rescan = false;
         egui::ScrollArea::vertical()
             .id_salt("phone-empty")
@@ -1352,9 +1544,15 @@ impl OneumApp {
                     ui.allocate_ui(vec2(width, 0.0), |ui| {
                         ui.add(
                             egui::Label::new(
-                                RichText::new(s.phone_empty_body)
-                                    .font(font(15.0))
-                                    .color(theme::dim(ui)),
+                                RichText::new(if copies {
+                                    s.phone_empty_body
+                                } else if access {
+                                    s.phone_empty_body_folders
+                                } else {
+                                    s.phone_storage_needed
+                                })
+                                .font(font(15.0))
+                                .color(theme::dim(ui)),
                             )
                             .wrap()
                             .halign(Align::Center),
@@ -1362,16 +1560,31 @@ impl OneumApp {
                     });
                     ui.add_space(22.0);
                     let width = (ui.available_width() - 2.0 * 28.0).clamp(160.0, 320.0);
-                    import_files =
-                        pill_button(ui, Icon::Plus, s.phone_import_files, width, true).clicked();
-                    ui.add_space(10.0);
-                    import_folder =
-                        pill_button(ui, Icon::Folder, s.phone_import_folder, width, false)
+                    if copies {
+                        import_files =
+                            pill_button(ui, Icon::Plus, s.phone_import_files, width, true)
+                                .clicked();
+                        ui.add_space(10.0);
+                        import_folder =
+                            pill_button(ui, Icon::Folder, s.phone_import_folder, width, false)
+                                .clicked();
+                    } else if access {
+                        add_folder = pill_button(ui, Icon::Folder, s.phone_add_folder, width, true)
                             .clicked();
+                    } else {
+                        allow = pill_button(ui, Icon::Check, s.phone_storage_allow, width, true)
+                            .clicked();
+                    }
                     ui.add_space(10.0);
                     rescan = pill_button(ui, Icon::Repeat, s.rescan, width, false).clicked();
                 });
             });
+        if add_folder {
+            self.link_folder();
+        }
+        if allow {
+            crate::platform::files::ask_storage_access();
+        }
         if import_files {
             self.import_music(crate::platform::PickKind::Files);
         }
@@ -2220,7 +2433,7 @@ impl OneumApp {
     /// The settings tab: the groups of settings.
     fn phone_settings(&mut self, ui: &mut Ui) {
         let s = self.s();
-        let entries: [(Icon, &str, SettingsPage); 6] = [
+        let mut entries = vec![
             (Icon::Folder, s.phone_library, SettingsPage::Library),
             (Icon::Play, s.settings_playback, SettingsPage::Playback),
             (Icon::Equalizer, s.equalizer, SettingsPage::Equalizer),
@@ -2228,6 +2441,18 @@ impl OneumApp {
             (Icon::Keyboard, s.menu_user_guide, SettingsPage::Guide),
             (Icon::Info, s.settings_about, SettingsPage::About),
         ];
+        if crate::platform::PHONE_KEYBOARD {
+            // The keyboard is the sign of its keys there; the guide gets words.
+            entries[4].0 = Icon::Lyrics;
+            entries.insert(
+                4,
+                (
+                    Icon::Keyboard,
+                    s.settings_shortcuts,
+                    SettingsPage::Shortcuts,
+                ),
+            );
+        }
         let mut open = None;
         egui::ScrollArea::vertical()
             .id_salt("phone-settings")
@@ -2290,6 +2515,10 @@ impl OneumApp {
                                 ui.set_width(width);
                                 self.settings_about(ui);
                             }
+                            SettingsPage::Shortcuts => {
+                                ui.set_width(width);
+                                self.phone_settings_shortcuts(ui);
+                            }
                             SettingsPage::Equalizer => {
                                 ui.set_width(width);
                                 widgets::card(ui, |ui| {
@@ -2337,10 +2566,15 @@ impl OneumApp {
         let mut show_damaged = false;
         let mut import_apple = false;
         let mut link_folder = false;
+        let mut open_files = false;
+        let mut show_folder: Option<std::path::PathBuf> = None;
         let mut unlink: Option<(i64, String)> = None;
         // The folders that are used where they are: every music folder but the app's
         // own.
-        let own = crate::platform::PHONE
+        let copies = crate::platform::COPIES_MUSIC_IN;
+        let access = self.storage_access();
+        let mut allow = false;
+        let own = copies
             .then(crate::app::paths::AppPaths::phone_music_dir)
             .flatten();
         let linked: Vec<_> = self
@@ -2360,14 +2594,27 @@ impl OneumApp {
                     ui.vertical(|ui| {
                         ui.set_width(ui.available_width() - SIDE);
                         widgets::card(ui, |ui| {
-                            widgets::setting_row(
-                                ui,
-                                s.phone_music_place,
-                                Some(s.phone_music_place_desc),
-                                true,
-                                |_| {},
-                            );
-                            widgets::row_divider(ui);
+                            if copies {
+                                widgets::setting_row(
+                                    ui,
+                                    s.phone_music_place,
+                                    Some(s.phone_music_place_desc),
+                                    true,
+                                    |_| {},
+                                );
+                                widgets::row_divider(ui);
+                            } else if !access {
+                                widgets::setting_row(
+                                    ui,
+                                    s.phone_storage_row,
+                                    Some(s.phone_storage_missing),
+                                    true,
+                                    |ui| {
+                                        allow = ui.button(s.phone_storage_allow).clicked();
+                                    },
+                                );
+                                widgets::row_divider(ui);
+                            }
                             let songs = self.lang.song_count(self.snapshot.len());
                             let status = if scan.running {
                                 self.lang.scan_progress(scan.files_found)
@@ -2391,24 +2638,41 @@ impl OneumApp {
                         });
                         ui.add_space(14.0);
                         widgets::card(ui, |ui| {
-                            widgets::setting_row(
-                                ui,
-                                s.phone_import_files,
-                                Some(s.phone_import_desc),
-                                true,
-                                |ui| {
-                                    if ui.button(s.phone_import_files).clicked() {
-                                        import_files = true;
+                            if copies {
+                                widgets::setting_row(
+                                    ui,
+                                    s.phone_import_files,
+                                    Some(s.phone_import_desc),
+                                    true,
+                                    |ui| {
+                                        if ui.button(s.phone_import_files).clicked() {
+                                            import_files = true;
+                                        }
+                                    },
+                                );
+                                widgets::row_divider(ui);
+                                widgets::setting_row(ui, s.phone_import_folder, None, true, |ui| {
+                                    if ui.button(s.phone_import_folder).clicked() {
+                                        import_folder = true;
                                     }
-                                },
-                            );
-                            widgets::row_divider(ui);
-                            widgets::setting_row(ui, s.phone_import_folder, None, true, |ui| {
-                                if ui.button(s.phone_import_folder).clicked() {
-                                    import_folder = true;
-                                }
-                            });
-                            widgets::row_divider(ui);
+                                });
+                                widgets::row_divider(ui);
+                            } else {
+                                // Music is used where it is: single files can be
+                                // played without their folder, as on a desk.
+                                widgets::setting_row(
+                                    ui,
+                                    s.phone_open_files,
+                                    Some(s.phone_open_files_desc),
+                                    true,
+                                    |ui| {
+                                        if ui.button(s.phone_open_files).clicked() {
+                                            open_files = true;
+                                        }
+                                    },
+                                );
+                                widgets::row_divider(ui);
+                            }
                             widgets::setting_row(ui, s.playlists, None, true, |ui| {
                                 if ui.button(s.import_m3u8).clicked() {
                                     self.pick_playlist_to_import();
@@ -2417,7 +2681,14 @@ impl OneumApp {
                         });
                         // Folders that are read where they are.
                         ui.add_space(14.0);
-                        widgets::section_title(ui, s.phone_linked_folders);
+                        widgets::section_title(
+                            ui,
+                            if copies {
+                                s.phone_linked_folders
+                            } else {
+                                s.phone_music_folders
+                            },
+                        );
                         widgets::card(ui, |ui| {
                             for root in &linked {
                                 let name = root.path.file_name().map_or_else(
@@ -2431,27 +2702,43 @@ impl OneumApp {
                                 };
                                 ui.push_id(("phone-linked", root.id), |ui| {
                                     widgets::setting_row(ui, &name, Some(&state), true, |ui| {
-                                        if ui.button(s.phone_unlink).clicked() {
+                                        let label = if copies {
+                                            s.phone_unlink
+                                        } else {
+                                            s.remove_folder
+                                        };
+                                        if ui.button(label).clicked() {
                                             unlink =
                                                 Some((root.id, root.path.display().to_string()));
+                                        }
+                                        if crate::platform::PHONE_FILE_MANAGER
+                                            && ui.button(s.phone_show_folder).clicked()
+                                        {
+                                            show_folder = Some(root.path.clone());
                                         }
                                     });
                                 });
                                 widgets::row_divider(ui);
                             }
-                            widgets::setting_row(
-                                ui,
-                                s.phone_link_folder,
-                                Some(s.phone_link_folder_desc),
-                                true,
-                                |ui| {
-                                    if ui.button(s.phone_link_folder).clicked() {
-                                        link_folder = true;
-                                    }
-                                },
-                            );
+                            let (add, about) = if copies {
+                                (s.phone_link_folder, Some(s.phone_link_folder_desc))
+                            } else {
+                                (s.phone_add_folder, None)
+                            };
+                            widgets::setting_row(ui, add, about, true, |ui| {
+                                if ui.button(add).clicked() {
+                                    link_folder = true;
+                                }
+                            });
                         });
-                        widgets::section_note(ui, s.phone_linked_hint);
+                        widgets::section_note(
+                            ui,
+                            if copies {
+                                s.phone_linked_hint
+                            } else {
+                                s.phone_folders_hint
+                            },
+                        );
                         // Reading every file to the end to see that it is whole, as on
                         // a desk. The damaged ones are shown in the search tab.
                         ui.add_space(18.0);
@@ -2489,6 +2776,15 @@ impl OneumApp {
         }
         if link_folder {
             self.link_folder();
+        }
+        if open_files {
+            self.pick_files();
+        }
+        if let Some(folder) = show_folder {
+            self.reveal_path(&folder);
+        }
+        if allow {
+            crate::platform::files::ask_storage_access();
         }
         if let Some((id, path)) = unlink {
             self.dialog = Some(super::dialogs::Dialog::RemoveFolder(id, path));
@@ -3981,6 +4277,13 @@ impl OneumApp {
                 if Self::sheet_item(ui, Icon::Info, s.song_info, false) {
                     self.phone.sheet = Some(Sheet::Info(track.id));
                     return false;
+                }
+                // The folder the file is in, in the phone's file manager.
+                if crate::platform::PHONE_FILE_MANAGER
+                    && Self::sheet_item(ui, Icon::Folder, s.show_in_finder, false)
+                {
+                    actions.push(Action::Reveal(track.id));
+                    return true;
                 }
                 if self.player.current.map(|c| c.track_id) == Some(track.id) {
                     // Where it is among all songs (on a desk: a click on its title).
