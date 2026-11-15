@@ -1660,7 +1660,7 @@ impl Library {
 
     /// The tracks each path stands for, in input order: one, the tracks of the CUE
     /// sheet a file is the audio of, or none (unreadable, unsupported, not there).
-    fn import_paths(&self, paths: &[PathBuf]) -> Vec<Vec<TrackId>> {
+    pub fn import_paths(&self, paths: &[PathBuf]) -> Vec<Vec<TrackId>> {
         /// Files per database transaction.
         const BATCH: usize = 200;
         let inner = &self.inner;

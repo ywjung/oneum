@@ -433,7 +433,8 @@ public final class MainActivity extends NativeActivity {
             Native.onPicked(id, "");
         } else if (kind == 0) {
             String folder = folderPath(chosen.get(0));
-            Native.onPicked(id, folder == null ? "" : folder);
+            boolean told = folder != null && folder.indexOf('\n') < 0 && folder.indexOf('\r') < 0;
+            Native.onPicked(id, told ? folder : "");
         } else {
             // Music that was chosen is kept; a file that is read once (a playlist, a
             // correction file) is not.
@@ -487,7 +488,9 @@ public final class MainActivity extends NativeActivity {
         List<Uri> elsewhere = new ArrayList<>();
         for (Uri uri : from) {
             String path = filePath(uri);
-            if (path != null) {
+            // (A file whose own name has a line break in it cannot be told in a list
+            // of lines: it is copied, under a name without one.)
+            if (path != null && path.indexOf('\n') < 0 && path.indexOf('\r') < 0) {
                 paths.append(path).append('\n');
             } else {
                 elsewhere.add(uri);
@@ -731,8 +734,18 @@ public final class MainActivity extends NativeActivity {
         if (name == null || name.isEmpty()) {
             name = "file";
         }
-        name = name.replace('/', '_').replace('\\', '_');
-        return name.equals(".") || name.equals("..") ? "file" : name;
+        // What a path would make of it, and what the list of paths would: the paths go
+        // to the app one a line, so a line break in a name would make two of one (and
+        // the second could name any place).
+        name = name.replaceAll("[\\p{Cntrl}/\\\\]", "_").trim();
+        // Short enough for a file name with a number added (255 bytes; a letter can be
+        // three or four): cut, with its ending kept.
+        if (name.length() > 70) {
+            int dot = name.lastIndexOf('.');
+            String ending = dot > 0 && name.length() - dot <= 10 ? name.substring(dot) : "";
+            name = name.substring(0, 70 - ending.length()) + ending;
+        }
+        return name.isEmpty() || name.equals(".") || name.equals("..") ? "file" : name;
     }
 
     /** A music file another app asked to have opened ("Open with"). */

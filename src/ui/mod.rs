@@ -1566,7 +1566,19 @@ impl OneumApp {
         let spawned = std::thread::Builder::new()
             .name("oneum-open".into())
             .spawn(move || {
-                let ids = library.import_files(&files);
+                let each = library.import_paths(&files);
+                // A copy the app made of a file (Android: one it could not read in
+                // place) that turns out to stand for no song is not kept.
+                if let Some(copies) = crate::app::paths::AppPaths::imported_copies_dir() {
+                    let unused: Vec<PathBuf> = files
+                        .iter()
+                        .zip(&each)
+                        .filter(|(_, tracks)| tracks.is_empty())
+                        .map(|(file, _)| file.clone())
+                        .collect();
+                    crate::app::delete_own_copies(&copies, &unused);
+                }
+                let ids = each.into_iter().flatten().collect();
                 let _ = tx.send(AppEvent::FilesImported(ids));
                 core.request_repaint();
             });
@@ -1654,7 +1666,19 @@ impl OneumApp {
                     .err()
                     .map(AppEvent::EditFailed)
             }),
-            Action::RemoveFromLibrary(tracks) => self.dialog = Some(Dialog::RemoveTracks(tracks)),
+            Action::RemoveFromLibrary(tracks) => {
+                // Told once, when the dialog comes up: whether copies of the app's own
+                // go with these songs (Android: music it could not read where it was).
+                let own_copies =
+                    crate::app::paths::AppPaths::imported_copies_dir().is_some_and(|copies| {
+                        tracks.iter().any(|&id| {
+                            self.snapshot
+                                .get(id)
+                                .is_some_and(|track| track.path.parent() == Some(copies.as_path()))
+                        })
+                    });
+                self.dialog = Some(Dialog::RemoveTracks { tracks, own_copies });
+            }
             Action::Go(nav) => self.go(nav),
             Action::ToggleColumn(kind) => {
                 let columns = &mut self.settings.list_columns;

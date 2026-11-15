@@ -285,6 +285,41 @@ pub fn delete_own_copies(copies: &std::path::Path, files: &[std::path::PathBuf])
     }
 }
 
+/// The app's own copies (files directly in `copies`) that no song stands for and that
+/// are older than `spare`: a file that turned out not to be music, a copy left half
+/// written when the app was ended, one whose song was removed while the file could not
+/// be. Nothing else would ever remove them, and the listener cannot reach the folder.
+/// A newer one is left alone: it may be on its way into the library.
+pub fn sweep_own_copies(
+    copies: &std::path::Path,
+    in_library: impl Fn(&std::path::Path) -> bool,
+    spare: std::time::Duration,
+) {
+    let Ok(copies) = std::fs::canonicalize(copies) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&copies) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = copies.join(entry.file_name());
+        let old_file = entry
+            .metadata()
+            .ok()
+            .filter(|meta| meta.is_file())
+            .is_some_and(|meta| {
+                meta.modified()
+                    .ok()
+                    .and_then(|at| at.elapsed().ok())
+                    .is_some_and(|age| age >= spare)
+            });
+        if old_file && !in_library(&file) {
+            tracing::info!("a copy that no song stands for is removed");
+            delete_own_copies(&copies, std::slice::from_ref(&file));
+        }
+    }
+}
+
 /// What the system does to the sound (a phone: a call, headphones pulled out) is
 /// answered the way a listener expects of a music player: paused while something else
 /// has the sound, playing on afterwards only if it was this that stopped it and the
@@ -439,6 +474,29 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     }));
     library.rescan();
     library.start_watching();
+    // Where the app keeps copies of its own (Android): those of earlier runs that no
+    // song stands for go. Not on this thread: it reads a folder.
+    if let Some(copies) = AppPaths::imported_copies_dir() {
+        let library = library.clone();
+        let swept = std::thread::Builder::new()
+            .name("oneum-copies".into())
+            .spawn(move || {
+                let songs: std::collections::HashSet<std::path::PathBuf> = library
+                    .snapshot()
+                    .tracks
+                    .iter()
+                    .map(|track| track.path.clone())
+                    .collect();
+                sweep_own_copies(
+                    &copies,
+                    |file| songs.contains(file),
+                    std::time::Duration::from_secs(3600),
+                );
+            });
+        if let Err(error) = swept {
+            tracing::warn!("no thread to look through the app's copies: {error}");
+        }
+    }
 
     let wake_core = core.clone();
     app_hooks::set_waker(move || wake_core.request_repaint());
@@ -470,7 +528,48 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::delete_own_copies;
+    use super::{delete_own_copies, sweep_own_copies};
+
+    /// The sweep removes old files of the copies folder that no song stands for (a
+    /// file that was no music, a half-written copy), and nothing else: not a copy a
+    /// song stands for, not a new one (it may be on its way in), not a folder.
+    #[test]
+    fn the_sweep_removes_old_copies_no_song_stands_for() {
+        use std::time::{Duration, SystemTime};
+        let temp = tempfile::tempdir().unwrap();
+        let copies = temp.path().join("Imported");
+        std::fs::create_dir_all(copies.join("folder")).unwrap();
+        let old = SystemTime::now() - Duration::from_secs(7200);
+        let make = |name: &str, aged: bool| {
+            let file = copies.join(name);
+            std::fs::write(&file, b"x").unwrap();
+            if aged {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&file)
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
+            file
+        };
+        let song = make("song.flac", true);
+        let no_music = make("notes.pls", true);
+        let half = make("copy123.part", true);
+        let fresh = make("just now.flac", false);
+        let in_folder = copies.join("folder").join("deep.flac");
+        std::fs::write(&in_folder, b"x").unwrap();
+
+        let real = std::fs::canonicalize(&copies).unwrap();
+        let in_library = |file: &std::path::Path| file == real.join("song.flac");
+        sweep_own_copies(&copies, in_library, Duration::from_secs(3600));
+        assert!(song.exists(), "a song stands for it");
+        assert!(!no_music.exists() && !half.exists(), "old and unused: gone");
+        assert!(fresh.exists(), "a new one is left alone");
+        assert!(in_folder.exists() && copies.join("folder").is_dir());
+        // A folder that is not there: nothing happens.
+        sweep_own_copies(&temp.path().join("none"), |_| false, Duration::ZERO);
+    }
 
     /// Only the app's own copies are deleted: files directly in the folder it keeps
     /// them in. A file elsewhere (the listener's music), one deeper inside that

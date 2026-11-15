@@ -7,7 +7,12 @@ pub(super) enum Dialog {
     /// Remove a music folder (root id, displayed path).
     RemoveFolder(i64, String),
     DeletePlaylist(i64, String),
-    RemoveTracks(Vec<TrackId>),
+    /// Remove these songs from the library; `own_copies` if copies the app made of some
+    /// of them are deleted with them.
+    RemoveTracks {
+        tracks: Vec<TrackId>,
+        own_copies: bool,
+    },
     NewPlaylist {
         name: String,
         tracks: Vec<TrackId>,
@@ -123,7 +128,7 @@ impl OneumApp {
                     format!("“{name}”\n\n{}", s.confirm_delete_playlist_body),
                     s.delete,
                 ),
-                Dialog::RemoveTracks(tracks) => {
+                Dialog::RemoveTracks { tracks, own_copies } => {
                     let mut body = format!(
                         "{}\n\n{}",
                         self.lang.song_count(tracks.len()),
@@ -131,13 +136,7 @@ impl OneumApp {
                     );
                     // Songs the app keeps a copy of (Android: music it could not read
                     // where it was): the copy is the app's, and goes with the song.
-                    if let Some(copies) = crate::app::paths::AppPaths::imported_copies_dir()
-                        && tracks.iter().any(|&id| {
-                            self.snapshot
-                                .get(id)
-                                .is_some_and(|track| track.path.parent() == Some(copies.as_path()))
-                        })
-                    {
+                    if *own_copies {
                         body.push_str("\n\n");
                         body.push_str(s.confirm_remove_copies);
                     }
@@ -282,7 +281,7 @@ impl OneumApp {
                 });
                 Ok(())
             }
-            Dialog::RemoveTracks(tracks) => {
+            Dialog::RemoveTracks { tracks, .. } => {
                 // Where the app keeps copies of its own (Android: music it could not
                 // read where it was), the copies of these songs go with them.
                 let copies = crate::app::paths::AppPaths::imported_copies_dir();
