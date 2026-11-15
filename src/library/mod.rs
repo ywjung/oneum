@@ -1495,9 +1495,10 @@ impl Library {
         self.inner.scan.cancel_root(root_id);
 
         if let Err(error) = self.delete_folder_rows(root_id) {
-            // The folder is still in the database (the database is locked, the disk
-            // full): it stays a music folder, as before it was to be removed. What was
-            // deleted of it so far is found again by a scan.
+            // The folder is still in the database with all of its tracks (the database
+            // is locked, the disk full; nothing is deleted unless all of it is): it
+            // stays a music folder, as before it was to be removed. The scan that was
+            // stopped above is started again.
             tracing::warn!(root_id, %error, "a music folder could not be removed; it is kept");
             {
                 let mut state = lock(&self.inner.state);
@@ -1521,30 +1522,25 @@ impl Library {
         Ok(())
     }
 
-    /// Deletes the tracks of a music folder and the folder itself from the database
-    /// (and the tracks from memory as they go), in chunks so that other threads get
-    /// their turn at the database in between; the folder row goes last (which would
-    /// also take any remaining track rows with it).
+    /// Deletes a music folder and its tracks from the database, all of it or nothing,
+    /// and then the tracks from memory. It is one transaction on purpose, though a
+    /// large folder keeps the database busy for it: deleted in parts, a failure half
+    /// way would leave the first parts gone for good, and with them the favourites,
+    /// play counts and playlist entries of those songs, which no scan brings back.
     fn delete_folder_rows(&self, root_id: i64) -> Result<(), LibraryError> {
-        loop {
-            let mut db = lock(&self.inner.db);
-            let ids: Vec<TrackId> = lock(&self.inner.state)
-                .tracks
-                .values()
-                .filter(|e| e.track.root_id == Some(root_id))
-                .map(|e| e.track.id)
-                .take(500)
-                .collect();
-            if ids.is_empty() {
-                db.delete_root(root_id)?;
-                return Ok(());
-            }
-            db.delete_tracks(&ids)?;
-            let mut state = lock(&self.inner.state);
-            for id in ids {
-                state.remove(id);
-            }
+        let mut db = lock(&self.inner.db);
+        db.delete_root_with_tracks(root_id)?;
+        let mut state = lock(&self.inner.state);
+        let ids: Vec<TrackId> = state
+            .tracks
+            .values()
+            .filter(|e| e.track.root_id == Some(root_id))
+            .map(|e| e.track.id)
+            .collect();
+        for id in ids {
+            state.remove(id);
         }
+        Ok(())
     }
 
     /// Starts an incremental background scan of every music folder (folders that are

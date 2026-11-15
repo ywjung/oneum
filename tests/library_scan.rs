@@ -3200,6 +3200,78 @@ fn a_folder_that_cannot_be_removed_stays() {
     assert!(titles(&reopened).is_empty());
 }
 
+/// Removing a folder that fails part of the way loses nothing: the folder is deleted
+/// whole or not at all. (Deleted five hundred songs at a time, a failure at the last
+/// song left the first five hundred gone; the scan that followed found the files
+/// again, but as new songs, without their favourites and playlist entries.)
+#[test]
+fn a_folder_removal_that_fails_part_way_loses_nothing() {
+    const SONGS: usize = 501;
+    let env = TestEnv::new();
+    let music = env.music();
+    for n in 0..SONGS {
+        write_tagged_wav(
+            &music.join(format!("{n:03}.wav")),
+            20,
+            &format!("Song {n:03}"),
+            "Band",
+            "Album",
+        );
+    }
+    let (library, root) = env.open_scanned();
+    let ids: Vec<_> = library.snapshot().tracks.iter().map(|t| t.id).collect();
+    assert_eq!(ids.len(), SONGS);
+    library.set_favorite(&ids, true).unwrap();
+    let playlist = library.create_playlist("all of it").unwrap();
+    library.add_to_playlist(playlist, &ids).unwrap();
+
+    let favourites = |library: &Library| {
+        library
+            .snapshot()
+            .tracks
+            .iter()
+            .filter(|t| t.favorite)
+            .count()
+    };
+    // The deletion fails when it comes to the last song that is left.
+    let other = rusqlite::Connection::open(env.paths().data_dir.join("library.db")).unwrap();
+    other
+        .execute_batch(
+            "CREATE TRIGGER refuse_the_last BEFORE DELETE ON tracks \
+             WHEN (SELECT COUNT(*) FROM tracks) <= 1 \
+             BEGIN SELECT RAISE(ABORT, 'refused, as a full disk might'); END;",
+        )
+        .unwrap();
+    assert!(library.remove_folder(root).is_err());
+    assert_eq!(library.roots().len(), 1, "still a music folder");
+    wait_scan(&library);
+    assert_eq!(library.snapshot().tracks.len(), SONGS);
+    assert_eq!(favourites(&library), SONGS, "favourites are kept");
+    assert_eq!(
+        library.playlist_items(playlist).len(),
+        SONGS,
+        "and so is the playlist"
+    );
+    let same: Vec<_> = library.snapshot().tracks.iter().map(|t| t.id).collect();
+    assert_eq!(
+        same, ids,
+        "the songs are the ones that were there, not new ones"
+    );
+    // The same after a restart: memory and database agree.
+    library.shutdown();
+    let (reopened, _) = Library::open(env.paths()).unwrap();
+    assert_eq!(reopened.snapshot().tracks.len(), SONGS);
+    assert_eq!(favourites(&reopened), SONGS);
+    assert_eq!(reopened.playlist_items(playlist).len(), SONGS);
+
+    // Once it can be deleted, all of it goes.
+    other.execute_batch("DROP TRIGGER refuse_the_last").unwrap();
+    reopened.remove_folder(root).unwrap();
+    assert!(reopened.roots().is_empty());
+    assert!(reopened.snapshot().tracks.is_empty());
+    assert!(reopened.playlist_items(playlist).is_empty());
+}
+
 /// A playlist with tracks of a sheet in it, read into a library that does not have the
 /// music folder (a new library, another profile): the tracks are found through the
 /// sheet, like files a playlist names. They are looked after like other individually

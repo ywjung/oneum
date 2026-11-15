@@ -492,6 +492,18 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Deletes a music folder together with its tracks (and, with them, what refers to
+    /// them: playlist entries, history, measurements). All of it or nothing: if any
+    /// part fails, the folder and every one of its tracks are still there, favourites
+    /// and playlist entries included.
+    pub fn delete_root_with_tracks(&mut self, id: i64) -> SqlResult<bool> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM tracks WHERE root_id = ?1", params![id])?;
+        let n = tx.execute("DELETE FROM roots WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
     pub fn set_root_unconfirmed(&self, id: i64, after: Option<TrackId>) -> SqlResult<()> {
         self.conn.execute(
             "UPDATE roots SET unconfirmed_after = ?2 WHERE id = ?1",
