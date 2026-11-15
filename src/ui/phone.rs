@@ -3593,35 +3593,39 @@ impl OneumApp {
             RepeatMode::All => (Icon::Repeat, s.repeat_all),
             RepeatMode::One => (Icon::RepeatOne, s.repeat_one),
         };
-        let buttons: [(Icon, &str, f32, bool, Command); 4] = [
+        // The two at the ends are switches. What each stands at is said in words below
+        // it, and one that is on stands on a tinted ground; one that is off is grey.
+        // (By colour alone, dark for off and the accent for on, the two were hard to
+        // tell apart, and a phone has no pointer to hover for the words.)
+        let buttons: [(Icon, &str, f32, Option<bool>, Command); 4] = [
             (
                 Icon::Shuffle,
                 if self.player.shuffle {
                     s.shuffle_on
                 } else {
-                    s.shuffle
+                    s.shuffle_off
                 },
                 24.0,
-                self.player.shuffle,
+                Some(self.player.shuffle),
                 Command::SetShuffle(!self.player.shuffle),
             ),
             (
                 Icon::Previous,
                 s.previous_track,
                 34.0,
-                false,
+                None,
                 Command::Previous,
             ),
-            (Icon::Next, s.next_track, 34.0, false, Command::Next),
+            (Icon::Next, s.next_track, 34.0, None, Command::Next),
             (
                 repeat_icon,
                 repeat_label,
                 24.0,
-                self.player.repeat != RepeatMode::Off,
+                Some(self.player.repeat != RepeatMode::Off),
                 Command::SetRepeat(next_repeat(self.player.repeat)),
             ),
         ];
-        for (index, (icon, label, size, active, command)) in buttons.into_iter().enumerate() {
+        for (index, (icon, label, size, switch, command)) in buttons.into_iter().enumerate() {
             let slot = if index >= 2 { index + 1 } else { index };
             let hit = Rect::from_center_size(centre(slot), egui::Vec2::splat(TOUCH + 8.0));
             let response = ui.interact(
@@ -3630,16 +3634,37 @@ impl OneumApp {
                 Sense::click(),
             );
             response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-            let color = if active {
-                theme::accent(dark)
-            } else if response.is_pointer_button_down_on() {
-                theme::dim(ui)
-            } else {
-                ui.visuals().strong_text_color()
+            let pressed = response.is_pointer_button_down_on();
+            let (at, color) = match switch {
+                Some(on) => {
+                    let color = match (on, pressed) {
+                        (true, _) => theme::accent(dark),
+                        (false, true) => ui.visuals().text_color(),
+                        (false, false) => theme::dim(ui),
+                    };
+                    let at = hit.center() - vec2(0.0, 9.0);
+                    if on {
+                        ui.painter().rect_filled(
+                            Rect::from_center_size(at, vec2(48.0, 32.0)),
+                            10.0,
+                            theme::accent(dark).gamma_multiply(0.16),
+                        );
+                    }
+                    ui.painter().text(
+                        pos2(hit.center().x, hit.center().y + 19.0),
+                        Align2::CENTER_CENTER,
+                        label,
+                        font(11.0),
+                        color,
+                    );
+                    (at, color)
+                }
+                None if pressed => (hit.center(), theme::dim(ui)),
+                None => (hit.center(), ui.visuals().strong_text_color()),
             };
             icons::paint(
                 ui.painter(),
-                Rect::from_center_size(hit.center(), egui::Vec2::splat(size)),
+                Rect::from_center_size(at, egui::Vec2::splat(size)),
                 icon,
                 color,
             );

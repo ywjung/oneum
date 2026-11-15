@@ -28,7 +28,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - Pressing a song in a list puts the whole list into the queue and plays from that song. **Play** and **Shuffle** above a list start from the top or in a shuffled order.
 - **⋯** at the right of a song (or a long press on it): Play Next · Add to Queue · Add to Playlist · Favorite · Go to Album · Go to Artist · Song Info · Show in Files · Remove.
 - A long press on an album, artist, genre or playlist: Play · Play Next · Add to Queue · Add to Playlist · Pin.
-- **The player**: cover, title (press it for the album), heart (favourite), position, shuffle · previous · play · next · repeat, app volume. **⌄** at the top left closes it, and so does pulling the cover down.
+- **The player**: cover, title (press it for the album), heart (favourite), position, shuffle · previous · play · next · repeat, app volume. Under shuffle and repeat is what each stands at, in words (Shuffle Off · Shuffle On; Repeat Off · Repeat All · Repeat One); one that is on is coloured and stands on a tinted ground. **⌄** at the top left closes it, and so does pulling the cover down.
 - The three buttons at the top right of the player choose what is shown in the cover's place: **Lyrics · VU Meter · Up Next**. Pressing the same button again brings the cover back.
 - **Lyrics**: the lyrics in the file's tags or in an .lrc file of the same name. With time stamps the line being sung is followed, and pressing a line plays from there.
 - **VU Meter**: needles for the loudness of the left and right channel, a spectrum, and the file's format with the path the sound takes.

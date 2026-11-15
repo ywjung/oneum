@@ -112,6 +112,7 @@ strings! {
     previous_track: "이전 곡", "Previous";
     shuffle: "셔플", "Shuffle";
     shuffle_on: "셔플 켜짐", "Shuffle On";
+    shuffle_off: "셔플 끔", "Shuffle Off";
     repeat_off: "반복 끔", "Repeat Off";
     repeat_all: "전체 반복", "Repeat All";
     repeat_one: "한 곡 반복", "Repeat One";
