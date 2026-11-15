@@ -47,6 +47,9 @@ pub struct Core {
     player_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Wakes the UI (set once the egui context exists).
     repaint: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// Settings the UI changed and has not handed to its writer yet (it waits a
+    /// moment so that a slider on its way is not written at every step).
+    unsaved_settings: Mutex<Option<Settings>>,
 }
 
 impl Core {
@@ -57,6 +60,34 @@ impl Core {
     pub fn request_repaint(&self) {
         if let Some(f) = self.repaint.get() {
             f();
+        }
+    }
+
+    /// The UI says which settings it still has to save (`None`: none, they are on
+    /// their way to the file or in it).
+    pub fn note_unsaved_settings(&self, settings: Option<Settings>) {
+        let mut unsaved = self
+            .unsaved_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *unsaved != settings {
+            *unsaved = settings;
+        }
+    }
+
+    /// Writes the settings the UI has not saved yet, if there are any. For the moment
+    /// a phone's app leaves the screen: it may be ended there without another frame.
+    pub fn save_unsaved_settings(&self) {
+        let unsaved = self
+            .unsaved_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(settings) = unsaved
+            && let Err(error) =
+                crate::storage::settings::save_json_atomic(&self.paths.settings_file(), &settings)
+        {
+            tracing::warn!("could not save the settings on leaving the screen: {error}");
         }
     }
 
@@ -229,35 +260,21 @@ pub fn log_dir_hint() -> String {
     }
 }
 
-/// What the system does to the sound (an iPhone: a call, headphones pulled out) is
+/// What the system does to the sound (a phone: a call, headphones pulled out) is
 /// answered the way a listener expects of a music player: paused while something else
-/// has the sound, playing on afterwards only if it was this that stopped it, and
-/// silent when the output it played to is gone.
+/// has the sound, playing on afterwards only if it was this that stopped it and the
+/// listener did not stop or pause it in the meantime, and silent when the output it
+/// played to is gone. The player itself keeps track of that (it sees the listener's
+/// commands in the order they came): see [`Command::InterruptionOver`].
 fn observe_sound(player: &PlayerHandle) {
     use platform::SoundEvent;
-    use std::sync::atomic::{AtomicBool, Ordering};
     let player = player.clone();
-    let paused_for_interruption = AtomicBool::new(false);
     platform::sound::observe(move |event| match event {
-        SoundEvent::Interrupted => {
-            let playing = matches!(
-                player.snapshot().state,
-                PlayState::Playing | PlayState::Loading | PlayState::Seeking
-            );
-            if playing {
-                paused_for_interruption.store(true, Ordering::Release);
-                player.send(Command::Pause);
-            }
-        }
+        SoundEvent::Interrupted => player.send(Command::Interrupted),
         SoundEvent::InterruptionOver { resume } => {
-            if paused_for_interruption.swap(false, Ordering::AcqRel) && resume {
-                player.send(Command::Play);
-            }
+            player.send(Command::InterruptionOver { resume });
         }
-        SoundEvent::OutputGone => {
-            paused_for_interruption.store(false, Ordering::Release);
-            player.send(Command::Pause);
-        }
+        SoundEvent::OutputGone => player.send(Command::Pause),
     });
 }
 
@@ -377,6 +394,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         paths,
         player_thread: Mutex::new(Some(player_thread)),
         repaint: OnceLock::new(),
+        unsaved_settings: Mutex::new(None),
     });
     let _ = core_slot.set(core.clone());
 
@@ -400,9 +418,19 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let wake_core = core.clone();
     app_hooks::set_waker(move || wake_core.request_repaint());
     observe_sound(&player);
-    // Music put into the app's folder while it was away is read when it comes back.
+    // A phone's app that has left the screen may be ended without another word: what
+    // is not saved yet (where the song stands, the volume, a setting just changed) is
+    // saved as it leaves. Music put into the app's folder while it was away is read
+    // when it comes back.
+    let (leaving_player, leaving_core) = (player.clone(), core.clone());
     let returning = library.clone();
-    platform::lifecycle::observe(|| {}, move || returning.rescan());
+    platform::lifecycle::observe(
+        move || {
+            leaving_player.send(Command::SaveSession);
+            leaving_core.save_unsaved_settings();
+        },
+        move || returning.rescan(),
+    );
     let sleep_player = player;
     platform::power::observe_sleep(move || sleep_player.send(Command::SystemWillSleep));
 

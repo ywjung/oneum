@@ -1743,6 +1743,7 @@ impl OneumApp {
             self.settings.window_size = Some(size);
         }
         if self.settings == self.saved_settings {
+            self.core.note_unsaved_settings(None);
             return;
         }
         // Preference changes are saved at once; a window being resized only now and then.
@@ -1761,8 +1762,12 @@ impl OneumApp {
         const SETTLE: Duration = Duration::from_millis(250);
         let dragging = ctx.input(|i| i.pointer.any_down());
         if dragging || self.last_settings_save.elapsed() < SETTLE {
+            // Not written yet: a phone's app that leaves the screen now writes it
+            // then (see `Core::save_unsaved_settings`).
+            self.core.note_unsaved_settings(Some(self.settings.clone()));
             ctx.request_repaint_after(SETTLE);
         } else {
+            self.core.note_unsaved_settings(None);
             self.persist_settings();
         }
     }

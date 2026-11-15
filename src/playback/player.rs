@@ -166,9 +166,39 @@ pub enum Command {
     /// After a lost device: open the preferred (or default) device again and continue.
     RetryOutput,
     SystemWillSleep,
+    /// Something else took the sound (a call): silent until it gives it back.
+    Interrupted,
+    /// It gave the sound back. Playing goes on if `resume` says it may, the
+    /// interruption was what stopped it, and the listener has not decided otherwise
+    /// in between (stopped, paused or started something).
+    InterruptionOver {
+        resume: bool,
+    },
+    /// Write the session now (the app is leaving the screen and may be ended there).
+    SaveSession,
     /// Tracks may have left the library; drop them from the queue.
     LibraryChanged,
     Shutdown,
+}
+
+impl Command {
+    /// Whether the command is the listener's word on playing or not playing. While
+    /// something else has the sound, such a word stands: playing does not start again
+    /// by itself when the sound comes back.
+    fn decides_playing(&self) -> bool {
+        matches!(
+            self,
+            Command::PlayTracks { .. }
+                | Command::JumpTo(_)
+                | Command::ClearQueue
+                | Command::Play
+                | Command::Pause
+                | Command::TogglePlayPause
+                | Command::Stop
+                | Command::RetryOutput
+                | Command::SystemWillSleep
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,6 +625,9 @@ struct Player<H: PlayerHost> {
     state: PlayState,
     /// What the user asked for; the engine follows once audio is available.
     want_playing: bool,
+    /// Playing was stopped because something else took the sound, and is to go on when
+    /// the sound comes back (see [`Command::InterruptionOver`]).
+    interrupted: bool,
     chain: Option<Chain>,
     /// Position used when there is no feed (restored session, prepared-while-paused, lost device).
     resume_ms: u64,
@@ -691,6 +724,7 @@ impl<H: PlayerHost> Player<H> {
             copied_queue_revision,
             state,
             want_playing: false, // never start making sound on launch
+            interrupted: false,
             chain: None,
             resume_ms,
             volume,
@@ -1053,6 +1087,8 @@ impl<H: PlayerHost> Player<H> {
         let left = at.saturating_duration_since(Instant::now());
         if left.is_zero() {
             self.sleep_at = None;
+            // The timer's word stands like the listener's: no playing on after a call.
+            self.interrupted = false;
             self.pause();
             // Not at once: the pause fades its last milliseconds out, and a volume rising
             // meanwhile would turn them into a tick.
@@ -1236,6 +1272,9 @@ impl<H: PlayerHost> Player<H> {
     // ----- commands --------------------------------------------------------------------
 
     fn handle(&mut self, command: Command) {
+        if command.decides_playing() {
+            self.interrupted = false;
+        }
         match command {
             Command::PlayTracks {
                 tracks,
@@ -1359,6 +1398,9 @@ impl<H: PlayerHost> Player<H> {
                 self.volume = volume;
                 self.sleep_restore_at = None;
                 self.engine.set_volume(volume);
+                // Part of the session: saved soon, also while nothing plays (then
+                // nothing else would save it).
+                self.meta_dirty_since.get_or_insert_with(Instant::now);
                 self.dirty = true;
             }
             Command::SetShuffle(on) => {
@@ -1463,6 +1505,18 @@ impl<H: PlayerHost> Player<H> {
                 self.dirty = true;
                 self.save_session(false);
             }
+            Command::Interrupted => {
+                if self.want_playing || self.state == PlayState::Playing {
+                    self.pause();
+                    self.interrupted = true;
+                }
+            }
+            Command::InterruptionOver { resume } => {
+                if std::mem::take(&mut self.interrupted) && resume {
+                    self.play();
+                }
+            }
+            Command::SaveSession => self.save_session(false),
             Command::LibraryChanged => {
                 let before = self.queue.len();
                 let current_removed = self.queue.retain_tracks(|t| self.host.has_track(t));
@@ -1552,6 +1606,9 @@ impl<H: PlayerHost> Player<H> {
         }
         let duration = self.current_duration_ms();
         let target = if duration > 0 { ms.min(duration) } else { ms };
+        // Where the song stands is part of the session: saved soon, also while paused
+        // (the regular saves only run while it plays).
+        self.meta_dirty_since.get_or_insert_with(Instant::now);
         if self.chain.is_some() {
             self.start_current(target, true);
         } else {

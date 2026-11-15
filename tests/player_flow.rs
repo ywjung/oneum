@@ -1182,6 +1182,134 @@ fn sleep_pauses_keeps_the_position_and_never_resumes_on_its_own() {
     assert!(awake.position_ms >= asleep.position_ms);
 }
 
+/// Something else takes the sound (a call): playing stops, and goes on when the sound
+/// comes back and the system says it may. Not when it says it may not, and an end of
+/// an interruption that never began changes nothing.
+#[test]
+fn playing_goes_on_after_an_interruption() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 300
+    });
+    rig.send(Command::Interrupted);
+    let silent = rig.wait("paused for the call", |s| s.state == PlayState::Paused);
+    rig.send(Command::InterruptionOver { resume: true });
+    let again = rig.wait("playing after the call", |s| s.state == PlayState::Playing);
+    assert!(again.position_ms >= silent.position_ms);
+
+    rig.send(Command::Interrupted);
+    rig.wait("paused again", |s| s.state == PlayState::Paused);
+    rig.send(Command::InterruptionOver { resume: false });
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(rig.player.snapshot().state, PlayState::Paused);
+    // That interruption is over: a later "it is over" finds nothing to play on.
+    rig.send(Command::InterruptionOver { resume: true });
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(rig.player.snapshot().state, PlayState::Paused);
+}
+
+/// What the listener decides while something else has the sound stands: a song that
+/// was stopped or paused during a call does not start again when the call is over.
+/// (It did: only "was it playing before" was remembered.)
+#[test]
+fn an_interruption_does_not_undo_what_the_listener_did_meanwhile() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    let interrupted_while_playing = |then: Command| {
+        rig.send(play(&[LONG], 0));
+        rig.wait("playing", |s| {
+            s.state == PlayState::Playing && s.position_ms >= 300
+        });
+        rig.send(Command::Interrupted);
+        rig.wait("paused for the call", |s| s.state == PlayState::Paused);
+        rig.send(then);
+        rig.send(Command::InterruptionOver { resume: true });
+        std::thread::sleep(Duration::from_millis(200));
+        rig.player.snapshot()
+    };
+    assert_eq!(
+        interrupted_while_playing(Command::Stop).state,
+        PlayState::Paused,
+        "stopped during the call"
+    );
+    assert_eq!(
+        interrupted_while_playing(Command::Pause).state,
+        PlayState::Paused,
+        "paused during the call"
+    );
+    // Seeking or the volume is not a word on playing: it goes on.
+    let moved = interrupted_while_playing(Command::SeekTo(6_000));
+    assert_eq!(moved.state, PlayState::Playing);
+    assert!(moved.position_ms >= 6_000);
+
+    // Paused before the call: the call's end starts nothing.
+    rig.send(Command::Pause);
+    rig.wait("paused by the listener", |s| s.state == PlayState::Paused);
+    rig.send(Command::Interrupted);
+    rig.send(Command::InterruptionOver { resume: true });
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(rig.player.snapshot().state, PlayState::Paused);
+}
+
+/// Where the song stands and the volume are saved soon after they change while the
+/// song is paused (they were not: only a playing song was saved at intervals), and
+/// "save now" saves at once.
+#[test]
+fn position_and_volume_changed_while_paused_are_saved() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    let saved = |rig: &Rig| {
+        rig.host
+            .saved
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("session saved")
+    };
+    rig.send(Command::SetVolume(0.5));
+    rig.send(play(&[LONG], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    rig.send(Command::Pause);
+    rig.wait("paused", |s| s.state == PlayState::Paused);
+    assert!(saved(&rig).position_ms < 5_000);
+
+    rig.send(Command::SeekTo(8_000));
+    rig.wait_host("the new position to be saved", |host| {
+        host.saved
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .is_some_and(|session| session.position_ms == 8_000)
+    });
+    rig.send(Command::SetVolume(0.25));
+    rig.wait_host("the new volume to be saved", |host| {
+        host.saved
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .is_some_and(|session| session.volume == 0.25)
+    });
+
+    // Leaving the screen: saved at once, not after the usual moment.
+    rig.send(Command::SeekTo(2_000));
+    rig.send(Command::SaveSession);
+    let before = Instant::now();
+    rig.wait_host("the save that was asked for", |host| {
+        host.saved
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .is_some_and(|session| session.position_ms == 2_000)
+    });
+    assert!(
+        before.elapsed() < Duration::from_millis(500),
+        "saved at once"
+    );
+    assert_eq!(saved(&rig).volume, 0.25);
+}
+
 #[test]
 fn a_file_that_never_opens_is_skipped_after_the_stall_timeout() {
     let dir = tempfile::tempdir().expect("tempdir");
