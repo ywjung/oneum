@@ -24,3 +24,16 @@ env -i HOME="$HOME" USER="${USER:-}" \
   IPHONEOS_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \
   cargo build --locked --bin oneum --target "$TARGET" $MODE
 cp "target/$TARGET/$DIR/oneum" "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
+# The signature Xcode made in an earlier build is of the executable that was just
+# replaced. Xcode signs again only when something it knows of has changed, and this
+# copy is not among that: a second build with nothing else changed left the app
+# unsigned ("No code signature found" when it was installed). So where Xcode has
+# signed this app before (its entitlements are there from then), it is signed here
+# again, as Xcode does it. In a first build Xcode's own signing step follows.
+ENTITLEMENTS="$TARGET_TEMP_DIR/$PRODUCT_NAME.app.xcent"
+if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ] \
+  && [ -f "$ENTITLEMENTS" ] && [ -f "$TARGET_BUILD_DIR/$WRAPPER_NAME/embedded.mobileprovision" ]; then
+  /usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" \
+    --entitlements "$ENTITLEMENTS" --timestamp=none --generate-entitlement-der \
+    "$TARGET_BUILD_DIR/$WRAPPER_NAME"
+fi

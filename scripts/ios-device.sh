@@ -50,6 +50,13 @@ xcodebuild -project ios/OnEum.xcodeproj -scheme OnEum -configuration "$CONFIG" \
   DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
   MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" build
 APP=target/xcode/Build/Products/$CONFIG-iphoneos/OnEum.app
+# An iPhone refuses an app whose signature is missing or not of what is in it, with a
+# message that does not say so plainly: better to find out here.
+if ! codesign --verify --strict "$APP" 2>/dev/null; then
+  echo "The app that was built is not signed as it stands ($APP):" >&2
+  codesign --verify --strict "$APP" >&2 || true
+  exit 1
+fi
 [ "$INSTALL" = 1 ] || { echo "$APP"; exit 0; }
 
 DEVICE=${ONEUM_IOS_DEVICE:-}
