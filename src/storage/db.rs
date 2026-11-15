@@ -485,13 +485,6 @@ impl Db {
     }
 
     /// Deletes a root and (by cascade) its tracks. Returns false if it did not exist.
-    pub fn delete_root(&self, id: i64) -> SqlResult<bool> {
-        let n = self
-            .conn
-            .execute("DELETE FROM roots WHERE id = ?1", params![id])?;
-        Ok(n > 0)
-    }
-
     /// Deletes a music folder together with its tracks (and, with them, what refers to
     /// them: playlist entries, history, measurements). All of it or nothing: if any
     /// part fails, the folder and every one of its tracks are still there, favourites
@@ -2164,7 +2157,7 @@ mod tests {
         assert_eq!(db.load_queue().unwrap(), vec![(u64::MAX, ids[2])]);
 
         // Removing the root removes its remaining track and that track's references.
-        assert!(db.delete_root(root).unwrap());
+        assert!(db.delete_root_with_tracks(root).unwrap());
         let left = db.load_tracks().unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].track.id, ids[2]);

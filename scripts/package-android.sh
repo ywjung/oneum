@@ -42,13 +42,17 @@ for inside in lib/arm64-v8a/liboneum.so assets/LICENSE.txt assets/THIRD_PARTY_LI
 done
 # Its signature holds, and it is not a build that can be debugged (such a build takes
 # test settings from whoever starts it).
-TOOLS=$(ls -d "$ANDROID_SDK"/build-tools/* | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+# (The newest: sorted by the numbers of the version, which is the folder's name.)
+TOOLS="$ANDROID_SDK/build-tools/$(ls "$ANDROID_SDK/build-tools" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+[ -x "$TOOLS/apksigner" ] && [ -x "$TOOLS/aapt2" ] \
+  || { echo "no apksigner and aapt2 in $TOOLS" >&2; exit 1; }
 if [ -z "${JAVA_HOME:-}" ]; then
   JAVA_HOME=$(/usr/libexec/java_home -v 21 2>/dev/null || /usr/libexec/java_home -v 17 2>/dev/null || true)
   [ -n "$JAVA_HOME" ] && export JAVA_HOME
 fi
 "$TOOLS/apksigner" verify "$APK" || { echo "the APK's signature does not verify" >&2; exit 1; }
-if "$TOOLS/aapt2" dump badging "$APK" | grep -q "application-debuggable"; then
+BADGING=$("$TOOLS/aapt2" dump badging "$APK") || { echo "aapt2 could not read the APK" >&2; exit 1; }
+if echo "$BADGING" | grep -q "application-debuggable"; then
   echo "the APK is a debuggable build" >&2; exit 1
 fi
 

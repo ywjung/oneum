@@ -73,6 +73,12 @@ PY
 say() { # say <condition as a shell test result> <description>
   if [ "$1" = 0 ]; then echo "  ok   $2"; else echo "  FAIL $2"; exit 1; fi
 }
+holds() { # holds <description> <command…>: runs the command and says whether it holds
+  # (As the test of an "if": a command that fails on a line of its own ends the script
+  # under "set -e" before anything is said of it.)
+  what=$1; shift
+  if "$@"; then say 0 "$what"; else say 1 "$what"; fi
+}
 start() { # (re)starts the installed app with the verification channel
   $ADB shell am force-stop $PKG
   $ADB shell "run-as $PKG sh -c 'mkdir -p files/verify && : > files/verify/script.txt'"
@@ -84,6 +90,9 @@ session() { # what the system's media session says of the app: "PLAYING" / "PAUS
   $ADB shell dumpsys media_session | grep -A14 "package=$PKG" \
     | sed -n 's/.*state=PlaybackState {state=\([A-Z_]*\).*/\1/p' | head -1
 }
+session_is() { [ "$(session)" = "$1" ]; }
+in_foreground() { $ADB shell dumpsys activity services $PKG | grep -q 'isForeground=true'; }
+keyboard_away() { [ "$($ADB shell dumpsys input_method | grep -c 'mInputShown=true')" = 0 ]; }
 
 echo "== generating test library"
 scripts/dev/gen-test-library.sh "$MUSIC" >/dev/null
@@ -162,8 +171,8 @@ check p1.json 'd["state"] == "Playing" and d["queue_len"] == 20 and d["queue_ind
 check p1.json 'd["volume"] == 0 and d["underruns"] == 0 and d["output_device"]' "audio reaches the output without underruns, silently"
 ui 'wait 1200' 'dump p2.json'
 check p2.json 'd["position_ms"] > 1500' "the position advances"
-[ "$(session)" = PLAYING ]; say $? "the system's media session says it is playing"
-$ADB shell dumpsys activity services $PKG | grep -q "isForeground=true"; say $? "the playback service is in the foreground"
+holds "the system's media session says it is playing" session_is PLAYING
+holds "the playback service is in the foreground" in_foreground
 ui "tap 150 $MINI" 'wait 700' 'dump p3.json'
 check p3.json 'p["player_open"]' "the bar of the playing song opens the player"
 ui "tap $PLAY_X $PLAY_Y" 'wait 600' 'dump p4.json' "tap $PLAY_X $PLAY_Y" 'wait 800' 'dump p5.json'
@@ -181,7 +190,7 @@ echo "== buttons of the system (a headset, the lock screen)"
 $ADB shell cmd media_session dispatch pause >/dev/null
 ui 'wait 1200' 'dump m1.json'
 check m1.json 'd["state"] == "Paused"' "a pause from outside pauses"
-[ "$(session)" = PAUSED ]; say $? "and the media session says so"
+holds "and the media session says so" session_is PAUSED
 $ADB shell cmd media_session dispatch play >/dev/null
 ui 'wait 1200' 'dump m2.json'
 check m2.json 'd["state"] == "Playing"' "a play from outside plays"
@@ -219,8 +228,7 @@ check kb4.json 'p["player_open"] and p["player_view"] == "Queue"' "Ctrl+U shows 
 $ADB shell input keyevent KEYCODE_ESCAPE
 ui 'wait 900' 'dump kb5.json'
 check kb5.json 'not p["player_open"] and d["state"] == "Playing"' "Escape goes back"
-[ "$($ADB shell dumpsys input_method | grep -c 'mInputShown=true')" = 0 ]
-say $? "the on-screen keyboard stayed away"
+holds "the on-screen keyboard stayed away" keyboard_away
 
 echo "== a call"
 $ADB emu gsm call 0101234567 >/dev/null
@@ -228,8 +236,7 @@ ui 'wait 3000' 'dump k1.json'
 check k1.json 'd["state"] == "Paused"' "the music pauses when a call comes in"
 # It is to play on after the call, also from behind the screen: a service that left the
 # foreground now could not come back to it there.
-$ADB shell dumpsys activity services $PKG | grep -q 'isForeground=true'
-say $? "and the playback service keeps the foreground for the call"
+holds "and the playback service keeps the foreground for the call" in_foreground
 $ADB emu gsm cancel 0101234567 >/dev/null
 ui 'wait 3000' 'dump k2.json'
 check k2.json 'd["state"] == "Playing"' "and plays on when the call is over"
@@ -244,7 +251,7 @@ check s2.json 'not d["text_focus"] and p["tab"] == "Search"' "Back gives the key
 echo "== off screen and back"
 $ADB shell input keyevent KEYCODE_HOME
 sleep 5
-[ "$(session)" = PLAYING ]; say $? "the music plays on with the app off screen"
+holds "the music plays on with the app off screen" session_is PLAYING
 $ADB shell am start -n $PKG/.MainActivity >/dev/null 2>&1
 sleep 2
 ui 'wait 600' 'dump h1.json'
