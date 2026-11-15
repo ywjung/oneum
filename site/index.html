@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OnEum(온음), 내 음악 파일을 위한 오프라인 플레이어</title>
+  <meta name="description" content="OnEum(온음)은 가지고 있는 음악 파일을 듣는 오프라인 플레이어입니다. 폴더를 추가하면 바로 재생하고, 파일은 읽기만 하며, 계정도 서버도 없습니다. macOS, Windows, iPhone, Android.">
+  <link rel="canonical" href="https://ywjung.github.io/oneum/">
+  <link rel="alternate" hreflang="ko" href="https://ywjung.github.io/oneum/">
+  <link rel="alternate" hreflang="en" href="https://ywjung.github.io/oneum/en/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="OnEum(온음)">
+  <meta property="og:description" content="가지고 있는 음악 파일을 듣는 오프라인 플레이어. 계정도 서버도 없습니다.">
+  <meta property="og:url" content="https://ywjung.github.io/oneum/">
+  <meta property="og:image" content="https://ywjung.github.io/oneum/img/mac-playing-ko.png">
+  <link rel="icon" href="img/favicon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+
+  <header class="wrap top">
+    <a class="name" href="./"><img src="img/icon-256.png" alt="" width="34" height="34">OnEum</a>
+    <nav aria-label="이 페이지">
+      <a class="far" href="#does">하는 일</a>
+      <a class="far" href="#phone">휴대폰</a>
+      <a class="far" href="#checked">확인한 범위</a>
+      <a href="#get">받기</a>
+      <a href="en/" lang="en" hreflang="en">English</a>
+      <a href="https://github.com/ywjung/oneum">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <div class="wrap opening">
+      <div>
+        <h1>가지고 있는 음악을,<br>있는 그대로 듣습니다.</h1>
+        <p class="lead">OnEum(온음)은 내 음악 파일을 위한 오프라인 플레이어입니다. 폴더를 추가하면 바로 재생하고, 파일은 읽기만 합니다. 계정도 서버도 없습니다.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/ywjung/oneum">GitHub에서 보기</a>
+          <a class="button quiet" href="#get">받는 방법</a>
+        </div>
+      </div>
+      <dl class="plate">
+        <div><dt>형식</dt><dd>FLAC, WAV, AIFF, ALAC, MP3, AAC, DSD</dd></div>
+        <div><dt>실행</dt><dd>macOS, Windows, iPhone, Android</dd></div>
+        <div><dt>연결</dt><dd>없음. 인터넷 없이 씁니다</dd></div>
+        <div><dt>언어</dt><dd>한국어, 영어</dd></div>
+        <div><dt>라이선스</dt><dd>MIT, 소스 공개</dd></div>
+      </dl>
+    </div>
+
+    <div class="wrap">
+      <figure>
+        <div class="window">
+          <img src="img/mac-playing-ko.png" width="1680" height="1084"
+               alt="OnEum의 macOS 창. 앨범의 곡 목록 아래에 좌우 VU 미터와 스펙트럼이 있고, 오른쪽에 재생 중인 곡의 정보가 보입니다.">
+        </div>
+        <figcaption>macOS에서 재생 중인 화면입니다. 화면 속 음악가와 앨범은 이 페이지를 위해 지어낸 것입니다.</figcaption>
+      </figure>
+    </div>
+
+    <div class="faceplate">
+      <div class="wrap">
+        <div class="vu" data-channel="L"></div>
+        <div class="meaning">
+          <p class="word">온음</p>
+          <p class="said">on-eum</p>
+          <p>바꾸지 않은 온전한 소리라는 뜻이고, 음악에서 말하는 온음이기도 합니다.</p>
+          <button type="button" data-meters data-stop="미터 멈추기" data-move="미터 움직이기" hidden></button>
+        </div>
+        <div class="vu" data-channel="R"></div>
+      </div>
+    </div>
+
+    <section id="does" class="does">
+      <div class="wrap">
+        <h2>하는 일</h2>
+        <dl>
+          <div>
+            <dt>듣기</dt>
+            <dd><strong>폴더를 추가하면 스캔이 끝나기 전에도 재생합니다.</strong> 곡과 곡 사이를 끊김 없이 잇고, 파일 하나로 된 앨범은 CUE 시트로 곡을 나눕니다. 대기열, 플레이리스트, 셔플과 반복, 잠자기 타이머가 있습니다.</dd>
+          </div>
+          <div>
+            <dt>찾기</dt>
+            <dd><strong>5만 곡 라이브러리에서 검색과 스크롤이 바로 반응합니다.</strong> 초성만 넣어도 찾고, <code>artist:</code>, <code>year:1990-1999</code>, <code>plays:&gt;=5</code> 같은 조건을 쓸 수 있습니다. 검색을 저장하면 스마트 플레이리스트가 됩니다.</dd>
+          </div>
+          <div>
+            <dt>소리</dt>
+            <dd><strong>파일에서 장치까지 거치는 단계를 신호 경로로 보여 줍니다.</strong> macOS에서는 곡의 샘플레이트에 장치를 맞춰 변환 없이 내보내거나 독점 출력을 고를 수 있습니다. 변환이 필요할 때는 20kHz까지 평탄하게 변환합니다.</dd>
+          </div>
+          <div>
+            <dt>보기</dt>
+            <dd><strong>좌우 VU 미터와 36밴드 스펙트럼.</strong> 가사는 줄을 따라가고, 크레딧과 듣기 통계를 보여 줍니다. 파일 검사는 손상 여부와 다이내믹 레인지, 트루 피크를 잽니다.</dd>
+          </div>
+          <div>
+            <dt>다듬기</dt>
+            <dd><strong>음량을 곡마다 비슷하게 맞춥니다.</strong> ReplayGain 태그를 쓰고, 태그가 없는 곡은 직접 잽니다. 10밴드 이퀄라이저, 헤드폰 34종의 보정 프로필, 크로스피드가 있습니다.</dd>
+          </div>
+          <div>
+            <dt>지키기</dt>
+            <dd><strong>음악 파일과 태그를 바꾸지 않습니다.</strong> 광고가 없고 사용 기록을 어디에도 보내지 않습니다. 이 페이지도 외부 글꼴이나 추적 코드를 불러오지 않습니다.</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <figure>
+          <div class="window">
+            <img src="img/mac-albums-ko.png" width="1680" height="690" loading="lazy"
+                 alt="OnEum의 앨범 화면. 표지가 격자로 놓여 있고 왼쪽에 곡, 앨범, 아티스트, 장르, 즐겨찾기, 폴더, 통계 메뉴가 있습니다.">
+          </div>
+          <figcaption>앨범, 아티스트, 장르, 폴더로 둘러보고 자주 가는 곳은 사이드바에 고정합니다.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="phone" class="pocket">
+      <div class="wrap">
+        <div>
+          <h2>휴대폰에서도 듣습니다</h2>
+          <p>같은 코드로 만든 iPhone 앱과 Android 앱에는 손가락에 맞춘 화면이 따로 있습니다. 화면을 꺼도 재생이 이어지고, 잠금 화면과 이어폰 버튼으로 조작합니다.</p>
+          <p>iPhone에서는 음악을 파일 앱이나 Mac의 Finder로 넣거나, iCloud Drive와 꽂은 저장 장치의 폴더를 복사 없이 연결합니다. Android에서는 휴대폰의 Music 폴더와 추가한 폴더를 그 자리에서 읽습니다.</p>
+          <p class="note">화면은 iPhone에서 찍은 것입니다. Android도 같은 화면을 씁니다.</p>
+        </div>
+        <div class="phones">
+          <figure><img src="img/phone-albums-ko.png" width="598" height="1300" loading="lazy" alt="iPhone의 앨범 격자 화면."></figure>
+          <figure><img src="img/phone-player-ko.png" width="598" height="1300" loading="lazy" alt="iPhone의 플레이어 화면. 표지와 재생 버튼이 보입니다."></figure>
+          <figure><img src="img/phone-meters-ko.png" width="598" height="1300" loading="lazy" alt="iPhone 플레이어의 VU 미터와 스펙트럼 화면."></figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="checked" class="checked">
+      <div class="wrap">
+        <h2>확인한 범위</h2>
+        <table>
+          <thead>
+            <tr><th scope="col">시스템</th><th scope="col">대상</th><th scope="col">지금까지 확인한 것</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">macOS</th>
+              <td>Apple Silicon, macOS 14 이상</td>
+              <td>macOS 27.2.1에서 확인했습니다. 아직 Apple의 서명과 공증을 받지 않아 처음 열 때 경고가 나옵니다.</td>
+            </tr>
+            <tr>
+              <th scope="row">Windows</th>
+              <td>64비트, Windows 10 이상</td>
+              <td>zip과 설치 프로그램을 만드는 것까지 확인했습니다. 실제 Windows에서의 확인은 아직 끝나지 않았습니다.</td>
+            </tr>
+            <tr>
+              <th scope="row">iPhone</th>
+              <td>iOS 16 이상</td>
+              <td>iOS 시뮬레이터에서 확인했고, 실제 iPhone에 설치해 실행했습니다. App Store에는 없으며 Xcode로 직접 빌드해 설치합니다.</td>
+            </tr>
+            <tr>
+              <th scope="row">Android</th>
+              <td>Android 11 이상</td>
+              <td>Android 16 에뮬레이터에서 확인했습니다. 실제 기기에서의 확인은 아직 하지 못했습니다. 스토어에는 없으며 직접 빌드해 설치합니다.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="note">무엇을 어떻게 확인했고 무엇이 남았는지는 저장소의 <a href="https://github.com/ywjung/oneum/blob/main/docs/TESTING.md">TESTING.md</a>에 적어 둡니다.</p>
+      </div>
+    </section>
+
+    <section id="get" class="get">
+      <div class="wrap">
+        <h2>받기</h2>
+        <div>
+          <h3>릴리스</h3>
+          <p>배포 파일은 GitHub의 릴리스 페이지에 올립니다. macOS는 디스크 이미지, Windows는 설치 프로그램과 zip입니다. 아직 올라온 것이 없으면 소스에서 빌드해 주세요.</p>
+          <p><a class="button quiet" href="https://github.com/ywjung/oneum/releases">릴리스 페이지 열기</a></p>
+          <h3>문서</h3>
+          <ul>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE.md">macOS 사용 안내</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE_WINDOWS.md">Windows 사용 안내</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE_IOS.md">iPhone 사용 안내</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE_ANDROID.md">Android 사용 안내</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/CHANGELOG.md">바뀐 것</a></li>
+          </ul>
+        </div>
+        <div>
+          <h3>소스에서 빌드</h3>
+          <p>Rust와 Xcode 명령줄 도구가 있는 Mac에서 만듭니다.</p>
+<pre><code>git clone https://github.com/ywjung/oneum.git
+cd oneum
+scripts/package.sh            # macOS 앱
+scripts/package-windows.sh    # Windows zip과 설치 프로그램
+scripts/ios-sim.sh            # iOS 시뮬레이터에서 실행
+scripts/android-build.sh --release   # Android APK</code></pre>
+          <p>자세한 준비물과 서명은 <a href="https://github.com/ywjung/oneum/blob/main/docs/RELEASE.md">RELEASE.md</a>에 있습니다.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>OnEum은 MIT 라이선스로 공개된 소프트웨어입니다. <a href="https://github.com/ywjung/oneum">github.com/ywjung/oneum</a></p>
+      <p>이 페이지는 쿠키를 쓰지 않고 방문 기록을 모으지 않습니다.</p>
+    </div>
+  </footer>
+
+  <script src="meters.js" defer></script>
+</body>
+</html>

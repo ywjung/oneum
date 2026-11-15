@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OnEum, an offline player for the music files you own</title>
+  <meta name="description" content="OnEum is an offline player for the music files you own. Add a folder and listen: files are only read, and there is no account and no server. For macOS, Windows, iPhone and Android.">
+  <link rel="canonical" href="https://ywjung.github.io/oneum/en/">
+  <link rel="alternate" hreflang="ko" href="https://ywjung.github.io/oneum/">
+  <link rel="alternate" hreflang="en" href="https://ywjung.github.io/oneum/en/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="OnEum">
+  <meta property="og:description" content="An offline player for the music files you own. No account, no server.">
+  <meta property="og:url" content="https://ywjung.github.io/oneum/en/">
+  <meta property="og:image" content="https://ywjung.github.io/oneum/img/mac-playing-en.png">
+  <link rel="icon" href="../img/favicon.png">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the content</a>
+
+  <header class="wrap top">
+    <a class="name" href="./"><img src="../img/icon-256.png" alt="" width="34" height="34">OnEum</a>
+    <nav aria-label="This page">
+      <a class="far" href="#does">What it does</a>
+      <a class="far" href="#phone">Phones</a>
+      <a class="far" href="#checked">What was checked</a>
+      <a href="#get">Get it</a>
+      <a href="../" lang="ko" hreflang="ko">한국어</a>
+      <a href="https://github.com/ywjung/oneum">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <div class="wrap opening">
+      <div>
+        <h1>The music you own,<br>played as it is.</h1>
+        <p class="lead">OnEum is an offline player for your own music files. Add a folder and it plays at once. Files are only read. There is no account and no server.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/ywjung/oneum">View on GitHub</a>
+          <a class="button quiet" href="#get">How to get it</a>
+        </div>
+      </div>
+      <dl class="plate">
+        <div><dt>Formats</dt><dd>FLAC, WAV, AIFF, ALAC, MP3, AAC, DSD</dd></div>
+        <div><dt>Runs on</dt><dd>macOS, Windows, iPhone, Android</dd></div>
+        <div><dt>Network</dt><dd>None. It works without the internet</dd></div>
+        <div><dt>Languages</dt><dd>Korean, English</dd></div>
+        <div><dt>License</dt><dd>MIT, open source</dd></div>
+      </dl>
+    </div>
+
+    <div class="wrap">
+      <figure>
+        <div class="window">
+          <img src="../img/mac-playing-en.png" width="1680" height="1084"
+               alt="The OnEum window on macOS: the songs of an album, and below them a VU meter for each channel with a spectrum between them.">
+        </div>
+        <figcaption>OnEum playing on macOS. The artists and albums in these pictures were made up for this page.</figcaption>
+      </figure>
+    </div>
+
+    <div class="faceplate">
+      <div class="wrap">
+        <div class="vu" data-channel="L"></div>
+        <div class="meaning">
+          <p class="word">온음</p>
+          <p class="said">on-eum</p>
+          <p>Korean for a whole, unaltered sound, and for the whole tone of music.</p>
+          <button type="button" data-meters data-stop="Stop the meters" data-move="Move the meters" hidden></button>
+        </div>
+        <div class="vu" data-channel="R"></div>
+      </div>
+    </div>
+
+    <section id="does" class="does">
+      <div class="wrap">
+        <h2>What it does</h2>
+        <dl>
+          <div>
+            <dt>Play</dt>
+            <dd><strong>Add a folder and it plays while the scan is still running.</strong> Songs follow each other without a gap, and an album that is one file is split by its CUE sheet. There is a queue, playlists, shuffle and repeat, and a sleep timer.</dd>
+          </div>
+          <div>
+            <dt>Find</dt>
+            <dd><strong>Searching and scrolling answer at once in a library of 50,000 songs.</strong> Search by parts of words, by Korean initial consonants, or by fields such as <code>artist:</code>, <code>year:1990-1999</code> and <code>plays:&gt;=5</code>. A search can be kept as a smart playlist.</dd>
+          </div>
+          <div>
+            <dt>Sound</dt>
+            <dd><strong>The signal path lists what happens between the file and the device.</strong> On macOS the device can be set to the song's sample rate, so nothing is converted, or be used exclusively. Where conversion is needed it is flat to 20 kHz.</dd>
+          </div>
+          <div>
+            <dt>See</dt>
+            <dd><strong>A VU meter for each channel and a 36-band spectrum.</strong> Lyrics are followed line by line, and there are credits and listening statistics. The file check finds damage, dynamic range and true peak.</dd>
+          </div>
+          <div>
+            <dt>Adjust</dt>
+            <dd><strong>Loudness is evened out between songs.</strong> ReplayGain tags are used, and songs without them are measured. There is a ten-band equalizer, correction profiles for 34 headphones, and crossfeed.</dd>
+          </div>
+          <div>
+            <dt>Keep</dt>
+            <dd><strong>Music files and their tags are never changed.</strong> There is no advertising, and nothing about what you play is sent anywhere. This page loads no outside fonts and no tracking code either.</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <figure>
+          <div class="window">
+            <img src="../img/mac-albums-en.png" width="1680" height="690" loading="lazy"
+                 alt="The albums of the library as a grid of covers, with songs, albums, artists, genres, favorites, folders and statistics in the sidebar.">
+          </div>
+          <figcaption>Browse by album, artist, genre and folder, and pin what you open often to the sidebar.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="phone" class="pocket">
+      <div class="wrap">
+        <div>
+          <h2>On a phone too</h2>
+          <p>The iPhone app and the Android app are built from the same code and have screens of their own, made for a finger. Music plays on with the screen off, and the lock screen and headphone buttons control it.</p>
+          <p>On an iPhone, put music in with the Files app or Finder on a Mac, or link a folder in iCloud Drive or on a plugged-in drive without copying it. On Android, the phone's Music folder and the folders you add are read where they are.</p>
+          <p class="note">The pictures were taken on an iPhone. Android uses the same screens.</p>
+        </div>
+        <div class="phones">
+          <figure><img src="../img/phone-albums-en.png" width="598" height="1300" loading="lazy" alt="The album grid on an iPhone."></figure>
+          <figure><img src="../img/phone-player-en.png" width="598" height="1300" loading="lazy" alt="The player on an iPhone, with the cover and the playback buttons."></figure>
+          <figure><img src="../img/phone-meters-en.png" width="598" height="1300" loading="lazy" alt="The VU meters and the spectrum in the iPhone player."></figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="checked" class="checked">
+      <div class="wrap">
+        <h2>What was checked</h2>
+        <table>
+          <thead>
+            <tr><th scope="col">System</th><th scope="col">Made for</th><th scope="col">Checked so far</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">macOS</th>
+              <td>Apple Silicon, macOS 14 or later</td>
+              <td>Checked on macOS 27.2.1. It is not yet signed and notarised with Apple, so the first start shows a warning.</td>
+            </tr>
+            <tr>
+              <th scope="row">Windows</th>
+              <td>64-bit, Windows 10 or later</td>
+              <td>The zip and the setup program are built. Checking them on a real Windows machine is not finished.</td>
+            </tr>
+            <tr>
+              <th scope="row">iPhone</th>
+              <td>iOS 16 or later</td>
+              <td>Checked in the iOS Simulator, and installed and started on a real iPhone. It is not in the App Store: you build and install it with Xcode.</td>
+            </tr>
+            <tr>
+              <th scope="row">Android</th>
+              <td>Android 11 or later</td>
+              <td>Checked in an Android 16 emulator. It has not been checked on a real device yet. It is not in a store: you build and install it yourself.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="note">What was checked, how, and what is still open is written down in <a href="https://github.com/ywjung/oneum/blob/main/docs/TESTING.md">TESTING.md</a> in the repository (in Korean).</p>
+      </div>
+    </section>
+
+    <section id="get" class="get">
+      <div class="wrap">
+        <h2>Get it</h2>
+        <div>
+          <h3>Releases</h3>
+          <p>Files to install are put on the releases page on GitHub: a disk image for macOS, a setup program and a zip for Windows. If none is there yet, build from source.</p>
+          <p><a class="button quiet" href="https://github.com/ywjung/oneum/releases">Open the releases page</a></p>
+          <h3>Documents</h3>
+          <ul>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE.en.md">User guide for macOS</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE_WINDOWS.en.md">User guide for Windows</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE_IOS.en.md">User guide for iPhone</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/docs/USER_GUIDE_ANDROID.en.md">User guide for Android</a></li>
+            <li><a href="https://github.com/ywjung/oneum/blob/main/README.en.md">Read-me</a></li>
+          </ul>
+        </div>
+        <div>
+          <h3>Build from source</h3>
+          <p>On a Mac with Rust and the Xcode command line tools.</p>
+<pre><code>git clone https://github.com/ywjung/oneum.git
+cd oneum
+scripts/package.sh            # the macOS app
+scripts/package-windows.sh    # the Windows zip and setup program
+scripts/ios-sim.sh            # run in the iOS Simulator
+scripts/android-build.sh --release   # the Android APK</code></pre>
+          <p>What is needed, and signing, is in <a href="https://github.com/ywjung/oneum/blob/main/docs/RELEASE.md">RELEASE.md</a> (in Korean).</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>OnEum is open-source software under the MIT license. <a href="https://github.com/ywjung/oneum">github.com/ywjung/oneum</a></p>
+      <p>This page uses no cookies and keeps no record of visits.</p>
+    </div>
+  </footer>
+
+  <script src="../meters.js" defer></script>
+</body>
+</html>
