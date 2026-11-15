@@ -15,7 +15,7 @@
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 준비 | 준비됨(2026-11-14) — 원격 `github`(https://github.com/ywjung/oneum, 비어 있는 공개 저장소). 추적 파일과 지난 커밋의 내용에 비밀 값·개인 주소·홈 경로·서명 팀 ID·기기 식별자가 없음을 확인, 저장소 크기 약 5MB(가장 큰 파일 1MB), 오픈 소스 고지가 iPhone 빌드까지 포함, CI에 iPhone 린트 추가. 커밋 기록의 작성자는 모두 한 이름과 한 e-mail 주소로 통일했다(이 저장소의 git 설정도 같음). 이 Mac의 로컬 계정 이름은 기록에 남지 않고, 그 e-mail 주소는 push하면 공개된다. 새 클론에서 빌드와 테스트 562개가 통과함을 확인. push와 CI 첫 실행은 **아직 하지 않음** |
-| Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), `scripts/android-build.sh --release`. 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
+| Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기**. TestFlight·App Store는 범위 밖 |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
@@ -94,11 +94,13 @@ scripts/package-windows.sh
 rustup target add aarch64-linux-android
 ```
 ```bash
-scripts/android-build.sh --release
+scripts/package-android.sh
 ```
 준비물: Android SDK(플랫폼 35, 빌드 도구)와 NDK(`scripts/android-env.sh`가 `ANDROID_NDK_HOME` 또는 SDK 아래에서 찾는다), JDK 17 또는 21. Gradle과 Android Gradle 플러그인은 처음 빌드할 때 받는다(`android/gradlew`).
 
-결과물: `android/app/build/outputs/apk/release/app-release.apk`(arm64 전용, Android 11 이상). 앱 ID는 `app.oneum.android`, 버전 이름은 `Cargo.toml`의 버전, 버전 코드는 커밋 수다.
+결과물: `dist/OnEum-<버전>-android-arm64.apk`와 `dist/SHA256SUMS-android.txt`(arm64 전용, Android 11 이상). 앱 ID는 `app.oneum.android`, 버전 이름은 `Cargo.toml`의 버전, 버전 코드는 커밋 수다. APK가 Android의 설치 파일이다. 스크립트는 릴리스 빌드(`scripts/android-build.sh --release`, 검증 채널 없음)를 만들고, OnEum의 라이선스와 오픈 소스 라이선스 전문(`scripts/gen-licenses.py --android`)을 APK의 `assets`에 넣으며, APK에 앱의 라이브러리와 그 두 파일이 들어 있는지, 서명이 맞는지, 디버그 가능한 빌드가 아닌지 확인한다.
+
+휴대폰에 설치: APK를 휴대폰으로 옮겨 파일 앱에서 연다. 처음에는 그 앱에 "출처를 알 수 없는 앱 설치"를 허용하라는 안내가 나오고(설정 → 이 출처 허용 → 뒤로), 다시 열면 설치를 묻는다. Google Play Protect가 "처음 보는 앱"이라며 검사를 권하면 **자세히 → 검사 없이 설치**로 진행할 수 있다("앱 검사"는 APK를 Google로 보낸다).
 
 서명: 환경 변수 `ONEUM_ANDROID_KEYSTORE`(키 저장소 파일), `ONEUM_ANDROID_KEYSTORE_PASSWORD`, `ONEUM_ANDROID_KEY_ALIAS`, `ONEUM_ANDROID_KEY_PASSWORD`를 주면 그 키로 서명하고, 없으면 이 컴퓨터의 디버그 키로 서명한다. **디버그 키로 서명한 APK는 내 기기에 넣어 쓰는 용도이며 배포물이 아니다**(다른 키로 서명한 다음 버전은 덮어 설치할 수 없다). 키 저장소와 비밀번호는 저장소에 넣지 않는다.
 

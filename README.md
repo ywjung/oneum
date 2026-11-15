@@ -81,10 +81,11 @@ iPhone에는 폰 전용 화면이 있습니다: 보관함 · 검색 · 플레이
 
 ## Android
 ```bash
-scripts/android-build.sh --release
+scripts/package-android.sh
 ```
-앱(Rust로 만든 공유 라이브러리)과 얇은 Java 껍데기(`android/`)를 APK로 묶습니다. Android SDK와 NDK, `rustup target add aarch64-linux-android`, JDK 17 또는 21이 필요합니다.
-연결된 기기나 에뮬레이터에는 아래로 설치해 실행합니다(USB 디버깅을 켠 기기).
+앱(Rust로 만든 공유 라이브러리)과 얇은 Java 껍데기(`android/`)를 APK로 묶어 `dist/OnEum-<버전>-android-arm64.apk`를 만듭니다. Android SDK와 NDK, `rustup target add aarch64-linux-android`, JDK 17 또는 21이 필요합니다.
+APK가 Android의 설치 파일입니다. 휴대폰으로 옮겨(케이블, 클라우드 등) 파일 앱에서 열면 설치됩니다. 처음에는 그 앱에 "출처를 알 수 없는 앱 설치"를 허용해야 하고, Google Play Protect가 처음 보는 앱이라며 검사를 권하면 "자세히 → 검사 없이 설치"를 고를 수 있습니다. 64비트 ARM, Android 11 이상용이며 이 컴퓨터의 디버그 키로 서명됩니다(내 휴대폰용, 배포용 아님).
+케이블로 연결된 기기나 에뮬레이터에는 아래로 바로 설치해 실행합니다(USB 디버깅을 켠 기기).
 ```bash
 scripts/android-device.sh
 ```

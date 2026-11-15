@@ -56,7 +56,7 @@ out = ["# Third-party notices", "",
        f"{build_name} builds), and contains the data listed at the end. Each remains under its",
        "own license. The full license texts come with the app in the file",
        "`THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows",
-       "next to the program).", "",
+       "next to the program; on Android inside the APK, under assets).", "",
        f"Crates: {len(rows)}", "",
        "## License summary", ""]
 for lic in sorted(by_license, key=lambda l: (-len(by_license[l]), l)):

@@ -84,11 +84,12 @@ Usage: [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md). What differs and 
 ## Android
 
 ```bash
-scripts/android-build.sh --release
+scripts/package-android.sh
 ```
 
-Packs the app (a shared library built from the Rust code) and a thin Java shell (`android/`) into an APK. Needs the Android SDK with an NDK, `rustup target add aarch64-linux-android`, and a JDK 17 or 21.
-To install and start it on a connected device or emulator (a device needs USB debugging switched on):
+Packs the app (a shared library built from the Rust code) and a thin Java shell (`android/`) into an APK, `dist/OnEum-<version>-android-arm64.apk`. Needs the Android SDK with an NDK, `rustup target add aarch64-linux-android`, and a JDK 17 or 21.
+The APK is what installs the app: bring it to the phone (by cable, a cloud drive …) and open it in the Files app. The first time, that app has to be allowed to "install unknown apps", and where Google Play Protect recommends a scan of an app it has not seen, "More details → Install without scanning" goes on. It is for 64-bit ARM phones with Android 11 or later and is signed with this computer's debug key (for your own phone, not for publishing).
+To install and start it straight away on a connected device or emulator (a device needs USB debugging switched on):
 
 ```bash
 scripts/android-device.sh

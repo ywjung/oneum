@@ -5,6 +5,7 @@ crates' own packages (the LICENSE/COPYING/NOTICE files they ship). Uses only
 
     python3 scripts/gen-licenses.py <output file>             # macOS arm64 build
     python3 scripts/gen-licenses.py --windows <output file>   # Windows x86_64 build
+    python3 scripts/gen-licenses.py --android <output file>   # Android arm64 build
 
 Identical texts are written once, with the list of crates they apply to. Crates that
 ship no license file are listed at the end with their license expression and source.
@@ -18,14 +19,17 @@ import sys
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 args = sys.argv[1:]
-windows = bool(args) and args[0] == "--windows"
-if windows:
+builds = {
+    "--windows": ("x86_64-pc-windows-gnu", "Windows x86_64"),
+    "--android": ("aarch64-linux-android", "Android arm64"),
+}
+platform, build_name = "aarch64-apple-darwin", "macOS arm64"
+if args and args[0] in builds:
+    platform, build_name = builds[args[0]]
     args = args[1:]
 if len(args) != 1:
     sys.exit(__doc__)
 out_path = args[0]
-platform, build_name = (
-    ("x86_64-pc-windows-gnu", "Windows x86_64") if windows else ("aarch64-apple-darwin", "macOS arm64"))
 env = dict(os.environ, PATH=os.path.expanduser("~/.cargo/bin") + os.pathsep + os.environ.get("PATH", ""))
 meta = json.loads(subprocess.check_output(
     ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", platform],

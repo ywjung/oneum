@@ -14,3 +14,7 @@
 /android/app/build/
 /android/app/src/main/jniLibs/
 /android/local.properties
+
+# Android: what packaging puts into the APK (scripts/package-android.sh).
+/android/app/src/main/assets/LICENSE.txt
+/android/app/src/main/assets/THIRD_PARTY_LICENSES.txt

@@ -4,7 +4,7 @@ OnEum is built from the open-source Rust crates listed below (as linked into the
 macOS arm64, iPhone and Android builds), and contains the data listed at the end. Each remains under its
 own license. The full license texts come with the app in the file
 `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
-next to the program).
+next to the program; on Android inside the APK, under assets).
 
 Crates: 308
 
