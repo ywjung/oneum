@@ -65,13 +65,14 @@ impl Core {
 
     /// The UI says which settings it still has to save (`None`: none, they are on
     /// their way to the file or in it).
-    pub fn note_unsaved_settings(&self, settings: Option<Settings>) {
+    pub fn note_unsaved_settings(&self, settings: Option<&Settings>) {
         let mut unsaved = self
             .unsaved_settings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *unsaved != settings {
-            *unsaved = settings;
+        // Called every frame while a control is moved: copied only when it differs.
+        if unsaved.as_ref() != settings {
+            *unsaved = settings.cloned();
         }
     }
 

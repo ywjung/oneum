@@ -84,10 +84,42 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
     }
 }
 
-/// Serialises `value` as pretty JSON and atomically replaces `path` with it.
+/// Serialises `value` as pretty JSON and atomically replaces `path` with it. It is the
+/// newest version there is: a write that was handed over earlier and is still on its
+/// way does not replace it afterwards (see [`write_atomic_in_turn`]).
 pub fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    write_atomic(path, &bytes)
+    write_atomic_in_turn(path, &bytes, take_turn())
+}
+
+/// The next place in the order of versions of a state file. Taken at the moment a
+/// version is decided on, by whoever will write it (or have it written).
+pub(crate) fn take_turn() -> u64 {
+    static TURN: AtomicU64 = AtomicU64::new(0);
+    TURN.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// [`write_atomic`] for a file that more than one thread writes: versions reach the
+/// file in the order of their turns. One whose turn has been overtaken (a newer
+/// version is in the file already) is not written, and that is no error: the file
+/// holds what is newer. Without this an older version, handed to a writer thread
+/// before a newer one was written elsewhere, could land after it and stay.
+pub(crate) fn write_atomic_in_turn(path: &Path, bytes: &[u8], turn: u64) -> io::Result<()> {
+    static WRITTEN: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+    // Held over the write: the versions of a file follow each other.
+    let mut written = WRITTEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = written.iter().position(|(file, _)| file == path);
+    if at.is_some_and(|at| written[at].1 > turn) {
+        return Ok(());
+    }
+    write_atomic(path, bytes)?;
+    match at {
+        Some(at) => written[at].1 = turn,
+        None => written.push((path.to_path_buf(), turn)),
+    }
+    Ok(())
 }
 
 /// Writes `bytes` to a temporary sibling of `path`, syncs it and renames it into place.
@@ -266,5 +298,51 @@ mod tests {
         assert_eq!(read(".corrupt"), b"{ first");
         assert_eq!(read(".corrupt-2"), b"{ second");
         assert_eq!(read(".corrupt-3"), b"{ third");
+    }
+
+    /// Versions of a file reach it in the order of their turns: one that was decided
+    /// on earlier and arrives later (a writer thread that was slow) does not replace
+    /// the newer one. Each file has its own order.
+    #[test]
+    fn an_older_version_does_not_replace_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let other = dir.path().join("other.json");
+        let earlier = take_turn();
+        let later = take_turn();
+        assert!(later > earlier);
+        write_atomic_in_turn(&path, b"newer", later).unwrap();
+        write_atomic_in_turn(&path, b"older", earlier).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"newer");
+        // Another file is not held back by that.
+        write_atomic_in_turn(&other, b"its own", earlier).unwrap();
+        assert_eq!(fs::read(&other).unwrap(), b"its own");
+        // The newest of all is written.
+        save_json_atomic(
+            &path,
+            &Sample {
+                volume: 0.5,
+                name: "x".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_json::<Sample>(&path),
+            Sample {
+                volume: 0.5,
+                name: "x".into()
+            }
+        );
+        // A write that failed leaves the order as it was: the same turn can be tried
+        // again.
+        let nowhere = dir.path().join("missing").join("deeper");
+        fs::write(
+            dir.path().join("missing"),
+            b"a file where a folder is needed",
+        )
+        .unwrap();
+        let turn = take_turn();
+        assert!(write_atomic_in_turn(&nowhere, b"x", turn).is_err());
+        assert!(write_atomic_in_turn(&nowhere, b"x", turn).is_err());
     }
 }

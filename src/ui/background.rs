@@ -120,7 +120,11 @@ impl SettingsWriter {
                             slot = wake.wait(slot).unwrap_or_else(|e| e.into_inner());
                         }
                     };
-                    let result = crate::storage::settings::write_atomic(&path, &bytes);
+                    // The generation is the version's turn (see `persist_settings`):
+                    // a version written elsewhere meanwhile, as a phone's app leaves
+                    // the screen, is not replaced by this older one.
+                    let result =
+                        crate::storage::settings::write_atomic_in_turn(&path, &bytes, generation);
                     written(generation, result);
                 }
             });

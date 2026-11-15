@@ -1767,7 +1767,7 @@ impl OneumApp {
             self.settings.window_size = Some(size);
         }
         if self.settings == self.saved_settings {
-            self.core.note_unsaved_settings(None);
+            self.note_unsaved_settings(false);
             return;
         }
         // Preference changes are saved at once; a window being resized only now and then.
@@ -1788,11 +1788,21 @@ impl OneumApp {
         if dragging || self.last_settings_save.elapsed() < SETTLE {
             // Not written yet: a phone's app that leaves the screen now writes it
             // then (see `Core::save_unsaved_settings`).
-            self.core.note_unsaved_settings(Some(self.settings.clone()));
+            self.note_unsaved_settings(true);
             ctx.request_repaint_after(SETTLE);
         } else {
-            self.core.note_unsaved_settings(None);
+            self.note_unsaved_settings(false);
             self.persist_settings();
+        }
+    }
+
+    /// Tells the app's core whether the settings wait to be written, where something
+    /// reads that: a phone's app saves them as it leaves the screen. A desktop app is
+    /// not sent away, and is spared the bookkeeping.
+    fn note_unsaved_settings(&self, unsaved: bool) {
+        if crate::platform::PHONE {
+            self.core
+                .note_unsaved_settings(unsaved.then_some(&self.settings));
         }
     }
 
@@ -1815,12 +1825,16 @@ impl OneumApp {
                 return;
             }
         };
-        self.settings_generation += 1;
+        // The version's place among all that are written to the file, from any thread.
+        self.settings_generation = crate::storage::settings::take_turn();
         let generation = self.settings_generation;
         self.settings_in_flight = Some((generation, self.settings.clone()));
         if !self.settings_writer.write(generation, bytes.clone()) {
-            let result =
-                crate::storage::settings::write_atomic(&self.core.paths.settings_file(), &bytes);
+            let result = crate::storage::settings::write_atomic_in_turn(
+                &self.core.paths.settings_file(),
+                &bytes,
+                generation,
+            );
             self.settings_written(generation, result);
         }
     }
