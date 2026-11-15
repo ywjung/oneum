@@ -1,4 +1,5 @@
 ## What Is Different on Windows
+- **Installing**: run `OnEum-…-setup.exe` and OnEum appears in the Start menu (no administrator rights are needed). To remove it, use **Settings → Apps → Installed apps** in Windows. Removing asks whether the library and the settings are to go as well; your music files are never touched. To use OnEum without installing it, unzip the zip file and run `OnEum.exe`.
 - The menu bar is at the top of the window. Shortcuts use the Ctrl key.
 - Closing the window quits the program and stops playback. What this guide says about the Dock does not apply to Windows.
 - Drop music files onto `OnEum.exe`, or open them with "Open with", to play them.

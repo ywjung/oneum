@@ -1,0 +1,38 @@
+// What is built into OnEum.exe for Windows itself: the icon File Explorer, the taskbar
+// and the Start menu show, and the version details of the file's properties.
+// Compiled by build.rs, which passes the version as ONEUM_VERSION (text) and
+// ONEUM_VERSION_NUMBERS (four numbers).
+#include <winver.h>
+
+// The icon with the lowest number is the one Windows takes for the program.
+1 ICON "oneum.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION ONEUM_VERSION_NUMBERS
+PRODUCTVERSION ONEUM_VERSION_NUMBERS
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // U.S. English, Unicode.
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "OnEum"
+            VALUE "FileDescription", "OnEum"
+            VALUE "FileVersion", ONEUM_VERSION
+            VALUE "InternalName", "oneum"
+            VALUE "LegalCopyright", "MIT License"
+            VALUE "OriginalFilename", "OnEum.exe"
+            VALUE "ProductName", "OnEum"
+            VALUE "ProductVersion", ONEUM_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
