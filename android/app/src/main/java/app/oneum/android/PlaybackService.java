@@ -271,15 +271,6 @@ public final class PlaybackService extends Service {
 
     /** Shows `state` in the session and the notification, and follows playing/paused. */
     private void show(State state) {
-        if (state.playing && !hasFocus) {
-            int answer = audio.requestAudioFocus(focusRequest);
-            hasFocus = answer == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
-            lostForAWhile = false;
-            if (!hasFocus) {
-                // A call is on, say: the app is told as if the sound had been taken.
-                Native.onSound(1);
-            }
-        }
         if (!state.artPath.equals(artShown)) {
             artShown = state.artPath;
             art = state.artPath.isEmpty() ? null : BitmapFactory.decodeFile(state.artPath);
@@ -305,14 +296,29 @@ public final class PlaybackService extends Service {
 
         Notification notification = notification(state);
         if (state.playing) {
+            // In this order: an app that is not on the screen may ask for the sound only
+            // from a foreground service (Android 15). Asked before, playing on from the
+            // notification after another app had played was refused.
             goForeground(notification);
+            if (!hasFocus) {
+                int answer = audio.requestAudioFocus(focusRequest);
+                hasFocus = answer == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+                lostForAWhile = false;
+                if (!hasFocus) {
+                    // A call is on, say: the app is told as if the sound had been taken.
+                    Native.onSound(1);
+                }
+            }
             if (!awake.isHeld()) {
                 awake.acquire();
             }
         } else {
             // Paused: the notification stays, but nothing holds the phone awake and the
-            // system may end the app when it needs the room.
-            if (foreground) {
+            // system may end the app when it needs the room. Not while the sound is only
+            // taken for a while (a call): playing goes on by itself afterwards, and a
+            // service that has left the foreground cannot come back to it from behind
+            // the screen (it would play on unprotected).
+            if (foreground && !lostForAWhile) {
                 stopForeground(STOP_FOREGROUND_DETACH);
                 foreground = false;
             }
@@ -381,6 +387,20 @@ public final class PlaybackService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
+    /**
+     * After the sound was lost for good or came back: once the app has had the time to
+     * answer, a service that kept the foreground through an interruption and does not
+     * play (the listener paused meanwhile) leaves it like any paused one.
+     */
+    private void settleLater() {
+        main.postDelayed(() -> {
+            State state = latest;
+            if (running == this && state != null && !state.playing) {
+                show(state);
+            }
+        }, 3000);
+    }
+
     private void focusChanged(int change) {
         switch (change) {
             case AudioManager.AUDIOFOCUS_LOSS:
@@ -388,16 +408,21 @@ public final class PlaybackService extends Service {
                 hasFocus = false;
                 lostForAWhile = false;
                 Native.onSound(1);
+                settleLater();
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                // A call, an alarm: silent until it is over.
+                // A call, an alarm: silent until it is over. The sound is not this
+                // app's meanwhile: a "play" of the listener's asks for it again.
+                hasFocus = false;
                 lostForAWhile = true;
                 Native.onSound(1);
                 break;
             case AudioManager.AUDIOFOCUS_GAIN:
+                hasFocus = true;
                 if (lostForAWhile) {
                     lostForAWhile = false;
                     Native.onSound(2);
+                    settleLater();
                 }
                 break;
             default:

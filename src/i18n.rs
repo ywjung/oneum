@@ -646,6 +646,7 @@ strings! {
         "The iPhone decides the sample rate. The built-in output follows between 44.1 and 48 kHz, a USB DAC up to what it accepts. Where the output does not follow, the sound is converted as usual. Going on to a song of another sample rate takes a break of less than a second; songs of the same rate follow each other without one. How the sound goes out right now is shown in the signal path of Song Info.";
     phone_quality_hint_fixed: "출력의 샘플레이트는 시스템이 정합니다. 곡의 샘플레이트가 그와 다르면 변환해 재생합니다. 지금 어떻게 나가고 있는지는 곡 정보의 신호 경로에 나옵니다.",
         "The system decides the output's sample rate. A song of another sample rate is converted. How the sound goes out right now is shown in the signal path of Song Info.";
+    confirm_remove_copies: "OnEum이 가져오면서 만들어 둔 사본은 함께 지워집니다.", "The copies OnEum made when it brought them in are deleted with them.";
     phone_open_files: "음악 파일 열기", "Open Music Files";
     phone_open_files_desc: "폴더를 추가하지 않고 고른 파일만 재생합니다. 그 곡은 보관함에 남습니다.",
         "Plays the files you choose without adding their folder. The songs stay in the library.";

@@ -6,7 +6,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - **The right**: press **Allow Access** on the first page, and on the settings page that opens allow OnEum **All files access**. It is used for reading music files only.
 - **The Music folder**: music in the phone's **Music** folder appears by itself. Put music there by connecting the phone to a computer with a cable, or with a file manager.
 - **Other folders**: **Settings → Library → Add Folder** adds another folder, also one on a card or on a drive that is plugged in. The top of the storage and the Download folder itself cannot be chosen; folders inside them can.
-- **Single files**: **Settings → Library → Open Music Files** plays the files you choose without adding their folder. They are not copied but read where they are, and the songs stay in the library.
+- **Single files**: **Settings → Library → Open Music Files** plays the files you choose without adding their folder. They are not copied but read where they are, and the songs stay in the library. Of a file that cannot be read where it is (one on a cloud drive, say) OnEum keeps a copy, and deletes the copy when the song is removed from the library (the original stays as it is).
 
 - Music that was added appears by itself within half a minute or so while OnEum is on the screen. To read it at once, press **Settings → Library → Rescan**.
 - **Remove** leaves a folder's files as they are. Its songs only leave OnEum's lists.

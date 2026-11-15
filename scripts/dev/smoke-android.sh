@@ -226,6 +226,10 @@ echo "== a call"
 $ADB emu gsm call 0101234567 >/dev/null
 ui 'wait 3000' 'dump k1.json'
 check k1.json 'd["state"] == "Paused"' "the music pauses when a call comes in"
+# It is to play on after the call, also from behind the screen: a service that left the
+# foreground now could not come back to it there.
+$ADB shell dumpsys activity services $PKG | grep -q 'isForeground=true'
+say $? "and the playback service keeps the foreground for the call"
 $ADB emu gsm cancel 0101234567 >/dev/null
 ui 'wait 3000' 'dump k2.json'
 check k2.json 'd["state"] == "Playing"' "and plays on when the call is over"

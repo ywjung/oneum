@@ -260,6 +260,31 @@ pub fn log_dir_hint() -> String {
     }
 }
 
+/// Of `files`, those that are the app's own copies (in `copies`, the folder it keeps
+/// them in): the songs they were made for have left the library, and nothing else
+/// would ever remove them. No file anywhere else is touched, whatever is passed in.
+pub fn delete_own_copies(copies: &std::path::Path, files: &[std::path::PathBuf]) {
+    // Compared as the system names the folders: a phone's app folder is reached
+    // through a link, and the library keeps the files under the name behind it.
+    let Ok(copies) = std::fs::canonicalize(copies) else {
+        return;
+    };
+    for file in files {
+        let own = file
+            .parent()
+            .and_then(|folder| std::fs::canonicalize(folder).ok())
+            .is_some_and(|folder| folder == copies);
+        if !own {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(file)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("a copy the app made could not be removed: {error}");
+        }
+    }
+}
+
 /// What the system does to the sound (a phone: a call, headphones pulled out) is
 /// answered the way a listener expects of a music player: paused while something else
 /// has the sound, playing on afterwards only if it was this that stopped it and the
@@ -441,4 +466,55 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         lang,
         system_prefers_korean,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delete_own_copies;
+
+    /// Only the app's own copies are deleted: files directly in the folder it keeps
+    /// them in. A file elsewhere (the listener's music), one deeper inside that
+    /// folder, and the folder itself are left alone.
+    #[test]
+    fn only_the_apps_own_copies_are_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let copies = temp.path().join("Imported");
+        let music = temp.path().join("Music");
+        std::fs::create_dir_all(copies.join("deeper")).unwrap();
+        std::fs::create_dir_all(&music).unwrap();
+        let copy = copies.join("song.flac");
+        let other_copy = copies.join("song (2).flac");
+        let deeper = copies.join("deeper").join("song.flac");
+        let theirs = music.join("song.flac");
+        for file in [&copy, &other_copy, &deeper, &theirs] {
+            std::fs::write(file, b"music").unwrap();
+        }
+        delete_own_copies(
+            &copies,
+            &[
+                copy.clone(),
+                deeper.clone(),
+                theirs.clone(),
+                copies.clone(),
+                copies.join("not-there.flac"),
+                copies.join("..").join("Music").join("song.flac"),
+            ],
+        );
+        assert!(!copy.exists(), "the copy of the removed song is gone");
+        assert!(other_copy.exists(), "a copy that was not named stays");
+        assert!(deeper.exists() && theirs.exists() && copies.is_dir());
+
+        // The folder is named through a link (as an Android app's folder is), the
+        // file by the folder's real name: it is the same folder.
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(&copies, &link).unwrap();
+            delete_own_copies(&link, std::slice::from_ref(&other_copy));
+            assert!(!other_copy.exists(), "found through the link");
+        }
+        // A folder that is not there: nothing is deleted, nothing fails.
+        delete_own_copies(&temp.path().join("none"), std::slice::from_ref(&theirs));
+        assert!(theirs.exists());
+    }
 }

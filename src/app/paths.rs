@@ -82,6 +82,32 @@ impl AppPaths {
         Some(PathBuf::from(home).join("Documents"))
     }
 
+    /// Where a phone's app keeps its own copies of music it could not read in place
+    /// (Android: a file chosen from a cloud drive or handed over by another app; the
+    /// activity tells the folder through the environment). `None` where music is
+    /// always used where it is.
+    pub fn imported_copies_dir() -> Option<PathBuf> {
+        if !cfg!(target_os = "android") {
+            return None;
+        }
+        static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir =
+                PathBuf::from(std::env::var_os("ONEUM_IMPORT_DIR").filter(|v| !v.is_empty())?);
+            // Named as the library names the files in it: by the real name of the
+            // app's folder, which the activity reaches through a link. (The folder
+            // itself may not be there yet: the one above it is.)
+            let real = match (dir.parent(), dir.file_name()) {
+                (Some(above), Some(name)) => std::fs::canonicalize(above)
+                    .map(|above| above.join(name))
+                    .unwrap_or_else(|_| dir.clone()),
+                _ => dir.clone(),
+            };
+            Some(real)
+        })
+        .clone()
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.data_dir.join("settings.json")
     }

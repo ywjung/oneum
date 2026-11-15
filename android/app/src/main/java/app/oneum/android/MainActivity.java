@@ -116,6 +116,7 @@ public final class MainActivity extends NativeActivity {
             Os.setenv("ONEUM_MUSIC_DIR", Environment
                     .getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
                     .getAbsolutePath(), false);
+            Os.setenv("ONEUM_IMPORT_DIR", importedFolder().getAbsolutePath(), true);
             boolean debuggable =
                     (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
             Bundle extras = getIntent() == null ? null : getIntent().getExtras();
@@ -403,7 +404,10 @@ public final class MainActivity extends NativeActivity {
             String folder = folderPath(chosen.get(0));
             Native.onPicked(id, folder == null ? "" : folder);
         } else {
-            new Thread(() -> Native.onPicked(id, pathsOf(chosen, "picked")), "oneum-import")
+            // Music that was chosen is kept; a file that is read once (a playlist, a
+            // correction file) is not.
+            boolean keep = kind == 1;
+            new Thread(() -> Native.onPicked(id, pathsOf(chosen, keep)), "oneum-import")
                     .start();
         }
     }
@@ -432,11 +436,22 @@ public final class MainActivity extends NativeActivity {
 
     /** Copies what the addresses name into the app's cache; the paths, one a line. */
     /**
+     * Where the app keeps its copies of music it cannot read where it is (a file of a
+     * cloud drive, of another app). Not in the cache: the system empties that when
+     * the phone runs short of room, and the songs would be gone from the library.
+     * The app deletes a copy when its song is removed from the library.
+     */
+    private File importedFolder() {
+        return new File(getFilesDir(), "Imported");
+    }
+
+    /**
      * Paths the app can read for these files, one a line: the files themselves where
      * they lie in shared storage and can be read there (then they are used where they
-     * are, like the music folders), copies in the app's cache of the others.
+     * are, like the music folders), copies of the others. With `keep`, the copies of
+     * music are kept (see importedFolder); otherwise they are in the cache.
      */
-    private String pathsOf(List<Uri> from, String folder) {
+    private String pathsOf(List<Uri> from, boolean keep) {
         StringBuilder paths = new StringBuilder();
         List<Uri> elsewhere = new ArrayList<>();
         for (Uri uri : from) {
@@ -448,7 +463,7 @@ public final class MainActivity extends NativeActivity {
             }
         }
         if (!elsewhere.isEmpty()) {
-            paths.append(copyIn(elsewhere, folder));
+            paths.append(copyIn(elsewhere, keep));
         }
         return paths.toString();
     }
@@ -536,27 +551,115 @@ public final class MainActivity extends NativeActivity {
         }
     }
 
-    private String copyIn(List<Uri> from, String folder) {
+    /**
+     * Copies files into the app's own storage and returns the paths of the copies, one
+     * a line. Every file gets a name of its own (two files called the same do not
+     * become one), and a copy that is there already, name and content, is used again.
+     */
+    private String copyIn(List<Uri> from, boolean keep) {
         StringBuilder paths = new StringBuilder();
-        File into = new File(getCacheDir(), folder + "/" + System.nanoTime());
-        if (!into.mkdirs()) {
-            Log.w(TAG, "cannot make " + into);
-        }
+        File once = new File(getCacheDir(), "picked/" + System.nanoTime());
         ContentResolver resolver = getContentResolver();
         for (Uri uri : from) {
-            File to = new File(into, nameOf(uri));
-            try (InputStream in = resolver.openInputStream(uri);
-                    OutputStream out = new FileOutputStream(to)) {
-                if (in == null) {
-                    continue;
+            String name = nameOf(uri);
+            // A playlist is read and done with, also among music.
+            String lower = name.toLowerCase(Locale.ROOT);
+            boolean music = !lower.endsWith(".m3u8") && !lower.endsWith(".m3u");
+            File into = keep && music ? importedFolder() : once;
+            if (!into.isDirectory() && !into.mkdirs()) {
+                Log.w(TAG, "cannot make " + into);
+            }
+            File part = null;
+            try {
+                part = File.createTempFile("copy", ".part", into);
+                try (InputStream in = resolver.openInputStream(uri);
+                        OutputStream out = new FileOutputStream(part)) {
+                    if (in == null) {
+                        continue;
+                    }
+                    copy(in, out);
                 }
-                copy(in, out);
-                paths.append(to.getAbsolutePath()).append('\n');
+                File kept = settle(part, into, name);
+                part = null;
+                paths.append(kept.getAbsolutePath()).append('\n');
             } catch (IOException | RuntimeException error) {
                 Log.w(TAG, "cannot copy a chosen file", error);
+            } finally {
+                if (part != null && part.exists() && !part.delete()) {
+                    Log.w(TAG, "cannot remove " + part);
+                }
             }
         }
         return paths.toString();
+    }
+
+    /**
+     * Gives the copy `part` its place in `folder`: the name the file had, or that name
+     * with a number where another file has it. A file of that name with the same
+     * content is used instead, and the copy dropped. No file is ever written over.
+     */
+    private static synchronized File settle(File part, File folder, String name)
+            throws IOException {
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        String ending = dot > 0 ? name.substring(dot) : "";
+        for (int number = 1; number < 100000; number++) {
+            File at = new File(folder, number == 1 ? name : stem + " (" + number + ")" + ending);
+            // Made only if there is none of that name: the name is this copy's then.
+            if (at.createNewFile()) {
+                if (part.renameTo(at)) {
+                    return at;
+                }
+                if (!at.delete()) {
+                    Log.w(TAG, "cannot remove " + at);
+                }
+                throw new IOException("cannot move the copy to " + at);
+            }
+            if (sameContent(at, part)) {
+                if (!part.delete()) {
+                    Log.w(TAG, "cannot remove " + part);
+                }
+                return at;
+            }
+        }
+        throw new IOException("no free name for " + name);
+    }
+
+    private static boolean sameContent(File one, File other) throws IOException {
+        if (one.length() != other.length()) {
+            return false;
+        }
+        try (InputStream a = new FileInputStream(one); InputStream b = new FileInputStream(other)) {
+            byte[] left = new byte[1 << 16];
+            byte[] right = new byte[1 << 16];
+            while (true) {
+                int read = fill(a, left);
+                if (read != fill(b, right)) {
+                    return false;
+                }
+                if (read == 0) {
+                    return true;
+                }
+                for (int i = 0; i < read; i++) {
+                    if (left[i] != right[i]) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    /** Reads until `buffer` is full or the stream is at its end; how much was read. */
+    private static int fill(InputStream in, byte[] buffer) throws IOException {
+        int have = 0;
+        while (have < buffer.length) {
+            int read = in.read(buffer, have, buffer.length - have);
+            if (read < 0) {
+                break;
+            }
+            have += read;
+        }
+        return have;
     }
 
     private void copyOut(File from, Uri to) {
@@ -614,6 +717,6 @@ public final class MainActivity extends NativeActivity {
         }
         List<Uri> one = new ArrayList<>();
         one.add(uri);
-        new Thread(() -> Native.onOpen(pathsOf(one, "opened")), "oneum-open").start();
+        new Thread(() -> Native.onOpen(pathsOf(one, true)), "oneum-open").start();
     }
 }

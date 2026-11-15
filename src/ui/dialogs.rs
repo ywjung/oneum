@@ -123,15 +123,26 @@ impl OneumApp {
                     format!("“{name}”\n\n{}", s.confirm_delete_playlist_body),
                     s.delete,
                 ),
-                Dialog::RemoveTracks(tracks) => (
-                    s.confirm_remove_tracks_title,
-                    format!(
+                Dialog::RemoveTracks(tracks) => {
+                    let mut body = format!(
                         "{}\n\n{}",
                         self.lang.song_count(tracks.len()),
                         s.confirm_remove_tracks_body
-                    ),
-                    s.remove_from_library,
-                ),
+                    );
+                    // Songs the app keeps a copy of (Android: music it could not read
+                    // where it was): the copy is the app's, and goes with the song.
+                    if let Some(copies) = crate::app::paths::AppPaths::imported_copies_dir()
+                        && tracks.iter().any(|&id| {
+                            self.snapshot
+                                .get(id)
+                                .is_some_and(|track| track.path.parent() == Some(copies.as_path()))
+                        })
+                    {
+                        body.push_str("\n\n");
+                        body.push_str(s.confirm_remove_copies);
+                    }
+                    (s.confirm_remove_tracks_title, body, s.remove_from_library)
+                }
                 Dialog::NewPlaylist { .. } => (s.new_playlist, String::new(), s.ok),
                 Dialog::RenamePlaylist { .. } => (s.rename, String::new(), s.ok),
                 Dialog::SmartPlaylist { query, .. } => (s.smart_playlist, query.clone(), s.ok),
@@ -272,8 +283,27 @@ impl OneumApp {
                 Ok(())
             }
             Dialog::RemoveTracks(tracks) => {
+                // Where the app keeps copies of its own (Android: music it could not
+                // read where it was), the copies of these songs go with them.
+                let copies = crate::app::paths::AppPaths::imported_copies_dir();
+                let files: Vec<(TrackId, std::path::PathBuf)> = match &copies {
+                    Some(_) => tracks
+                        .iter()
+                        .filter_map(|&id| Some((id, self.snapshot.get(id)?.path.clone())))
+                        .collect(),
+                    None => Vec::new(),
+                };
                 self.edit(move |library| {
                     library.remove_tracks(&tracks);
+                    if let Some(copies) = copies {
+                        // Only of the songs that are gone (removing can fail).
+                        let gone: Vec<std::path::PathBuf> = files
+                            .into_iter()
+                            .filter(|(id, _)| library.track(*id).is_none())
+                            .map(|(_, file)| file)
+                            .collect();
+                        crate::app::delete_own_copies(&copies, &gone);
+                    }
                     None
                 });
                 Ok(())
