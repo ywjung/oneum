@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/ywjung/oneum/actions/workflows/ci.yml/badge.svg)](https://github.com/ywjung/oneum/actions/workflows/ci.yml)
 
-폴더만 추가하면 바로 듣는 오프라인 로컬 음악 플레이어. Rust로 작성했고 macOS가 주 대상이며 Windows와 iPhone용으로도 빌드됩니다.
+폴더만 추가하면 바로 듣는 오프라인 로컬 음악 플레이어. Rust로 작성했고 macOS가 주 대상이며 Windows, iPhone, Android용으로도 빌드됩니다.
 이름은 우리말 **온음**(온전한 소리, 그리고 음악의 온음)에서 왔습니다.
 
 - 음악 폴더를 추가하면 스캔하면서 곧바로 재생할 수 있습니다.
@@ -52,8 +52,10 @@ Developer ID로 서명·공증하지 않은 빌드이므로 다른 Mac에서는 
 ```bash
 scripts/package-windows.sh
 ```
-Mac에서 크로스 컴파일해 `dist/OnEum-<버전>-windows-x86_64.zip`을 만듭니다(`rustup target add x86_64-pc-windows-gnu`, `brew install mingw-w64` 필요).
-**Windows판은 컴파일과 링크까지만 확인했고 실제 Windows에서 실행해 보지 못했습니다.** (CI가 Windows 러너에서 빌드·테스트하고 띄워 보게 되어 있지만 아직 돌아간 적이 없습니다.)
+Mac에서 크로스 컴파일해 `dist/OnEum-<버전>-windows-x86_64.zip`(압축을 풀어 바로 실행)과 설치 프로그램 `dist/OnEum-<버전>-windows-x86_64-setup.exe`를 만듭니다
+(`rustup target add x86_64-pc-windows-gnu`, `brew install mingw-w64` 필요. 설치 프로그램은 `brew install makensis`가 있을 때 만들어집니다).
+설치 프로그램은 관리자 권한 없이 사용자 계정에 설치하고, 시작 메뉴 바로 가기와 "설치된 앱"의 제거 항목을 만듭니다. `OnEum.exe`에는 아이콘과 버전 정보가 들어 있습니다.
+**Windows판은 컴파일과 링크까지만 확인했고 실제 Windows에서 실행해 보지 못했습니다. 설치 프로그램도 만들어지는 것까지만 확인했습니다.** (CI가 Windows 러너에서 빌드·테스트하고 띄워 보게 되어 있지만 아직 돌아간 적이 없습니다.)
 Windows에서 다른 점(창 안 메뉴 막대, Ctrl 단축키, 지원하지 않는 기능)은 [Windows 사용 안내](docs/USER_GUIDE_WINDOWS.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "플랫폼", [docs/TESTING.md](docs/TESTING.md)의 "Windows"에 있습니다.
 
@@ -77,13 +79,32 @@ iPhone에는 폰 전용 화면이 있습니다: 보관함 · 검색 · 플레이
 **iPhone판은 iOS 27.0 시뮬레이터에서 확인했습니다. 실제 iPhone(iOS 27.2.1)에는 설치해서 시작되고, 그려지고, 업데이트 뒤에도 보관함이 그대로인 것까지 확인했습니다. 기기에서 화면이 어떻게 보이고 움직이는지는 저희가 확인하지 못했습니다.**
 화면과 사용법은 [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md), 다른 점과 확인 범위는 [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md)와 [docs/TESTING.md](docs/TESTING.md)의 "iPhone"에 있습니다.
 
+## Android
+```bash
+scripts/android-build.sh --release
+```
+앱(Rust로 만든 공유 라이브러리)과 얇은 Java 껍데기(`android/`)를 APK로 묶습니다. Android SDK와 NDK, `rustup target add aarch64-linux-android`, JDK 17 또는 21이 필요합니다.
+연결된 기기나 에뮬레이터에는 아래로 설치해 실행합니다(USB 디버깅을 켠 기기).
+```bash
+scripts/android-device.sh
+```
+Android Studio에서 `android/` 폴더를 열어도 됩니다(앱의 라이브러리는 위 스크립트가 먼저 만들어 둡니다).
+
+iPhone과 같은 폰 화면을 씁니다. 처음 열 때 "모든 파일에 대한 접근"을 허용하면 휴대폰의 Music 폴더를 그 자리에서 읽고, 다른 폴더(SD 카드 포함)를 추가할 수 있습니다.
+화면을 꺼도 재생이 이어지고(알림과 잠금 화면의 재생 조작), 전화가 오면 멈췄다가 이어 재생합니다. 시스템의 뒤로 가기가 통합니다.
+꽂거나 블루투스로 연결한 키보드의 단축키(Space, Ctrl+→ …), 폴더를 추가하지 않고 음악 파일만 열기, 곡이 있는 폴더를 파일 앱에서 보기, 로그 저장이 됩니다.
+없는 것: 화면 낭독기(TalkBack) 지원, 출력 장치 선택과 USB DAC의 샘플레이트 맞춤, 독점 출력, 태블릿용 화면.
+
+**Android판은 Android 16 에뮬레이터에서 확인했습니다. 실제 Android 기기에는 아직 설치해 보지 못했습니다.**
+사용법은 [docs/USER_GUIDE_ANDROID.md](docs/USER_GUIDE_ANDROID.md), 계획과 진행은 [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md), 확인 범위는 [docs/TESTING.md](docs/TESTING.md)의 "Android"에 있습니다.
+
 ## 개발
 
 ```bash
 scripts/check.sh
 ```
 
-CI가 하는 검사를 그대로 돌립니다: 포맷, 린트(macOS, 그리고 대상이 설치되어 있으면 Windows와 iPhone), 테스트. 하나씩 돌리려면:
+CI가 하는 검사를 그대로 돌립니다: 포맷, 린트(macOS, 그리고 대상이 설치되어 있으면 Windows, iPhone, Android), 테스트. 하나씩 돌리려면:
 
 ```bash
 cargo fmt --all --check
@@ -111,6 +132,7 @@ cargo build --release --locked
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · [docs/USER_GUIDE.en.md](docs/USER_GUIDE.en.md) | macOS 사용 안내, 한국어와 영어(앱의 도움말 메뉴에서 보는 것과 같은 글) |
 | [docs/USER_GUIDE_WINDOWS.md](docs/USER_GUIDE_WINDOWS.md) · [docs/USER_GUIDE_WINDOWS.en.md](docs/USER_GUIDE_WINDOWS.en.md) | Windows 사용 안내 |
 | [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md) · [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md) | iPhone 사용 안내 |
+| [docs/USER_GUIDE_ANDROID.md](docs/USER_GUIDE_ANDROID.md) · [docs/USER_GUIDE_ANDROID.en.md](docs/USER_GUIDE_ANDROID.en.md) | Android 사용 안내 |
 | [CHANGELOG.md](CHANGELOG.md) | 바뀐 것 |
 | [docs/PRD.md](docs/PRD.md) | 사용자, 범위, 완료 조건 |
 | [docs/UX.md](docs/UX.md) | 화면, 조작, 재생 동작 정의 |
@@ -120,7 +142,8 @@ cargo build --release --locked
 | [docs/PLAN.md](docs/PLAN.md) · [docs/STATUS.md](docs/STATUS.md) | 단계와 현재 상태 |
 | [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) · [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) | 결정 기록: GUI 스택, iPhone판 |
 | [docs/IOS_PLAN.md](docs/IOS_PLAN.md) | iPhone판 계획과 진행 결과 |
-| [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md) | Android판 계획(계획만 있고 아직 시작하지 않음) |
+| [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md) | Android판 계획과 진행 |
+| [site/](site/) | 소개 홈페이지(GitHub Pages로 게시, docs/RELEASE.md "홈페이지") |
 
 ## 라이선스
 

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/ywjung/oneum/actions/workflows/ci.yml/badge.svg)](https://github.com/ywjung/oneum/actions/workflows/ci.yml)
 
-An offline player for the music files you own: add a folder and listen. Written in Rust, made for macOS first, and built for Windows and iPhone from the same code.
+An offline player for the music files you own: add a folder and listen. Written in Rust, made for macOS first, and built for Windows, iPhone and Android from the same code.
 The name is the Korean word **온음** ("on-eum"): a whole, unaltered sound, and the whole tone of music.
 
 - Add a music folder and play at once, while it is still being scanned.
@@ -54,8 +54,9 @@ Details: [docs/RELEASE.md](docs/RELEASE.md) (Korean).
 scripts/package-windows.sh
 ```
 
-Cross-compiles on a Mac and makes `dist/OnEum-<version>-windows-x86_64.zip` (needs `rustup target add x86_64-pc-windows-gnu` and `brew install mingw-w64`).
-**The Windows build has only been compiled and linked. It has not been run on a real Windows machine.** (The CI workflow builds, tests and starts it on a Windows runner; that has not run yet.)
+Cross-compiles on a Mac and makes `dist/OnEum-<version>-windows-x86_64.zip` (unzip and run) and the setup program `dist/OnEum-<version>-windows-x86_64-setup.exe` (needs `rustup target add x86_64-pc-windows-gnu` and `brew install mingw-w64`; the setup program is made when `brew install makensis` is there).
+The setup program installs for the user who runs it, without administrator rights, and adds a Start menu shortcut and an entry in "Installed apps" for removing it. `OnEum.exe` carries its icon and version details.
+**The Windows build has only been compiled and linked. It has not been run on a real Windows machine, and the setup program has only been built, not run.** (The CI workflow builds, tests and starts it on a Windows runner; that has not run yet.)
 What differs there (a menu bar inside the window, Ctrl shortcuts, features that are missing) is in the [Windows user guide](docs/USER_GUIDE_WINDOWS.en.md), and in "플랫폼" of [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and "Windows" of [docs/TESTING.md](docs/TESTING.md) (Korean).
 
 ## iPhone
@@ -80,13 +81,36 @@ Not there: choosing an output device and exclusive output (the iPhone decides), 
 **The iPhone version is verified in the iOS 27.0 Simulator. On a real iPhone (iOS 27.2.1) it has been installed and seen to start, draw and keep its library across an update; how its screens look and feel on the device has not been checked by us.**
 Usage: [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md). What differs and what was verified: [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) and the "iPhone" section of [docs/TESTING.md](docs/TESTING.md) (both Korean).
 
+## Android
+
+```bash
+scripts/android-build.sh --release
+```
+
+Packs the app (a shared library built from the Rust code) and a thin Java shell (`android/`) into an APK. Needs the Android SDK with an NDK, `rustup target add aarch64-linux-android`, and a JDK 17 or 21.
+To install and start it on a connected device or emulator (a device needs USB debugging switched on):
+
+```bash
+scripts/android-device.sh
+```
+
+The folder `android/` can also be opened in Android Studio (the script above builds the app's library first).
+
+Android uses the same phone screens as the iPhone. Allow "All files access" on the first start and the phone's Music folder is read where it is; other folders (also on a card) can be added.
+Music plays on with the screen off (controls in the notification and on the lock screen) and pauses for a call. The system's Back works throughout.
+The shortcuts of a keyboard that is plugged in or paired (Space, Ctrl+→ …), opening single music files without adding their folder, showing a song's folder in the Files app, and saving the log are there.
+Not there: screen-reader (TalkBack) support, choosing an output device, matching a USB DAC's sample rate, exclusive output, and screens made for tablets.
+
+**The Android version is verified in an Android 16 emulator. It has not been installed on a real Android device yet.**
+Usage: [docs/USER_GUIDE_ANDROID.en.md](docs/USER_GUIDE_ANDROID.en.md). The plan and how it went: [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md); what was verified: "Android" in [docs/TESTING.md](docs/TESTING.md) (both Korean).
+
 ## Development
 
 ```bash
 scripts/check.sh
 ```
 
-runs what CI runs: formatting, lints (for macOS, and for Windows and iPhone when their targets are installed) and the tests. The single steps:
+runs what CI runs: formatting, lints (for macOS, and for Windows, iPhone and Android when their targets are installed) and the tests. The single steps:
 
 ```bash
 cargo fmt --all --check
@@ -116,6 +140,7 @@ The user guides are in Korean and English; the other documents are in Korean.
 | [docs/USER_GUIDE.en.md](docs/USER_GUIDE.en.md) · [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | User guide for macOS (the text of the app's Help menu) |
 | [docs/USER_GUIDE_WINDOWS.en.md](docs/USER_GUIDE_WINDOWS.en.md) · [docs/USER_GUIDE_WINDOWS.md](docs/USER_GUIDE_WINDOWS.md) | User guide for Windows |
 | [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md) · [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md) | User guide for iPhone |
+| [docs/USER_GUIDE_ANDROID.en.md](docs/USER_GUIDE_ANDROID.en.md) · [docs/USER_GUIDE_ANDROID.md](docs/USER_GUIDE_ANDROID.md) | User guide for Android |
 | [CHANGELOG.md](CHANGELOG.md) | What changed |
 | [docs/PRD.md](docs/PRD.md) | Users, scope, what "done" means |
 | [docs/UX.md](docs/UX.md) | Screens, interaction, how playback behaves |
@@ -125,7 +150,8 @@ The user guides are in Korean and English; the other documents are in Korean.
 | [docs/PLAN.md](docs/PLAN.md) · [docs/STATUS.md](docs/STATUS.md) | Phases and the current state |
 | [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) · [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) | Decisions: the GUI stack, the iPhone version |
 | [docs/IOS_PLAN.md](docs/IOS_PLAN.md) | The plan for the iPhone version and how it went |
-| [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md) | The plan for an Android version (a plan only; not started) |
+| [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md) | The plan for the Android version and how it goes |
+| [site/](site/) | The homepage (published with GitHub Pages; see "홈페이지" in docs/RELEASE.md) |
 
 ## License
 

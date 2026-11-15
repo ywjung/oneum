@@ -13,8 +13,9 @@
 | 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
-| iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(56항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
+| iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 준비 | 준비됨(2026-11-14) — 원격 `github`(https://github.com/ywjung/oneum, 비어 있는 공개 저장소). 추적 파일과 지난 커밋의 내용에 비밀 값·개인 주소·홈 경로·서명 팀 ID·기기 식별자가 없음을 확인, 저장소 크기 약 5MB(가장 큰 파일 1MB), 오픈 소스 고지가 iPhone 빌드까지 포함, CI에 iPhone 린트 추가. 커밋 기록의 작성자는 모두 한 이름과 한 e-mail 주소로 통일했다(이 저장소의 git 설정도 같음). 이 Mac의 로컬 계정 이름은 기록에 남지 않고, 그 e-mail 주소는 push하면 공개된다. 새 클론에서 빌드와 테스트 562개가 통과함을 확인. push와 CI 첫 실행은 **아직 하지 않음** |
+| Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), `scripts/android-build.sh --release`. 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기**. TestFlight·App Store는 범위 밖 |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
@@ -62,14 +63,48 @@ rustup target add x86_64-pc-windows-gnu
 brew install mingw-w64
 ```
 ```bash
+brew install makensis
+```
+```bash
 scripts/package-windows.sh
 ```
-`dist/OnEum-<버전>-windows-x86_64.zip`(OnEum.exe, LICENSE.txt, Windows 빌드 기준 THIRD_PARTY_NOTICES.md, README.txt)과
-`dist/SHA256SUMS-windows.txt`가 만들어집니다. 설치 프로그램은 없고, 압축을 푼 폴더에서 바로 실행합니다.
-- 서명하지 않으므로 Windows SmartScreen 경고가 나옵니다(코드 서명 인증서가 필요합니다).
+세 가지가 만들어집니다.
+- `dist/OnEum-<버전>-windows-x86_64.zip`: OnEum.exe, LICENSE.txt, Windows 빌드 기준 THIRD_PARTY_NOTICES.md, README.txt. 압축을 푼 폴더에서 바로 실행합니다.
+- `dist/OnEum-<버전>-windows-x86_64-setup.exe`: 설치 프로그램(NSIS 3, `assets/windows/installer.nsi`). `makensis`가 없으면 만들지 않고 그렇게 알립니다.
+- `dist/SHA256SUMS-windows.txt`: 두 파일의 체크섬.
+
+설치 프로그램이 하는 일:
+- 실행한 사용자의 계정에 설치합니다(관리자 권한을 묻지 않음). 기본 위치는 `%LOCALAPPDATA%\Programs\OnEum`이고 바꿀 수 있습니다.
+- 시작 메뉴에 바로 가기를 만들고, 마지막 화면에서 고르면 바탕 화면에도 만듭니다.
+- "설치된 앱"(프로그램 추가/제거)에 항목을 만들고, 거기서 제거합니다. 제거할 때 라이브러리와 설정(`%APPDATA%\OnEum`, `%LOCALAPPDATA%\OnEum`)도 지울지 묻고, 기본은 남기는 것입니다. 음악 파일은 건드리지 않습니다.
+- OnEum이 실행 중이면 닫으라고 알리고 기다립니다. 새 버전은 같은 자리에 덮어 설치합니다.
+- 64비트 Windows 10 이상이 아니면 설치하지 않습니다. 언어는 Windows의 언어에 따라 한국어 또는 영어입니다.
+
+`OnEum.exe`에는 아이콘(16~256px 아홉 가지)과 버전 정보가 들어갑니다. `build.rs`가 `assets/windows/oneum.rc`를 mingw-w64의 `windres`로 컴파일해 링크합니다.
+아이콘 파일은 `python3 scripts/gen-windows-icon.py`로 `assets/icon-1024.png`에서 만듭니다(Pillow 필요, 결과는 저장소에 들어 있음).
+패키징 스크립트는 실행 파일에 아이콘이 들어 있는지 검사하고, 없으면 실패합니다.
+(mac에서 `makensis`는 로케일이 설정되지 않은 셸에서 메모리 오류로 끝나므로 스크립트가 UTF-8 로케일로 실행합니다.)
+- 실행 파일도 설치 프로그램도 서명하지 않으므로 Windows SmartScreen 경고가 나옵니다(코드 서명 인증서가 필요합니다).
 - 스크립트는 실행 파일이 컴파일러 런타임 DLL을 필요로 하지 않는지만 검사합니다. **Windows에서 실행해 보는 단계는 없습니다** — 배포 전에 실제 Windows에서
   docs/TESTING.md "Windows"의 항목을 확인해야 합니다.
-- 실행 파일 자체의 아이콘(탐색기에 보이는 아이콘)은 넣지 않았습니다. 창과 작업 표시줄 아이콘만 설정됩니다.
+- **설치 프로그램은 만들어지는 것까지만 확인했습니다.** Windows에서 설치·실행·제거해 본 적이 없습니다(docs/TESTING.md "Windows").
+
+### Android판
+```bash
+rustup target add aarch64-linux-android
+```
+```bash
+scripts/android-build.sh --release
+```
+준비물: Android SDK(플랫폼 35, 빌드 도구)와 NDK(`scripts/android-env.sh`가 `ANDROID_NDK_HOME` 또는 SDK 아래에서 찾는다), JDK 17 또는 21. Gradle과 Android Gradle 플러그인은 처음 빌드할 때 받는다(`android/gradlew`).
+
+결과물: `android/app/build/outputs/apk/release/app-release.apk`(arm64 전용, Android 11 이상). 앱 ID는 `app.oneum.android`, 버전 이름은 `Cargo.toml`의 버전, 버전 코드는 커밋 수다.
+
+서명: 환경 변수 `ONEUM_ANDROID_KEYSTORE`(키 저장소 파일), `ONEUM_ANDROID_KEYSTORE_PASSWORD`, `ONEUM_ANDROID_KEY_ALIAS`, `ONEUM_ANDROID_KEY_PASSWORD`를 주면 그 키로 서명하고, 없으면 이 컴퓨터의 디버그 키로 서명한다. **디버그 키로 서명한 APK는 내 기기에 넣어 쓰는 용도이며 배포물이 아니다**(다른 키로 서명한 다음 버전은 덮어 설치할 수 없다). 키 저장소와 비밀번호는 저장소에 넣지 않는다.
+
+연결된 기기나 에뮬레이터에 설치: `scripts/android-device.sh`(USB 디버깅을 켠 기기). `--automation`으로 만든 빌드는 검증 채널이 들어 있으므로 배포하지 않는다.
+
+"모든 파일에 대한 접근"(`MANAGE_EXTERNAL_STORAGE`) 권한을 쓰므로 지금 형태로는 Play 스토어의 심사 대상이 아니다(직접 설치용). 스토어에 올리려면 저장소 접근을 `READ_MEDIA_AUDIO`와 폴더 선택기로 바꿔야 한다([ANDROID_PLAN.md](ANDROID_PLAN.md)).
 
 ## 4. Developer ID 서명 (자격 증명 필요)
 필요한 것: Apple Developer Program의 **Developer ID Application** 인증서(키체인에 설치).
@@ -124,3 +159,26 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
   (샌드박스를 도입하려면 security-scoped bookmark의 저장·복원·해제를 함께 구현해야 합니다.)
 - Hardened Runtime은 Developer ID 서명 시 켭니다(샌드박스와 별개).
 - 마이크, 카메라, 전체 디스크 접근, 네트워크 권한을 요구하지 않습니다. 앱은 네트워크에 접속하지 않습니다.
+
+## 홈페이지 (GitHub Pages)
+프로그램을 소개하는 페이지가 `site/`에 있습니다. 한국어(`site/index.html`)와 영어(`site/en/index.html`) 두 장이고, 같은 스타일시트(`site/style.css`)와 스크립트(`site/meters.js`, 움직이는 VU 미터)를 씁니다.
+외부 글꼴·스크립트·추적 코드를 불러오지 않으며, 쿠키도 쓰지 않습니다.
+
+게시하는 방법:
+1. 저장소를 GitHub에 올립니다(`git push -u github main`).
+2. GitHub 저장소의 **Settings → Pages → Build and deployment → Source**를 **GitHub Actions**로 바꿉니다(한 번만).
+3. `.github/workflows/pages.yml`이 `main`의 `site/`가 바뀔 때마다 게시합니다. Actions 탭에서 "Pages"를 직접 실행할 수도 있습니다.
+4. 주소는 `https://ywjung.github.io/oneum/`(영어는 `/oneum/en/`)입니다.
+
+미리 보기:
+```bash
+python3 -m http.server 8799 --bind 127.0.0.1 --directory site
+```
+브라우저에서 `http://localhost:8799/`를 엽니다. (파일을 직접 열면 스타일과 그림이 붙지 않습니다.)
+
+화면 그림을 다시 만들 때:
+- 그림 속 음악가와 앨범은 지어낸 것입니다. `python3 scripts/dev/gen-demo-library.py <폴더>`가 합성음과 그린 표지로 라이브러리를 만듭니다(ffmpeg, Pillow 필요).
+- macOS 화면은 `scripts/dev/run.sh`로 띄운 앱에서 `shot` 명령으로(앱 볼륨 0), iPhone 화면은 시뮬레이터에서 같은 방법으로 찍어 `site/img/`에 넣습니다. 언어는 설정의 `language`로 바꿉니다.
+- 페이지의 "확인한 범위" 표는 docs/TESTING.md와 같아야 합니다. 플랫폼의 상태가 바뀌면 두 언어의 페이지를 함께 고칩니다.
+
+확인한 것(2026-11-15): 로컬 서버로 열어 두 언어의 페이지가 넓은 화면(1280px)과 좁은 화면(390px)에서 넘침 없이 그려지고, 밝은 화면과 어두운 화면 모두 읽히며, VU 미터가 움직이고 버튼으로 멈추는 것, 페이지가 가리키는 사이트 안의 파일이 모두 있는 것, 다른 서버로 가는 요청이 없는 것. **GitHub에 게시해 본 적은 없습니다**(워크플로는 실행된 적이 없습니다).
