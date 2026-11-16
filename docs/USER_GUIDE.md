@@ -154,10 +154,10 @@
 
 ## 헤드폰 보정
 헤드폰은 모델마다 주파수 특성이 달라, 같은 음악도 저음이 많거나 고음이 날카롭게 들립니다. 그 차이를 측정값으로 만든 필터로 바로잡는 기능입니다. 설정 → 재생 → **헤드폰 보정**에서 씁니다(기본 꺼짐).
-- **보정 프로필**에서 쓰는 헤드폰을 고르면 바로 적용됩니다. 널리 쓰이는 헤드폰 34종의 **기본 프로필**이 들어 있습니다.
-  - 헤드폰: Sennheiser HD 800 S · HD 600 · HD 650 · HD 660S2 · HD 560S · Momentum 4 Wireless, Beyerdynamic DT 770 Pro · DT 990 Pro · DT 1990(밸런스드 패드), AKG K701 · K371 · K712, Audio-Technica ATH-M50x · ATH-R70x, Sony MDR-7506 · WH-1000XM4 · WH-1000XM5, Apple AirPods Max, Bose QuietComfort 45, HIFIMAN Sundara(2020년 이후 패드) · HE400se · Edition XS, Focal Clear · Utopia, Audeze LCD-X(2021) · LCD-2 Classic, Meze 99 Classics, Koss Porta Pro.
+- **보정 프로필**에서 쓰는 헤드폰을 고르면 바로 적용됩니다. 널리 쓰이는 헤드폰 35종의 **기본 프로필**이 들어 있습니다.
+  - 헤드폰: Sennheiser HD 800 S · HD 600 · HD 650 · HD 660S2 · HD 560S · Momentum 4 Wireless · Momentum 5 Wireless, Beyerdynamic DT 770 Pro · DT 990 Pro · DT 1990(밸런스드 패드), AKG K701 · K371 · K712, Audio-Technica ATH-M50x · ATH-R70x, Sony MDR-7506 · WH-1000XM4 · WH-1000XM5, Apple AirPods Max, Bose QuietComfort 45, HIFIMAN Sundara(2020년 이후 패드) · HE400se · Edition XS, Focal Clear · Utopia, Audeze LCD-X(2021) · LCD-2 Classic, Meze 99 Classics, Koss Porta Pro.
   - 이어폰: Sony WF-1000XM4, Samsung Galaxy Buds2 Pro, Etymotic ER2XR, Moondrop Aria, Sennheiser IE 600.
-- 기본 프로필의 값은 AutoEq 프로젝트가 oratory1990의 측정으로 계산해 공개한 것(Harman 목표 곡선 기준)을 고치지 않고 그대로 담은 것입니다. 측정에 쓰인 한 대를 기준으로 한 값이라, 같은 모델이라도 제품마다, 그리고 패드 상태나 쓰는 위치에 따라 조금씩 다를 수 있습니다. 이름에 패드나 연식이 적힌 것은 그 구성으로 측정한 값입니다.
+- 기본 프로필의 값은 AutoEq 프로젝트가 oratory1990의 측정으로 계산해 공개한 것(Harman 목표 곡선 기준)을 고치지 않고 그대로 담은 것입니다. 측정에 쓰인 한 대를 기준으로 한 값이라, 같은 모델이라도 제품마다, 그리고 패드 상태나 쓰는 위치에 따라 조금씩 다를 수 있습니다. 이름에 패드나 연식이 적힌 것은 그 구성으로 측정한 값입니다. Sennheiser Momentum 5 Wireless만은 AutoEq가 아직 공개한 값이 없어, Super* Review가 공개한 측정(노이즈 캔슬링을 켠 상태)을 AutoEq 프로그램으로 같은 목표 곡선에 맞춰 계산한 값입니다(2026-11-16). 측정한 곳과 장비가 다른 프로필과 다르고, 제품이 나오기 전에 잰 값입니다.
 - 목록에 없는 헤드폰은 **보정값 파일**을 구해서 넣습니다. AutoEq 프로젝트가 헤드폰 모델별로 만들어 둔 `ParametricEQ.txt`가 널리 쓰입니다(Equalizer APO 형식의 텍스트 파일). 앱은 인터넷에서 가져오지 않습니다.
 - **불러오기…**로 파일을 고르면 파일 이름으로 된 프로필이 만들어지고 바로 적용됩니다(`Sennheiser HD 600 ParametricEQ.txt` → "Sennheiser HD 600"). 같은 이름을 다시 불러오면 값이 바뀝니다. 30개까지 둘 수 있습니다. 불러온 프로필은 목록 위쪽 "불러온 프로필"에 나오고, 기본 프로필과 이름이 같으면 불러온 것이 쓰입니다.
 - 고른 프로필 아래에 필터 수와 프리앰프가 보입니다. 쓰지 않을 때는 **끔**으로 둡니다. **삭제**는 불러온 프로필만 지웁니다(기본 프로필은 지워지지 않습니다).

@@ -292,8 +292,8 @@ ui "menu correction_import $WORK/unsupported.txt" 'wait 300' 'dump hc0.json' \
    'menu correction_select Sennheiser HD 800 S' 'wait 400' 'dump hc3.json' \
    'menu correction_select No Such Headphones' 'wait 300' 'dump hc4.json' \
    'menu correction_off' 'wait 300' 'dump hc5.json'
-check hc0.json 'd["correction"] == {"selected": None, "applied": None, "profiles": [], "builtin": 34}' "a file with a filter that is not supported is not imported"
-check hc1.json 'd["correction"] == {"selected": "Test Phones", "applied": "Test Phones", "profiles": [["Test Phones", 2]], "builtin": 34}' "a correction file is imported, named after the file, and applied"
+check hc0.json 'd["correction"] == {"selected": None, "applied": None, "profiles": [], "builtin": 35}' "a file with a filter that is not supported is not imported"
+check hc1.json 'd["correction"] == {"selected": "Test Phones", "applied": "Test Phones", "profiles": [["Test Phones", 2]], "builtin": 35}' "a correction file is imported, named after the file, and applied"
 check hc2.json 'd["correction"]["applied"] is None and d["correction"]["profiles"] == [["Test Phones", 2]]' "…and can be switched off, the profile kept"
 check hc3.json 'd["correction"]["selected"] == "Sennheiser HD 800 S" and d["correction"]["applied"] == "Sennheiser HD 800 S" and d["correction"]["profiles"] == [["Test Phones", 2]]' "a built-in headphone profile is applied without being copied into the settings"
 check hc4.json 'd["correction"]["applied"] == "Sennheiser HD 800 S"' "a name that is no profile changes nothing"

@@ -414,11 +414,11 @@ strings! {
     correction_file_desc: "목록에 없는 헤드폰은 AutoEq의 ParametricEQ.txt 같은 Equalizer APO 형식의 파일을 불러옵니다.", "For a headphone that is not listed: imports a file in Equalizer APO format, such as AutoEq's ParametricEQ.txt.";
     correction_import: "불러오기…", "Import…";
     correction_group_imported: "불러온 프로필", "Imported";
-    correction_group_builtin: "기본 프로필 (AutoEq · oratory1990 측정)", "Built in (AutoEq · measured by oratory1990)";
+    correction_group_builtin: "기본 프로필 (AutoEq)", "Built in (AutoEq)";
     correction_choose: "보정값 파일 선택", "Choose a Correction File";
     correction_filter_text: "텍스트 파일", "Text files";
-    correction_hint: "헤드폰마다 다른 주파수 특성을, 측정해서 만든 필터 값으로 바로잡습니다. 기본 프로필은 AutoEq 프로젝트가 oratory1990의 측정으로 만든 값이며(Harman 목표 곡선 기준), 같은 모델이라도 제품마다 조금씩 다를 수 있습니다. 이퀄라이저 다음, 크로스피드 앞에서 적용됩니다. 켜면 소리는 원본과 달라집니다. 불러오는 파일에서 지원하는 필터는 PK, LSC, HSC입니다.",
-        "Corrects a headphone's frequency response with filter values made from measurements. The built-in profiles are the AutoEq project's results for measurements by oratory1990 (to the Harman target); units of the same model differ a little. Applied after the equalizer and before crossfeed. While on, the sound differs from the original. Imported files may use PK, LSC and HSC filters.";
+    correction_hint: "헤드폰마다 다른 주파수 특성을, 측정해서 만든 필터 값으로 바로잡습니다. 기본 프로필은 AutoEq 프로젝트가 oratory1990의 측정으로 만든 값이며(Harman 목표 곡선 기준; Momentum 5 Wireless만 Super* Review의 측정을 AutoEq로 계산한 값), 같은 모델이라도 제품마다 조금씩 다를 수 있습니다. 이퀄라이저 다음, 크로스피드 앞에서 적용됩니다. 켜면 소리는 원본과 달라집니다. 불러오는 파일에서 지원하는 필터는 PK, LSC, HSC입니다.",
+        "Corrects a headphone's frequency response with filter values made from measurements. The built-in profiles are the AutoEq project's results for measurements by oratory1990 (to the Harman target; the Momentum 5 Wireless alone was computed with AutoEq from a measurement by Super* Review); units of the same model differ a little. Applied after the equalizer and before crossfeed. While on, the sound differs from the original. Imported files may use PK, LSC and HSC filters.";
     correction_err_read: "보정값 파일을 읽을 수 없습니다.", "The correction file could not be read.";
     correction_err_empty: "보정값(Preamp, Filter 줄)이 없는 파일입니다.", "The file holds no correction (no Preamp or Filter lines).";
     correction_err_many: "필터가 너무 많은 파일입니다(32개까지).", "The file has too many filters (32 at most).";

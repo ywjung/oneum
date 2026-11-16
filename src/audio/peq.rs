@@ -81,7 +81,8 @@ pub enum PeqError {
 }
 
 /// Corrections for well-known headphones that come with the app: AutoEq's results for
-/// measurements by oratory1990 (see the head of the data file for source and licence).
+/// measurements by oratory1990, and one computed with AutoEq from a measurement by
+/// Super* Review (see the head of the data file for sources and licence).
 const BUILTIN_TEXT: &str = include_str!("../../assets/corrections/headphones.txt");
 
 /// The profiles that come with the app, in the order of the data file.
@@ -817,7 +818,7 @@ mod tests {
     #[test]
     fn the_builtin_profiles_are_what_the_source_says() {
         let sections = builtin_sections(BUILTIN_TEXT);
-        assert_eq!(sections.len(), 34);
+        assert_eq!(sections.len(), 35);
         assert_eq!(builtin_profiles().len(), sections.len(), "every one parses");
         let mut names = std::collections::HashSet::new();
         for ((name, text), profile) in sections.iter().zip(builtin_profiles()) {
@@ -897,6 +898,37 @@ mod tests {
                 hz: 5_679.0,
                 gain_db: -4.4,
                 q: 4.36
+            }
+        );
+        // The one computed with AutoEq from Super* Review's measurement: it stands with
+        // its brand, after the Momentum 4 Wireless.
+        let at = builtin_profiles()
+            .iter()
+            .position(|p| p.name == "Sennheiser Momentum 5 Wireless")
+            .expect("included");
+        assert_eq!(
+            builtin_profiles()[at - 1].name,
+            "Sennheiser Momentum 4 Wireless"
+        );
+        let momentum5 = &builtin_profiles()[at];
+        assert_eq!(momentum5.preamp_db, -5.7);
+        assert_eq!(momentum5.filters.len(), 10);
+        assert_eq!(
+            momentum5.filters[0],
+            PeqFilter {
+                kind: PeqKind::LowShelf,
+                hz: 105.0,
+                gain_db: -9.9,
+                q: 0.70
+            }
+        );
+        assert_eq!(
+            momentum5.filters[5],
+            PeqFilter {
+                kind: PeqKind::HighShelf,
+                hz: 10_000.0,
+                gain_db: -7.5,
+                q: 0.70
             }
         );
     }
