@@ -70,7 +70,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 ## Settings
 - **Library**: Rescan, Open Music Files, importing a playlist, the music folders (adding, removing, and **Show** in the Files app), and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.
 - **Importing an Apple Music library** (Settings → Library): save an XML file on the Mac with **File → Library → Export Library** in Apple Music, move it to the phone and choose it: play counts, last played, date added, loved songs and playlists are brought over. Songs are found by the folder they are in and their file name, so this fits songs whose folders were copied from the Mac as they are. Music files are not changed.
-- **Playback**: volume leveling (ReplayGain) and the analysis of songs without tags, shuffle by album, resuming long tracks, crossfeed, headphone correction (34 built-in profiles and correction files), radio, memory playback.
+- **Playback**: volume leveling (ReplayGain) and the analysis of songs without tags, shuffle by album, resuming long tracks, crossfeed, headphone correction (35 built-in profiles and correction files), radio, memory playback.
 - **Equalizer**: ten bands and presets. Double-tap a slider to return it to 0 dB.
 - **General**: language and appearance (light · dark · system).
 - **Shortcuts**: the list of the shortcuts of a keyboard (see "Keyboard").

@@ -18,7 +18,7 @@ The name is the Korean word **온음** ("on-eum"): a whole, unaltered sound, and
 - Volume leveling (ReplayGain): the file's tags are used, and songs without tags are measured by the app (EBU R 128). Music files are never changed.
 - Meter deck: analogue VU meters for left and right (needles that move to the standard, PEAK lamps), a 36-band spectrum between them, and the source and output path.
 - Media servers of the same network (DLNA/UPnP): finding them or adding one by its address, looking through their folders, playing from them into memory as the music arrives. The network is used only when that view is opened
-- A ten-band equalizer (12 presets and your own), headphone correction (profiles for 34 widely used headphones, and correction files such as AutoEq's `ParametricEQ.txt`), headphone crossfeed, and a signal path that lists, in order, what the app does between the file and the device.
+- A ten-band equalizer (12 presets and your own), headphone correction (profiles for 35 widely used headphones, and correction files such as AutoEq's `ParametricEQ.txt`), headphone crossfeed, and a signal path that lists, in order, what the app does between the file and the device.
 - Listen Again (recently added, most played, not heard for long), lyrics (tags and `.lrc`, followed line by line when timed), credits and work information from the tags, a genre view, other versions of the same song, and radio (when the queue ends, similar songs from the library follow).
 - The user guide is inside the app (Help → OnEum User Guide), in Korean and English.
 - Optional output quality settings: set the device to the song's sample rate and play without resampling, exclusive output, memory playback. Dither is added only where an integer device needs it.

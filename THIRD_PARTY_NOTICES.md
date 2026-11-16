@@ -360,4 +360,4 @@ Notes:
 
 | Data | License | Source |
 |---|---|---|
-| Built-in headphone correction profiles (`assets/corrections/headphones.txt`): parametric equalizer settings from AutoEq, computed from oratory1990's measurements | MIT, Copyright (c) 2018-2022 Jaakko Pasanen | https://github.com/jaakkopasanen/AutoEq |
+| Built-in headphone correction profiles (`assets/corrections/headphones.txt`): parametric equalizer settings from AutoEq, computed from oratory1990's measurements (one, Sennheiser Momentum 5 Wireless: computed with AutoEq from a measurement published by Super* Review, https://squig.link/headphones/) | MIT, Copyright (c) 2018-2022 Jaakko Pasanen | https://github.com/jaakkopasanen/AutoEq |

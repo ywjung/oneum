@@ -6,6 +6,22 @@
 # results for measurements by oratory1990, equalized to the Harman target curves. They
 # are reproduced here unchanged.
 #
+# One profile is not from that directory: Sennheiser Momentum 5 Wireless. AutoEq had
+# published no result for it by 2026-11-16 (its last commit, 7ae0f56, is of 2025-07-20;
+# the headphone came out in June 2026). Its values were computed for this file on
+# 2026-11-16 with AutoEq itself (release 4.1.2 from PyPI: that commit's code without the
+# table of default bass shelf gains, whose value for this target, 6 dB, was given by hand),
+# from Super* Review's public measurement with noise cancelling on
+# (https://squig.link/headphones/, files "Sennheiser Momentum 5 anc-on L1" to "R3",
+# measured on 2026-05-11 on a clone IEC 711 coupler with a KB006x ear), the way AutoEq's
+# own tooling treats that source (dbtools/squig_crawler.py and dbtools/db.ipynb): the six
+# files are averaged after interpolate() and center(), and the result is equalized to
+# "Harman over-ear 2018 without bass" with a 6 dB bass shelf at 105 Hz, Q 0.7, and the
+# parametric configurations 4_PEAKING_WITH_LOW_SHELF and 4_PEAKING_WITH_HIGH_SHELF, as
+# the profiles above are. The same run gave AutoEq's published results for three other
+# headphones to within 0.01 dB of their curves (7 Hz and 0.04 of Q at most in a filter).
+# When AutoEq publishes a result for this headphone, that result is to replace this one.
+#
 # Format: "## <name>" starts a profile; the lines that follow are the profile as in
 # AutoEq's "<name> ParametricEQ.txt". The "# check <count> <sum>" line holds the number
 # of numbers in the profile and their sum, as computed from the source: a test compares
@@ -94,6 +110,22 @@ Filter 8: ON PK Fc 652 Hz Gain 1.2 dB Q 2.25
 Filter 9: ON PK Fc 952 Hz Gain -1.0 dB Q 3.69
 Filter 10: ON PK Fc 316 Hz Gain -0.9 dB Q 3.46
 # check 41 19362.94
+
+## Sennheiser Momentum 5 Wireless
+# Not from results/oratory1990: computed with AutoEq from Super* Review's measurement,
+# noise cancelling on (see the head of this file).
+Preamp: -5.7 dB
+Filter 1: ON LSC Fc 105 Hz Gain -9.9 dB Q 0.70
+Filter 2: ON PK Fc 6249 Hz Gain 5.4 dB Q 0.36
+Filter 3: ON PK Fc 279 Hz Gain -3.4 dB Q 0.40
+Filter 4: ON PK Fc 74 Hz Gain 5.3 dB Q 0.74
+Filter 5: ON PK Fc 1208 Hz Gain -3.0 dB Q 2.57
+Filter 6: ON HSC Fc 10000 Hz Gain -7.5 dB Q 0.70
+Filter 7: ON PK Fc 10000 Hz Gain 2.7 dB Q 0.90
+Filter 8: ON PK Fc 2270 Hz Gain 3.0 dB Q 4.87
+Filter 9: ON PK Fc 2684 Hz Gain -2.4 dB Q 5.93
+Filter 10: ON PK Fc 3321 Hz Gain -1.5 dB Q 3.83
+# check 41 36249
 
 ## Beyerdynamic DT 770 Pro
 Preamp: -5.1 dB
