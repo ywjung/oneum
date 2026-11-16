@@ -593,3 +593,71 @@ pub fn key_caps(ui: &mut Ui, keys: &str) {
         }
     }
 }
+
+/// Five stars, `rating` of them filled. Where `label` is given they can be set: a
+/// click on a star gives that many, and a click on the last one that is filled takes
+/// the rating away. Returns the rating that was chosen. (Drawn, not written: the
+/// fonts that come with the app have no star.)
+pub fn stars(ui: &mut Ui, rating: u8, size: f32, label: Option<&str>) -> Option<u8> {
+    const COUNT: u8 = 5;
+    let gap = (size * 0.18).round();
+    let width = f32::from(COUNT) * size + f32::from(COUNT - 1) * gap;
+    let sense = if label.is_some() {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, size), sense);
+    if let Some(label) = label {
+        let label = format!("{label}: {rating}");
+        response.widget_info(move || WidgetInfo::labeled(Role::Button, true, &label));
+    }
+    if ui.is_rect_visible(rect) {
+        let accent = theme::accent(ui.visuals().dark_mode);
+        let empty = theme::dim(ui).gamma_multiply(0.7);
+        for star in 0..COUNT {
+            let center = egui::pos2(
+                rect.left() + size / 2.0 + f32::from(star) * (size + gap),
+                rect.center().y,
+            );
+            // Ten corners, from the top: a tip, then the notch beside it, and so on.
+            let corners: Vec<egui::Pos2> = (0..10)
+                .map(|corner| {
+                    let angle = (-90.0 + 36.0 * corner as f32).to_radians();
+                    let radius = if corner % 2 == 0 {
+                        size / 2.0
+                    } else {
+                        size * 0.21
+                    };
+                    center + radius * egui::vec2(angle.cos(), angle.sin())
+                })
+                .collect();
+            if star < rating {
+                // (Filled in parts that have no notch: the middle, and each tip.)
+                let notches: Vec<egui::Pos2> = corners.iter().skip(1).step_by(2).copied().collect();
+                ui.painter().add(egui::Shape::convex_polygon(
+                    notches,
+                    accent,
+                    egui::Stroke::NONE,
+                ));
+                for tip in (0..10).step_by(2) {
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        vec![corners[(tip + 9) % 10], corners[tip], corners[tip + 1]],
+                        accent,
+                        egui::Stroke::NONE,
+                    ));
+                }
+            } else {
+                ui.painter().add(egui::Shape::closed_line(
+                    corners,
+                    egui::Stroke::new(1.0, empty),
+                ));
+            }
+        }
+    }
+    let at = response
+        .interact_pointer_pos()
+        .filter(|_| response.clicked())?;
+    let chosen = (((at.x - rect.left()) / (size + gap)).floor() as i32).clamp(0, 4) as u8 + 1;
+    Some(if chosen == rating { 0 } else { chosen })
+}

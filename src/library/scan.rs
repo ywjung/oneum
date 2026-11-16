@@ -2240,6 +2240,7 @@ mod tests {
             check: None,
             art_id: None,
             favorite: false,
+            rating: 0,
             play_count: 0,
             last_played_at: None,
             added_at: 0,

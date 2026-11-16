@@ -71,6 +71,13 @@ strings! {
     col_year: "연도", "Year";
     col_genre: "장르", "Genre";
     col_plays: "재생", "Plays";
+    col_rating: "별점", "Rating";
+    rating_none: "별점 없음", "No Rating";
+    rating_1: "별 1개", "1 Star";
+    rating_2: "별 2개", "2 Stars";
+    rating_3: "별 3개", "3 Stars";
+    rating_4: "별 4개", "4 Stars";
+    rating_5: "별 5개", "5 Stars";
     col_added: "추가", "Added";
     col_last_played: "마지막 재생", "Last Played";
     columns_menu: "표시할 열", "Columns";

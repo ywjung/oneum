@@ -147,6 +147,21 @@ impl OneumApp {
                 close = true;
             }
         }
+        // The listener's stars: shown, and set by pressing one.
+        if !crate::library::Library::is_remote(track.id) {
+            ui.add_space(6.0);
+            let mut chosen = None;
+            ui.horizontal(|ui| {
+                ui.add_space(super::SIDE + 4.0);
+                ui.label(RichText::new(s.col_rating).color(theme::dim(ui)));
+                ui.add_space(12.0);
+                chosen = crate::ui::widgets::stars(ui, track.rating, 24.0, Some(s.col_rating));
+            });
+            ui.add_space(6.0);
+            if let Some(stars) = chosen {
+                actions.push(Action::SetRating(vec![track.id], stars));
+            }
+        }
         let rows = self.info_rows(track, details.as_deref());
         for (index, (name, value)) in rows.into_iter().enumerate() {
             if name == s.info_genre {

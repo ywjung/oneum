@@ -43,7 +43,8 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - Loudness is set with the iPhone's volume buttons. **App volume** in the player turns down OnEum's own sound only.
 
 ## Song lists
-- **Sort**: above the lists of Songs, Favorites, a genre, a folder and a smart playlist, **Sort** puts the songs in order of title, artist, album, year, length, play count, date added, last played or format. Choosing the same one again turns the order round; **Default Order** brings the usual one back.
+- **Sort**: above the lists of Songs, Favorites, a genre, a folder and a smart playlist, **Sort** puts the songs in order of title, artist, album, year, length, play count, rating, date added, last played or format. Choosing the same one again turns the order round; **Default Order** brings the usual one back.
+- **Ratings**: under ⋯ of a song, press its rating (**No Rating** at first) to give it 1 to 5 stars; the stars in Song Info can be pressed too. Ratings are kept inside OnEum only, and files are not changed. **Sort** above a list can order by rating, and a search can ask for it: `rating:>=4`.
 - **Select**: press **Select** above a list and press songs to choose several. **Selected Songs…** plays them, plays them next, adds them to the queue or to a playlist, makes them favourites or removes them, all at once. **Select All** chooses every song; **Done** ends it.
 - A play is counted once half of a song (four minutes of a long one) has really been heard. A song that is skipped is not counted.
 

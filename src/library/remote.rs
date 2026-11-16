@@ -107,6 +107,7 @@ fn track_of(row: &RemoteRow) -> Track {
         check: None,
         art_id: row.art_id.clone(),
         favorite: false,
+        rating: 0,
         play_count: 0,
         last_played_at: None,
         added_at: row.added_at,

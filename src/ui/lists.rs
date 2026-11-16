@@ -957,6 +957,7 @@ impl OneumApp {
             (ColumnKind::Year, s.col_year, columns.year),
             (ColumnKind::Genre, s.col_genre, columns.genre),
             (ColumnKind::Plays, s.col_plays, columns.plays),
+            (ColumnKind::Rating, s.col_rating, columns.rating),
             (ColumnKind::Added, s.col_added, columns.added),
             (
                 ColumnKind::LastPlayed,
@@ -972,6 +973,7 @@ impl OneumApp {
         let column_width = |kind: ColumnKind| match kind {
             ColumnKind::Year | ColumnKind::Plays => 46.0,
             ColumnKind::Genre => 110.0,
+            ColumnKind::Rating => 74.0,
             ColumnKind::Added => 72.0,
             ColumnKind::LastPlayed => 84.0,
             ColumnKind::Format => 64.0,
@@ -1128,6 +1130,7 @@ impl OneumApp {
                         ColumnKind::Year => (s.col_year, Some(SortKey::Year)),
                         ColumnKind::Genre => (s.col_genre, None),
                         ColumnKind::Plays => (s.col_plays, Some(SortKey::PlayCount)),
+                        ColumnKind::Rating => (s.col_rating, Some(SortKey::Rating)),
                         ColumnKind::Added => (s.col_added, Some(SortKey::DateAdded)),
                         ColumnKind::LastPlayed => (s.col_last_played, Some(SortKey::LastPlayed)),
                         ColumnKind::Format => (s.col_format, Some(SortKey::Format)),
@@ -1217,6 +1220,13 @@ impl OneumApp {
                     });
                     for kind in &extras {
                         row.col(|ui| {
+                            if *kind == ColumnKind::Rating {
+                                // Shown, not set, in the list: a click here is for the row.
+                                if track.rating > 0 {
+                                    widgets::stars(ui, track.rating, 11.0, None);
+                                }
+                                return;
+                            }
                             let text = match kind {
                                 ColumnKind::Year => {
                                     track.year.map(|y| y.to_string()).unwrap_or_default()
@@ -1226,6 +1236,7 @@ impl OneumApp {
                                     0 => String::new(),
                                     n => n.to_string(),
                                 },
+                                ColumnKind::Rating => String::new(),
                                 ColumnKind::Added => this.lang.days_ago(now - track.added_at),
                                 ColumnKind::LastPlayed => track.last_played_at.map_or_else(
                                     || s.never.to_string(),
@@ -1384,6 +1395,17 @@ impl OneumApp {
             actions.push(Action::SetFavorite(tracks.clone(), !favorite));
             ui.close();
         }
+        // Stars, for the songs that are chosen; the one the menu was opened on says
+        // what they have.
+        ui.menu_button(s.col_rating, |ui| {
+            for stars in [5, 4, 3, 2, 1, 0] {
+                let has = clicked_track.rating == stars;
+                if ui.radio(has, self.rating_words(stars)).clicked() {
+                    actions.push(Action::SetRating(tracks.clone(), stars));
+                    ui.close();
+                }
+            }
+        });
         ui.separator();
         // Where this song belongs: its album, and its artist as the artist view groups it.
         if ui.button(s.go_to_album).clicked() {

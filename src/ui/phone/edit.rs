@@ -12,7 +12,7 @@ use crate::playback::Command;
 use eframe::egui::{self, Align, Align2, Layout, Rect, RichText, Sense, Ui, pos2, vec2};
 
 /// The orders a list of songs can be put in, with what each is called.
-fn sort_choices(s: &Strings) -> [(SortKey, &'static str); 9] {
+fn sort_choices(s: &Strings) -> [(SortKey, &'static str); 10] {
     [
         (SortKey::Title, s.col_title),
         (SortKey::Artist, s.col_artist),
@@ -20,6 +20,7 @@ fn sort_choices(s: &Strings) -> [(SortKey, &'static str); 9] {
         (SortKey::Year, s.col_year),
         (SortKey::Duration, s.col_duration),
         (SortKey::PlayCount, s.info_plays),
+        (SortKey::Rating, s.col_rating),
         (SortKey::DateAdded, s.phone_sort_added),
         (SortKey::LastPlayed, s.col_last_played),
         (SortKey::Format, s.col_format),
@@ -31,7 +32,7 @@ fn sort_choices(s: &Strings) -> [(SortKey, &'static str); 9] {
 fn starts_ascending(key: SortKey) -> bool {
     !matches!(
         key,
-        SortKey::PlayCount | SortKey::DateAdded | SortKey::LastPlayed
+        SortKey::PlayCount | SortKey::DateAdded | SortKey::LastPlayed | SortKey::Rating
     )
 }
 

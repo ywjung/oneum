@@ -119,6 +119,15 @@ check ab2.json 'd["section"][1] is not None and 1000 <= d["section"][1] - d["sec
 check ab3.json 'd["state"] == "Playing" and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
 check ab4.json 'd["section"] is None and d["state"] == "Playing"' "the third time gives the section up"
 
+echo "== stars"
+# A rating for the song that is playing, kept in the app's database only: the song is
+# found by it, and the rating is taken away again.
+ui 'menu rate_current 4' 'wait 500' 'dump rt1.json' 'click 200 20' 'text rating:>=4' 'wait 400' 'dump rt2.json' 'key Escape' 'wait 300' \
+   'menu rate_current 0' 'wait 500' 'dump rt3.json'
+check rt1.json 'd["current_rating"] == 4' "the song that is playing is given four stars"
+check rt2.json 'd["rows"] == 1 and d["first_rows"] == [d["current"]]' "…and is found by them (rating:>=4)"
+check rt3.json 'd["current_rating"] == 0 and d["rows"] == 20 and d["query"] == ""' "the stars are taken away again"
+
 echo "== modes"
 ui "click $SHUFFLE" 'wait 400' 'dump m1.json' "click $SHUFFLE" 'wait 400' 'dump m2.json' "click $REPEAT" 'wait 300' 'dump m3.json' "click $REPEAT" 'wait 300' 'dump m4.json' "click $REPEAT" 'wait 300' 'dump m5.json'
 check m1.json 'd["shuffle"] and d["queue_index"] == 0' "shuffle on keeps the current track first"

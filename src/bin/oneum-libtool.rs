@@ -996,6 +996,7 @@ fn synthetic_tracks(n: usize) -> Vec<Track> {
                 check: None,
                 art_id: art_id.clone(),
                 favorite: rng.u8(..50) == 0,
+                rating: 0,
                 play_count: if rng.u8(..4) == 0 { rng.u32(..200) } else { 0 },
                 last_played_at: (rng.u8(..4) == 0).then(|| 1_700_000_000 + rng.i64(0..30_000_000)),
                 added_at: 1_690_000_000 + rng.i64(0..20_000_000),

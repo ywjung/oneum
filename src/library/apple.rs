@@ -70,6 +70,9 @@ pub struct AppleTrack {
     pub last_played: Option<i64>,
     pub added: Option<i64>,
     pub loved: bool,
+    /// The stars the listener gave it, 1 to 5 (0: none). A rating the app worked out
+    /// from the album's is not one.
+    pub rating: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +112,14 @@ pub fn parse(xml: &str) -> Option<AppleLibrary> {
             last_played: track.date("Play Date UTC"),
             added: track.date("Date Added"),
             loved: track.flag("Loved") || track.flag("Favorited"),
+            // (Twenty to a star; half stars, which old versions knew, are rounded down.)
+            rating: if track.flag("Rating Computed") {
+                0
+            } else {
+                track
+                    .integer("Rating")
+                    .map_or(0, |rating| (rating.clamp(0, 100) / 20) as u8)
+            },
         });
     }
     if let Some(Value::Array(playlists)) = root.get("Playlists") {
@@ -457,6 +468,7 @@ mod tests {
 			<key>Play Date UTC</key><date>2024-01-02T03:04:05Z</date>
 			<key>Date Added</key><date>2019-03-24T00:00:00Z</date>
 			<key>Loved</key><true/>
+			<key>Rating</key><integer>80</integer>
 			<key>Normalization</key><integer>1234</integer>
 			<key>Location</key><string>file:///Users/me/Music/%EC%95%84%EC%9D%B4%EC%9C%A0/Palette/01%20Night%20Letter.flac</string>
 		</dict>
@@ -465,6 +477,7 @@ mod tests {
 			<key>Track ID</key><integer>102</integer>
 			<key>Name</key><string>Rock &amp; Roll</string>
 			<key>Favorited</key><true/>
+			<key>Rating</key><integer>60</integer><key>Rating Computed</key><true/>
 			<key>Location</key><string>file://localhost/Users/me/Music/R%26R.mp3</string>
 		</dict>
 		<key>103</key>
@@ -510,7 +523,12 @@ mod tests {
         assert_eq!(first.last_played, Some(1_704_164_645));
         assert_eq!(first.added, Some(1_553_385_600));
         assert!(first.loved);
+        assert_eq!(first.rating, 4, "eighty of a hundred: four stars");
         let second = &library.tracks[1];
+        assert_eq!(
+            second.rating, 0,
+            "a rating worked out from the album's is none"
+        );
         assert_eq!(second.path, PathBuf::from("/Users/me/Music/R&R.mp3"));
         assert_eq!((second.play_count, second.last_played), (0, None));
         assert!(second.loved, "Favorited counts as loved");

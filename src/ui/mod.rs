@@ -99,6 +99,7 @@ enum ColumnKind {
     Plays,
     Added,
     LastPlayed,
+    Rating,
 }
 
 /// A genre and how many songs carry it.
@@ -147,6 +148,8 @@ enum Action {
     AddToPlaylist(i64, Vec<TrackId>),
     NewPlaylistWith(Vec<TrackId>),
     SetFavorite(Vec<TrackId>, bool),
+    /// Stars for these songs: 1 to 5, 0 for none.
+    SetRating(Vec<TrackId>, u8),
     Reveal(TrackId),
     ShowInfo(TrackId),
     RemoveFromPlaylist(i64, Vec<i64>),
@@ -1689,6 +1692,19 @@ impl OneumApp {
         })
     }
 
+    /// What a rating is called in a menu ("3 Stars"; "No Rating" for 0).
+    pub(super) fn rating_words(&self, stars: u8) -> &'static str {
+        let s = self.s();
+        match stars {
+            0 => s.rating_none,
+            1 => s.rating_1,
+            2 => s.rating_2,
+            3 => s.rating_3,
+            4 => s.rating_4,
+            _ => s.rating_5,
+        }
+    }
+
     /// What the next step of marking a section does, as a menu says it.
     pub(super) fn section_step(&self) -> &'static str {
         match self.player.section {
@@ -1987,6 +2003,7 @@ impl OneumApp {
             Action::AddToPlaylist(_, ref tracks)
             | Action::NewPlaylistWith(ref tracks)
             | Action::SetFavorite(ref tracks, _)
+            | Action::SetRating(ref tracks, _)
             | Action::RemoveFromLibrary(ref tracks)
                 if had_remote(tracks) =>
             {
@@ -1994,6 +2011,7 @@ impl OneumApp {
                     Action::AddToPlaylist(id, tracks) => Action::AddToPlaylist(id, local(tracks)),
                     Action::NewPlaylistWith(tracks) => Action::NewPlaylistWith(local(tracks)),
                     Action::SetFavorite(tracks, on) => Action::SetFavorite(local(tracks), on),
+                    Action::SetRating(tracks, stars) => Action::SetRating(local(tracks), stars),
                     Action::RemoveFromLibrary(tracks) => Action::RemoveFromLibrary(local(tracks)),
                     other => other,
                 };
@@ -2001,6 +2019,7 @@ impl OneumApp {
                     Action::AddToPlaylist(_, tracks)
                     | Action::NewPlaylistWith(tracks)
                     | Action::SetFavorite(tracks, _)
+                    | Action::SetRating(tracks, _)
                     | Action::RemoveFromLibrary(tracks) => tracks.is_empty(),
                     _ => false,
                 };
@@ -2040,6 +2059,12 @@ impl OneumApp {
             Action::SetFavorite(tracks, favorite) => self.edit(move |library| {
                 library
                     .set_favorite(&tracks, favorite)
+                    .err()
+                    .map(AppEvent::EditFailed)
+            }),
+            Action::SetRating(tracks, stars) => self.edit(move |library| {
+                library
+                    .set_rating(&tracks, stars)
                     .err()
                     .map(AppEvent::EditFailed)
             }),
@@ -2109,6 +2134,7 @@ impl OneumApp {
                     ColumnKind::Year => &mut columns.year,
                     ColumnKind::Genre => &mut columns.genre,
                     ColumnKind::Plays => &mut columns.plays,
+                    ColumnKind::Rating => &mut columns.rating,
                     ColumnKind::Added => &mut columns.added,
                     ColumnKind::LastPlayed => &mut columns.last_played,
                 };
@@ -2477,6 +2503,13 @@ impl OneumApp {
                         dispatch(action);
                         continue;
                     }
+                    // Stars for the song that is playing.
+                    if let Some(stars) = id.strip_prefix("rate_current ") {
+                        if let (Some(current), Ok(stars)) = (self.player.current, stars.parse()) {
+                            self.apply(Action::SetRating(vec![current.track_id], stars));
+                        }
+                        continue;
+                    }
                     // The library's own data, to a file and from one.
                     if let Some(path) = id.strip_prefix("data_export ") {
                         self.write_library_data(PathBuf::from(path), false);
@@ -2664,6 +2697,11 @@ impl OneumApp {
         state["adapter"] = serde_json::json!(renderer::adapter());
         state["graphics_errors"] = serde_json::json!(renderer::errors());
         state["section"] = serde_json::json!(p.section.map(|s| (s.from_ms, s.to_ms)));
+        state["current_rating"] = serde_json::json!(
+            p.current
+                .and_then(|c| self.snapshot.get(c.track_id))
+                .map(|t| t.rating)
+        );
         state["current_path"] = serde_json::json!(
             p.current
                 .and_then(|c| self.track(c.track_id))

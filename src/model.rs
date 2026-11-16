@@ -70,6 +70,9 @@ pub struct Track {
     /// Cached cover image id (hex), if the track has artwork.
     pub art_id: Option<String>,
     pub favorite: bool,
+    /// The listener's rating: 1 to 5 stars, 0 for none. Kept in the app's database,
+    /// never written to the file.
+    pub rating: u8,
     pub play_count: u32,
     /// Unix seconds.
     pub last_played_at: Option<i64>,
@@ -201,6 +204,7 @@ pub(crate) fn test_track(id: TrackId) -> Track {
         check: None,
         art_id: None,
         favorite: false,
+        rating: 0,
         play_count: 0,
         last_played_at: None,
         added_at: 0,

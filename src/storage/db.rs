@@ -21,7 +21,7 @@ const HISTORY_KEEP_ROWS: i64 = 20_000;
 /// Ordered migration list. Entry `i` upgrades the schema from version `i` to `i + 1`;
 /// the current version is stored in `PRAGMA user_version`.
 const MIGRATIONS: &[&str] = &[
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
 ];
 
 const SCHEMA_V1: &str = "
@@ -128,7 +128,7 @@ CREATE TABLE loudness (
 
 /// What another player knew about a song: `(track, plays, last played, added, loved)`
 /// (times in Unix seconds).
-pub type ListeningRow = (TrackId, u32, Option<i64>, Option<i64>, bool);
+pub type ListeningRow = (TrackId, u32, Option<i64>, Option<i64>, bool, u8);
 
 const KV_UPSERT_SQL: &str = "INSERT INTO kv (key, value) VALUES (?1, ?2) \
                              ON CONFLICT(key) DO UPDATE SET value = excluded.value";
@@ -163,6 +163,11 @@ const SCHEMA_V6: &str = "
 CREATE TABLE removed_files (
     path BLOB PRIMARY KEY
 ) WITHOUT ROWID;
+";
+
+/// The listener's rating of a song: 1 to 5 stars, 0 for none.
+const SCHEMA_V7: &str = "
+ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Tracks of media servers on the network (see `library::remote`). They are not part of
@@ -260,7 +265,7 @@ const USER_COLS: [&str; 4] = ["favorite", "play_count", "last_played_at", "added
 static SELECT_TRACKS_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT id, path, {}, {}, m_track_gain, m_track_peak, m_album_gain, m_album_peak, \
-         c_verdict, c_dr, c_true_peak \
+         c_verdict, c_dr, c_true_peak, rating \
          FROM tracks \
          LEFT JOIN loudness ON loudness.track_id = tracks.id \
          AND loudness.of_mtime_ns = tracks.mtime_ns AND loudness.of_file_size = tracks.file_size \
@@ -722,7 +727,7 @@ impl Db {
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(
-                "DELETE FROM tracks WHERE id = ?1 AND favorite = 0 \
+                "DELETE FROM tracks WHERE id = ?1 AND favorite = 0 AND rating = 0 \
                  AND NOT EXISTS (SELECT 1 FROM playlist_items WHERE track_id = ?1)",
             )?;
             for &id in ids {
@@ -865,12 +870,14 @@ impl Db {
             (a, b) => a.or(b),
         };
         tx.execute(
-            "UPDATE tracks SET favorite = ?2, play_count = ?3, last_played_at = ?4 WHERE id = ?1",
+            "UPDATE tracks SET favorite = ?2, play_count = ?3, last_played_at = ?4, \
+             rating = CASE WHEN rating = 0 THEN ?5 ELSE rating END WHERE id = ?1",
             params![
                 keep,
                 target.track.favorite || s.favorite,
                 target.track.play_count.saturating_add(s.play_count),
                 last_played,
+                s.rating,
             ],
         )?;
         tx.commit()?;
@@ -949,8 +956,9 @@ impl Db {
     }
 
     /// Merges what another player knew about songs, in one transaction: the higher
-    /// play count, the later last play, the earlier date added, and loved songs become
-    /// favourites. Rows are `(track, plays, last played, added, loved)`.
+    /// play count, the later last play, the earlier date added, loved songs become
+    /// favourites, and a rating is taken for a song that has none here. Rows are
+    /// `(track, plays, last played, added, loved, rating)`.
     pub fn merge_listening(&mut self, rows: &[ListeningRow]) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
         {
@@ -961,11 +969,27 @@ impl Db {
                      WHEN last_played_at IS NULL OR ?3 > last_played_at THEN ?3 \
                      ELSE last_played_at END, \
                  added_at = CASE WHEN ?4 IS NOT NULL AND ?4 < added_at THEN ?4 ELSE added_at END, \
-                 favorite = favorite OR ?5 \
+                 favorite = favorite OR ?5, \
+                 rating = CASE WHEN rating = 0 THEN ?6 ELSE rating END \
                  WHERE id = ?1",
             )?;
-            for (id, plays, last, added, loved) in rows {
-                stmt.execute(params![id, plays, last, added, loved])?;
+            for (id, plays, last, added, loved, rating) in rows {
+                stmt.execute(params![id, plays, last, added, loved, rating.min(&5)])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Sets the rating of the tracks: 1 to 5 stars, 0 for none.
+    pub fn set_rating(&mut self, ids: &[TrackId], rating: u8) -> SqlResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("UPDATE tracks SET rating = ?2 WHERE id = ?1")?;
+            for id in ids {
+                stmt.execute(params![id, rating.min(5)])?;
             }
         }
         tx.commit()
@@ -1148,18 +1172,27 @@ impl Db {
 
     /// Gives the tracks that take the place of `old` (a CUE sheet's tracks, for the file
     /// they are cut from) what the user gave it, and deletes it, in one transaction: each
-    /// of its places in a playlist holds them instead, in their order, and if it was a
-    /// favourite, they are. Returns whether it was a favourite.
-    pub fn hand_over_track(&mut self, old: TrackId, heirs: &[TrackId]) -> SqlResult<bool> {
+    /// of its places in a playlist holds them instead, in their order; if it was a
+    /// favourite, they are, and its rating is theirs where they have none. Returns
+    /// whether it was a favourite, and its rating.
+    pub fn hand_over_track(&mut self, old: TrackId, heirs: &[TrackId]) -> SqlResult<(bool, u8)> {
         let tx = self.conn.transaction()?;
-        let favorite: bool = tx
+        let (favorite, rating): (bool, i64) = tx
             .query_row(
-                "SELECT favorite FROM tracks WHERE id = ?1",
+                "SELECT favorite, rating FROM tracks WHERE id = ?1",
                 params![old],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
-            .unwrap_or(false);
+            .unwrap_or((false, 0));
+        let rating = rating.clamp(0, 5) as u8;
+        if rating > 0 {
+            let mut stmt =
+                tx.prepare_cached("UPDATE tracks SET rating = ?2 WHERE id = ?1 AND rating = 0")?;
+            for heir in heirs {
+                stmt.execute(params![heir, rating])?;
+            }
+        }
         if favorite {
             let mut stmt = tx.prepare_cached("UPDATE tracks SET favorite = 1 WHERE id = ?1")?;
             for heir in heirs {
@@ -1199,7 +1232,7 @@ impl Db {
         }
         tx.execute("DELETE FROM tracks WHERE id = ?1", params![old])?;
         tx.commit()?;
-        Ok(favorite)
+        Ok((favorite, rating))
     }
 
     /// Replaces everything in a playlist with `tracks` in one transaction: if anything
@@ -1818,6 +1851,7 @@ fn row_to_track(row: &Row<'_>) -> SqlResult<StoredTrack> {
                 .transpose()?,
             art_id: row.get(27)?,
             favorite: row.get(29)?,
+            rating: row.get::<_, i64>(40)?.clamp(0, 5) as u8,
             play_count: clamp_u32(row.get(30)?),
             last_played_at: row.get(31)?,
             added_at: row.get(32)?,
@@ -1867,6 +1901,7 @@ mod tests {
                 check: None,
                 art_id: Some("0123456789abcdef".into()),
                 favorite: false,
+                rating: 0,
                 play_count: 0,
                 last_played_at: None,
                 added_at: 1_700_000_000,
@@ -2145,7 +2180,7 @@ mod tests {
             db.upsert_tracks(&[sample_track("/m/a.flac", None)])
                 .unwrap();
         }
-        let next = "ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;";
+        let next = "ALTER TABLE tracks ADD COLUMN mood INTEGER NOT NULL DEFAULT 0;";
         let opened = Db::open_with_migrations(&path, &with_next(next)).unwrap();
         assert_eq!(opened.migrated_from, Some(current));
         assert_eq!(opened.db.schema_version().unwrap(), current + 1);
@@ -2240,7 +2275,7 @@ mod tests {
             db.kv_set("marker", "before").unwrap();
         }
         // The first statement succeeds, the second fails: the whole step must roll back.
-        let broken = "ALTER TABLE tracks ADD COLUMN rating INTEGER; \
+        let broken = "ALTER TABLE tracks ADD COLUMN mood INTEGER; \
                       INSERT INTO table_that_does_not_exist VALUES (1);";
         let err = match Db::open_with_migrations(&path, &with_next(broken)) {
             Ok(_) => panic!("migration must fail"),
@@ -2297,7 +2332,7 @@ mod tests {
         let current = MIGRATIONS.len() as u32;
         let (writer, reader) = with_unfolded_writes(&path);
 
-        let broken = "ALTER TABLE tracks ADD COLUMN rating INTEGER; \
+        let broken = "ALTER TABLE tracks ADD COLUMN mood INTEGER; \
                       INSERT INTO table_that_does_not_exist VALUES (1);";
         let started = std::time::Instant::now();
         match Db::open_with_migrations(&path, &with_next(broken)) {
@@ -2339,7 +2374,7 @@ mod tests {
         // A leftover of an interrupted backup is replaced, not an obstacle.
         fs::write(sibling(&path, &format!(".bak-v{current}.partial")), b"junk").unwrap();
 
-        let next = "ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;";
+        let next = "ALTER TABLE tracks ADD COLUMN mood INTEGER NOT NULL DEFAULT 0;";
         let opened = Db::open_with_migrations(&path, &with_next(next)).unwrap();
         assert_eq!(opened.migrated_from, Some(current));
         assert_eq!(opened.db.load_tracks().unwrap().len(), 2);
@@ -2382,7 +2417,7 @@ mod tests {
         writer
             .execute("UPDATE kv SET value = 'theirs' WHERE key = 'marker'", [])
             .unwrap();
-        let next = "ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;";
+        let next = "ALTER TABLE tracks ADD COLUMN mood INTEGER NOT NULL DEFAULT 0;";
         assert!(matches!(
             Db::open_with_migrations(&path, &with_next(next)),
             Err(DbError::Sqlite(_))

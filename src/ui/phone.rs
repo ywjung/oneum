@@ -105,6 +105,8 @@ enum Sheet {
     Smart(String),
     /// The sleep timer's choices.
     Sleep,
+    /// The stars of these songs.
+    Rating(Vec<TrackId>),
     Info(TrackId),
     Artist(String),
     Genre(String),
@@ -4450,6 +4452,11 @@ impl OneumApp {
                 } else {
                     (Icon::Heart, s.add_favorite)
                 };
+                // The stars it has, and the way to give it others.
+                if Self::sheet_item(ui, Icon::Tag, self.rating_words(track.rating), false) {
+                    self.phone.sheet = Some(Sheet::Rating(ids));
+                    return false;
+                }
                 if Self::sheet_item(ui, icon, label, false) {
                     actions.push(Action::SetFavorite(ids, !track.favorite));
                     return true;
@@ -4728,6 +4735,30 @@ impl OneumApp {
                     return true;
                 }
                 false
+            }
+            Sheet::Rating(tracks) => {
+                Self::sheet_heading(ui, s.col_rating, "");
+                // (Of several songs, the first says what they have.)
+                let current = tracks
+                    .first()
+                    .and_then(|id| self.snapshot.get(*id))
+                    .map_or(0, |track| track.rating);
+                let mut chosen = None;
+                ui.vertical_centered(|ui| {
+                    ui.add_space(6.0);
+                    chosen = widgets::stars(ui, current, 38.0, Some(s.col_rating));
+                    ui.add_space(16.0);
+                });
+                if current > 0 && Self::sheet_item(ui, Icon::Close, s.rating_none, true) {
+                    chosen = Some(0);
+                }
+                match chosen {
+                    Some(stars) => {
+                        actions.push(Action::SetRating(tracks.clone(), stars));
+                        true
+                    }
+                    None => false,
+                }
             }
             Sheet::Info(track) => {
                 let Some(track) = self.snapshot.get(*track).cloned() else {

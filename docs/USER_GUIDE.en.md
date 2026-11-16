@@ -54,7 +54,8 @@
 - **Favorites**: click the heart in a song's row or press ⌘D. They gather under Favorites on the left.
 - Click the list once, then type: the list jumps to the first song beginning with what you typed.
 - Drag songs or albums onto a playlist or onto the queue.
-- **Choosing columns**: right-click a column title to switch the **Year · Genre · Plays · Added · Last Played · Format** columns on and off. The menu stays open, so you can choose several, then click outside it to close it. The Year, Plays, Added, Last Played and Format columns can be sorted by clicking their titles. In a narrow window, the last columns are hidden for the time being.
+- **Choosing columns**: right-click a column title to switch the **Year · Genre · Plays · Rating · Added · Last Played · Format** columns on and off. The menu stays open, so you can choose several, then click outside it to close it. The Year, Plays, Added, Last Played and Format columns can be sorted by clicking their titles. In a narrow window, the last columns are hidden for the time being.
+- **Ratings**: a song can be given 1 to 5 stars. Right-click a song and choose under **Rating** (with several songs selected, for all of them), or click a star in Song Info (clicking the last filled star again takes the rating away). Ratings are kept inside OnEum only; the file's tags are not changed. With the **Rating** column switched on they show in the list, which can be sorted by them, and they can be searched: `rating:>=4` (four stars or more), `rating:0` (not rated). The Apple Music library import and the library data file carry ratings too (a song that already has one keeps it).
 - The play count goes up by one when half of the song (4 minutes for long songs) has actually been heard. Songs that were skipped are not counted.
 
 ## Search

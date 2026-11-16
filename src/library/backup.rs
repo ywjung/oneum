@@ -1,13 +1,13 @@
 //! The app's own library data as one file, to keep or to take to another device: what
 //! was listened to (play counts, last plays, the plays the statistics go by), dates
-//! added, favourites, playlists and saved searches.
+//! added, favourites, ratings, playlists and saved searches.
 //!
 //! The file names a song by the end of its path, from its music folder's own name on
 //! ("Music/Artist/Album/01 Song.flac"), not by where that folder lies: it fits a copy
 //! of the music on another computer or on a phone, and nothing in it tells of a place
 //! on the device it was written on. Taking a file in merges, as the Apple Music import
-//! does: the higher count, the later play, the earlier date added; twice changes
-//! nothing more. Music files are neither read nor changed by any of this.
+//! does: the higher count, the later play, the earlier date added, a rating where the
+//! song has none here; twice changes nothing more. Music files are neither read nor changed by any of this.
 use super::{Library, LibraryError, apple, lock};
 use crate::model::TrackId;
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,9 @@ pub struct Song {
     pub added: Option<i64>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub favorite: bool,
+    /// 1 to 5 stars; 0 (left out): none.
+    #[serde(default, skip_serializing_if = "is_no_rating")]
+    pub rating: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,6 +85,10 @@ fn is_zero(n: &u32) -> bool {
 
 fn is_false(flag: &bool) -> bool {
     !*flag
+}
+
+fn is_no_rating(rating: &u8) -> bool {
+    *rating == 0
 }
 
 /// Why a file was not taken in.
@@ -238,6 +245,7 @@ impl Library {
                 last_played: track.last_played_at,
                 added: Some(track.added_at),
                 favorite: track.favorite,
+                rating: track.rating,
             })
             .collect();
         let plays: Vec<(u32, i64)> = lock(&self.inner.db)
@@ -329,7 +337,14 @@ impl Library {
             .enumerate()
             .filter_map(|(at, song)| {
                 let id = *found.get(&(at as u32))?;
-                Some((id, song.plays, song.last_played, song.added, song.favorite))
+                Some((
+                    id,
+                    song.plays,
+                    song.last_played,
+                    song.added,
+                    song.favorite,
+                    song.rating,
+                ))
             })
             .collect();
         let playlists: Vec<(String, Vec<TrackId>)> = data
@@ -418,6 +433,7 @@ mod tests {
                     last_played: Some(1_700_000_000),
                     added: Some(1_600_000_000),
                     favorite: true,
+                    rating: 4,
                 },
                 Song {
                     file: "Music/A/B/2.flac".into(),

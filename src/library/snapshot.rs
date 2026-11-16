@@ -26,6 +26,8 @@ pub enum SortKey {
     PlayCount,
     LastPlayed,
     Format,
+    /// The listener's stars.
+    Rating,
 }
 
 /// A group of tracks with the same album identity.
@@ -392,6 +394,7 @@ impl LibrarySnapshot {
                 (*from..=*to).contains(&plays)
             }
             Filter::Favorite(wanted) => track.favorite == *wanted,
+            Filter::Rating(from, to) => (*from..=*to).contains(&i32::from(track.rating)),
             Filter::AddedSince(since) => track.added_at >= *since,
             Filter::PlayedSince(since) => track.last_played_at.is_some_and(|at| at >= *since),
             Filter::Check(wanted) => {
@@ -498,6 +501,7 @@ impl LibrarySnapshot {
             SortKey::PlayCount => {
                 sort_keyed(indices, ascending, |i| self.field(i, |t| t.play_count))
             }
+            SortKey::Rating => sort_keyed(indices, ascending, |i| self.field(i, |t| t.rating)),
             SortKey::LastPlayed => sort_keyed(indices, ascending, |i| {
                 self.field(i, |t| t.last_played_at.unwrap_or(i64::MIN))
             }),
@@ -902,6 +906,7 @@ mod tests {
             check: None,
             art_id: None,
             favorite: false,
+            rating: 0,
             play_count: 0,
             last_played_at: None,
             added_at: id,
@@ -1271,6 +1276,7 @@ mod tests {
             SortKey::PlayCount,
             SortKey::LastPlayed,
             SortKey::Format,
+            SortKey::Rating,
         ] {
             let mut odd = vec![3, 900, 0, 3, 7];
             s.sort(&mut odd, key, true);

@@ -611,6 +611,7 @@ fn to_stored(file: ScannedFile, now: i64) -> StoredTrack {
             check: None,
             art_id: file.art_id,
             favorite: false,
+            rating: 0,
             play_count: 0,
             last_played_at: None,
             added_at: now,
@@ -689,6 +690,7 @@ impl Inner {
                         let current = &state.tracks.get(id)?.track;
                         let published = snapshot.get(*id)?;
                         if published.favorite == current.favorite
+                            && published.rating == current.rating
                             && published.play_count == current.play_count
                             && published.last_played_at == current.last_played_at
                             && published.added_at == current.added_at
@@ -708,6 +710,7 @@ impl Inner {
                             track.check = current.check;
                         }
                         track.favorite = current.favorite;
+                        track.rating = current.rating;
                         track.play_count = current.play_count;
                         track.last_played_at = current.last_played_at;
                         track.added_at = current.added_at;
@@ -886,6 +889,7 @@ impl Inner {
             let is_new = match state.tracks.get(&id) {
                 Some(old) => {
                     track.favorite = old.track.favorite;
+                    track.rating = old.track.rating;
                     track.play_count = old.track.play_count;
                     track.last_played_at = old.track.last_played_at;
                     track.added_at = old.track.added_at;
@@ -945,12 +949,15 @@ impl Inner {
                 break;
             }
             match db.hand_over_track(*old, heirs) {
-                Ok(favorite) => {
+                Ok((favorite, rating)) => {
                     let mut state = lock(&self.state);
-                    if favorite {
-                        for &heir in heirs {
-                            state.update(heir, |t| t.favorite = true);
-                        }
+                    for &heir in heirs {
+                        state.update(heir, |t| {
+                            t.favorite |= favorite;
+                            if t.rating == 0 {
+                                t.rating = rating;
+                            }
+                        });
                     }
                     state.remove(*old);
                     done += 1;
@@ -2094,6 +2101,33 @@ impl Library {
     }
 
     /// Marks or unmarks tracks as favourites. On an error nothing changed.
+    /// Sets the listener's rating of the tracks: 1 to 5 stars, 0 for none. Kept in the
+    /// app's database; the files are not touched.
+    pub fn set_rating(&self, ids: &[TrackId], rating: u8) -> Result<(), LibraryError> {
+        let rating = rating.min(5);
+        let changed: Vec<TrackId> = {
+            let mut db = lock(&self.inner.db);
+            let mut state = lock(&self.inner.state);
+            let changed: Vec<TrackId> = ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    state
+                        .tracks
+                        .get(id)
+                        .is_some_and(|e| e.track.rating != rating)
+                })
+                .collect();
+            db.set_rating(&changed, rating)?;
+            for &id in &changed {
+                state.update(id, |t| t.rating = rating);
+            }
+            changed
+        };
+        self.inner.publish_patch(&changed);
+        Ok(())
+    }
+
     pub fn set_favorite(&self, ids: &[TrackId], favorite: bool) -> Result<(), LibraryError> {
         let changed: Vec<TrackId> = {
             let mut db = lock(&self.inner.db);
@@ -2561,7 +2595,7 @@ impl Library {
             .iter()
             .filter_map(|t| {
                 let id = *found.get(&t.id)?;
-                Some((id, t.play_count, t.last_played, t.added, t.loved))
+                Some((id, t.play_count, t.last_played, t.added, t.loved, t.rating))
             })
             .collect();
         let playlists: Vec<(String, Vec<TrackId>)> = export
@@ -2603,8 +2637,11 @@ impl Library {
             let mut db = lock(&self.inner.db);
             db.merge_listening(rows)?;
             let mut state = lock(&self.inner.state);
-            for &(id, plays, last, added, loved) in rows {
+            for &(id, plays, last, added, loved, rating) in rows {
                 state.update(id, |t| {
+                    if t.rating == 0 {
+                        t.rating = rating.min(5);
+                    }
                     t.play_count = t.play_count.max(plays);
                     if let Some(last) = last
                         && t.last_played_at.is_none_or(|at| last > at)

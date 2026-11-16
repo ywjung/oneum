@@ -66,6 +66,7 @@ pub struct ListColumns {
     pub plays: bool,
     pub added: bool,
     pub last_played: bool,
+    pub rating: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -120,6 +120,8 @@ pub(crate) enum Filter {
     Plays(i32, i32),
     /// In the favourites, or not.
     Favorite(bool),
+    /// Stars given, from the first to the second, both included (0: not rated).
+    Rating(i32, i32),
     /// Added to the library at or after this time (Unix seconds).
     AddedSince(i64),
     /// Last played at or after this time (Unix seconds).
@@ -140,6 +142,7 @@ enum Subject {
     Year,
     Plays,
     Favorite,
+    Rating,
     Added,
     Played,
     Check,
@@ -169,7 +172,7 @@ fn check_wanted(value: &str) -> Option<CheckWanted> {
 }
 
 /// The names a field can be asked for by, in normalised form.
-const FIELD_NAMES: [(&str, Subject); 30] = [
+const FIELD_NAMES: [(&str, Subject); 33] = [
     ("title", Subject::Text(Field::Title)),
     ("제목", Subject::Text(Field::Title)),
     ("artist", Subject::Text(Field::Artist)),
@@ -192,6 +195,9 @@ const FIELD_NAMES: [(&str, Subject); 30] = [
     ("fav", Subject::Favorite),
     ("favorite", Subject::Favorite),
     ("즐겨찾기", Subject::Favorite),
+    ("rating", Subject::Rating),
+    ("stars", Subject::Rating),
+    ("별점", Subject::Rating),
     ("added", Subject::Added),
     ("추가", Subject::Added),
     ("played", Subject::Played),
@@ -341,6 +347,9 @@ impl PreparedQuery {
                             year_range(value).map(|(from, to)| Filter::Plays(from, to))
                         }
                         Subject::Favorite => yes_or_no(value).map(Filter::Favorite),
+                        Subject::Rating => {
+                            year_range(value).map(|(from, to)| Filter::Rating(from, to))
+                        }
                         Subject::Added => time_span(value)
                             .map(|span| Filter::AddedSince(now.saturating_sub(span))),
                         Subject::Played => time_span(value)
@@ -543,6 +552,22 @@ mod tests {
             [Filter::Check(CheckWanted::Unchecked)]
         );
         assert_eq!(PreparedQuery::new("check:maybe").filters, [Filter::Never]);
+    }
+
+    #[test]
+    fn stars_are_asked_for_as_numbers() {
+        assert_eq!(
+            PreparedQuery::new_at("rating:>=4", 0).filters,
+            [Filter::Rating(4, i32::MAX)]
+        );
+        assert_eq!(
+            PreparedQuery::new_at("별점:5 stars:0", 0).filters,
+            [Filter::Rating(5, 5), Filter::Rating(0, 0)]
+        );
+        assert_eq!(
+            PreparedQuery::new_at("rating:many", 0).filters,
+            [Filter::Never]
+        );
     }
 
     #[test]

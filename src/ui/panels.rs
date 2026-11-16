@@ -2284,6 +2284,15 @@ impl OneumApp {
                 }
                 ui.add_space(8.0);
 
+                // The listener's stars, right below what the song is: shown, and set by
+                // a click on one (a click on the last one that is filled takes them away).
+                if !crate::library::Library::is_remote(track.id) {
+                    if let Some(stars) = widgets::stars(ui, track.rating, 16.0, Some(s.col_rating))
+                    {
+                        actions.push(Action::SetRating(vec![track.id], stars));
+                    }
+                    ui.add_space(10.0);
+                }
                 let rows = self.info_rows(&track, details.as_deref());
                 egui::Grid::new("info-grid")
                     .num_columns(2)

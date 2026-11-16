@@ -910,3 +910,69 @@ fn library_data_written_here_is_taken_in_on_another_device() {
         Err(LibraryError::Io(_))
     ));
 }
+
+/// The listener's stars: kept in the database, found by search and by sorting, left
+/// alone by a rescan, and carried to another device by the library data file.
+#[test]
+fn ratings_are_kept_found_and_carried() {
+    use oneum::library::SortKey;
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    library.set_rating(&[ids[0], ids[1]], 5).unwrap();
+    library.set_rating(&[ids[1]], 3).unwrap();
+    library.set_rating(&[ids[2]], 9).unwrap();
+    assert_eq!(library.track(ids[0]).unwrap().rating, 5);
+    assert_eq!(library.track(ids[1]).unwrap().rating, 3);
+    assert_eq!(library.track(ids[2]).unwrap().rating, 5, "five at most");
+    let snapshot = library.snapshot();
+    let found = |query: &str| -> Vec<TrackId> {
+        let mut found: Vec<TrackId> = snapshot
+            .search(query)
+            .into_iter()
+            .map(|i| snapshot.tracks[i as usize].id)
+            .collect();
+        found.sort_unstable();
+        found
+    };
+    let sorted = |mut ids: Vec<TrackId>| {
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(found("rating:>=4"), sorted(vec![ids[0], ids[2]]));
+    assert_eq!(found("별점:3"), [ids[1]]);
+    assert_eq!(found("rating:0"), sorted(vec![ids[3], ids[4]]));
+    let mut order: Vec<u32> = (0..snapshot.tracks.len() as u32).collect();
+    snapshot.sort(&mut order, SortKey::Rating, false);
+    let stars: Vec<u8> = order
+        .iter()
+        .map(|&i| snapshot.tracks[i as usize].rating)
+        .collect();
+    assert_eq!(stars, [5, 5, 3, 0, 0]);
+
+    // A rescan and a new start leave them as they are; none is a rating too.
+    rescan(&library);
+    library.set_rating(&[ids[2]], 0).unwrap();
+    drop(snapshot);
+    drop(library);
+    let library = env.open();
+    assert_eq!(library.track(ids[0]).unwrap().rating, 5);
+    assert_eq!(library.track(ids[1]).unwrap().rating, 3);
+    assert_eq!(library.track(ids[2]).unwrap().rating, 0);
+
+    // On another device: a song that has stars there keeps them, the others take what
+    // the file says.
+    let file = env.dir.path().join("data.json");
+    library.export_data(&file, &[]).expect("writes");
+    let there = TestEnv::new();
+    let (other, theirs) = library_with_tracks(&there);
+    other.set_rating(&[theirs[1]], 1).unwrap();
+    other.import_data(&file).expect("takes in");
+    assert_eq!(other.track(theirs[0]).unwrap().rating, 5);
+    assert_eq!(
+        other.track(theirs[1]).unwrap().rating,
+        1,
+        "its own stars stay"
+    );
+    assert_eq!(other.track(theirs[2]).unwrap().rating, 0);
+    assert_eq!(other.snapshot().get(theirs[0]).unwrap().rating, 5);
+}
