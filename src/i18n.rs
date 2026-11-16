@@ -511,6 +511,18 @@ strings! {
     apple_import_hint: "Apple Music에서 파일 ▸ 보관함 ▸ 보관함 내보내기로 저장한 XML 파일을 고르세요. 라이브러리에 있는 곡(파일 위치로 찾음)에만 적용되고, 재생 횟수는 더하지 않고 큰 쪽을 남깁니다. 음악 파일은 바꾸지 않습니다.", "Choose the XML file saved with File ▸ Library ▸ Export Library… in Apple Music. It applies to the songs in your library (found by their file); play counts are not added up, the higher one is kept. Music files are not changed.";
     notice_apple_import_failed: "Apple Music 보관함 파일을 읽지 못했습니다.", "Could not read the Apple Music library file.";
     dialog_filter_apple: "Apple Music 보관함", "Apple Music library";
+    data_title: "라이브러리 데이터", "Library Data";
+    data_export_row: "파일로 내보내기", "Export to a File";
+    data_export_desc: "재생 횟수·재생 기록·추가한 날짜·즐겨찾기·플레이리스트·저장한 검색", "Play counts, plays, dates added, favorites, playlists, saved searches";
+    data_export_button: "내보내기…", "Export…";
+    data_import_row: "파일에서 가져오기", "Import from a File";
+    data_import_desc: "다른 기기에서 내보낸 파일을 이 라이브러리에 합칩니다", "Merges a file exported on another device into this library";
+    data_hint: "다른 기기로 옮기거나 보관해 둘 수 있습니다. 파일은 곡을 음악 폴더 아래의 폴더와 파일 이름으로 적으므로, 같은 음악을 그대로 복사해 둔 기기에서 곡을 찾습니다. 가져올 때 재생 횟수는 더하지 않고 큰 쪽을 남기며, 두 번 가져와도 달라지지 않습니다. 화면·출력 같은 설정과 고정한 항목은 들어가지 않습니다. 음악 파일은 바꾸지 않습니다.", "To take to another device, or to keep. The file names songs by their folders and file names below the music folder, so songs are found on a device that holds a copy of the same music. On import, play counts are not added up, the higher one is kept; importing twice changes nothing more. Settings such as appearance and output, and what is pinned, are not part of it. Music files are not changed.";
+    dialog_filter_data: "OnEum 라이브러리 데이터", "OnEum library data";
+    data_file_name: "OnEum 라이브러리 데이터.json", "OnEum Library Data.json";
+    notice_data_export_failed: "라이브러리 데이터를 내보내지 못했습니다. 저장 위치를 확인하세요.", "Could not export the library data. Check the destination.";
+    notice_data_import_failed: "라이브러리 데이터 파일을 읽지 못했습니다.", "Could not read the library data file.";
+    notice_data_import_newer: "더 새로운 버전의 OnEum에서 만든 파일입니다. 이 기기의 앱을 업데이트한 뒤 가져오세요.", "This file was made by a later version of OnEum. Update the app on this device, then import it.";
     stats: "통계", "Statistics";
     stats_7d: "7일", "7 Days";
     stats_30d: "30일", "30 Days";
@@ -626,6 +638,9 @@ strings! {
     dialog_filter_playlist: "플레이리스트", "Playlists";
     // The phone screens
     phone_library: "보관함", "Library";
+    phone_data_title: "보관함 데이터", "Library Data";
+    phone_data_import_desc: "다른 기기에서 내보낸 파일을 이 보관함에 합칩니다", "Merges a file exported on another device into this library";
+    phone_data_hint: "다른 기기로 옮기거나 보관해 둘 수 있습니다. 파일은 곡을 음악 폴더 아래의 폴더와 파일 이름으로 적으므로, 같은 음악을 그대로 복사해 둔 기기에서 곡을 찾습니다. 가져올 때 재생 횟수는 더하지 않고 큰 쪽을 남기며, 두 번 가져와도 달라지지 않습니다. 화면·재생 같은 설정과 고정한 항목은 들어가지 않습니다. 음악 파일은 바꾸지 않습니다.", "To take to another device, or to keep. The file names songs by their folders and file names below the music folder, so songs are found on a device that holds a copy of the same music. On import, play counts are not added up, the higher one is kept; importing twice changes nothing more. Settings such as appearance and playback, and what is pinned, are not part of it. Music files are not changed.";
     phone_songs: "곡", "Songs";
     phone_now_playing: "지금 재생", "Now Playing";
     phone_more: "더 보기", "More";
@@ -1060,6 +1075,52 @@ impl Lang {
                 en_count(missing, "entry", "entries")
             ),
         }
+    }
+
+    pub fn data_exported(self, songs: usize, playlists: usize) -> String {
+        match self {
+            Lang::Ko => format!(
+                "라이브러리 데이터를 내보냈습니다 ({} · 플레이리스트 {playlists}개).",
+                self.song_count(songs)
+            ),
+            Lang::En => format!(
+                "Library data exported ({} · {playlists} playlists).",
+                self.song_count(songs)
+            ),
+        }
+    }
+
+    pub fn data_import_result(
+        self,
+        matched: usize,
+        unmatched: usize,
+        playlists: usize,
+        searches: usize,
+    ) -> String {
+        let mut text = match self {
+            Lang::Ko => format!("{}곡의 기록을 가져왔습니다", group_digits(matched)),
+            Lang::En => format!("Took over the history of {}", self.song_count(matched)),
+        };
+        if playlists > 0 {
+            text.push_str(&match self {
+                Lang::Ko => format!(" · 플레이리스트 {playlists}개"),
+                Lang::En => format!(" · {playlists} playlists"),
+            });
+        }
+        if searches > 0 {
+            text.push_str(&match self {
+                Lang::Ko => format!(" · 저장한 검색 {searches}개"),
+                Lang::En => format!(" · {searches} saved searches"),
+            });
+        }
+        if unmatched > 0 {
+            text.push_str(&match self {
+                Lang::Ko => format!(" · 라이브러리에 없는 곡 {}곡", group_digits(unmatched)),
+                Lang::En => format!(" · {} not in your library", group_digits(unmatched)),
+            });
+        }
+        text.push('.');
+        text
     }
 
     pub fn playlist_exported(self, count: usize) -> String {

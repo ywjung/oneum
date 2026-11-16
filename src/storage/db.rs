@@ -1008,7 +1008,43 @@ impl Db {
         Ok(true)
     }
 
-    /// Distinct recently played tracks, most recent first.
+    /// Adds plays that another record knew of (`(track, unix seconds)`; the app's own
+    /// library data from another device) to the history, each only if it is not there
+    /// yet. The rows are then in the order of time again: what was played last is told
+    /// by the order of the rows ([`Self::recent_plays`]), and a play of last year that
+    /// came in today must not count as the latest. The oldest rows beyond what the
+    /// history keeps are dropped, as [`Self::record_play`] drops them. Returns how many
+    /// plays were added.
+    pub fn merge_plays(&mut self, plays: &[(TrackId, i64)]) -> SqlResult<usize> {
+        let tx = self.conn.transaction()?;
+        let mut all: Vec<(TrackId, i64)> = {
+            let mut stmt = tx.prepare("SELECT track_id, played_at FROM history ORDER BY id")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<SqlResult<_>>()?
+        };
+        let mut known: std::collections::HashSet<(TrackId, i64)> = all.iter().copied().collect();
+        let before = all.len();
+        all.extend(plays.iter().copied().filter(|play| known.insert(*play)));
+        let added = all.len() - before;
+        if added == 0 {
+            return Ok(0);
+        }
+        // (Stable: plays of the same second stay in the order they were in.)
+        all.sort_by_key(|&(_, at)| at);
+        let keep = usize::try_from(HISTORY_KEEP_ROWS).unwrap_or(usize::MAX);
+        let dropped = all.len().saturating_sub(keep);
+        tx.execute("DELETE FROM history", [])?;
+        {
+            let mut stmt =
+                tx.prepare("INSERT INTO history (track_id, played_at) VALUES (?1, ?2)")?;
+            for (id, at) in &all[dropped..] {
+                stmt.execute(params![id, at])?;
+            }
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
     /// `(track, unix seconds)` of every play at or after `since`, oldest first.
     pub fn plays_since(&self, since: i64) -> SqlResult<Vec<(TrackId, i64)>> {
         let mut stmt = self.conn.prepare_cached(
@@ -1018,6 +1054,7 @@ impl Db {
         rows.collect()
     }
 
+    /// Distinct recently played tracks, most recent first.
     pub fn recent_plays(&self, limit: usize) -> SqlResult<Vec<TrackId>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT track_id FROM history GROUP BY track_id \

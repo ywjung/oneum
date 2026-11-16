@@ -519,6 +519,43 @@ impl OneumApp {
         if import {
             self.pick_apple_library();
         }
+
+        // The library's own data, to keep or to take to another device.
+        ui.add_space(14.0);
+        widgets::section_title(ui, s.data_title);
+        let (mut export_data, mut import_data) = (false, false);
+        widgets::card(ui, |ui| {
+            widgets::setting_row(
+                ui,
+                s.data_export_row,
+                Some(s.data_export_desc),
+                true,
+                |ui| {
+                    let button =
+                        egui::Button::new(s.data_export_button).min_size(egui::vec2(0.0, 26.0));
+                    export_data = ui.add(button).clicked();
+                },
+            );
+            widgets::row_divider(ui);
+            widgets::setting_row(
+                ui,
+                s.data_import_row,
+                Some(s.data_import_desc),
+                true,
+                |ui| {
+                    let button =
+                        egui::Button::new(s.apple_import_button).min_size(egui::vec2(0.0, 26.0));
+                    import_data = ui.add(button).clicked();
+                },
+            );
+        });
+        widgets::section_note(ui, s.data_hint);
+        if export_data {
+            self.pick_data_export();
+        }
+        if import_data {
+            self.pick_data_import();
+        }
     }
 
     /// The file check: start or stop it, what it found, and the way to the damaged files.

@@ -223,6 +223,10 @@ enum AppEvent {
     /// The statistics page's figures were worked out.
     StatsReady(Box<stats_view::StatsData>),
     AppleImported(Result<crate::library::AppleImport, LibraryError>),
+    /// The library's own data was written to a file, or could not be.
+    DataExported(Option<crate::library::backup::DataExport>),
+    /// Library data from a file was taken in, or could not be.
+    DataImported(Result<crate::library::backup::DataImport, LibraryError>),
     /// The file to show in the file manager was found (a CUE sheet's audio file).
     Reveal(PathBuf),
     /// A music folder was added.
@@ -245,6 +249,10 @@ enum PickFor {
     Correction,
     Playlist,
     AppleLibrary,
+    /// Where to write the library's own data.
+    ExportData,
+    /// The library data to take in.
+    ImportData,
     /// Where to write this playlist.
     ExportPlaylist(i64),
     /// Where to write a copy of the log.
@@ -1006,6 +1014,31 @@ impl OneumApp {
                     tracing::warn!("Apple Music import failed: {error}");
                     self.warn_toast(self.s().notice_apple_import_failed);
                 }
+                AppEvent::DataExported(Some(written)) => {
+                    self.info_toast(self.lang.data_exported(written.songs, written.playlists));
+                }
+                AppEvent::DataExported(None) => {
+                    self.warn_toast(self.s().notice_data_export_failed);
+                }
+                AppEvent::DataImported(Ok(result)) => {
+                    let searches = self.take_in_searches(&result.searches);
+                    self.info_toast(self.lang.data_import_result(
+                        result.matched,
+                        result.unmatched,
+                        result.playlists,
+                        searches,
+                    ));
+                    self.playlists_generation = self.core.library.playlists_generation();
+                    self.playlists = self.core.library.playlists();
+                }
+                AppEvent::DataImported(Err(error)) => {
+                    tracing::warn!("library data import failed: {error}");
+                    self.warn_toast(if crate::library::backup::is_of_a_later_version(&error) {
+                        self.s().notice_data_import_newer
+                    } else {
+                        self.s().notice_data_import_failed
+                    });
+                }
             }
         }
         let opened = app_hooks::take_opened_paths();
@@ -1477,6 +1510,16 @@ impl OneumApp {
                     self.import_apple_library(file);
                 }
             }
+            PickFor::ExportData => {
+                if let Some(dest) = paths.pop() {
+                    self.write_library_data(dest, true);
+                }
+            }
+            PickFor::ImportData => {
+                if let Some(file) = paths.pop() {
+                    self.import_library_data(file);
+                }
+            }
             PickFor::ExportPlaylist(id) => {
                 if let Some(dest) = paths.pop() {
                     self.write_playlist(id, dest);
@@ -1629,6 +1672,78 @@ impl OneumApp {
         if spawned.is_err() {
             self.warn_toast(self.s().notice_apple_import_failed);
         }
+    }
+
+    /// Asks where the library's own data is to be written (see `library::backup`).
+    pub(super) fn pick_data_export(&mut self) {
+        let request = PickRequest::new(PickKind::SaveAs(self.s().data_file_name.into()))
+            .filter(self.s().dialog_filter_data, &["json"]);
+        self.pick(PickFor::ExportData, request);
+    }
+
+    /// Asks for a file of library data to take in.
+    pub(super) fn pick_data_import(&mut self) {
+        let request =
+            PickRequest::new(PickKind::File).filter(self.s().dialog_filter_data, &["json"]);
+        self.pick(PickFor::ImportData, request);
+    }
+
+    /// Writes the library's own data to `dest`, with the saved searches the settings
+    /// keep. On the edit thread: the destination may be slow to answer. With `hand_out`
+    /// the written file is offered to the user where the system has them choose its
+    /// place afterwards (a phone); a verification run reads it where it was written.
+    fn write_library_data(&mut self, dest: PathBuf, hand_out: bool) {
+        let searches: Vec<crate::library::backup::Search> = self
+            .settings
+            .smart_playlists
+            .iter()
+            .map(|search| crate::library::backup::Search {
+                name: search.name.clone(),
+                query: search.query.clone(),
+            })
+            .collect();
+        self.edit(move |library| {
+            let written = library
+                .export_data(&dest, &searches)
+                .inspect_err(|error| tracing::warn!("library data export failed: {error}"))
+                .ok();
+            if written.is_some() && hand_out {
+                files::hand_out(&dest);
+            }
+            Some(AppEvent::DataExported(written))
+        });
+    }
+
+    /// Takes in library data from `file`, on the edit thread.
+    fn import_library_data(&mut self, file: PathBuf) {
+        self.edit(move |library| Some(AppEvent::DataImported(library.import_data(&file))));
+    }
+
+    /// The saved searches that came with library data join those of the settings: one
+    /// that is here already (same name, same search) is passed over, and a name that
+    /// stands for another search here gets a mark. Returns how many were taken in.
+    fn take_in_searches(&mut self, searches: &[crate::library::backup::Search]) -> usize {
+        let mut taken = 0;
+        for search in searches {
+            let list = &mut self.settings.smart_playlists;
+            let marked = format!("{} (2)", search.name);
+            if list.iter().any(|own| {
+                (own.name == search.name || own.name == marked) && own.query == search.query
+            }) {
+                continue;
+            }
+            let name = if list.iter().any(|own| own.name == search.name) {
+                marked
+            } else {
+                search.name.clone()
+            };
+            list.push(app::settings::SmartPlaylist {
+                name,
+                query: search.query.clone(),
+            });
+            taken += 1;
+        }
+        taken
     }
 
     fn export_playlist(&mut self, id: i64, name: &str) {
@@ -2335,6 +2450,15 @@ impl OneumApp {
                     };
                     if let (Some(action), Some(dispatch)) = (playback, self.menu_dispatch.clone()) {
                         dispatch(action);
+                        continue;
+                    }
+                    // The library's own data, to a file and from one.
+                    if let Some(path) = id.strip_prefix("data_export ") {
+                        self.write_library_data(PathBuf::from(path), false);
+                        continue;
+                    }
+                    if let Some(path) = id.strip_prefix("data_import ") {
+                        self.import_library_data(PathBuf::from(path));
                         continue;
                     }
                     // Importing a correction file, and switching the correction off.

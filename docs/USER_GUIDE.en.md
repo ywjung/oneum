@@ -243,6 +243,13 @@ In Apple Music, save an XML file with **File ▸ Library ▸ Export Library…**
 - The playlists you made are created (not smart playlists or folders). When a list of that name exists already, "(Apple Music)" is added to the name; a list imported before is not made again.
 - Songs that are not in your library are counted, not added. Music files are not changed.
 
+## Taking Your History to Another Device
+Under **Library Data** in Settings → Library, **Export…** saves one file; in OnEum on another device, choose that file with **Import…**. The file can also simply be kept.
+
+- The file holds play counts, the plays themselves (what the statistics and Listen Again go by), dates added, favorites, playlists and smart playlists. Settings such as appearance and output, and what is pinned, are not part of it.
+- Songs are found by their folders and file names below the music folder, which fits a device that holds a copy of the music folder. Songs that are not in the library, and songs that cannot be told apart because the same name occurs more than once, are skipped and counted.
+- An import merges: the higher play count, the later last play and the earlier date added are kept, and importing the same file twice changes nothing more. When a playlist of that name exists already, "(2)" is added to the name. Music files are not changed.
+
 ## Settings (⌘,)
 The gear button at the top right opens them too. Close them with Esc, the close (×) button, or a click outside. Changes apply and are saved at once.
 - **General**: language (Follow System / 한국어 / English), appearance (Follow System / Light / Dark), and the Format column.

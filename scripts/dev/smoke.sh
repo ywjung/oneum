@@ -389,6 +389,39 @@ check fo1.json 'd["nav"].startswith("Folder") and d["rows"] == 20 and d["subfold
 check st1.json 'd["nav"] == "Stats" and d["stats"] is not None and d["stats"][0] >= 1 and d["stats"][2] == 20' "statistics: the plays of this run and the whole library"
 check pn1.json 'd["pinned"] == 1' "an album is pinned to the sidebar"
 
+echo "== library data, to a file and back"
+# The library's own data (plays, favourites, playlists, saved searches) is written to a
+# file that names songs from their music folder on, not by a place on this Mac. A file
+# that knows more (as one from another device does) is merged in; twice changes nothing.
+ui "menu data_export $WORK/data.json" 'wait 1000' 'dump ld1.json'
+if python3 - "$WORK/data.json" "$WORK" "$WORK/data-more.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+d = json.loads(text)
+assert d["format"] == "oneum-library-data" and d["version"] == 1
+assert len(d["songs"]) == 20, len(d["songs"])
+assert all(song["file"].startswith("music/") for song in d["songs"]), d["songs"][0]
+assert sys.argv[2] not in text, "the file tells where the music lies"
+assert sum(song.get("plays", 0) for song in d["songs"]) >= 1 and d["plays"], "no plays"
+assert [p["name"] for p in d["playlists"]] == ["드라이브"], d["playlists"]
+assert d["searches"] == [{"name": "Late", "query": "year:2019-2020"}], d["searches"]
+# What another device might know besides.
+d["playlists"] += [{"name": "From Elsewhere", "songs": [0, 1, 2]}, {"name": "드라이브", "songs": [3]}]
+d["searches"].append({"name": "Loud", "query": "dr:<8"})
+json.dump(d, open(sys.argv[3], "w"))
+PY
+then echo "  ok   the file holds the 20 songs by folder and name, the plays, the playlist and the saved search"
+else echo "  FAIL the library data file is not as expected"; exit 1
+fi
+ui "menu data_import $WORK/data-more.json" 'wait 1200' 'dump ld2.json' \
+   "menu data_import $WORK/data-more.json" 'wait 1200' 'dump ld3.json' \
+   "menu data_import $WORK/unsupported.txt" 'wait 600' 'dump ld4.json'
+check ld1.json '"20" in (d["toast"] or "")' "the export says how much it wrote"
+check ld2.json 'sorted(p[0] for p in d["playlists"]) == sorted(["드라이브", "드라이브 (2)", "From Elsewhere"])' "a file from elsewhere is merged in: its new playlist, and one whose name was taken, marked"
+check ld2.json 'd["smart_playlists"] == [["Late", "year:2019-2020"], ["Loud", "dr:<8"]]' "…and its saved search"
+check ld3.json 'len(d["playlists"]) == 3 and len(d["smart_playlists"]) == 2' "taking the same file in again changes nothing more"
+check ld4.json 'len(d["playlists"]) == 3 and d["toast"] is not None and d["library_tracks"] == 20' "a file that is not library data is refused, and said so"
+
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'
 sleep 2

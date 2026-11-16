@@ -2614,6 +2614,7 @@ impl OneumApp {
         let mut restore_removed = false;
         let mut show_damaged = false;
         let mut import_apple = false;
+        let (mut export_data, mut import_data) = (false, false);
         let mut link_folder = false;
         let mut open_files = false;
         let mut show_folder: Option<std::path::PathBuf> = None;
@@ -2832,6 +2833,31 @@ impl OneumApp {
                             );
                         });
                         widgets::section_note(ui, s.phone_apple_import_hint);
+                        // The library's own data, to keep or to take to another device.
+                        ui.add_space(14.0);
+                        widgets::section_title(ui, s.phone_data_title);
+                        widgets::card(ui, |ui| {
+                            widgets::setting_row(
+                                ui,
+                                s.data_export_row,
+                                Some(s.data_export_desc),
+                                true,
+                                |ui| {
+                                    export_data = ui.button(s.data_export_button).clicked();
+                                },
+                            );
+                            widgets::row_divider(ui);
+                            widgets::setting_row(
+                                ui,
+                                s.data_import_row,
+                                Some(s.phone_data_import_desc),
+                                true,
+                                |ui| {
+                                    import_data = ui.button(s.apple_import_button).clicked();
+                                },
+                            );
+                        });
+                        widgets::section_note(ui, s.phone_data_hint);
                     });
                 });
                 ui.add_space(16.0);
@@ -2841,6 +2867,12 @@ impl OneumApp {
         }
         if import_apple {
             self.pick_apple_library();
+        }
+        if export_data {
+            self.pick_data_export();
+        }
+        if import_data {
+            self.pick_data_import();
         }
         if restore_removed {
             self.core.library.restore_removed();

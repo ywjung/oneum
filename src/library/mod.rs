@@ -9,6 +9,7 @@
 //! [`Library::rescan`] and [`Library::start_watching`].
 pub mod apple;
 mod art;
+pub mod backup;
 mod check;
 pub mod cue;
 pub mod details;
@@ -2563,11 +2564,46 @@ impl Library {
                 Some((id, t.play_count, t.last_played, t.added, t.loved))
             })
             .collect();
+        let playlists: Vec<(String, Vec<TrackId>)> = export
+            .playlists
+            .iter()
+            .map(|playlist| {
+                let tracks = playlist
+                    .items
+                    .iter()
+                    .filter_map(|item| found.get(item).copied())
+                    .collect();
+                (playlist.name.clone(), tracks)
+            })
+            .collect();
+        let made = self.take_over(&rows, &playlists, "Apple Music")?;
+        let matched = found.len();
+        tracing::info!(matched, playlists = made, "Apple Music library imported");
+        Ok(AppleImport {
+            matched,
+            unmatched: export.tracks.len() - matched,
+            playlists: made,
+        })
+    }
+
+    /// Gives songs of the library what another record knew of them (an Apple Music
+    /// library export, the app's own library data from another device). The listening
+    /// rows are merged, not added up (see `Db::merge_listening`). The playlists are
+    /// made, each with its songs in one step: one that is here already (same name,
+    /// same songs: an earlier import) is not made again, one without a song that is
+    /// here is left out, and a name taken by another list gets `mark` behind it.
+    /// Returns how many playlists were made.
+    fn take_over(
+        &self,
+        rows: &[crate::storage::db::ListeningRow],
+        playlists: &[(String, Vec<TrackId>)],
+        mark: &str,
+    ) -> Result<usize, LibraryError> {
         let changed: Vec<TrackId> = {
             let mut db = lock(&self.inner.db);
-            db.merge_listening(&rows)?;
+            db.merge_listening(rows)?;
             let mut state = lock(&self.inner.state);
-            for &(id, plays, last, added, loved) in &rows {
+            for &(id, plays, last, added, loved) in rows {
                 state.update(id, |t| {
                     t.play_count = t.play_count.max(plays);
                     if let Some(last) = last
@@ -2587,10 +2623,7 @@ impl Library {
         };
         self.inner.publish_patch(&changed);
 
-        // Playlists, each with its songs in one step. One that is here already (same
-        // name, same songs: an earlier import) is not made again; a name taken by
-        // another list gets a mark.
-        let existing: Vec<(String, Vec<TrackId>)> = self
+        let mut existing: Vec<(String, Vec<TrackId>)> = self
             .playlists()
             .into_iter()
             .map(|p| {
@@ -2603,39 +2636,30 @@ impl Library {
             })
             .collect();
         let mut made = 0;
-        for playlist in &export.playlists {
-            let tracks: Vec<TrackId> = playlist
-                .items
-                .iter()
-                .filter_map(|item| found.get(item).copied())
-                .collect();
+        for (name, tracks) in playlists {
             if tracks.is_empty() {
                 continue;
             }
-            let marked = format!("{} (Apple Music)", playlist.name);
-            if existing.iter().any(|(name, items)| {
-                (*name == playlist.name || *name == marked) && *items == tracks
-            }) {
+            let marked = format!("{name} ({mark})");
+            if existing
+                .iter()
+                .any(|(known, items)| (known == name || *known == marked) && items == tracks)
+            {
                 continue;
             }
-            let name = if existing.iter().any(|(name, _)| *name == playlist.name) {
+            let name = if existing.iter().any(|(known, _)| known == name) {
                 marked
             } else {
-                playlist.name.clone()
+                name.clone()
             };
-            lock(&self.inner.db).create_playlist_with_items(&name, unix_now(), &tracks)?;
+            lock(&self.inner.db).create_playlist_with_items(&name, unix_now(), tracks)?;
+            existing.push((name, tracks.clone()));
             made += 1;
         }
         if made > 0 {
             self.playlists_changed();
         }
-        let matched = found.len();
-        tracing::info!(matched, playlists = made, "Apple Music library imported");
-        Ok(AppleImport {
-            matched,
-            unmatched: export.tracks.len() - matched,
-            playlists: made,
-        })
+        Ok(made)
     }
 
     // ---- session persistence for the playback module -------------------------------

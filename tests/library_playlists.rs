@@ -783,3 +783,130 @@ fn an_apple_music_export_from_another_computer_is_matched_by_folder_and_name() {
         .expect("playlist made");
     assert_eq!(track_ids(&library, playlist.id), [ids[1], ids[0]]);
 }
+
+/// The app's own library data, written on one device and taken in on others whose
+/// music is the same folders and files below a music folder that lies elsewhere.
+#[test]
+fn library_data_written_here_is_taken_in_on_another_device() {
+    use oneum::library::backup::{Search, is_of_a_later_version};
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    library.record_play(ids[0]);
+    library.record_play(ids[2]);
+    library.set_favorite(&[ids[1]], true).unwrap();
+    let list = library.create_playlist("드라이브").unwrap();
+    library.add_to_playlist(list, &[ids[1], ids[0]]).unwrap();
+    let searches = [Search {
+        name: "Loved".into(),
+        query: "fav:yes".into(),
+    }];
+    let file = env.dir.path().join("OnEum Library.json");
+    let written = library.export_data(&file, &searches).expect("writes");
+    assert_eq!((written.songs, written.playlists), (5, 1));
+    // The file names songs from their music folder on, and tells nothing of where that
+    // folder lies on this device.
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("music/앨범/곡 1.wav"), "{text}");
+    assert!(!text.contains(&*env.dir.path().to_string_lossy()));
+
+    // Another device with the same music. It has heard a song itself, just now; what
+    // the file tells of happened long before.
+    let mut data: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for play in data["plays"].as_array_mut().unwrap() {
+        play[1] = serde_json::json!(1_000_000_000 + play[0].as_i64().unwrap());
+    }
+    data["songs"][0]["added"] = serde_json::json!(978_307_200);
+    fs::write(&file, data.to_string()).unwrap();
+    let there = TestEnv::new();
+    let (other, theirs) = library_with_tracks(&there);
+    other.record_play(theirs[4]);
+    let result = other.import_data(&file).expect("takes in");
+    assert_eq!(
+        (result.matched, result.unmatched, result.playlists),
+        (5, 0, 1)
+    );
+    assert_eq!(result.searches, searches);
+    let first = other.track(theirs[0]).unwrap();
+    assert_eq!(first.play_count, 1);
+    assert_eq!(
+        first.last_played_at,
+        library.track(ids[0]).unwrap().last_played_at
+    );
+    assert_eq!(first.added_at, 978_307_200, "the earlier date added");
+    assert!(other.track(theirs[1]).unwrap().favorite);
+    assert!(!other.track(theirs[0]).unwrap().favorite);
+    let playlist = other
+        .playlists()
+        .into_iter()
+        .find(|p| p.name == "드라이브")
+        .expect("playlist made");
+    assert_eq!(track_ids(&other, playlist.id), [theirs[1], theirs[0]]);
+    // The plays themselves came too, each in its place in time: what this device heard
+    // just now is still what was heard last.
+    assert_eq!(other.plays_since(0).len(), 3);
+    assert_eq!(other.recent_plays(10), [theirs[4], theirs[2], theirs[0]]);
+    assert_eq!(other.snapshot().get(theirs[0]).unwrap().play_count, 1);
+
+    // Again: nothing more.
+    let again = other.import_data(&file).expect("takes in");
+    assert_eq!((again.matched, again.playlists), (5, 0));
+    assert_eq!(other.plays_since(0).len(), 3);
+    assert_eq!(other.playlists().len(), 1);
+    assert_eq!(other.recent_plays(10), [theirs[4], theirs[2], theirs[0]]);
+
+    // A device whose music folder has another name, with one song missing and a
+    // playlist of the same name that holds other songs.
+    let third = TestEnv::new();
+    for i in 1..=4u32 {
+        write_tagged_wav(
+            &third.dir.path().join(format!("노래/앨범/곡 {i}.wav")),
+            200 + i * 100,
+            &format!("T{i}"),
+            "아이유",
+            "앨범",
+        );
+    }
+    let last = third.open();
+    last.add_folder(&third.dir.path().join("노래")).unwrap();
+    wait_scan(&last);
+    let by_title = |title: &str| {
+        let snapshot = last.snapshot();
+        snapshot
+            .tracks
+            .iter()
+            .find(|t| t.title == title)
+            .map(|t| t.id)
+            .unwrap()
+    };
+    let own = last.create_playlist("드라이브").unwrap();
+    last.add_to_playlist(own, &[by_title("T3")]).unwrap();
+    let result = last.import_data(&file).expect("takes in");
+    assert_eq!(
+        (result.matched, result.unmatched, result.playlists),
+        (4, 1, 1),
+        "found by the folders they lie in and their names"
+    );
+    assert!(last.track(by_title("T2")).unwrap().favorite);
+    let marked = last
+        .playlists()
+        .into_iter()
+        .find(|p| p.name == "드라이브 (2)")
+        .expect("the name was taken: the list that came in is marked");
+    assert_eq!(
+        track_ids(&last, marked.id),
+        [by_title("T2"), by_title("T1")]
+    );
+    assert_eq!(track_ids(&last, own), [by_title("T3")]);
+
+    // What is not library data, and data of a later version of the app.
+    fs::write(&file, "<html></html>").unwrap();
+    let error = last.import_data(&file).unwrap_err();
+    assert!(!is_of_a_later_version(&error));
+    fs::write(&file, r#"{"format":"oneum-library-data","version":99}"#).unwrap();
+    let error = last.import_data(&file).unwrap_err();
+    assert!(is_of_a_later_version(&error));
+    assert!(matches!(
+        last.import_data(&env.dir.path().join("no such file")),
+        Err(LibraryError::Io(_))
+    ));
+}
