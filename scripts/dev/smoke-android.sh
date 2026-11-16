@@ -124,6 +124,14 @@ $ADB shell pm grant $PKG android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 |
 echo "== first run, without the right to read files"
 start
 ui 'volume 0' 'wait 500' 'dump a.json'
+# With an interface asked for, the app says that it draws through that one (else a run
+# "on OpenGL ES" could pass on Vulkan). The adapter ends "(<interface>, <kind>)", or
+# "; glow)" under the UI framework's OpenGL renderer.
+case "${ONEUM_GRAPHICS:-}" in
+  glow) check a.json 'd["adapter"].endswith("; glow)")' "the screen is drawn by the OpenGL renderer that was asked for (glow)" ;;
+  gl) check a.json 'd["adapter"].rsplit("(", 1)[1].startswith("Gl,")' "the screen is drawn through OpenGL ES, as asked" ;;
+  vulkan) check a.json 'd["adapter"].rsplit("(", 1)[1].startswith("Vulkan,")' "the screen is drawn through Vulkan, as asked" ;;
+esac
 check a.json 'd["library_tracks"] == 0 and d["state"] == "Idle"' "starts with an empty library, idle"
 check a.json 'p["tab"] == "Library" and p["page"] is None' "the phone screens are shown, on the library tab"
 check a.json 'd["screen"]["full"][3] > d["screen"]["full"][2] > 300' "the whole screen is drawn on, upright"
@@ -355,42 +363,46 @@ panics() { $ADB shell "run-as $PKG grep -c 'panic:' files/logs/oneum.log" </dev/
 opened_again() { [ -n "$after" ] && [ "$after" != "$before" ]; }
 no_new_panic() { [ "$(panics)" = "$panics_before" ]; }
 app_gone() { [ -z "$(pid)" ]; }
+echo "== the graphics device is lost"
+# A driver can take away the device the screen is drawn with at any time (on a phone
+# one did, 2026-11-15), and the app then ended at the next frame. The step takes the
+# device away as a driver does (under the UI framework's OpenGL renderer, which has no
+# such device, it says the loss as the app does of a driver that ran out of memory).
+# The app saves what it keeps, opens again in a new process and plays on; that run has
+# no verification channel (it was not started with one), so it is asked about through
+# the system and its log.
+ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
+check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
+before=$(pid)
+panics_before=$(panics)
+ui 'fail device'
+i=0; after=$(pid)
+while { [ -z "$after" ] || [ "$after" = "$before" ]; } && [ $i -lt 75 ]; do
+  sleep 0.2; i=$((i + 1)); after=$(pid)
+done
+sleep 4
+holds "the app opened again in a new process" opened_again
+holds "its log says that it started anew, and that music was playing" log_has 'graphics: started anew after the device was lost playing=true'
 if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
-  # There is no wgpu device to lose under the framework's OpenGL renderer.
-  echo "== the graphics device is lost: left out (no wgpu device under glow)"
+  # That renderer is a choice of its own, with no other interface to turn to: the note
+  # of the loss names none (the run that follows goes by the settings).
+  names_no_interface() { $ADB shell "run-as $PKG cat files/data/relaunch.txt" </dev/null | tr -d '\r' | grep -q ' -$'; }
+  holds "the loss names no interface to turn from" names_no_interface
 else
-  echo "== the graphics device is lost"
-  # A driver can take away the device the screen is drawn with at any time (on a phone
-  # one did, 2026-11-15), and the app then ended at the next frame. The step takes the
-  # device away as a driver does. The app saves what it keeps, opens again in a new
-  # process and plays on; that run has no verification channel (it was not started with
-  # one), so it is asked about through the system and its log.
-  ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
-  check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
-  before=$(pid)
-  panics_before=$(panics)
-  ui 'fail device'
-  i=0; after=$(pid)
-  while { [ -z "$after" ] || [ "$after" = "$before" ]; } && [ $i -lt 75 ]; do
-    sleep 0.2; i=$((i + 1)); after=$(pid)
-  done
-  sleep 4
-  holds "the app opened again in a new process" opened_again
-  holds "its log says that it started anew, and that music was playing" log_has 'graphics: started anew after the device was lost playing=true'
   # While the settings leave the choice to the app, the new run draws through the other
   # interface than the one the device was lost on.
   other=gl; [ "${ONEUM_GRAPHICS:-}" != gl ] || other=vulkan
   holds "the new run draws through the other interface ($other)" log_has "graphics: this interface is tried first interface=.$other."
   holds "which has shown that it works" log_has 'graphics: the interface on trial works'
-  holds "the music goes on: the system's media session says it is playing" session_is PLAYING
-  holds "nothing ended in a panic" no_new_panic
-  # The same again within a minute: what failed twice in a row is not tried a third time.
-  start
-  ui 'volume 0' 'wait 500' 'fail device'
-  sleep 6
-  holds "a second loss right after closes the app instead of opening it once more" app_gone
-  holds "and the log says why" log_has 'graphics: lost again right after a new start'
 fi
+holds "the music goes on: the system's media session says it is playing" session_is PLAYING
+holds "nothing ended in a panic" no_new_panic
+# The same again within a minute: what failed twice in a row is not tried a third time.
+start
+ui 'volume 0' 'wait 500' 'fail device'
+sleep 6
+holds "a second loss right after closes the app instead of opening it once more" app_gone
+holds "and the log says why" log_has 'graphics: lost again right after a new start'
 
 echo "== a crash of the native side"
 # What the system kept of it (the signal, where the thread was) is written beside the

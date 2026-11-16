@@ -624,6 +624,10 @@ impl OneumApp {
         {
             // What a device was lost on belongs to the choice that was left.
             app::relaunch::forget_lost_interface(&self.core.paths.data_dir);
+            // An interface on trial that let the settings be reached and changed has
+            // shown that it works: left open, its trial would make the next start
+            // give up the choice that was just made.
+            app::relaunch::end_trial(&self.core.paths.data_dir);
             if crate::platform::android::open_again_after_exit() {
                 self.shutdown();
                 std::process::exit(0);
@@ -1710,7 +1714,7 @@ impl OneumApp {
             std::env::consts::OS,
             app::BUILT
         )];
-        if let Some((adapter, _)) = renderer::adapter() {
+        if let Some(adapter) = renderer::adapter() {
             about.push(format!("drawn with: {adapter}"));
         }
         about.push(format!("graphics setting: {:?}", self.settings.graphics));
@@ -2522,7 +2526,7 @@ impl OneumApp {
         state["network"] = self.network_state();
         state["removed_songs"] = serde_json::json!(self.core.library.removed_count());
         state["memory"] = serde_json::json!(memory::read().to_string());
-        state["adapter"] = serde_json::json!(renderer::adapter().map(|(name, _)| name.as_str()));
+        state["adapter"] = serde_json::json!(renderer::adapter());
         state["current_path"] = serde_json::json!(
             p.current
                 .and_then(|c| self.track(c.track_id))
@@ -3071,9 +3075,17 @@ impl eframe::App for OneumApp {
     /// Runs for every pass, also while the window is hidden or fully covered (then
     /// without a UI pass): the close button, Finder opens and menu commands must not
     /// wait for the window to become visible again.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.sync(ctx);
         self.run_automation(ctx);
+        // The UI framework's OpenGL renderer does not say when the driver refused
+        // something while the frame before was drawn: it is asked here.
+        #[cfg(target_os = "android")]
+        if let Some(gl) = frame.gl() {
+            renderer::note_gl_errors(gl, memory::frames());
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = frame;
         // Asked last, right before this pass is drawn: a device that went while the
         // frame before was drawn (or was taken away by a verification step just now)
         // must not be drawn with again.

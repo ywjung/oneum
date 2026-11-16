@@ -1353,7 +1353,7 @@ impl OneumApp {
                         );
                     },
                 );
-                if let Some((adapter, _)) = super::renderer::adapter() {
+                if let Some(adapter) = super::renderer::adapter() {
                     ui.add_space(4.0);
                     ui.add(
                         egui::Label::new(
