@@ -374,6 +374,32 @@ echo "== the graphics device is lost"
 ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
 check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
 check g1.json 'd["graphics_errors"] == 0' "what the screen is drawn with has told of no error in all of this run"
+# A section repeated, stars and the library's data: what the desk's smoke test shows
+# of these in full, by the same commands; here, that they work on a phone.
+ui 'menu repeat_section' 'wait 1500' 'menu repeat_section' 'wait 300' 'dump n1.json' 'wait 3500' 'dump n2.json' \
+   'menu repeat_section' 'wait 300' 'dump n3.json'
+check n1.json 'd["section"] is not None and d["section"][1] is not None and d["state"] == "Playing"' "a section of the song is marked, from one press to the next"
+check n2.json 'd["state"] == "Playing" and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
+check n3.json 'd["section"] is None and d["state"] == "Playing"' "the third press gives the section up"
+ui 'menu rate_current 4' 'wait 600' 'dump n4.json' "menu data_export $VERIFY/data.json" 'wait 1500' 'dump n5.json' \
+   'menu rate_current 0' 'wait 600' 'dump n6.json' "menu data_import $VERIFY/data.json" 'wait 1500' 'dump n7.json'
+check n4.json 'd["current_rating"] == 4' "the song that is playing is given four stars"
+$ADB exec-out run-as $PKG cat files/verify/data.json > "$OUT/data.json" </dev/null
+if python3 - "$OUT/data.json" "$OUT/n5.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+d = json.loads(text)
+state = json.load(open(sys.argv[2]))
+assert d["format"] == "oneum-library-data" and d["version"] == 1
+assert len(d["songs"]) == state["library_tracks"], (len(d["songs"]), state["library_tracks"])
+assert [song.get("rating", 0) for song in d["songs"]].count(4) == 1
+assert "/storage/" not in text and "/data/" not in text, "the file tells where the music lies"
+PY
+then echo "  ok   the library's data is written: every song, the stars, and no place on the device"
+else echo "  FAIL the library data file is not as expected"; exit 1
+fi
+check n6.json 'd["current_rating"] == 0' "the stars are taken away"
+check n7.json 'd["current_rating"] == 4' "…and the data, taken in again, gives them back: its songs are found here"
 lose=device
 if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
   # That no error was told means something only if the driver is really asked: OpenGL

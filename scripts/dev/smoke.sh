@@ -127,6 +127,14 @@ ui 'menu rate_current 4' 'wait 500' 'dump rt1.json' 'click 200 20' 'text rating:
 check rt1.json 'd["current_rating"] == 4' "the song that is playing is given four stars"
 check rt2.json 'd["rows"] == 1 and d["first_rows"] == [d["current"]]' "…and is found by them (rating:>=4)"
 check rt3.json 'd["current_rating"] == 0 and d["rows"] == 20 and d["query"] == ""' "the stars are taken away again"
+# The stars of Song Info are pressed: the fifth gives five, the same one again none.
+# (The panel is put away through the queue button: it opens the queue in its place,
+# and closes that.)
+ui 'menu song_info' 'wait 800' 'click 973 460' 'wait 600' 'dump rt4.json' 'click 973 460' 'wait 600' 'dump rt5.json' \
+   'click 1118 20' 'wait 300' 'click 1118 20' 'wait 400' 'dump rt6.json'
+check rt4.json 'd["right_panel"] == "Info" and d["current_rating"] == 5' "a click on the fifth star of Song Info gives five stars"
+check rt5.json 'd["current_rating"] == 0' "…and a click on the last star that is filled takes them away"
+check rt6.json 'd["right_panel"] != "Info" and d["right_panel"] != "Queue"' "the panel is put away again"
 
 echo "== modes"
 ui "click $SHUFFLE" 'wait 400' 'dump m1.json' "click $SHUFFLE" 'wait 400' 'dump m2.json' "click $REPEAT" 'wait 300' 'dump m3.json' "click $REPEAT" 'wait 300' 'dump m4.json' "click $REPEAT" 'wait 300' 'dump m5.json'

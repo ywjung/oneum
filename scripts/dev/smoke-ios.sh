@@ -106,13 +106,13 @@ controls = top + 50 + 8 + side + 16 + 0.6 * spare
 print(f"PLAY_X={28 + step * 2.5:.0f} NEXT_X={28 + step * 3.5:.0f} PLAY_Y={controls + 156:.0f}")
 print(f"COVER_Y={top + 50 + 8 + 0.3 * spare + side / 2:.0f}")
 # The "more" button beside the title of the song that plays, and in the sheet it puts
-# up (eleven lines under a heading, more than the sheet shows at once on most phones:
+# up (thirteen lines under a heading, more than the sheet shows at once on most phones:
 # then it is as tall as it may be and its lines are counted from the top) the line
-# that shows the song in the song list, the eighth.
+# that shows the song in the song list, the ninth.
 print(f"MORE_X={w - 42:.0f} MORE_Y={controls + 26:.0f}")
-shown = min(52 + 52 * 11, max((bottom - top) * 0.72, 200))
+shown = min(52 + 52 * 13, max((bottom - top) * 0.72, 200))
 sheet_top = full - (26 + shown + 8 + (full - bottom))
-print(f"IN_SONGS={sheet_top + 26 + 52 + 26 + 52 * 7:.0f}")
+print(f"IN_SONGS={sheet_top + 26 + 52 + 26 + 52 * 8:.0f}")
 # The queue: the words at the right of its first line, and its rows.
 print(f"QUEUE_TOOLS={top + 67:.0f} QUEUE_SELECT={w - 31:.0f} QUEUE_CHOSEN={w - 97:.0f}")
 print(f"QUEUE2={top + 127 + 124:.0f} QUEUE3={top + 127 + 186:.0f}")
@@ -300,6 +300,33 @@ check h0.json 'not d["output_options"]["match_sample_rate"]' "output at the song
 check h1.json 'd["output_options"]["match_sample_rate"]' "its switch turns it on"
 check h2.json 'd["state"] == "Playing" and d["output_rate"] == 48000 and d["underruns"] == 0' "a 48 kHz song goes out at 48 kHz"
 check h3.json 'd["state"] == "Playing" and d["output_rate"] == 44100 and d["underruns"] == 0' "and a 44.1 kHz song at 44.1 kHz again"
+
+echo "== a section repeated, stars, the library's data"
+# What the desk's smoke test shows of these in full, by the same commands; here: that
+# they work in the app as a phone runs it. The song of the section above is playing.
+ui 'menu repeat_section' 'wait 1500' 'menu repeat_section' 'wait 300' 'dump n1.json' 'wait 3500' 'dump n2.json' \
+   'menu repeat_section' 'wait 300' 'dump n3.json'
+check n1.json 'd["section"] is not None and d["section"][1] is not None and d["state"] == "Playing"' "a section of the song is marked, from one press to the next"
+check n2.json 'd["state"] == "Playing" and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
+check n3.json 'd["section"] is None and d["state"] == "Playing"' "the third press gives the section up"
+ui 'menu rate_current 4' 'wait 600' 'dump n4.json' "menu data_export $PROFILE/data.json" 'wait 1500' 'dump n5.json' \
+   'menu rate_current 0' 'wait 600' 'dump n6.json' "menu data_import $PROFILE/data.json" 'wait 1500' 'dump n7.json'
+check n4.json 'd["current_rating"] == 4' "the song that is playing is given four stars"
+if python3 - "$PROFILE/data.json" "$PROFILE/n5.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+d = json.loads(text)
+state = json.load(open(sys.argv[2]))
+assert d["format"] == "oneum-library-data" and d["version"] == 1
+assert len(d["songs"]) == state["library_tracks"], (len(d["songs"]), state["library_tracks"])
+assert [song.get("rating", 0) for song in d["songs"]].count(4) == 1
+assert "/Users/" not in text and "CoreSimulator" not in text, "the file tells where the music lies"
+PY
+then echo "  ok   the library's data is written: every song, the stars, and no place on the device"
+else echo "  FAIL the library data file is not as expected"; exit 1
+fi
+check n6.json 'd["current_rating"] == 0' "the stars are taken away"
+check n7.json 'd["current_rating"] == 4' "…and the data, taken in again, gives them back: its songs are found here"
 
 echo "== restart"
 ui 'wait 300' 'dump r0.json'
