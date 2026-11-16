@@ -3691,6 +3691,12 @@ impl OneumApp {
                 self.seek_drag = None;
                 self.seek_pending = Some((shown, Instant::now()));
             }
+            // The section that is marked for repeating: its ends, on the rail.
+            if let Some(section) = self.player.section
+                && duration_s > 0.0
+            {
+                super::player_bar::section_marks(ui, response.rect, section, duration_s);
+            }
         });
         let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
         let dim = theme::dim(ui);
@@ -3908,11 +3914,17 @@ impl OneumApp {
             )
             .clicked()
         };
-        if self.player.stop_after_current || self.player.sleep_at.is_some() {
+        let section = self.section_words();
+        if self.player.stop_after_current || self.player.sleep_at.is_some() || section.is_some() {
             ui.add_space(6.0);
         }
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
+            if let Some(words) = section
+                && note(ui, words)
+            {
+                self.core.player.send(Command::ClearSection);
+            }
             if self.player.stop_after_current && note(ui, s.stop_after_short.to_string()) {
                 self.core.player.send(Command::SetStopAfterCurrent(false));
             }
@@ -4481,6 +4493,16 @@ impl OneumApp {
                     let on = self.player.stop_after_current;
                     if Self::sheet_item(ui, Icon::Pause, s.menu_stop_after_current, on) {
                         self.core.player.send(Command::SetStopAfterCurrent(!on));
+                        return true;
+                    }
+                    // A section of the song to play over and over: where it begins,
+                    // where it ends, and off again, one step at each choice.
+                    let repeating = self
+                        .player
+                        .section
+                        .is_some_and(|section| section.to_ms.is_some());
+                    if Self::sheet_item(ui, Icon::Repeat, self.section_step(), repeating) {
+                        self.core.player.send(Command::MarkSection);
                         return true;
                     }
                     if Self::sheet_item(ui, Icon::Clock, s.menu_sleep_timer, false) {

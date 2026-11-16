@@ -2464,3 +2464,112 @@ fn a_track_of_a_server_that_is_gone_is_skipped() {
     rig.wait("end of queue", |s| s.state == PlayState::Ended);
     assert_eq!(rig.host.plays(), vec![A, B]);
 }
+
+/// A section of a song that is marked to be repeated: playing goes back to its
+/// beginning whenever it reaches its end, until the marking is given up.
+#[test]
+fn a_marked_section_is_played_over_and_over_until_it_is_given_up() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG, A], 0));
+    rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 1000
+    });
+    rig.send(Command::MarkSection);
+    let begun = rig.wait("its beginning is marked", |s| s.section.is_some());
+    let from = begun.section.unwrap().from_ms;
+    assert!(from >= 1000, "where the song stood: {from}");
+    assert_eq!(begun.section.unwrap().to_ms, None, "not repeated yet");
+    rig.wait("further on", |s| s.position_ms >= from + 2000);
+    rig.send(Command::MarkSection);
+    let marked = rig.wait("its end is marked", |s| {
+        s.section.is_some_and(|section| section.to_ms.is_some())
+    });
+    let to = marked.section.unwrap().to_ms.unwrap();
+    assert!(to >= from + 2000, "{from} to {to}");
+    assert_eq!(marked.section.unwrap().from_ms, from);
+
+    // Left alone for longer than the rest of the song lasts (the rig plays several
+    // times as fast as a clock): the song has not ended and stands inside the section,
+    // and more of it was heard than lies between the mark and the song's end.
+    let heard = rig.total_frames();
+    std::thread::sleep(Duration::from_secs(4));
+    let later = rig.player.snapshot();
+    assert_eq!(Rig::track(&later), Some(LONG), "still the same song");
+    assert_eq!(later.state, PlayState::Playing);
+    assert!(
+        later.position_ms + 100 >= from && later.position_ms <= to + 600,
+        "inside the section: {} ({from} to {to})",
+        later.position_ms
+    );
+    let rate = u64::from(later.output_sample_rate.unwrap_or(44_100));
+    let to_the_end = (12_000 - from) * rate / 1000;
+    assert!(
+        (rig.total_frames() - heard) as u64 > to_the_end,
+        "the section was played more than once"
+    );
+    assert_eq!(
+        rig.host.plays(),
+        vec![LONG],
+        "one playthrough, counted once"
+    );
+
+    // Given up: the song goes on to its end, and the next one follows.
+    rig.send(Command::MarkSection);
+    rig.wait("no section any more", |s| s.section.is_none());
+    rig.wait("the next song", |s| Rig::track(s) == Some(A));
+}
+
+/// The marks of a section may be set from its end backwards, and the section belongs
+/// to its song: another song being current ends it.
+#[test]
+fn a_section_marked_backwards_is_the_same_section_and_another_song_ends_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG, A], 0));
+    rig.send(Command::Pause);
+    rig.wait("paused", |s| s.state == PlayState::Paused);
+    rig.send(Command::SeekTo(6000));
+    rig.wait("at six seconds", |s| s.position_ms == 6000);
+    rig.send(Command::MarkSection);
+    rig.wait("one mark", |s| s.section.is_some());
+    rig.send(Command::SeekTo(2000));
+    rig.wait("at two seconds", |s| s.position_ms == 2000);
+    rig.send(Command::MarkSection);
+    let marked = rig.wait("both marks", |s| {
+        s.section.is_some_and(|section| section.to_ms.is_some())
+    });
+    assert_eq!(
+        marked.section,
+        Some(oneum::playback::SectionRepeat {
+            from_ms: 2000,
+            to_ms: Some(6000)
+        })
+    );
+    // Marks that lie on each other still make a section that can be heard; one at the
+    // very end of the song makes none.
+    rig.send(Command::ClearSection);
+    rig.wait("given up", |s| s.section.is_none());
+    rig.send(Command::MarkSection);
+    rig.send(Command::MarkSection);
+    let short = rig.wait("both marks at one place", |s| {
+        s.section.is_some_and(|section| section.to_ms.is_some())
+    });
+    assert_eq!(short.section.unwrap().to_ms, Some(2500));
+    rig.send(Command::ClearSection);
+    rig.send(Command::SeekTo(11_900));
+    rig.wait("near the end", |s| s.position_ms >= 11_900);
+    rig.send(Command::MarkSection);
+    rig.wait("one mark", |s| s.section.is_some());
+    rig.send(Command::MarkSection);
+    rig.wait("no room for a section", |s| s.section.is_none());
+
+    // Another song.
+    rig.send(Command::SeekTo(1000));
+    rig.send(Command::MarkSection);
+    rig.wait("one mark", |s| s.section.is_some());
+    rig.send(Command::Next);
+    let next = rig.wait("the next song is current", |s| Rig::track(s) == Some(A));
+    let _ = next;
+    rig.wait("its section went with the song", |s| s.section.is_none());
+}

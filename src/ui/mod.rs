@@ -723,6 +723,7 @@ impl OneumApp {
                     let on = player.snapshot().stop_after_current;
                     return player.send(Command::SetStopAfterCurrent(!on));
                 }
+                MenuAction::RepeatSection => return player.send(Command::MarkSection),
                 MenuAction::SleepTimer(minutes) => {
                     let after = (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60));
                     return player.send(Command::SetSleepTimer(after));
@@ -1674,6 +1675,29 @@ impl OneumApp {
         }
     }
 
+    /// The marked section of the current song in words, for the player bar and the
+    /// phone's player: where it begins while only that is marked, and both ends once
+    /// it is repeated.
+    pub(super) fn section_words(&self) -> Option<String> {
+        let section = self.player.section?;
+        let from = crate::i18n::format_time(section.from_ms);
+        Some(match section.to_ms {
+            Some(to) => self
+                .lang
+                .section_repeating(&from, &crate::i18n::format_time(to)),
+            None => self.lang.section_begun(&from),
+        })
+    }
+
+    /// What the next step of marking a section does, as a menu says it.
+    pub(super) fn section_step(&self) -> &'static str {
+        match self.player.section {
+            None => self.s().section_mark_start,
+            Some(section) if section.to_ms.is_none() => self.s().section_mark_end,
+            Some(_) => self.s().section_off,
+        }
+    }
+
     /// Asks where the library's own data is to be written (see `library::backup`).
     pub(super) fn pick_data_export(&mut self) {
         let request = PickRequest::new(PickKind::SaveAs(self.s().data_file_name.into()))
@@ -2441,6 +2465,7 @@ impl OneumApp {
                     // The playback commands of the menu go straight to the player.
                     let playback = match id.as_str() {
                         "stop_after_current" => Some(MenuAction::StopAfterCurrent),
+                        "repeat_section" => Some(MenuAction::RepeatSection),
                         "sleep_off" => Some(MenuAction::SleepTimer(0)),
                         "sleep_15" => Some(MenuAction::SleepTimer(15)),
                         "sleep_90" => Some(MenuAction::SleepTimer(90)),
@@ -2638,6 +2663,7 @@ impl OneumApp {
         state["memory"] = serde_json::json!(memory::read().to_string());
         state["adapter"] = serde_json::json!(renderer::adapter());
         state["graphics_errors"] = serde_json::json!(renderer::errors());
+        state["section"] = serde_json::json!(p.section.map(|s| (s.from_ms, s.to_ms)));
         state["current_path"] = serde_json::json!(
             p.current
                 .and_then(|c| self.track(c.track_id))

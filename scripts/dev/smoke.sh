@@ -108,6 +108,17 @@ check mk2.json 'd["position_ms"] < 4500' "Option-Command-Left skips back"
 check mk3.json 'd["stop_after_current"]' "Shift-Command-period marks the song as the last one"
 check mk4.json 'not d["stop_after_current"] and d["menu_keys"] == [True, True, True, True, False]' "…and takes the mark back; Command-period alone is nobody's shortcut"
 
+echo "== a section of the song, repeated"
+# Controls ▸ Mark Section to Repeat (A–B): the first time marks where the section
+# begins, the second where it ends. Left alone for more than twice its length, the
+# song still stands inside it. The third time gives it up.
+ui 'menu repeat_section' 'wait 1500' 'dump ab1.json' 'menu repeat_section' 'wait 300' 'dump ab2.json' \
+   'wait 3500' 'dump ab3.json' 'menu repeat_section' 'wait 300' 'dump ab4.json'
+check ab1.json 'd["section"] is not None and d["section"][1] is None and d["state"] == "Playing"' "the beginning of a section is marked"
+check ab2.json 'd["section"][1] is not None and 1000 <= d["section"][1] - d["section"][0] <= 2500' "…and its end, about a second and a half on"
+check ab3.json 'd["state"] == "Playing" and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
+check ab4.json 'd["section"] is None and d["state"] == "Playing"' "the third time gives the section up"
+
 echo "== modes"
 ui "click $SHUFFLE" 'wait 400' 'dump m1.json' "click $SHUFFLE" 'wait 400' 'dump m2.json' "click $REPEAT" 'wait 300' 'dump m3.json' "click $REPEAT" 'wait 300' 'dump m4.json' "click $REPEAT" 'wait 300' 'dump m5.json'
 check m1.json 'd["shuffle"] and d["queue_index"] == 0' "shuffle on keeps the current track first"

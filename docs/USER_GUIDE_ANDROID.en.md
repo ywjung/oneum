@@ -35,6 +35,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - **Up Next**: press a song to play from it; ⋯ removes it from the queue. Drag the **≡** handle at the right of a song to move it. **Save** keeps the queue as a playlist, **Clear Queue** empties it. Press **Select** and choose several songs: **Selected Songs…** moves them to the top, adds them to a playlist or takes them out of the queue, all at once.
 - A menu that ⋯ brought up closes when you press outside it or pull its handle down.
 - **Sleep Timer** and **Stop After Current Song** are under ⋯ of the song that is playing. While one is on it is shown at the bottom of the player; press those words to switch it off.
+- **Repeating a section (A–B)** is under ⋯ of the song that is playing too. The section from where you choose **Repeat Section: Start Here (A)** to where you choose **Repeat Section: End Here (B)** is played over and over; **Stop Repeating Section** ends it. While it is on, the section is shown at the bottom of the player (pressing those words ends it too) and both places are marked on the seek bar. Another song ends it.
 - **Show in Songs**, under ⋯ of the song that is playing, opens the song list at the place of that song.
 - **Song Info** (under ⋯ of a song): album, artist and genres (press one to go there), track number, length, format, leveling values, what the file check found, play count, what the file names besides (the label, and credits such as composer, lyricist and conductor), other versions of the same song in the library, for the song that is playing the signal path, and the folder the file is in. **Show in Files** opens that folder in the phone's Files app.
 - Press the time at the right of the position to switch between the whole length and the time left. Press the speaker at the left of the volume to mute; press it again for the volume as it was.
@@ -80,7 +81,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 ## Keyboard
 A keyboard that is plugged into the phone or paired with it has these shortcuts.
 
-- **Playback**: Space plays and pauses · Ctrl+→ / Ctrl+← next / previous song · Ctrl+Alt+→ / Ctrl+Alt+← five seconds on / back · Ctrl+Shift+. stops after the current song · Ctrl+↑ / Ctrl+↓ the app's volume · Ctrl+Shift+M mute · Ctrl+S shuffle · Ctrl+Shift+R repeat.
+- **Playback**: Space plays and pauses · Ctrl+→ / Ctrl+← next / previous song · Ctrl+Alt+→ / Ctrl+Alt+← five seconds on / back · Ctrl+Shift+. stops after the current song · Ctrl+B repeats a section (start → end → off) · Ctrl+↑ / Ctrl+↓ the app's volume · Ctrl+Shift+M mute · Ctrl+S shuffle · Ctrl+Shift+R repeat.
 - **The song that is playing**: Ctrl+D favorite · Ctrl+I Song Info · Ctrl+L Show in Songs · Ctrl+Shift+F Show in Files.
 - **Screens**: Ctrl+F search · Ctrl+U the queue · Ctrl+Shift+U the VU meters · Ctrl+E the equalizer · Ctrl+, Settings · Esc back.
 - **Library**: Ctrl+O Open Music Files · Ctrl+Shift+O Add Folder · Ctrl+N new playlist · Ctrl+R Rescan.

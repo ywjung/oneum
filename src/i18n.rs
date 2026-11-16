@@ -603,6 +603,12 @@ strings! {
     menu_toggle_shuffle: "셔플 켜기/끄기", "Toggle Shuffle";
     menu_cycle_repeat: "반복 모드 바꾸기", "Change Repeat Mode";
     menu_stop_after_current: "현재 곡이 끝나면 정지", "Stop After Current Song";
+    menu_repeat_section: "구간 반복 (A–B) 지정", "Mark Section to Repeat (A–B)";
+    section_mark_start: "구간 반복: 여기서 시작 (A)", "Repeat Section: Start Here (A)";
+    section_mark_end: "구간 반복: 여기까지 (B)", "Repeat Section: End Here (B)";
+    section_off: "구간 반복 끄기", "Stop Repeating Section";
+    section_cancel_hint: "이 곡의 표시한 구간을 되풀이합니다. 누르면 끕니다.", "The marked section of this song is played over and over. Click to end it.";
+    shortcut_repeat_section: "구간 반복: 시작(A) → 끝(B) → 끄기", "Repeat a section: start (A) → end (B) → off";
     menu_sleep_timer: "잠자기 타이머", "Sleep Timer";
     sleep_off: "끄기", "Off";
     sleep_15: "15분 뒤", "In 15 Minutes";
@@ -1121,6 +1127,22 @@ impl Lang {
         }
         text.push('.');
         text
+    }
+
+    /// The section of a song whose beginning is marked (`from`: a time as shown).
+    pub fn section_begun(self, from: &str) -> String {
+        match self {
+            Lang::Ko => format!("구간 시작 {from}"),
+            Lang::En => format!("Section from {from}"),
+        }
+    }
+
+    /// The section of a song that is being repeated.
+    pub fn section_repeating(self, from: &str, to: &str) -> String {
+        match self {
+            Lang::Ko => format!("구간 반복 {from}–{to}"),
+            Lang::En => format!("Repeating {from}–{to}"),
+        }
     }
 
     pub fn playlist_exported(self, count: usize) -> String {

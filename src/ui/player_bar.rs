@@ -181,6 +181,16 @@ impl OneumApp {
                         player.send(Command::SetStopAfterCurrent(on));
                         ui.close();
                     }
+                    if ui
+                        .add_enabled(
+                            self.player.current.is_some(),
+                            egui::Button::new(self.section_step()),
+                        )
+                        .clicked()
+                    {
+                        player.send(Command::MarkSection);
+                        ui.close();
+                    }
                     ui.menu_button(s.menu_sleep_timer, |ui| {
                         for (minutes, label) in [
                             (15, s.sleep_15),
@@ -278,6 +288,12 @@ impl OneumApp {
                 self.seek_drag = None;
                 self.seek_pending = Some((shown, Instant::now()));
             }
+            // The section that is marked for repeating: its ends, on the rail.
+            if let Some(section) = self.player.section
+                && duration_s > 0.0
+            {
+                section_marks(ui, response.rect, section, duration_s);
+            }
             // Where a click would land, while pointing at the rail.
             if enabled
                 && !response.dragged()
@@ -360,6 +376,19 @@ impl OneumApp {
             // The seconds count down without any input.
             ui.ctx().request_repaint_after(Duration::from_millis(500));
         }
+        // The section of the song that is marked for repeating: said in words; a click
+        // gives it up.
+        if let Some(words) = self.section_words() {
+            let text = RichText::new(words)
+                .small()
+                .color(theme::accent(ui.visuals().dark_mode));
+            let label = ui
+                .add(egui::Label::new(text).sense(Sense::click()))
+                .on_hover_text(s.section_cancel_hint);
+            if label.clicked() {
+                player.send(Command::ClearSection);
+            }
+        }
         // "Stop after this song", while it is set: said in words (a mark on the play
         // button read as a drawing fault); a click takes it back.
         if self.player.stop_after_current {
@@ -373,5 +402,46 @@ impl OneumApp {
                 player.send(Command::SetStopAfterCurrent(false));
             }
         }
+    }
+}
+
+/// The ends of the section that is marked for repeating, on the rail of a seek bar
+/// (`rail`: the slider's rectangle; the thumb's travel is a little shorter than it,
+/// which a mark of two points' width does not show).
+pub(super) fn section_marks(
+    ui: &Ui,
+    rail: egui::Rect,
+    section: crate::playback::SectionRepeat,
+    duration_s: f64,
+) {
+    let accent = theme::accent(ui.visuals().dark_mode);
+    let x_of = |ms: u64| {
+        let fraction = (ms as f64 / 1000.0 / duration_s).clamp(0.0, 1.0) as f32;
+        rail.left() + fraction * rail.width()
+    };
+    let from = x_of(section.from_ms);
+    let mark = |x: f32| {
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(x, rail.center().y),
+                egui::vec2(2.0, rail.height().min(14.0)),
+            ),
+            1.0,
+            accent,
+        );
+    };
+    mark(from);
+    if let Some(to) = section.to_ms {
+        let to = x_of(to);
+        mark(to);
+        // What lies between them, as a faint band behind the thumb's line.
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(from, rail.center().y - 1.5),
+                egui::pos2(to, rail.center().y + 1.5),
+            ),
+            0.0,
+            accent.gamma_multiply(0.45),
+        );
     }
 }

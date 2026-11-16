@@ -37,6 +37,7 @@
 - **Shuffle by Album** (Settings → Playback → Playing Order): shuffle mixes the order of the albums, and each album plays through in order, without gaps.
 - **Resume Long Tracks** (Settings → Playback → Playing Order, on at first): a track over 20 minutes (a DJ mix, an audiobook, a long classical piece) starts where you left off when you choose it again. When an album plays on into it, and once it was heard to the end, it starts from the beginning.
 - **Stop After Current Song** (Controls menu, ⌘⇧., or right-click the play button): plays the current song to its end and stops. While it is set, "Stops after song" is shown next to the volume; click it to switch it off. Playback stops with the next song ready, so pressing play goes on from there. It applies to this one song only (moving to another song cancels it).
+- **Repeating a section (A–B)** (**Mark Section to Repeat (A–B)** in the Controls menu, ⌘B, or right-click the play button): plays one section of a song over and over. The first time marks where the section begins (A), the second where it ends (B); from then on playback returns to the beginning whenever it reaches the end. The third time switches it off. While it is on, "Repeating 1:02–1:35" is shown next to the volume (clicking those words switches it off too), and both places are marked on the seek bar. It belongs to that one song: another song ends it, and it is not kept for the next time the app is opened.
 - **Sleep Timer** (Controls → Sleep Timer, or right-click the play button): stops playback in 15 minutes, 30 minutes, 45 minutes, 1 hour or 1 hour 30 minutes. The sound fades out over the last few seconds, and your volume setting stays as it was. While it runs, the time left is shown next to the volume; click it to switch the timer off.
 - Set the volume with the slider at the bottom right or with ⌘↑ / ⌘↓. The speaker icon (⌘⇧M) mutes; clicking it again brings back the volume you had.
 - Click the time to the right of the position bar to switch between the total length and the time left.
@@ -205,6 +206,7 @@ Options for listening through a DAC or good headphones (Settings → Playback). 
 | ⌘→ / ⌘← | Next song / previous song |
 | ⌥⌘→ / ⌥⌘← | Skip ahead / back 5 seconds |
 | ⌘⇧. | Stop after current song |
+| ⌘B | Repeat a section (A–B): start → end → off |
 | ⌘↑ / ⌘↓ | Volume up / down |
 | ⌘⇧M | Mute / unmute |
 | ⌘S / ⌘⇧R | Shuffle / repeat mode |

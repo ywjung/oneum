@@ -17,6 +17,8 @@ pub enum MenuAction {
     ToggleShuffle,
     CycleRepeat,
     StopAfterCurrent,
+    /// The next step of marking a section of the current song to repeat (A–B).
+    RepeatSection,
     /// Sleep timer in minutes; 0 switches it off.
     SleepTimer(u16),
     SeekForward,

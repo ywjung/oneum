@@ -85,6 +85,7 @@ pub(super) fn menus(s: &'static Strings) -> Vec<(&'static str, Vec<Entry>)> {
                     CMD_SHIFT,
                     Key::Period,
                 ),
+                key(A::RepeatSection, s.menu_repeat_section, CMD, Key::B),
                 Entry::Sub(
                     s.menu_sleep_timer,
                     vec![
@@ -311,6 +312,7 @@ mod tests {
             A::SongShowInFinder,
             A::SongInfo,
             A::StopAfterCurrent,
+            A::RepeatSection,
             A::SeekForward,
             A::SeekBack,
             A::SleepTimer(0),

@@ -27,6 +27,11 @@ const POSITION_PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// The sleep timer turns the volume down over its last seconds instead of cutting off.
 const SLEEP_FADE: Duration = Duration::from_secs(5);
+/// A section that is repeated (`Command::MarkSection`) is at least this long.
+const SECTION_MIN_MS: u64 = 500;
+/// It ends at least this long before its song does: at the song's end the next one
+/// would begin instead of the section again.
+const SECTION_BEFORE_END_MS: u64 = 300;
 /// After the sleep timer's pause, how long the volume stays down: past the renderer's
 /// own short fade-out, so that the volume coming back up is not heard as a tick.
 const SLEEP_RESTORE_AFTER: Duration = Duration::from_millis(120);
@@ -166,6 +171,14 @@ pub enum Command {
     /// Applies to this one song: it is over once playback has stopped there or another
     /// song was started.
     SetStopAfterCurrent(bool),
+    /// Marks a section of the current song to play over and over ("A–B repeat"): the
+    /// first time where it begins, the second time where it ends (from then on playing
+    /// goes back to its beginning whenever it gets there), the third time it is given
+    /// up. It belongs to this one song: another one being current ends it. Not kept in
+    /// the session.
+    MarkSection,
+    /// Gives the section up, however far it was marked.
+    ClearSection,
     /// Sleep timer: pause when this much time has passed (`None` switches it off).
     /// The sound fades out over the last seconds; the volume setting is not changed.
     SetSleepTimer(Option<Duration>),
@@ -242,6 +255,15 @@ pub enum Notice {
     OutputUnavailable(OutputError),
 }
 
+/// A section of the current song marked for repeating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionRepeat {
+    /// Where it begins, in the song's time.
+    pub from_ms: u64,
+    /// Where it ends, once that is marked: it is repeated from then on.
+    pub to_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NowPlaying {
     pub item_id: ItemId,
@@ -293,6 +315,9 @@ pub struct PlayerSnapshot {
     pub stop_after_current: bool,
     /// When the sleep timer will pause playback, while one is set.
     pub sleep_at: Option<Instant>,
+    /// The section of the current song that is marked for repeating, if one is (see
+    /// `Command::MarkSection`).
+    pub section: Option<SectionRepeat>,
     /// Frames of the current track, as far as it has been decoded, that would have
     /// exceeded full scale and had their gain turned down instead of being clipped.
     pub peak_limited_frames: u64,
@@ -332,6 +357,7 @@ impl PlayerSnapshot {
             radio: false,
             stop_after_current: false,
             sleep_at: None,
+            section: None,
             peak_limited_frames: 0,
             last_start_latency_ms: None,
         }
@@ -655,6 +681,8 @@ struct Player<H: PlayerHost> {
     stop_after: Option<ItemId>,
     /// Sleep timer: when to pause.
     sleep_at: Option<Instant>,
+    /// The section marked for repeating, with the queue item it belongs to.
+    section: Option<(ItemId, SectionRepeat)>,
     /// When the volume the sleep timer faded out is to be set back (see
     /// [`SLEEP_RESTORE_AFTER`]).
     sleep_restore_at: Option<Instant>,
@@ -750,6 +778,7 @@ impl<H: PlayerHost> Player<H> {
             resume_long_tracks: config.resume_long_tracks,
             stop_after: None,
             sleep_at: None,
+            section: None,
             sleep_restore_at: None,
             processed_until: None,
             notice: None,
@@ -813,6 +842,7 @@ impl<H: PlayerHost> Player<H> {
                 self.stop_after = None;
                 self.dirty = true;
             }
+            self.follow_section();
             self.follow_sleep_timer();
             self.watch_for_stall();
             self.release_paused_feed();
@@ -1354,6 +1384,12 @@ impl<H: PlayerHost> Player<H> {
                 self.engine.set_volume(self.volume);
                 self.dirty = true;
             }
+            Command::MarkSection => self.mark_section(),
+            Command::ClearSection => {
+                if self.section.take().is_some() {
+                    self.dirty = true;
+                }
+            }
             Command::SetStopAfterCurrent(on) => {
                 let wanted = self.queue.current().map(|i| i.id).filter(|_| on);
                 if wanted != self.stop_after {
@@ -1628,6 +1664,70 @@ impl<H: PlayerHost> Player<H> {
         }
         self.dirty = true;
         self.save_session(false);
+    }
+
+    /// One step of marking a section to repeat (`Command::MarkSection`): where it
+    /// begins, then where it ends, then nothing any more.
+    fn mark_section(&mut self) {
+        let Some(item) = self.queue.current().map(|i| i.id) else {
+            return;
+        };
+        let position = self.position_ms();
+        let marked = self.section.take().filter(|(of, _)| *of == item);
+        self.section = match marked {
+            None => Some(SectionRepeat {
+                from_ms: position,
+                to_ms: None,
+            }),
+            Some((
+                _,
+                SectionRepeat {
+                    from_ms,
+                    to_ms: None,
+                },
+            )) => {
+                // Marked from its end backwards (the listener went back in the song
+                // after marking): the two marks change places.
+                let (from, to) = (from_ms.min(position), from_ms.max(position));
+                // A section can be heard, and ends before the song does.
+                let duration = self.current_duration_ms();
+                let last = match duration.checked_sub(SECTION_BEFORE_END_MS) {
+                    Some(last) if duration > 0 => last,
+                    _ => u64::MAX,
+                };
+                let to = to.max(from.saturating_add(SECTION_MIN_MS)).min(last);
+                // (Too close to the end of the song for a section: none.)
+                (to >= from.saturating_add(SECTION_MIN_MS)).then_some(SectionRepeat {
+                    from_ms: from,
+                    to_ms: Some(to),
+                })
+            }
+            Some(_) => None,
+        }
+        .map(|section| (item, section));
+        self.dirty = true;
+    }
+
+    /// The section that is repeated belongs to one song: another one being current
+    /// ends it. While its song plays, reaching its end goes back to its beginning.
+    fn follow_section(&mut self) {
+        let Some((item, section)) = self.section else {
+            return;
+        };
+        if self.queue.current().map(|i| i.id) != Some(item) {
+            self.section = None;
+            self.dirty = true;
+            return;
+        }
+        if let Some(to) = section.to_ms
+            && self.state == PlayState::Playing
+            && self.chain.is_some()
+            && self.position_ms() >= to
+        {
+            // (Not `seek_to`: where the song stands is not written down for every
+            // round of the section.)
+            self.start_current(section.from_ms, true);
+        }
     }
 
     fn seek_to(&mut self, ms: u64) {
@@ -2087,6 +2187,7 @@ impl<H: PlayerHost> Player<H> {
             radio: self.radio,
             stop_after_current: self.stop_after.is_some(),
             sleep_at: self.sleep_at,
+            section: self.section.map(|(_, section)| section),
             peak_limited_frames: self.peak_limited_frames(),
             last_start_latency_ms: self.last_start_latency_ms,
         };

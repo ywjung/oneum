@@ -5,6 +5,6 @@ pub mod queue;
 
 pub use player::{
     Command, Notice, NowPlaying, PlayState, PlayableTrack, PlayerConfig, PlayerHandle, PlayerHost,
-    PlayerSnapshot, Session,
+    PlayerSnapshot, SectionRepeat, Session,
 };
 pub use queue::{ItemId, Queue, QueueItem, QueueState, RepeatMode};
