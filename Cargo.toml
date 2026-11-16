@@ -67,7 +67,10 @@ eframe = { version = "0.37", default-features = false, features = ["accesskit"] 
 # Android: the app is a shared library loaded by a native activity; Java is reached
 # through JNI (src/platform/android).
 [target.'cfg(target_os = "android")'.dependencies]
-eframe = { version = "0.37", default-features = false, features = ["android-native-activity"] }
+# "glow" is eframe's other renderer: OpenGL ES called directly, without wgpu between
+# (a trial: one phone's Vulkan driver runs out of memory under wgpu; chosen under
+# Settings → About, see `GraphicsChoice::Glow`).
+eframe = { version = "0.37", default-features = false, features = ["android-native-activity", "glow"] }
 jni = "0.22"
 ndk-context = "0.1"
 

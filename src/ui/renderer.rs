@@ -77,6 +77,25 @@ pub fn adapter() -> Option<&'static (String, wgpu::Backend)> {
     ADAPTER.get()
 }
 
+/// The window is not drawn through wgpu but by the UI framework's OpenGL renderer:
+/// what OpenGL says of itself is kept for [`adapter`] (there is no device to watch,
+/// and no count of its memory).
+#[cfg(target_os = "android")]
+pub fn note_glow(gl: &eframe::glow::Context) {
+    use eframe::glow::HasContext as _;
+    // SAFETY: the context is current on this thread (the framework made it so before
+    // it called the app), and these are plain queries.
+    let (renderer, version) = unsafe {
+        (
+            gl.get_parameter_string(eframe::glow::RENDERER),
+            gl.get_parameter_string(eframe::glow::VERSION),
+        )
+    };
+    let adapter = format!("{renderer} ({version}; glow)");
+    tracing::info!(%adapter, "graphics: the window is drawn with OpenGL, without wgpu");
+    let _ = ADAPTER.set((adapter, wgpu::Backend::Gl));
+}
+
 /// How many objects of each kind the graphics device holds at the moment, as the
 /// graphics library counts them. Something that is made for every frame and never
 /// given back shows here as a number that keeps growing.
@@ -133,6 +152,9 @@ pub enum Prefer {
     System,
     Vulkan,
     OpenGl,
+    /// Not wgpu at all: the UI framework's OpenGL renderer (Android, see
+    /// `GraphicsChoice::Glow`). For the choice of a wgpu adapter it is as `System`.
+    Glow,
 }
 
 impl Prefer {
@@ -146,6 +168,7 @@ impl Prefer {
         match (choice, lost_on) {
             (GraphicsChoice::Vulkan, _) => Self::Vulkan,
             (GraphicsChoice::OpenGl, _) => Self::OpenGl,
+            (GraphicsChoice::Glow, _) => Self::Glow,
             (GraphicsChoice::Auto, Some("vulkan")) => Self::OpenGl,
             (GraphicsChoice::Auto, Some("gl")) => Self::Vulkan,
             (GraphicsChoice::Auto, _) => Self::System,
@@ -164,6 +187,8 @@ impl Prefer {
 /// device names it: "vulkan", "gl", or nothing for the others (which have no
 /// alternative to go to).
 pub fn backend_word() -> Option<&'static str> {
+    // (Only a wgpu device can be lost; without one there is nothing to turn from.)
+    DEVICE.get()?;
     match ADAPTER.get()?.1 {
         wgpu::Backend::Vulkan => Some("vulkan"),
         wgpu::Backend::Gl => Some("gl"),
@@ -378,6 +403,14 @@ mod tests {
         // A choice that was made is kept, whatever was lost.
         assert_eq!(Prefer::from_choice(Vulkan, Some("vulkan")), Prefer::Vulkan);
         assert_eq!(Prefer::from_choice(OpenGl, Some("gl")), Prefer::OpenGl);
+        assert_eq!(
+            Prefer::from_choice(crate::app::settings::GraphicsChoice::Glow, Some("vulkan")),
+            Prefer::Glow
+        );
+        assert!(
+            !Prefer::Glow.wants(wgpu::Backend::Gl),
+            "no wgpu adapter is preferred for it"
+        );
 
         assert!(Prefer::OpenGl.wants(wgpu::Backend::Gl));
         assert!(!Prefer::OpenGl.wants(wgpu::Backend::Vulkan));

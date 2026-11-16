@@ -10,8 +10,9 @@
 #   scripts/dev/smoke-android.sh
 #
 #   ONEUM_ANDROID_SERIAL   the emulator to use (as `adb devices` names it); default: the only one
-#   ONEUM_GRAPHICS         gl or vulkan: the interface every start of the app draws through
-#                          (default: the app's own choice, Vulkan first)
+#   ONEUM_GRAPHICS         gl, vulkan or glow: what every start of the app draws through
+#                          (default: the app's own choice, Vulkan first; glow is the
+#                          UI framework's OpenGL renderer, without wgpu)
 #
 # The app and its data on that emulator are removed first and again at the end, and so
 # is the folder the test puts there. It refuses to run on a real phone (which has an
@@ -347,43 +348,49 @@ check x2.json "d['library_tracks'] == $SONGS - 1 and not d['scan_running'] and d
 ui 'restore removed' 'wait 3000' 'dump x3.json'
 check x3.json "d['library_tracks'] == $SONGS and d['removed_songs'] == 0" "\"Bring Back Removed Songs\" takes it in again"
 
-echo "== the graphics device is lost"
-# A driver can take away the device the screen is drawn with at any time (on a phone
-# one did, 2026-11-15), and the app then ended at the next frame. The step takes the
-# device away as a driver does. The app saves what it keeps, opens again in a new
-# process and plays on; that run has no verification channel (it was not started with
-# one), so it is asked about through the system and its log.
+# (Helpers of the sections that follow.)
 pid() { $ADB shell pidof $PKG 2>/dev/null | tr -d '\r'; }
 log_has() { $ADB shell "run-as $PKG grep -q '$1' files/logs/oneum.log" </dev/null; }
 panics() { $ADB shell "run-as $PKG grep -c 'panic:' files/logs/oneum.log" </dev/null | tr -d '\r'; }
 opened_again() { [ -n "$after" ] && [ "$after" != "$before" ]; }
 no_new_panic() { [ "$(panics)" = "$panics_before" ]; }
 app_gone() { [ -z "$(pid)" ]; }
-ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
-check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
-before=$(pid)
-panics_before=$(panics)
-ui 'fail device'
-i=0; after=$(pid)
-while { [ -z "$after" ] || [ "$after" = "$before" ]; } && [ $i -lt 75 ]; do
-  sleep 0.2; i=$((i + 1)); after=$(pid)
-done
-sleep 4
-holds "the app opened again in a new process" opened_again
-holds "its log says that it started anew, and that music was playing" log_has 'graphics: started anew after the device was lost playing=true'
-# While the settings leave the choice to the app, the new run draws through the other
-# interface than the one the device was lost on.
-other=gl; [ "${ONEUM_GRAPHICS:-}" != gl ] || other=vulkan
-holds "the new run draws through the other interface ($other)" log_has "graphics: this interface is tried first interface=.$other."
-holds "which has shown that it works" log_has 'graphics: the interface on trial works'
-holds "the music goes on: the system's media session says it is playing" session_is PLAYING
-holds "nothing ended in a panic" no_new_panic
-# The same again within a minute: what failed twice in a row is not tried a third time.
-start
-ui 'volume 0' 'wait 500' 'fail device'
-sleep 6
-holds "a second loss right after closes the app instead of opening it once more" app_gone
-holds "and the log says why" log_has 'graphics: lost again right after a new start'
+if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
+  # There is no wgpu device to lose under the framework's OpenGL renderer.
+  echo "== the graphics device is lost: left out (no wgpu device under glow)"
+else
+  echo "== the graphics device is lost"
+  # A driver can take away the device the screen is drawn with at any time (on a phone
+  # one did, 2026-11-15), and the app then ended at the next frame. The step takes the
+  # device away as a driver does. The app saves what it keeps, opens again in a new
+  # process and plays on; that run has no verification channel (it was not started with
+  # one), so it is asked about through the system and its log.
+  ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
+  check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
+  before=$(pid)
+  panics_before=$(panics)
+  ui 'fail device'
+  i=0; after=$(pid)
+  while { [ -z "$after" ] || [ "$after" = "$before" ]; } && [ $i -lt 75 ]; do
+    sleep 0.2; i=$((i + 1)); after=$(pid)
+  done
+  sleep 4
+  holds "the app opened again in a new process" opened_again
+  holds "its log says that it started anew, and that music was playing" log_has 'graphics: started anew after the device was lost playing=true'
+  # While the settings leave the choice to the app, the new run draws through the other
+  # interface than the one the device was lost on.
+  other=gl; [ "${ONEUM_GRAPHICS:-}" != gl ] || other=vulkan
+  holds "the new run draws through the other interface ($other)" log_has "graphics: this interface is tried first interface=.$other."
+  holds "which has shown that it works" log_has 'graphics: the interface on trial works'
+  holds "the music goes on: the system's media session says it is playing" session_is PLAYING
+  holds "nothing ended in a panic" no_new_panic
+  # The same again within a minute: what failed twice in a row is not tried a third time.
+  start
+  ui 'volume 0' 'wait 500' 'fail device'
+  sleep 6
+  holds "a second loss right after closes the app instead of opening it once more" app_gone
+  holds "and the log says why" log_has 'graphics: lost again right after a new start'
+fi
 
 echo "== a crash of the native side"
 # What the system kept of it (the signal, where the thread was) is written beside the

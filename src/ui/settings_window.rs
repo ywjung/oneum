@@ -1348,6 +1348,7 @@ impl OneumApp {
                                 (GraphicsChoice::Auto, s.graphics_auto),
                                 (GraphicsChoice::Vulkan, "Vulkan"),
                                 (GraphicsChoice::OpenGl, "OpenGL ES"),
+                                (GraphicsChoice::Glow, "glow"),
                             ],
                         );
                     },

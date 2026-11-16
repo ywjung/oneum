@@ -26,10 +26,17 @@ fn android_main(app: AndroidApp) {
     };
     let core = startup.core.clone();
     let _ = CORE.set(core.clone());
+    let prefer = graphics_preference(&startup);
     let options = eframe::NativeOptions {
         android_app: Some(app),
+        // The framework's OpenGL renderer where that was chosen, else wgpu.
+        renderer: if prefer == crate::ui::renderer::Prefer::Glow {
+            eframe::Renderer::Glow
+        } else {
+            eframe::Renderer::Wgpu
+        },
         // Every graphics adapter that can show the window is tried, not only the first.
-        wgpu_options: crate::ui::renderer::wgpu_options(graphics_preference(&startup)),
+        wgpu_options: crate::ui::renderer::wgpu_options(prefer),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -66,6 +73,7 @@ fn graphics_preference(startup: &crate::app::Startup) -> crate::ui::renderer::Pr
         match std::env::var("ONEUM_GRAPHICS").as_deref() {
             Ok("gl") => return Prefer::OpenGl,
             Ok("vulkan") => return Prefer::Vulkan,
+            Ok("glow") => return Prefer::Glow,
             _ => {}
         }
     }
@@ -74,6 +82,7 @@ fn graphics_preference(startup: &crate::app::Startup) -> crate::ui::renderer::Pr
         Prefer::System => return prefer,
         Prefer::Vulkan => "vulkan",
         Prefer::OpenGl => "gl",
+        Prefer::Glow => "glow",
     };
     if relaunch::begin_trial(dir, word) {
         tracing::info!(interface = word, "graphics: this interface is tried first");

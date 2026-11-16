@@ -573,6 +573,10 @@ impl OneumApp {
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             renderer::watch(state);
         }
+        #[cfg(target_os = "android")]
+        if let Some(gl) = cc.gl.as_ref() {
+            renderer::note_glow(gl);
+        }
         // A phone that ran out of memory left nothing that said what had grown.
         if cfg!(target_os = "android") {
             memory::watch();
@@ -3150,6 +3154,14 @@ impl eframe::App for OneumApp {
         self.perf.frames += 1;
     }
 
+    // (The framework hands its OpenGL context along where that renderer is built
+    // in, which is on Android.)
+    #[cfg(target_os = "android")]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown();
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn on_exit(&mut self) {
         self.shutdown();
     }

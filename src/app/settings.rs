@@ -24,6 +24,10 @@ pub enum GraphicsChoice {
     Auto,
     Vulkan,
     OpenGl,
+    /// OpenGL ES called directly by the UI framework's other renderer ("glow"), with
+    /// no wgpu between (Android; a trial for a phone whose Vulkan driver runs out of
+    /// memory). Elsewhere it is "automatic".
+    Glow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
