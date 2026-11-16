@@ -88,6 +88,39 @@ pub fn forget_lost_interface(data_dir: &Path) {
     }
 }
 
+/// What a run that cannot draw any more does next ([`note_loss`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Loss {
+    /// The first in a while: a new start may follow.
+    StartAnew,
+    /// A new start a moment ago ended the same way: no other follows.
+    Again,
+    /// The note could not be written: a new start would not know what it follows.
+    Unwritten,
+}
+
+/// A run ends because it cannot draw any more: the note for the run that follows is
+/// written (`lost_on`: the interface it happened on, where there is another one to go
+/// to), and the answer says whether a new start may follow.
+pub fn note_loss(data_dir: &Path, playing: bool, lost_on: Option<&'static str>, now: u64) -> Loss {
+    // A new start a moment ago that ends the same way is not followed by another.
+    let again = read(data_dir).is_some_and(|note| note.recent(now));
+    // The interface is written down either way: while the settings leave the choice
+    // to the app, the next start tries the other one.
+    let note = Note {
+        at: now,
+        playing,
+        taken: again,
+        lost_on,
+    };
+    let written = write(data_dir, note).is_ok();
+    match (again, written) {
+        (true, _) => Loss::Again,
+        (false, true) => Loss::StartAnew,
+        (false, false) => Loss::Unwritten,
+    }
+}
+
 /// Seconds since 1970.
 pub fn now() -> u64 {
     SystemTime::now()
@@ -238,6 +271,44 @@ mod tests {
         );
         // A word that names no interface is no interface.
         assert_eq!(parse("5 0 0 metal").unwrap().lost_on, None);
+    }
+
+    #[test]
+    fn a_loss_is_followed_by_one_new_start_and_not_by_a_second_within_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            note_loss(dir.path(), true, Some("vulkan"), 1000),
+            Loss::StartAnew
+        );
+        assert_eq!(
+            read(dir.path()),
+            Some(Note {
+                at: 1000,
+                playing: true,
+                taken: false,
+                lost_on: Some("vulkan"),
+            })
+        );
+        // The run that followed lost its device too, a moment later: no third start,
+        // and the note is not one a later run would take for news.
+        assert_eq!(note_loss(dir.path(), false, None, 1030), Loss::Again);
+        assert_eq!(
+            read(dir.path()),
+            Some(Note {
+                at: 1030,
+                playing: false,
+                taken: true,
+                lost_on: None,
+            })
+        );
+        // Long after, a loss is the first again.
+        assert_eq!(
+            note_loss(dir.path(), true, Some("gl"), 1030 + NOT_AGAIN_WITHIN_SECS),
+            Loss::StartAnew
+        );
+        // Where the note cannot be written, the run that followed would know nothing.
+        let nowhere = dir.path().join("no-such-folder");
+        assert_eq!(note_loss(&nowhere, true, None, 5000), Loss::Unwritten);
     }
 
     #[test]

@@ -373,9 +373,22 @@ echo "== the graphics device is lost"
 # the system and its log.
 ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
 check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
+check g1.json 'd["graphics_errors"] == 0' "what the screen is drawn with has told of no error in all of this run"
+lose=device
+if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
+  # That no error was told means something only if the driver is really asked: OpenGL
+  # is given a call that it refuses, and the refusal is to stand in the log.
+  ui 'fail gl' 'wait 1000' 'dump g2.json'
+  holds "OpenGL is asked what it refused: a call it refuses stands in the log" log_has 'graphics: OpenGL: invalid enum (0x0500)'
+  check g2.json 'd["graphics_errors"] == 1' "and is counted, once"
+  # A driver that gives up under that renderer does so when a frame is to be shown:
+  # the surface is taken away, the framework cannot show the frame and stops, and the
+  # app is to open again all the same.
+  lose=surface
+fi
 before=$(pid)
 panics_before=$(panics)
-ui 'fail device'
+ui "fail $lose"
 i=0; after=$(pid)
 while { [ -z "$after" ] || [ "$after" = "$before" ]; } && [ $i -lt 75 ]; do
   sleep 0.2; i=$((i + 1)); after=$(pid)
@@ -403,6 +416,10 @@ ui 'volume 0' 'wait 500' 'fail device'
 sleep 6
 holds "a second loss right after closes the app instead of opening it once more" app_gone
 holds "and the log says why" log_has 'graphics: lost again right after a new start'
+if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
+  holds "the surface was taken away for the first loss" log_has 'graphics: the surface was taken away by a verification run destroyed=true'
+  holds "which ended the framework's event loop: the frame could not be shown" log_has 'event loop failed'
+fi
 
 echo "== a crash of the native side"
 # What the system kept of it (the signal, where the thread was) is written beside the
@@ -416,5 +433,28 @@ start
 holds "the crash is in the list of how earlier runs ended" exits_have 'crash (native)'
 holds "with the signal" exits_have "^$(printf '\t')SIGSEGV"
 holds "and where the thread was" exits_have "^$(printf '\t')#00 "
+
+echo "== glow chosen in the settings"
+# The way a user reaches the UI framework's OpenGL renderer: the settings name it (what
+# the fourth choice of Settings → About writes), and the start that follows draws with
+# it on trial. (ONEUM_GRAPHICS, which the rest of a run may go by, passes the settings
+# and the trial by: this start is made without it.)
+$ADB shell am force-stop $PKG
+$ADB exec-out run-as $PKG cat files/data/settings.json > "$OUT/settings.json" </dev/null
+python3 - "$OUT/settings.json" <<'PY'
+import json, sys
+settings = json.load(open(sys.argv[1]))
+settings["graphics"] = "Glow"
+json.dump(settings, open(sys.argv[1], "w"))
+PY
+$ADB shell "run-as $PKG sh -c 'cat > files/data/settings.json'" < "$OUT/settings.json"
+no_trial_left() { ! $ADB shell "run-as $PKG test -f files/data/graphics-trying.txt" </dev/null; }
+GRAPHICS=
+start
+ui 'volume 0' 'wait 500' 'dump s1.json'
+check s1.json 'd["adapter"].endswith("; glow)")' "the app draws with the renderer the settings name"
+holds "which was tried first, as a choice of the settings is" log_has 'graphics: this interface is tried first interface=.glow.'
+holds "and has shown that it works: its trial is over" no_trial_left
+check s1.json 'd["library_tracks"] > 0 and d["graphics_errors"] == 0' "the library is there, and nothing is told of an error"
 
 echo "SMOKE TEST PASSED (Android emulator)"

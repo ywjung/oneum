@@ -328,6 +328,34 @@ impl Default for Settings {
 mod tests {
     use super::*;
 
+    /// The settings file names the way of drawing by these words: a build that wrote
+    /// one must read it again as the same choice (a word it does not know costs the
+    /// whole file its place, see `storage::settings`).
+    #[test]
+    fn the_way_of_drawing_is_kept_under_its_word() {
+        for (choice, word) in [
+            (GraphicsChoice::Auto, "Auto"),
+            (GraphicsChoice::Vulkan, "Vulkan"),
+            (GraphicsChoice::OpenGl, "OpenGl"),
+            (GraphicsChoice::Glow, "Glow"),
+        ] {
+            let settings = Settings {
+                graphics: choice,
+                ..Settings::default()
+            };
+            let json = serde_json::to_value(&settings).expect("serializes");
+            assert_eq!(json["graphics"], word);
+            let text = format!(r#"{{"graphics":"{word}"}}"#);
+            let read: Settings = serde_json::from_str(&text).expect("parses");
+            assert_eq!(read.graphics, choice);
+        }
+        // What the renderer makes of the choice that is on trial.
+        assert_eq!(
+            crate::ui::renderer::Prefer::from_choice(GraphicsChoice::Glow, None),
+            crate::ui::renderer::Prefer::Glow
+        );
+    }
+
     #[test]
     fn unknown_and_missing_fields_fall_back_to_defaults() {
         let s: Settings =

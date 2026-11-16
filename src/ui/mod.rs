@@ -669,10 +669,7 @@ impl OneumApp {
     /// a new process, where the music goes on; elsewhere a message says what happened.
     /// Does not return.
     fn graphics_lost(&mut self) -> ! {
-        let playing = matches!(
-            self.player.state,
-            PlayState::Playing | PlayState::Loading | PlayState::Seeking
-        );
+        let playing = sounding(self.player.state);
         tracing::error!(
             playing,
             "graphics: nothing can be drawn any more; ending this run"
@@ -681,25 +678,7 @@ impl OneumApp {
         tracing::error!("memory: {}", memory::read());
         #[cfg(target_os = "android")]
         {
-            let dir = self.core.paths.data_dir.clone();
-            let now = app::relaunch::now();
-            // A new start a moment ago that ends the same way is not followed by another.
-            let again = app::relaunch::read(&dir).is_some_and(|note| note.recent(now));
-            // The interface it happened on is written down either way: while the
-            // settings leave the choice to the app, the next start tries the other one.
-            let note = app::relaunch::Note {
-                at: now,
-                playing,
-                taken: again,
-                lost_on: renderer::backend_word(),
-            };
-            let written = app::relaunch::write(&dir, note).is_ok();
-            if again {
-                tracing::error!("graphics: lost again right after a new start; not starting anew");
-                crate::platform::android::notice(self.s().graphics_lost_again);
-            } else if !written || !crate::platform::android::open_again_after_exit() {
-                crate::platform::android::notice(self.s().graphics_lost_body);
-            }
+            start_anew_after_loss(&self.core.paths.data_dir, playing, self.s());
             self.shutdown();
             std::process::exit(0);
         }
@@ -837,6 +816,11 @@ impl OneumApp {
         }
         let previous_track = self.player.current.map(|c| c.item_id);
         self.player = self.core.player.snapshot();
+        #[cfg(target_os = "android")]
+        WAS_PLAYING.store(
+            sounding(self.player.state),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if self.player.current.map(|c| c.item_id) != previous_track {
             self.queue_scroll_to_current = true;
         }
@@ -2451,6 +2435,8 @@ impl OneumApp {
                     self.copy_text(ctx, report);
                 }
                 automation::AppStep::LoseDevice { told } => renderer::lose_device(told),
+                automation::AppStep::GlMistake => renderer::ask_for_gl_mistake(),
+                automation::AppStep::LoseSurface => renderer::lose_surface(),
                 automation::AppStep::Activate => window::show_main_window(),
                 automation::AppStep::Front => window::order_front_without_activating(),
                 automation::AppStep::Back => window::send_back(),
@@ -2527,6 +2513,7 @@ impl OneumApp {
         state["removed_songs"] = serde_json::json!(self.core.library.removed_count());
         state["memory"] = serde_json::json!(memory::read().to_string());
         state["adapter"] = serde_json::json!(renderer::adapter());
+        state["graphics_errors"] = serde_json::json!(renderer::errors());
         state["current_path"] = serde_json::json!(
             p.current
                 .and_then(|c| self.track(c.track_id))
@@ -2744,6 +2731,63 @@ impl OneumApp {
         self.core.shutdown();
         tracing::info!("OnEum stopped");
     }
+}
+
+/// Whether music is on its way out (playing, or about to: loading, seeking).
+fn sounding(state: PlayState) -> bool {
+    matches!(
+        state,
+        PlayState::Playing | PlayState::Loading | PlayState::Seeking
+    )
+}
+
+/// Whether the music was playing when the app last looked (`OneumApp::sync`): for an
+/// end of drawing that the app itself does not get to see ([`lost_after_drawing`]).
+#[cfg(target_os = "android")]
+static WAS_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A run that cannot draw any more (Android): the note for the run that follows is
+/// written and the app is asked to be opened again in a new process, where the music
+/// goes on. Where that is not to be (it happened twice in a row) or cannot be, a line
+/// of the system says what happened. The caller saves what the app keeps and ends the
+/// process.
+#[cfg(target_os = "android")]
+fn start_anew_after_loss(data_dir: &Path, playing: bool, s: &Strings) {
+    use app::relaunch::Loss;
+    let loss = app::relaunch::note_loss(
+        data_dir,
+        playing,
+        renderer::backend_word(),
+        app::relaunch::now(),
+    );
+    match loss {
+        Loss::Again => {
+            tracing::error!("graphics: lost again right after a new start; not starting anew");
+            crate::platform::android::notice(s.graphics_lost_again);
+        }
+        Loss::StartAnew if crate::platform::android::open_again_after_exit() => {}
+        Loss::StartAnew | Loss::Unwritten => {
+            crate::platform::android::notice(s.graphics_lost_body);
+        }
+    }
+}
+
+/// The event loop ended on an error (Android). Under the UI framework's OpenGL
+/// renderer that is how a run ends whose driver gives up while a frame is shown: no
+/// error of OpenGL tells of it beforehand ([`renderer::note_gl_errors`]), the frame
+/// cannot be shown and the framework stops. Once the window had been drawn, that is a
+/// lost device like any other: what `OneumApp::graphics_lost` does is done here, for
+/// an app that is gone already (it saved what it keeps when it was dropped). False
+/// where nothing was ever drawn, a start that failed, which is for the caller to say.
+#[cfg(target_os = "android")]
+pub fn lost_after_drawing(data_dir: &Path, lang: Lang, error: &dyn std::fmt::Display) -> bool {
+    if memory::frames() == 0 {
+        return false;
+    }
+    let playing = WAS_PLAYING.load(std::sync::atomic::Ordering::Relaxed);
+    tracing::error!(playing, "graphics: the device is lost: {error}");
+    start_anew_after_loss(data_dir, playing, lang.strings());
+    true
 }
 
 /// Of the system's list of how earlier runs ended (newest first, as `MainActivity`

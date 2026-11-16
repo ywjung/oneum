@@ -1325,8 +1325,9 @@ impl OneumApp {
             }
         }
 
-        // Android has two interfaces to its graphics hardware, and drivers that fail
-        // on one of them: which one is used can be seen and chosen here, and what the
+        // Android has two interfaces to its graphics hardware (and the UI framework a
+        // second renderer for one of them), and drivers that fail on one of them: what
+        // the screen is drawn through can be seen and chosen here, and what the
         // app holds of memory is shown (a phone ran out of it, and nothing told why).
         if cfg!(target_os = "android") {
             use crate::app::settings::GraphicsChoice;

@@ -318,6 +318,39 @@ impl Rig {
         }
     }
 
+    /// How many frames the output has taken once it has come to rest after the player
+    /// stopped it. What was under way at that moment is still taken, however late the
+    /// pump thread gets to it on a busy machine: the block that was being rendered (512
+    /// frames) and the fade-out that follows it (a few milliseconds). A first reading
+    /// taken right away may have neither, and what follows it then looks like sound
+    /// that plays on (seen once, 2026-11-17, with every core busy). More than a block
+    /// and a fade-out would be just that, and fails here.
+    fn frames_at_rest(&self) -> usize {
+        const UNDER_WAY: usize = 512 + 600;
+        let first = self.total_frames();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut frames, mut still) = (first, 0);
+        while still < 3 {
+            std::thread::sleep(Duration::from_millis(10));
+            let now = self.total_frames();
+            if now == frames {
+                still += 1;
+            } else {
+                (frames, still) = (now, 0);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the output does not come to rest"
+            );
+        }
+        assert!(
+            frames <= first + UNDER_WAY,
+            "the output played on after it was stopped: {} frames",
+            frames - first
+        );
+        frames
+    }
+
     fn feeds(&self) -> usize {
         self.audio.lock().expect("lock").len()
     }
@@ -414,7 +447,7 @@ fn pause_resume_next_previous_and_seek() {
     rig.wait("playing", |s| s.state == PlayState::Playing);
     rig.send(Command::Pause);
     let paused = rig.wait("paused", |s| s.state == PlayState::Paused);
-    let frames = rig.total_frames();
+    let frames = rig.frames_at_rest();
     std::thread::sleep(Duration::from_millis(60));
     assert!(
         rig.total_frames() <= frames + 600,
@@ -1109,7 +1142,7 @@ fn losing_the_device_pauses_and_retry_continues_from_there() {
         "position kept: {}",
         lost.position_ms
     );
-    let frames = rig.total_frames();
+    let frames = rig.frames_at_rest();
     std::thread::sleep(Duration::from_millis(80));
     assert!(
         rig.total_frames() <= frames + 600,
@@ -1184,7 +1217,7 @@ fn sleep_pauses_keeps_the_position_and_never_resumes_on_its_own() {
     let asleep = rig.wait("paused for sleep", |s| s.state == PlayState::Paused);
     assert!(asleep.position_ms >= 500);
     assert!(!asleep.device_lost, "sleep is not an error");
-    let frames = rig.total_frames();
+    let frames = rig.frames_at_rest();
     std::thread::sleep(Duration::from_millis(120));
     assert!(rig.total_frames() <= frames + 600);
     assert_eq!(rig.player.snapshot().state, PlayState::Paused);
@@ -1329,7 +1362,7 @@ fn no_sound_is_made_while_something_else_has_the_sound() {
     rig.send(Command::Pause);
     let paused = rig.wait("paused", |s| s.state == PlayState::Paused);
     rig.host.silenced.store(true, Ordering::Relaxed);
-    let frames = rig.total_frames();
+    let frames = rig.frames_at_rest();
     rig.send(Command::Play);
     assert!(!end_interruption(&rig, true));
     assert_eq!(rig.player.snapshot().state, PlayState::Paused);

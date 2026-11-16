@@ -27,6 +27,7 @@ fn android_main(app: AndroidApp) {
     let core = startup.core.clone();
     let _ = CORE.set(core.clone());
     let prefer = graphics_preference(&startup);
+    let lang = startup.lang;
     let options = eframe::NativeOptions {
         android_app: Some(app),
         // The framework's OpenGL renderer where that was chosen, else wgpu.
@@ -46,10 +47,18 @@ fn android_main(app: AndroidApp) {
     );
     if let Err(error) = result {
         tracing::error!("event loop failed: {error}");
-        super::fatal_alert(
-            "OnEum",
-            &format!("{error}\n\n{}", crate::app::log_dir_hint()),
-        );
+        // Under the framework's OpenGL renderer this is how a run ends whose driver
+        // gives up while a frame is shown (a wgpu device says that it is lost instead,
+        // and the app acts on that before the frame). Once the window had been drawn
+        // that is a lost device: the app opens again, as it does for the other.
+        let lost = prefer == crate::ui::renderer::Prefer::Glow
+            && crate::ui::lost_after_drawing(&core.paths.data_dir, lang, &error);
+        if !lost {
+            super::fatal_alert(
+                "OnEum",
+                &format!("{error}\n\n{}", crate::app::log_dir_hint()),
+            );
+        }
     }
     core.shutdown();
     // The process must not outlive its one window: a later start in the same process
