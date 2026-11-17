@@ -37,9 +37,18 @@ final class Native {
     /** What was chosen in the picker asked for under {@code id}: paths, one a line. */
     static native void onPicked(int id, String paths);
 
+    /**
+     * Something was chosen in the picker asked for under {@code id} that the app
+     * cannot use (a folder it cannot read by a path, files it could not take in).
+     */
+    static native void onPickFailed(int id);
+
     /** Files another app asked to have opened: paths, one a line. */
     static native void onOpen(String paths);
 
-    /** The activity is gone for good. Does not return: the process ends. */
-    static native void onDestroy();
+    /**
+     * The activity is gone: for good (1), or to be made anew by the system at once
+     * (0). Does not return: the process ends.
+     */
+    static native void onDestroy(int finishing);
 }

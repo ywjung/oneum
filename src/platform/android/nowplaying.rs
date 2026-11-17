@@ -36,18 +36,59 @@ type Send = Box<dyn Fn(RemoteCommand) + std::marker::Send + Sync>;
 static SEND: OnceLock<Send> = OnceLock::new();
 
 /// The app's side of the media session. The session itself lives in Java.
-pub struct MediaSession;
+pub struct MediaSession {
+    /// What the session was told last, and when.
+    told: Option<(NowPlayingInfo, std::time::Instant)>,
+    /// The session has been told that nothing plays.
+    told_nothing: bool,
+}
 
 impl MediaSession {
     pub fn install(send: impl Fn(RemoteCommand) + std::marker::Send + Sync + 'static) -> Self {
         let _ = SEND.set(Box::new(send));
-        Self
+        Self {
+            told: None,
+            told_nothing: false,
+        }
     }
 
+    /// Tells the session what plays, when that is something else than it was told.
+    /// Every change of the player comes by here (the volume's slider, a setting of
+    /// the equalizer, an edit of the queue: dozens a second while a slider moves),
+    /// and each telling is the cover sent across to the system, the session's
+    /// state and a notification made and posted anew.
     pub fn update(&mut self, info: Option<&NowPlayingInfo>) {
         match info {
-            Some(info) => super::java::update_playback(info),
-            None => super::java::stop_playback(),
+            Some(info) => {
+                let same = self.told.as_ref().is_some_and(|(told, at)| {
+                    told.title == info.title
+                        && told.artist == info.artist
+                        && told.album == info.album
+                        && told.art_path == info.art_path
+                        && told.playing == info.playing
+                        && told.rate == info.rate
+                        && (told.duration_s - info.duration_s).abs() < 0.5
+                        && crate::platform::position_as_told(
+                            told.position_s,
+                            told.playing,
+                            told.rate,
+                            at.elapsed().as_secs_f64(),
+                            info.position_s,
+                        )
+                });
+                if same {
+                    return;
+                }
+                self.told = Some((info.clone(), std::time::Instant::now()));
+                self.told_nothing = false;
+                super::java::update_playback(info);
+            }
+            None => {
+                if self.told.take().is_some() || !self.told_nothing {
+                    self.told_nothing = true;
+                    super::java::stop_playback();
+                }
+            }
         }
     }
 }

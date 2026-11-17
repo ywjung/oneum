@@ -20,11 +20,12 @@
         android:theme="@style/AppTheme">
 
         <!-- The one screen: a native activity that loads the app (liboneum.so). What
-             changes on the way (rotation, the theme, a keyboard) is handled by the app,
-             so the activity is not made anew for it. -->
+             changes on the way (rotation, the theme, a keyboard, bold text, a SIM) is
+             handled by the app, so the activity is not made anew for it: made anew, it
+             ends the process, and the music with it. -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection|fontWeightAdjustment|colorMode|mcc|mnc|touchscreen|grammaticalGender"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize|stateAlwaysHidden">

@@ -162,12 +162,27 @@ pub extern "system" fn Java_app_oneum_android_Native_onOpen<'caller>(
     app_hooks::receive(paths(&files));
 }
 
-/// The activity is going for good (swiped away): what is kept is saved and the process
-/// ends, so that the next start is a fresh one.
+/// Something was chosen in the picker asked for under `id` that cannot be used (a
+/// folder that cannot be read by a path, files that could not be taken in): whoever
+/// asked is told, with nothing (a picker that was put away tells nobody).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_oneum_android_Native_onPickFailed<'caller>(
+    _env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    id: jint,
+) {
+    super::files::pick_failed(id);
+    app_hooks::wake();
+}
+
+/// The activity is going: for good (swiped away; `finishing` 1), or to be made anew
+/// by the system at once (0). What is kept is saved and the process ends, so that
+/// the next start is a fresh one.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_oneum_android_Native_onDestroy<'caller>(
     _env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    finishing: jint,
 ) {
-    super::entry::end();
+    super::entry::end(finishing != 0);
 }

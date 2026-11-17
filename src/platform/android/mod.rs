@@ -170,6 +170,11 @@ pub mod responder {
         super::text_input::set_active(active);
     }
 
+    /// What is typed into the field that has the keyboard is a password.
+    pub fn set_text_input_secret(secret: bool) {
+        super::text_input::set_secret(secret);
+    }
+
     pub fn pasteboard_text() -> Option<String> {
         None
     }

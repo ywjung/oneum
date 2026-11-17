@@ -117,7 +117,17 @@ public final class MainActivity extends NativeActivity {
             return insets;
         });
         tellTheme(getResources().getConfiguration());
-        open(getIntent());
+        // A file the app was opened with is opened once. An activity that is made
+        // again for a task of old (the system had ended the process and the app is
+        // chosen from the recent ones, or by its icon) is handed the intent it was
+        // first made with: that file must not play again, in the place of what the
+        // listener left.
+        Intent first = getIntent();
+        boolean old = savedInstanceState != null || (first != null
+                && (first.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0);
+        if (!old) {
+            open(first);
+        }
     }
 
     /**
@@ -323,7 +333,10 @@ public final class MainActivity extends NativeActivity {
         up = false;
         NowPlayingWidget.appGone(this);
         PlaybackService.end();
-        Native.onDestroy();
+        // (Not finishing: the system makes the screen anew for a change it does not
+        // leave to the app, and opens the app again at once. The music that was
+        // playing goes on then.)
+        Native.onDestroy(isFinishing() ? 1 : 0);
         super.onDestroy();
     }
 
@@ -451,6 +464,11 @@ public final class MainActivity extends NativeActivity {
                 manager.hideSoftInputFromWindow(input.getWindowToken(), 0);
             }
         });
+    }
+
+    /** The field that is typed into holds a password, or no longer does. */
+    public void secretKeyboard(boolean secret) {
+        runOnUiThread(() -> input.setSecret(secret));
     }
 
     /** The input method starts from nothing (the field was changed by a touch). */
@@ -639,13 +657,25 @@ public final class MainActivity extends NativeActivity {
         } else if (kind == 0) {
             String folder = folderPath(chosen.get(0));
             boolean told = folder != null && folder.indexOf('\n') < 0 && folder.indexOf('\r') < 0;
-            Native.onPicked(id, told ? folder : "");
+            if (told) {
+                Native.onPicked(id, folder);
+            } else {
+                // Chosen, and of no use (a folder of another app's, of a cloud): the
+                // listener is told, which a picker that was put away is not.
+                Native.onPickFailed(id);
+            }
         } else {
             // Music that was chosen is kept; a file that is read once (a playlist, a
             // correction file) is not.
             boolean keep = kind == 1;
-            new Thread(() -> Native.onPicked(id, pathsOf(chosen, keep)), "oneum-import")
-                    .start();
+            new Thread(() -> {
+                String paths = pathsOf(chosen, keep);
+                if (paths.isEmpty()) {
+                    Native.onPickFailed(id);
+                } else {
+                    Native.onPicked(id, paths);
+                }
+            }, "oneum-import").start();
         }
     }
 
@@ -715,6 +745,11 @@ public final class MainActivity extends NativeActivity {
         try {
             String path = null;
             String authority = uri.getAuthority();
+            // (An address may name the user it is for in front of the provider:
+            // "0@media".)
+            if (authority != null && authority.indexOf('@') >= 0) {
+                authority = authority.substring(authority.lastIndexOf('@') + 1);
+            }
             if (DocumentsContract.isDocumentUri(this, uri)) {
                 String id = DocumentsContract.getDocumentId(uri);
                 int colon = id.indexOf(':');
@@ -745,7 +780,32 @@ public final class MainActivity extends NativeActivity {
         } catch (RuntimeException error) {
             Log.w(TAG, "no path for a chosen file", error);
         }
-        return null;
+        return pathBehind(uri);
+    }
+
+    /**
+     * The file an address leads to that tells nothing by its form (a file manager's
+     * own address for a song in the Music folder): what the opened file turns out to
+     * be, where that is a file of shared storage the app can read. Read through its
+     * address instead, such a song would be copied into the app, and be in the
+     * library a second time. Null for everything else, which is then copied as before.
+     */
+    private String pathBehind(Uri uri) {
+        if (!"content".equals(uri.getScheme())) {
+            return null;
+        }
+        try (android.os.ParcelFileDescriptor file =
+                getContentResolver().openFileDescriptor(uri, "r")) {
+            if (file == null) {
+                return null;
+            }
+            String path = android.system.Os.readlink("/proc/self/fd/" + file.getFd());
+            boolean shared = path.startsWith("/storage/") && path.indexOf('\n') < 0
+                    && path.indexOf('\r') < 0;
+            return shared && new File(path).canRead() ? path : null;
+        } catch (java.io.IOException | android.system.ErrnoException | RuntimeException error) {
+            return null;
+        }
     }
 
     /** Where the media store says a file is. */

@@ -121,6 +121,36 @@ pub fn note_loss(data_dir: &Path, playing: bool, lost_on: Option<&'static str>, 
     }
 }
 
+/// Present for a moment when a run ended because the system made the app's screen
+/// anew while music played (see [`note_remade`]): the time it ended at.
+const REMADE_FILE: &str = "remade.txt";
+
+/// A run ends because the system makes the app's screen anew (Android, for a change
+/// it does not leave to the app), which this app answers by ending its process. The
+/// system opens the app again at once: music that was `playing` goes on there
+/// ([`take_remade`]). Nothing went wrong, and nothing is said about it.
+pub fn note_remade(data_dir: &Path, playing: bool, now: u64) {
+    let file = data_dir.join(REMADE_FILE);
+    if playing {
+        let _ = std::fs::write(file, now.to_string());
+    } else {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+/// Whether the run before this one ended as [`note_remade`] says, with music playing,
+/// a moment before `now`. Asked once: the note is gone afterwards.
+pub fn take_remade(data_dir: &Path, now: u64) -> bool {
+    let file = data_dir.join(REMADE_FILE);
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&file);
+    text.trim()
+        .parse::<u64>()
+        .is_ok_and(|at| now.saturating_sub(at) < NOT_AGAIN_WITHIN_SECS)
+}
+
 /// Seconds since 1970.
 pub fn now() -> u64 {
     SystemTime::now()
@@ -324,5 +354,23 @@ mod tests {
         assert!(!note.recent(1000 + NOT_AGAIN_WITHIN_SECS));
         // A clock that was set back: the note is taken for recent, not for ancient.
         assert!(note.recent(990));
+    }
+    /// The note of a screen made anew is taken once, by a run that follows at once,
+    /// and only where music was playing.
+    #[test]
+    fn music_goes_on_after_the_screen_was_made_anew() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!take_remade(dir.path(), 1_000));
+        note_remade(dir.path(), true, 1_000);
+        assert!(take_remade(dir.path(), 1_003));
+        assert!(!take_remade(dir.path(), 1_004), "taken once");
+        // Nothing was playing: nothing to go on with (and an older note is gone).
+        note_remade(dir.path(), true, 2_000);
+        note_remade(dir.path(), false, 2_001);
+        assert!(!take_remade(dir.path(), 2_002));
+        // A run that follows much later is another matter.
+        note_remade(dir.path(), true, 3_000);
+        assert!(!take_remade(dir.path(), 3_000 + NOT_AGAIN_WITHIN_SECS));
+        assert!(!take_remade(dir.path(), 3_001), "and the note is gone");
     }
 }

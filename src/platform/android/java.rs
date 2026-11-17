@@ -183,6 +183,11 @@ pub(super) fn show_keyboard(show: bool) {
     tell(jni_str!("showKeyboard"), "showKeyboard", show);
 }
 
+/// Tells the input method that what is typed now is a password (or no longer is).
+pub(super) fn secret_keyboard(secret: bool) {
+    tell(jni_str!("secretKeyboard"), "secretKeyboard", secret);
+}
+
 /// Has the input method forget what it holds and what it was composing.
 pub(super) fn reset_keyboard() {
     ask(jni_str!("resetKeyboard"), "resetKeyboard");

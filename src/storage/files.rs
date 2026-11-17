@@ -1,7 +1,7 @@
 //! Reading small files that are not trusted to be what their name says.
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Reads `path` whole if it is a regular file of at most `max` bytes. `Ok(None)` when it
 /// is there but not that (larger, or a folder, pipe or device: opening a pipe would wait
@@ -19,9 +19,167 @@ pub fn read_bounded(path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
     Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
+/// Whether two files hold the same bytes (compared by their lengths first).
+pub fn same_content(a: &Path, b: &Path) -> io::Result<bool> {
+    let (len_a, len_b) = (std::fs::metadata(a)?.len(), std::fs::metadata(b)?.len());
+    if len_a != len_b {
+        return Ok(false);
+    }
+    let (mut a, mut b) = (File::open(a)?, File::open(b)?);
+    let (mut piece_a, mut piece_b) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let read = a.read(&mut piece_a)?;
+        if read == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut piece_b[..read])?;
+        if piece_a[..read] != piece_b[..read] {
+            return Ok(false);
+        }
+    }
+}
+
+/// Brings `from` (a file, or a folder with all that is in it; links are not followed)
+/// into the folder `into` under its own name, and says where it is then.
+///
+/// What is there already is not there twice afterwards. A file of that name with the
+/// same bytes is the file: nothing is copied. A folder of that name takes in what it
+/// does not have yet, file by file by the same rule. Only a file that is another one
+/// under the same name gets a name of its own beside it ("song 2.flac"). So bringing
+/// the same thing in again (the same song opened twice from another app, a folder
+/// chosen again after three songs were put into it) adds what is new and no more.
+///
+/// A file inside a folder that cannot be brought in is left out; the rest still comes.
+pub fn take_in(from: &Path, into: &Path) -> io::Result<PathBuf> {
+    let name = from
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "nothing to name it by"))?;
+    std::fs::create_dir_all(into)?;
+    let kind = std::fs::symlink_metadata(from)?.file_type();
+    let named = into.join(name);
+    if kind.is_dir() {
+        let to = if named.exists() && !named.is_dir() {
+            free_name(into, name, None)?
+        } else {
+            named
+        };
+        std::fs::create_dir_all(&to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            if let Err(error) = take_in(&entry.path(), &to) {
+                tracing::warn!("left out {}: {error}", entry.path().display());
+            }
+        }
+        Ok(to)
+    } else if kind.is_file() {
+        let to = free_name(into, name, Some(from))?;
+        if !to.exists() {
+            std::fs::copy(from, &to)?;
+        }
+        Ok(to)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "neither a file nor a folder",
+        ))
+    }
+}
+
+/// A path in `folder` for something named `name`: the name itself, or "name 2",
+/// "name 3" … (before the extension). With `same_as`, the first of them that is a
+/// file with the bytes of that one is the answer, though it is there; otherwise the
+/// first that nothing has.
+pub fn free_name(
+    folder: &Path,
+    name: &std::ffi::OsStr,
+    same_as: Option<&Path>,
+) -> io::Result<PathBuf> {
+    let as_path = Path::new(name);
+    let stem = as_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = as_path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned());
+    let numbered = (2..10_000).map(|n| match &extension {
+        Some(extension) => folder.join(format!("{stem} {n}.{extension}")),
+        None => folder.join(format!("{stem} {n}")),
+    });
+    for candidate in std::iter::once(folder.join(name)).chain(numbered) {
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+        if let Some(same_as) = same_as
+            && candidate.is_file()
+            && same_content(same_as, &candidate).unwrap_or(false)
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no name is free for it",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Brought in again, what is there already stays as it is: the same file is the
+    /// same file, a folder takes in only what is new, and only another file of the
+    /// same name gets a name of its own.
+    #[test]
+    fn what_is_brought_in_again_is_not_there_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let (outside, inside) = (dir.path().join("outside"), dir.path().join("inside"));
+        let album = outside.join("Album");
+        std::fs::create_dir_all(album.join("Disc 2")).unwrap();
+        std::fs::write(album.join("one.flac"), b"one").unwrap();
+        std::fs::write(album.join("Disc 2/two.flac"), b"two").unwrap();
+        std::fs::write(outside.join("single.flac"), b"single").unwrap();
+        let listed = |folder: &Path| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(folder)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        // A file, twice: one file.
+        let first = take_in(&outside.join("single.flac"), &inside).unwrap();
+        assert_eq!(first, inside.join("single.flac"));
+        assert_eq!(
+            take_in(&outside.join("single.flac"), &inside).unwrap(),
+            first
+        );
+        // Another file under the same name: beside it; and that one again: itself.
+        std::fs::write(outside.join("single.flac"), b"another take").unwrap();
+        let second = take_in(&outside.join("single.flac"), &inside).unwrap();
+        assert_eq!(second, inside.join("single 2.flac"));
+        assert_eq!(
+            take_in(&outside.join("single.flac"), &inside).unwrap(),
+            second
+        );
+        assert_eq!(std::fs::read(&first).unwrap(), b"single");
+
+        // A folder, then again with a song more in it: the one folder, with the song.
+        let folder = take_in(&album, &inside).unwrap();
+        assert_eq!(folder, inside.join("Album"));
+        std::fs::write(album.join("three.flac"), b"three").unwrap();
+        assert_eq!(take_in(&album, &inside).unwrap(), folder);
+        assert_eq!(listed(&folder), ["Disc 2", "one.flac", "three.flac"]);
+        assert_eq!(listed(&folder.join("Disc 2")), ["two.flac"]);
+        assert_eq!(
+            listed(&inside),
+            ["Album", "single 2.flac", "single.flac"],
+            "no \"Album 2\""
+        );
+        assert!(same_content(&album.join("one.flac"), &folder.join("one.flac")).unwrap());
+        assert!(!same_content(&first, &second).unwrap());
+    }
 
     #[test]
     fn only_a_regular_file_within_the_limit_is_read() {

@@ -66,6 +66,9 @@ pub fn set_text_input_active(active: bool) {
     TEXT_INPUT_ACTIVE.store(active, Ordering::Relaxed);
 }
 
+/// (For a phone's on-screen keyboard, which is told when a password is typed.)
+pub fn set_text_input_secret(_secret: bool) {}
+
 const KEY_LEFT: u16 = 123;
 const KEY_UP: u16 = 126;
 

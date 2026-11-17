@@ -126,6 +126,9 @@ pub mod responder {
 
     pub fn set_text_input_active(_active: bool) {}
 
+    /// (The system's own field is told that it holds a password where there is one.)
+    pub fn set_text_input_secret(_secret: bool) {}
+
     pub fn pasteboard_text() -> Option<String> {
         None
     }

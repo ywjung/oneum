@@ -329,7 +329,17 @@ public final class PlaybackService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
-        if (ACTION_PREVIOUS.equals(action)) {
+        boolean asked = ACTION_PREVIOUS.equals(action) || ACTION_TOGGLE.equals(action)
+                || ACTION_NEXT.equals(action);
+        if (asked && !MainActivity.up) {
+            // A button of a notification that outlived the app: there is no player to
+            // tell (and its code is not loaded in a process the system has just made
+            // for this service). The app is opened instead, as from the widget.
+            startActivity(new Intent(this, MainActivity.class)
+                    .setAction(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_LAUNCHER)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } else if (ACTION_PREVIOUS.equals(action)) {
             Native.onMedia(5, 0);
         } else if (ACTION_TOGGLE.equals(action)) {
             Native.onMedia(2, 0);

@@ -106,12 +106,27 @@ fn graphics_preference(startup: &crate::app::Startup) -> crate::ui::renderer::Pr
     }
 }
 
-/// The activity is gone for good: the session is saved and the process ends.
-pub(super) fn end() {
-    tracing::info!("the activity is gone: ending");
+/// The activity is gone: the session is saved and the process ends. `finishing`: for
+/// good. Otherwise the system is making the screen anew, for a change it does not
+/// leave to the app (the colours of a new wallpaper, an overlay), and opens the app
+/// again at once: music that was playing is noted, and goes on in the run that
+/// follows.
+pub(super) fn end(finishing: bool) {
+    tracing::info!(finishing, "the activity is gone: ending");
     if let Some(core) = CORE.get() {
         // An end of this kind is no failure of an interface that was on trial.
         crate::app::relaunch::end_trial(&core.paths.data_dir);
+        if !finishing {
+            let playing = matches!(
+                core.player.snapshot().state,
+                crate::playback::PlayState::Playing | crate::playback::PlayState::Loading
+            );
+            crate::app::relaunch::note_remade(
+                &core.paths.data_dir,
+                playing,
+                crate::app::relaunch::now(),
+            );
+        }
         core.shutdown();
     }
     tracing::info!("OnEum stopped");

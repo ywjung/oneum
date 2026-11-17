@@ -281,6 +281,19 @@ pub fn path_from_bytes(bytes: Vec<u8>) -> std::path::PathBuf {
     }
 }
 
+/// Whether the position a system's "now playing" display was told `elapsed_s` seconds
+/// ago still stands for the position of now: the system moves what it shows on by
+/// itself (at `rate`, while `playing`), and needs telling only when the position
+/// jumps (a seek, another song).
+pub fn position_as_told(told_s: f64, playing: bool, rate: f64, elapsed_s: f64, now_s: f64) -> bool {
+    let expected = if playing {
+        told_s + elapsed_s * rate
+    } else {
+        told_s
+    };
+    (now_s - expected).abs() < 1.0
+}
+
 /// Rewrites Mac key symbols for the keyboard of this system: on Windows "⌘⇧U" becomes
 /// "Ctrl+Shift+U". On a Mac the text is returned as it is.
 pub fn key_names(text: &str) -> std::borrow::Cow<'_, str> {
@@ -319,7 +332,7 @@ pub fn pc_key_names(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_web_address, open_web_page, pc_key_names};
+    use super::{is_web_address, open_web_page, pc_key_names, position_as_told};
 
     #[test]
     fn only_web_addresses_are_handed_to_the_browser() {
@@ -359,5 +372,19 @@ mod tests {
         assert_eq!(pc_key_names("⌘클릭이나 ⇧클릭"), "Ctrl+클릭이나 Shift+클릭");
         assert_eq!(pc_key_names("Space"), "Space");
         assert_eq!(pc_key_names("끝의 ⌘"), "끝의 Ctrl");
+    }
+    #[test]
+    fn a_position_is_told_again_only_when_it_jumps() {
+        // Playing on: ten seconds later the position is ten seconds on.
+        assert!(position_as_told(30.0, true, 1.0, 10.0, 40.2));
+        // At twice the speed, twenty.
+        assert!(position_as_told(30.0, true, 2.0, 10.0, 50.0));
+        assert!(!position_as_told(30.0, true, 1.0, 10.0, 50.0));
+        // A seek, forward or back.
+        assert!(!position_as_told(30.0, true, 1.0, 1.0, 90.0));
+        assert!(!position_as_told(30.0, true, 1.0, 1.0, 5.0));
+        // Paused: it stays where it is, however long.
+        assert!(position_as_told(30.0, false, 1.0, 600.0, 30.0));
+        assert!(!position_as_told(30.0, false, 1.0, 600.0, 45.0));
     }
 }

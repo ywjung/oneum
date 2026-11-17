@@ -42,18 +42,31 @@ pub fn pick(request: PickRequest, done: impl FnOnce(Vec<PathBuf>) + Send + 'stat
     super::java::pick(kind, id);
 }
 
-/// The picker asked for under `id` is done (see `natives`).
-pub(super) fn picked(id: i32, paths: Vec<PathBuf>) {
-    let done = WAITING.lock().ok().and_then(|mut waiting| {
+/// Whoever waits for the picker asked for under `id`.
+fn waiting_for(id: i32) -> Option<Box<dyn FnOnce(Vec<PathBuf>) + Send>> {
+    WAITING.lock().ok().and_then(|mut waiting| {
         let at = waiting
             .iter()
             .position(|(waiting_id, _)| *waiting_id == id)?;
         Some(waiting.swap_remove(at).1)
-    });
-    if let Some(done) = done
+    })
+}
+
+/// The picker asked for under `id` is done (see `natives`). Put away with nothing
+/// chosen, nobody is told.
+pub(super) fn picked(id: i32, paths: Vec<PathBuf>) {
+    if let Some(done) = waiting_for(id)
         && !paths.is_empty()
     {
         done(paths);
+    }
+}
+
+/// Something was chosen in the picker asked for under `id` that cannot be used:
+/// whoever asked is told with no paths, and says so on the screen.
+pub(super) fn pick_failed(id: i32) {
+    if let Some(done) = waiting_for(id) {
+        done(Vec::new());
     }
 }
 

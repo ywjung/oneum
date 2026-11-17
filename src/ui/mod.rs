@@ -678,6 +678,12 @@ impl OneumApp {
             memory::watch();
         }
         this.after_relaunch();
+        // The system made the screen anew while music played, which ended the run
+        // before this one (Android): the music goes on.
+        if app::relaunch::take_remade(&this.core.paths.data_dir, app::relaunch::now()) {
+            tracing::info!("started again after the screen was made anew: playing on");
+            this.core.player.send(Command::Play);
+        }
         this.after_a_trial_given_up();
         // An interface to the graphics hardware that is on trial has shown that it
         // works once the app has drawn and lived a moment (a start that fails does not
@@ -2683,6 +2689,12 @@ impl OneumApp {
 
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
         let typing = ctx.text_edit_focused();
+        // (A phone's keyboard is told when what is typed is a password: before it is
+        // told that a field is typed into.)
+        let secret = typing
+            && ctx.memory(|m| m.focused())
+                == Some(egui::Id::unique(network_folders::PASSWORD_FIELD));
+        responder::set_text_input_secret(secret);
         responder::set_text_input_active(typing);
         let was_typing = std::mem::replace(&mut self.typing, typing);
         let popup_open = ctx.any_popup_open();

@@ -55,6 +55,16 @@ pub(super) fn hard_key(key: HardKey) {
         .push(key);
 }
 
+/// The field that has the keyboard's attention holds a password (`true`), or does not:
+/// the input method is told, so that it neither suggests from what is typed nor
+/// keeps it among the words it has learned. Called before [`set_active`].
+pub fn set_secret(secret: bool) {
+    static SECRET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SECRET.swap(secret, Ordering::AcqRel) != secret {
+        super::java::secret_keyboard(secret);
+    }
+}
+
 /// A text field has the keyboard's attention (`true`) or none has. The keyboard comes
 /// up or goes away, and the input method starts from nothing.
 pub fn set_active(active: bool) {

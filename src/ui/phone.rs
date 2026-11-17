@@ -44,6 +44,11 @@ const MENU_ROW: f32 = 54.0;
 const SIDE: f32 = 16.0;
 /// The smallest thing a finger is asked to hit.
 const TOUCH: f32 = 44.0;
+/// The least width the full player's controls need beside the cover (five buttons of
+/// the transport, each to be hit by a finger).
+const CONTROLS_MIN_WIDTH: f32 = 260.0;
+/// Below this a cover in the full player is no cover any more.
+const COVER_MIN_SIDE: f32 = 72.0;
 
 fn font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
@@ -3132,11 +3137,16 @@ impl OneumApp {
         let controls = 292.0;
         // A screen that is wider than it is tall (a phone on its side) has no room for
         // them below the cover: there the cover stands at the left and they beside it.
-        let wide = body.width() > body.height() * 1.25;
+        // (Only where they have the room they need beside it: a small screen that is
+        // nearly square, like the outer one of a phone that folds, is wider than it
+        // is tall and still too narrow for that. Its buttons would lie on each other.)
+        let wide_side = (body.height() - 2.0 * 14.0)
+            .min(body.width() * 0.42)
+            .max(120.0);
+        let wide = body.width() > body.height() * 1.25
+            && body.width() - 3.0 * 28.0 - wide_side >= CONTROLS_MIN_WIDTH;
         let (art, column) = if wide {
-            let side = (body.height() - 2.0 * 14.0)
-                .min(body.width() * 0.42)
-                .max(120.0);
+            let side = wide_side;
             let art = Rect::from_center_size(
                 pos2(body.left() + 28.0 + side / 2.0, body.center().y),
                 egui::Vec2::splat(side),
@@ -3148,17 +3158,25 @@ impl OneumApp {
             );
             (art, column)
         } else {
-            let side = (body.width() - 2.0 * 28.0)
-                .min(body.height() - controls - 16.0)
-                .max(120.0);
+            // The cover has what the controls leave of the height. Where that is
+            // too little for a cover (a small screen), there is none: the controls
+            // are what the screen is for.
+            let room = body.height() - controls - 16.0;
+            let side = (body.width() - 2.0 * 28.0).min(room);
+            let side = if side < COVER_MIN_SIDE { 0.0 } else { side };
             // What the screen has to spare is shared out above and below the cover.
-            let spare = (body.height() - controls - 16.0 - side).max(0.0);
+            let spare = (room - side).max(0.0);
             let art = Rect::from_center_size(
                 pos2(body.center().x, body.top() + 8.0 + spare * 0.3 + side / 2.0),
                 egui::Vec2::splat(side),
             );
+            let top = if side > 0.0 {
+                art.bottom() + 16.0 + spare * 0.3
+            } else {
+                body.top() + ((body.height() - controls) / 2.0).max(0.0)
+            };
             let column = Rect::from_min_max(
-                pos2(body.left() + 28.0, art.bottom() + 16.0 + spare * 0.3),
+                pos2(body.left() + 28.0, top),
                 pos2(body.right() - 28.0, body.bottom()),
             );
             (art, column)

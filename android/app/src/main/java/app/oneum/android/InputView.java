@@ -21,6 +21,8 @@ final class InputView extends View {
     private final Editable held = Editable.Factory.getInstance().newEditable("");
     /** A text field of the app is being typed into (it asked for the keyboard). */
     private boolean typing;
+    /** What is typed is a password (see {@link #setSecret}). */
+    private boolean secret;
 
     InputView(Context context) {
         super(context);
@@ -30,6 +32,22 @@ final class InputView extends View {
 
     void setTyping(boolean typing) {
         this.typing = typing;
+    }
+
+    /**
+     * What is typed now is a password (or no longer is): the input method is told,
+     * so that it neither suggests from it nor learns it. It asks anew what kind of
+     * field this is.
+     */
+    void setSecret(boolean secret) {
+        if (this.secret == secret) {
+            return;
+        }
+        this.secret = secret;
+        InputMethodManager manager = getContext().getSystemService(InputMethodManager.class);
+        if (manager != null) {
+            manager.restartInput(this);
+        }
     }
 
     /** Starts from nothing: another field is typed into, or this one is done with. */
@@ -92,10 +110,13 @@ final class InputView extends View {
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo out) {
-        out.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        out.inputType = InputType.TYPE_CLASS_TEXT | (secret
+                ? InputType.TYPE_TEXT_VARIATION_PASSWORD
+                : InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         out.imeOptions = EditorInfo.IME_ACTION_DONE
                 | EditorInfo.IME_FLAG_NO_EXTRACT_UI
-                | EditorInfo.IME_FLAG_NO_FULLSCREEN;
+                | EditorInfo.IME_FLAG_NO_FULLSCREEN
+                | (secret ? EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING : 0);
         out.initialSelStart = held.length();
         out.initialSelEnd = held.length();
         return new Connection();

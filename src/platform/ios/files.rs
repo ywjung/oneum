@@ -208,7 +208,19 @@ fn bring(url: &NSURL, keep: Keep) -> Option<PathBuf> {
         // The picker's copies of music files lie in the temporary folder: they move to
         // where music is kept. Everything else of ours is used where it is.
         return if keep == Keep::Music && is_inside(&path, &temporary) {
-            let to = free_name(&documents.join(IMPORTED), path.file_name()?)?;
+            // (A file that is there already with the same bytes is that file: the
+            // same song chosen again is not there twice afterwards.)
+            let imported = documents.join(IMPORTED);
+            std::fs::create_dir_all(&imported)
+                .inspect_err(|error| tracing::warn!("cannot make {}: {error}", imported.display()))
+                .ok()?;
+            let to = crate::storage::files::free_name(&imported, path.file_name()?, Some(&path))
+                .inspect_err(|error| tracing::warn!("cannot keep an imported file: {error}"))
+                .ok()?;
+            if to.exists() {
+                let _ = std::fs::remove_file(&path);
+                return Some(to);
+            }
             std::fs::rename(&path, &to)
                 .or_else(|_| std::fs::copy(&path, &to).map(|_| ()))
                 .inspect_err(|error| tracing::warn!("cannot keep an imported file: {error}"))
@@ -226,12 +238,20 @@ fn bring(url: &NSURL, keep: Keep) -> Option<PathBuf> {
         Keep::Music | Keep::InPlace if path.is_dir() => documents.clone(),
         Keep::Music | Keep::InPlace => documents.join(IMPORTED),
     };
-    let copied = free_name(&into, path.file_name()?).and_then(|to| {
-        copy_tree(&path, &to)
+    // What is brought in again is not there twice afterwards: a file with the same
+    // bytes is the one that is there, a folder takes in what it does not have yet
+    // (see `take_in`). Only what is read once and thrown away is copied as it comes.
+    let copied = match keep {
+        Keep::Scratch => free_name(&into, path.file_name()?).and_then(|to| {
+            copy_tree(&path, &to)
+                .inspect_err(|error| tracing::warn!("cannot bring in {}: {error}", path.display()))
+                .ok()
+                .map(|()| to)
+        }),
+        Keep::Music | Keep::InPlace => crate::storage::files::take_in(&path, &into)
             .inspect_err(|error| tracing::warn!("cannot bring in {}: {error}", path.display()))
-            .ok()
-            .map(|()| to)
-    });
+            .ok(),
+    };
     if scoped {
         // SAFETY: see above.
         unsafe { url.stopAccessingSecurityScopedResource() };
