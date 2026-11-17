@@ -23,6 +23,7 @@ pub mod remote;
 pub mod render;
 pub mod resample;
 pub mod source;
+pub mod upsample;
 
 pub use crossfeed::Crossfeed;
 pub use dsp::{ReplayGainMode, ReplayGainSettings};

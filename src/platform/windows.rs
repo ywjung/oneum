@@ -499,6 +499,9 @@ pub mod nowplaying {
         pub duration_s: f64,
         pub position_s: f64,
         pub playing: bool,
+        /// How fast the song goes, as a multiple of its own speed. (Windows shows
+        /// the position it is told and does not move it by itself.)
+        pub rate: f64,
         /// Cached cover image file, if any.
         pub art_path: Option<PathBuf>,
     }

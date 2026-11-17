@@ -260,19 +260,64 @@ fn a_folder_is_listed_and_read_by_who_gives_the_right_name_and_password() {
         // Once the server has asked, it is answered with the request: the two
         // listings and the file took one request each, not two. (Before them: one
         // request as nobody, and two with the wrong password, the second of which
-        // was the answer to the server's question.)
+        // was the answer to the server's question.) That holds for an answer that
+        // does not carry the password. Basic carries it, and this connection is not
+        // encrypted: the password is never sent before the server asked for it, so
+        // every request is made twice as before.
         let given: Vec<Option<&str>> = seen.iter().map(|r| r.header("authorization")).collect();
-        assert_eq!(given.len(), 6, "{given:?}");
-        assert!(given[..2].iter().all(Option::is_none) && given[2..].iter().all(Option::is_some));
         if asks == Asks::Digest {
+            assert_eq!(given.len(), 6, "{given:?}");
+            assert!(given[..2].iter().all(Option::is_none));
+            assert!(given[2..].iter().all(Option::is_some));
             // Each answer to the same question is counted, as a server may demand.
             let counts: Vec<&str> = given[2..]
                 .iter()
                 .map(|given| field(given.unwrap(), "nc").unwrap())
                 .collect();
             assert_eq!(counts, ["00000001", "00000002", "00000003", "00000004"]);
+        } else {
+            let asked_first: Vec<bool> = given.iter().map(Option::is_none).collect();
+            assert_eq!(
+                asked_first,
+                [true, true, false, true, false, true, false, true, false],
+                "{given:?}"
+            );
         }
     }
+}
+
+/// A server that sends a request on to another of its own addresses is answered
+/// there for that address (an answer names the address it was made for), and not
+/// asked twice.
+#[test]
+fn an_answer_follows_a_redirect_inside_the_server_with_the_new_address() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut server = {
+        let seen = seen.clone();
+        HttpServer::start(move |request| {
+            let taken = allowed(request, Asks::Digest);
+            seen.lock().unwrap().push((request.path.clone(), taken));
+            if !taken {
+                return Reply::Bytes(refusal(Asks::Digest));
+            }
+            if request.path == "/old/" {
+                let moved = [("Location", "/dav/")];
+                return Reply::Bytes(response(307, "Temporary Redirect", &moved, b""));
+            }
+            Reply::Bytes(share(request, Asks::Digest))
+        })
+    };
+    let entries = dav::list(&server.url("/old/"), &account()).expect("the folder is listed");
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            ("/old/".to_string(), false),
+            ("/old/".to_string(), true),
+            ("/dav/".to_string(), true)
+        ]
+    );
+    server.stop();
 }
 
 /// A server whose question changes after every answer it took (as servers do after a

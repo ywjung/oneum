@@ -292,24 +292,72 @@ pub(super) fn answer_asked(
 /// The answer to what `server` asked `user` the last time, for a request that is
 /// about to be made: `None` when it has not asked since the app started. A server
 /// that no longer takes the answer asks again, and is answered anew.
+///
+/// `secure`: the request goes over TLS, to a server whose certificate has been
+/// checked by then. Over a connection that is not, only an answer that does not hold
+/// the password is given ahead: who answers at that address now (after the device
+/// moved to another network, say) need not be who asked.
 pub(super) fn answer_ahead(
     server: &str,
     user: &str,
     password: &str,
     method: &str,
     uri: &str,
+    secure: bool,
 ) -> Option<String> {
     let mut asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
     let asked = asked.get_mut(&(server.to_string(), user.to_string()))?;
-    asked.answers = asked.answers.checked_add(1)?;
-    answer_counted(
-        &asked.challenges,
-        user,
-        password,
-        method,
-        uri,
-        asked.answers,
-    )
+    let answers = asked.answers.checked_add(1)?;
+    let answer = answer_counted(&asked.challenges, user, password, method, uri, answers)?;
+    if !secure && answer.starts_with("Basic ") {
+        return None;
+    }
+    asked.answers = answers;
+    Some(answer)
+}
+
+/// The challenges of one `WWW-Authenticate` value, which may hold several
+/// (`Basic realm="x", Digest realm="x", nonce="…"`): a new one begins where a word is
+/// followed by something other than `=`.
+fn challenges_of(header: &str) -> Vec<String> {
+    // The parts between commas that are not inside quotes.
+    let mut parts: Vec<&str> = Vec::new();
+    let (mut start, mut quoted, mut escaped) = (0, false, false);
+    for (at, c) in header.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                parts.push(&header[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&header[start..]);
+    let mut challenges: Vec<String> = Vec::new();
+    for part in parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+    {
+        let (word, rest) = match part.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim_start()),
+            None => (part, ""),
+        };
+        // "Digest realm=…" and a bare "Negotiate" begin a challenge; "realm=…" and
+        // "nonce = …" go on with the one before.
+        let begins = !word.contains('=') && !word.contains('"') && !rest.starts_with('=');
+        match challenges.last_mut() {
+            Some(last) if !begins => {
+                last.push_str(", ");
+                last.push_str(part);
+            }
+            _ => challenges.push(part.to_string()),
+        }
+    }
+    challenges
 }
 
 fn answer_counted(
@@ -323,9 +371,13 @@ fn answer_counted(
     if !sendable(user) || !sendable(password) {
         return None;
     }
-    let digests: Vec<Challenge> = challenges
+    let challenges: Vec<String> = challenges
         .iter()
         .filter(|c| c.len() <= MAX_CHALLENGE_BYTES)
+        .flat_map(|c| challenges_of(c))
+        .collect();
+    let digests: Vec<Challenge> = challenges
+        .iter()
         .filter_map(|c| {
             let (name, rest) = scheme(c);
             name.eq_ignore_ascii_case("digest")
@@ -502,5 +554,58 @@ mod tests {
         }
         let name = quoted("a\"b\\c");
         assert_eq!(name, "\"a\\\"b\\\\c\"");
+    }
+
+    /// One header may hold several challenges. The one that proves the password
+    /// without sending it is taken whatever comes first, and what was asked over a
+    /// connection that is not encrypted is answered ahead only when the answer does
+    /// not hold the password.
+    #[test]
+    fn several_challenges_on_one_line_are_told_apart() {
+        let line =
+            r#"Basic realm="a, b", Digest realm="x", qop="auth,auth-int", nonce="n1", Negotiate"#;
+        assert_eq!(
+            challenges_of(line),
+            [
+                r#"Basic realm="a, b""#,
+                r#"Digest realm="x", qop="auth,auth-int", nonce="n1""#,
+                "Negotiate",
+            ]
+        );
+        assert_eq!(challenges_of(r#"Digest realm = "x", nonce="n""#).len(), 1);
+        assert_eq!(challenges_of("Negotiate, Basic realm=\"x\"").len(), 2);
+        assert!(challenges_of(" , ").is_empty());
+        let both = [line.to_string()];
+        let answer = answer(&both, "me", "word", "GET", "/").expect("an answer");
+        assert!(answer.starts_with("Digest "), "{answer}");
+        let negotiate = ["Negotiate, Basic realm=\"x\"".to_string()];
+        let answer = super::answer(&negotiate, "me", "word", "GET", "/").expect("an answer");
+        assert!(answer.starts_with("Basic "), "{answer}");
+
+        // Remembered and answered ahead: Digest anywhere, Basic only over TLS.
+        let digest = [r#"Digest realm="x", qop="auth", nonce="n2""#.to_string()];
+        let basic = [r#"Basic realm="x""#.to_string()];
+        assert!(answer_asked("http://plain.test", &digest, "me", "word", "GET", "/").is_some());
+        let ahead = answer_ahead("http://plain.test", "me", "word", "GET", "/a", false).unwrap();
+        assert!(
+            ahead.contains("nc=00000002") && ahead.contains(r#"uri="/a""#),
+            "{ahead}"
+        );
+        assert!(answer_asked("http://basic.test", &basic, "me", "word", "GET", "/").is_some());
+        assert_eq!(
+            answer_ahead("http://basic.test", "me", "word", "GET", "/", false),
+            None
+        );
+        assert!(answer_asked("https://basic.test", &basic, "me", "word", "GET", "/").is_some());
+        assert!(answer_ahead("https://basic.test", "me", "word", "GET", "/", true).is_some());
+        // Another name, another server: nothing to answer ahead with.
+        assert_eq!(
+            answer_ahead("https://basic.test", "you", "word", "GET", "/", true),
+            None
+        );
+        assert_eq!(
+            answer_ahead("https://other.test", "me", "word", "GET", "/", true),
+            None
+        );
     }
 }

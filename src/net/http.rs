@@ -103,6 +103,35 @@ impl Url {
         (self.secure, &self.host, self.port)
     }
 
+    /// The path without its query as a place: `%XX` read as what it stands for (all
+    /// but `%2F`, which is no separator) and ASCII letters in lower case. Servers
+    /// write one place in more than one way ("%ec" for "%EC", "%28" for "(",
+    /// "/Music/" for "/music/" where the disk does not tell them apart): as places
+    /// they are the same text.
+    pub fn place(&self) -> String {
+        let path = self.path.split('?').next().unwrap_or("/");
+        let bytes = path.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let hex = |b: Option<&u8>| b.and_then(|b| (*b as char).to_digit(16));
+        let mut i = 0;
+        while i < bytes.len() {
+            match (bytes[i], hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+                (b'%', Some(a), Some(b)) => {
+                    match (a * 16 + b) as u8 {
+                        b'/' => out.extend_from_slice(b"%2f"),
+                        byte => out.push(byte.to_ascii_lowercase()),
+                    }
+                    i += 3;
+                }
+                (byte, ..) => {
+                    out.push(byte.to_ascii_lowercase());
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     /// The address up to the path: "https://host:port".
     pub fn server(&self) -> String {
         let scheme = if self.secure { "https" } else { "http" };
@@ -300,6 +329,11 @@ fn remove_dot_segments(path: &str) -> String {
     }
     out
 }
+
+/// How the app names itself to a server: its name and version, as services ask of
+/// their clients (the lyrics service counts the requests of a client that says who it
+/// is more generously). Nothing of the device or the person is in it.
+pub const USER_AGENT: &str = concat!("OnEum/", env!("CARGO_PKG_VERSION"));
 
 /// How long to wait and how much to take.
 #[derive(Debug, Clone, Copy)]
@@ -582,7 +616,7 @@ impl Request<'_> {
         // it mean what they say. `close`: one request per connection, so the end of
         // the connection can end a body.
         let mut head = format!(
-            "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: OnEum\r\n\
+            "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {USER_AGENT}\r\n\
              Accept-Encoding: identity\r\nConnection: close\r\n",
             url.path,
             url.authority()
@@ -637,9 +671,19 @@ fn fetch(
     // A server that has asked who is there before (since the app started) is told
     // with the request: asked for every piece of a song, it would be asked twice for
     // each. Only that server, and only in the way it asked.
-    let mut authorization: Option<String> = access.account.and_then(|(user, password)| {
-        auth::answer_ahead(&server, user, password, request.method(), &url.path)
-    });
+    let ahead = |url: &Url| {
+        access.account.and_then(|(user, password)| {
+            auth::answer_ahead(
+                &server,
+                user,
+                password,
+                request.method(),
+                &url.path,
+                url.secure,
+            )
+        })
+    };
+    let mut authorization: Option<String> = ahead(&url);
     let mut asked = false;
     loop {
         let here = url.origin() == first.origin();
@@ -682,6 +726,12 @@ fn fetch(
             .as_deref()
             .ok_or(NetError::BadResponse("a redirect without an address"))?;
         url = url.join(location)?;
+        // An answer names the address it was made for: another address of the same
+        // server is answered anew (and one of another server not at all).
+        authorization = (url.origin() == first.origin())
+            .then(|| ahead(&url))
+            .flatten();
+        asked = false;
     }
 }
 
@@ -1370,8 +1420,10 @@ mod tests {
         };
         assert_eq!(
             String::from_utf8(get.bytes(&url, None)).unwrap(),
-            "GET /a%20b?c=d HTTP/1.1\r\nHost: example.local:8200\r\nUser-Agent: OnEum\r\n\
-             Accept-Encoding: identity\r\nConnection: close\r\nRange: bytes=7-\r\n\r\n"
+            format!(
+                "GET /a%20b?c=d HTTP/1.1\r\nHost: example.local:8200\r\nUser-Agent: {USER_AGENT}\r\n\
+                 Accept-Encoding: identity\r\nConnection: close\r\nRange: bytes=7-\r\n\r\n"
+            )
         );
         let url = Url::parse("http://[::1]/ctl").unwrap();
         let post = Request::Send {
@@ -1381,9 +1433,11 @@ mod tests {
         };
         assert_eq!(
             String::from_utf8(post.bytes(&url, None)).unwrap(),
-            "POST /ctl HTTP/1.1\r\nHost: [::1]\r\nUser-Agent: OnEum\r\n\
-             Accept-Encoding: identity\r\nConnection: close\r\nSOAPACTION: \"x\"\r\n\
-             Content-Length: 4\r\n\r\n<a/>"
+            format!(
+                "POST /ctl HTTP/1.1\r\nHost: [::1]\r\nUser-Agent: {USER_AGENT}\r\n\
+                 Accept-Encoding: identity\r\nConnection: close\r\nSOAPACTION: \"x\"\r\n\
+                 Content-Length: 4\r\n\r\n<a/>"
+            )
         );
     }
 }

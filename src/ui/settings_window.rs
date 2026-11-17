@@ -767,6 +767,16 @@ impl OneumApp {
                     },
                 );
                 widgets::row_divider(ui);
+                widgets::setting_row(
+                    ui,
+                    s.out_upsample,
+                    Some(s.phone_upsample_desc),
+                    true,
+                    |ui| {
+                        widgets::toggle(ui, &mut self.settings.output.upsample, s.out_upsample);
+                    },
+                );
+                widgets::row_divider(ui);
             } else {
                 widgets::setting_row(
                     ui,
@@ -792,11 +802,42 @@ impl OneumApp {
                     },
                 );
                 widgets::row_divider(ui);
+                widgets::setting_row(
+                    ui,
+                    s.out_upsample,
+                    describe(s.out_upsample_desc),
+                    device_control,
+                    |ui| {
+                        widgets::toggle(ui, &mut self.settings.output.upsample, s.out_upsample);
+                    },
+                );
+                widgets::row_divider(ui);
+            }
+            // (Where the system cannot be asked for a rate the output is never at a
+            // whole multiple of a song's: the filter would have nothing to do.)
+            if !phone || crate::platform::RATE_CONTROL {
+                widgets::setting_row(ui, s.out_filter, Some(s.out_filter_desc), true, |ui| {
+                    use crate::audio::upsample::Filter;
+                    widgets::segmented(
+                        ui,
+                        "upsampling-filter",
+                        &mut self.settings.output.filter,
+                        &[
+                            (Filter::Sharp, s.filter_sharp),
+                            (Filter::Slow, s.filter_slow),
+                            (Filter::Minimum, s.filter_minimum),
+                        ],
+                    );
+                });
+                widgets::row_divider(ui);
             }
             widgets::setting_row(ui, s.out_memory, Some(s.out_memory_desc), true, |ui| {
                 widgets::toggle(ui, &mut self.settings.output.memory_playback, s.out_memory);
             });
         });
+        if !phone || crate::platform::RATE_CONTROL {
+            widgets::section_note(ui, s.out_filter_hint);
+        }
         if phone && !crate::platform::RATE_CONTROL {
             widgets::section_note(ui, s.phone_quality_hint_fixed);
         } else if phone {
@@ -1053,46 +1094,50 @@ impl OneumApp {
             let desc = summary.as_deref().unwrap_or(s.correction_none_desc);
             widgets::setting_row(ui, s.correction_row, Some(desc), true, |ui| {
                 let selected = before.clone().unwrap_or_else(|| s.rg_off.to_string());
-                egui::ComboBox::from_id_salt("correction-profile")
-                    .selected_text(selected)
-                    .width(200.0)
-                    .height(320.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.settings.correction, None, s.rg_off);
-                        let group = |ui: &mut egui::Ui, title: &str| {
-                            ui.separator();
-                            ui.label(RichText::new(title).small().weak());
-                        };
-                        // The user's own first, then the ones that come with the app.
-                        let imported: Vec<String> = self
-                            .settings
-                            .corrections
-                            .iter()
-                            .map(|p| p.name.clone())
-                            .collect();
-                        if !imported.is_empty() {
-                            group(ui, s.correction_group_imported);
-                        }
-                        for name in &imported {
-                            ui.selectable_value(
-                                &mut self.settings.correction,
-                                Some(name.clone()),
-                                name,
-                            );
-                        }
-                        group(ui, s.correction_group_builtin);
-                        for profile in crate::audio::peq::builtin_profiles() {
-                            // One of the same name that the user imported stands for it.
-                            if imported.contains(&profile.name) {
-                                continue;
+                // (While a profile is being made on screen, that one is heard:
+                // another cannot be chosen under it.)
+                ui.add_enabled_ui(!editing, |ui| {
+                    egui::ComboBox::from_id_salt("correction-profile")
+                        .selected_text(selected)
+                        .width(200.0)
+                        .height(320.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.settings.correction, None, s.rg_off);
+                            let group = |ui: &mut egui::Ui, title: &str| {
+                                ui.separator();
+                                ui.label(RichText::new(title).small().weak());
+                            };
+                            // The user's own first, then the ones that come with the app.
+                            let imported: Vec<String> = self
+                                .settings
+                                .corrections
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .collect();
+                            if !imported.is_empty() {
+                                group(ui, s.correction_group_imported);
                             }
-                            ui.selectable_value(
-                                &mut self.settings.correction,
-                                Some(profile.name.clone()),
-                                &profile.name,
-                            );
-                        }
-                    });
+                            for name in &imported {
+                                ui.selectable_value(
+                                    &mut self.settings.correction,
+                                    Some(name.clone()),
+                                    name,
+                                );
+                            }
+                            group(ui, s.correction_group_builtin);
+                            for profile in crate::audio::peq::builtin_profiles() {
+                                // One of the same name that the user imported stands for it.
+                                if imported.contains(&profile.name) {
+                                    continue;
+                                }
+                                ui.selectable_value(
+                                    &mut self.settings.correction,
+                                    Some(profile.name.clone()),
+                                    &profile.name,
+                                );
+                            }
+                        });
+                });
             });
             widgets::row_divider(ui);
             widgets::setting_row(
@@ -1103,7 +1148,9 @@ impl OneumApp {
                 |ui| {
                     let button =
                         |text: &str| egui::Button::new(text).min_size(egui::vec2(0.0, 26.0));
-                    import = ui.add(button(s.correction_import)).clicked();
+                    import = ui
+                        .add_enabled(!editing, button(s.correction_import))
+                        .clicked();
                     // Removes the selected profile, if it is one that was imported.
                     remove = ui
                         .add_enabled(
@@ -1162,6 +1209,7 @@ impl OneumApp {
         let Some(mut edit) = self.peq_edit.take() else {
             return;
         };
+        edit.shown = true;
         let touch = super::theme::touch(ui.ctx());
         let (mut save, mut cancel) = (false, false);
         ui.add_space(10.0);

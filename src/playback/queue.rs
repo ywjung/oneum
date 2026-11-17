@@ -203,7 +203,8 @@ impl Queue {
             return;
         }
         self.by_rating = on;
-        if self.shuffle {
+        // (Albums are mixed without regard to stars: such a queue stays as it is.)
+        if self.shuffle && !self.by_album {
             self.set_shuffle(false);
             self.set_shuffle(true);
         }

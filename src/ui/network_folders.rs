@@ -25,7 +25,15 @@ pub(super) struct FolderForm {
     pub password: String,
     focus: bool,
     pub status: Status,
+    /// The id of the folder that is being tried for this form: what a try brings is
+    /// this form's only when it is the try of that folder (a try that was left
+    /// behind by a form since closed comes back to no one).
+    trying: Option<String>,
 }
+
+/// The password field, by a name of its own: what egui keeps of a field (see where
+/// the field is drawn) is found by it.
+const PASSWORD_FIELD: &str = "oneum-folder-password";
 
 impl FolderForm {
     pub(super) fn new() -> Self {
@@ -36,6 +44,7 @@ impl FolderForm {
             password: String::new(),
             focus: true,
             status: Status::Editing,
+            trying: None,
         }
     }
 }
@@ -77,9 +86,22 @@ impl OneumApp {
             pinned: trusted,
         }
         .sanitized();
+        // (A folder that is on the list already is replaced, not added.)
+        let full = self.settings.network_folders.len() >= folders::MAX_FOLDERS;
         match folder {
+            Some(folder)
+                if full
+                    && !self
+                        .settings
+                        .network_folders
+                        .iter()
+                        .any(|known| known.url == folder.url) =>
+            {
+                form.status = Status::Failed(Why::Full);
+            }
             Some(folder) => {
                 form.status = Status::Trying;
+                form.trying = Some(folder.id.clone());
                 let password = Secret::new(form.password.as_str());
                 self.network.try_folder(folder, password);
             }
@@ -111,6 +133,9 @@ impl OneumApp {
                     .hint_text(hint)
                     .password(secret)
                     .desired_width(f32::INFINITY);
+                if secret {
+                    edit = edit.id(egui::Id::unique(PASSWORD_FIELD));
+                }
                 if touch {
                     edit = edit
                         .font(egui::FontId::proportional(17.0))
@@ -128,8 +153,23 @@ impl OneumApp {
                 address.request_focus();
             }
             field(ui, &mut form.name, s.folder_name_hint, false);
-            field(ui, &mut form.user, s.folder_user_hint, false);
+            let user = field(ui, &mut form.user, s.folder_user_hint, false);
             let password = field(ui, &mut form.password, s.folder_password_hint, true);
+            // egui keeps what was typed into a field to take typing back: not of a
+            // password (it would outlive the form, and come back with "undo").
+            let field_id = egui::Id::unique(PASSWORD_FIELD);
+            if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), field_id) {
+                state.clear_undoer();
+                state.store(ui.ctx(), field_id);
+            }
+            // What the server said was said of what was typed then: of another
+            // address, name or password nothing is known yet. (A certificate that
+            // was shown is one server's: it is not to be trusted for another.)
+            if (address.changed() || user.changed() || password.changed())
+                && matches!(form.status, Status::Failed(_))
+            {
+                form.status = Status::Editing;
+            }
             let dim = theme::dim(ui);
             ui.label(RichText::new(s.folder_password_note).small().color(dim));
             // A name and a password over a connection that is not encrypted.
@@ -171,6 +211,12 @@ impl OneumApp {
                         }
                         Why::Address => {
                             ui.label(RichText::new(s.folder_bad_address).color(warn));
+                        }
+                        Why::Full => {
+                            ui.label(RichText::new(s.folder_full).color(warn));
+                        }
+                        Why::NoPassword => {
+                            ui.label(RichText::new(s.folder_no_password).color(warn));
                         }
                         Why::Other(reason) => {
                             ui.label(RichText::new(s.folder_unreachable).color(warn));
@@ -240,7 +286,14 @@ impl OneumApp {
         let Some((folder, password, result)) = self.network.take_tried() else {
             return;
         };
-        if self.folder_form.is_none() && !self.network.scripted_try {
+        // The try of the form that is open, or of a script: one that was left behind
+        // (its form was closed, or another address is being typed by now) is dropped
+        // with its password.
+        let of_the_form = self
+            .folder_form
+            .as_ref()
+            .is_some_and(|form| form.trying.as_deref() == Some(folder.id.as_str()));
+        if !of_the_form && !self.network.scripted_try {
             return;
         }
         self.network.scripted_try = false;
@@ -268,7 +321,6 @@ impl OneumApp {
                     .network_folders
                     .retain(|known| known.url != folder.url);
                 self.settings.network_folders.push(folder.clone());
-                self.settings.network_folders.truncate(folders::MAX_FOLDERS);
                 folders::set_known(&self.settings.network_folders);
                 self.network.open_network_folder(folder);
             }

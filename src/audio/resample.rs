@@ -3,6 +3,7 @@
 //! What the conversion does to the music is pinned down by the tests at the end of this
 //! file: flat to 20 kHz, nothing folded back from above the new Nyquist frequency, and
 //! distortion plus noise at the floor of 32-bit float samples.
+use super::upsample::{Filter, Upsampler};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler, WindowFunction};
 
@@ -153,6 +154,60 @@ impl StereoResampler {
         out.extend_from_slice(&self.scratch[skip * 2..(skip + usable) * 2]);
         self.total_out_frames += usable as u64;
         Ok(())
+    }
+}
+
+/// A conversion from one sample rate to another: the usual one, or, where the rate
+/// goes up by a whole factor and the listener chose another filter for that, that one
+/// (`upsample.rs`).
+pub enum Converter {
+    Usual(Box<StereoResampler>),
+    Chosen(Upsampler),
+}
+
+impl Converter {
+    pub fn new(in_rate: u32, out_rate: u32, filter: Filter) -> Result<Self, String> {
+        match Upsampler::new(in_rate, out_rate, filter) {
+            Some(upsampler) => Ok(Converter::Chosen(upsampler)),
+            None => StereoResampler::new(in_rate, out_rate).map(|r| Converter::Usual(Box::new(r))),
+        }
+    }
+
+    pub fn in_rate(&self) -> u32 {
+        match self {
+            Converter::Usual(r) => r.in_rate(),
+            Converter::Chosen(u) => u.in_rate(),
+        }
+    }
+
+    /// Output frames that the input fed so far corresponds to (independent of buffering).
+    pub fn expected_out_frames(&self) -> u64 {
+        match self {
+            Converter::Usual(r) => r.expected_out_frames(),
+            Converter::Chosen(u) => u.expected_out_frames(),
+        }
+    }
+
+    /// Feeds interleaved stereo input and appends whatever output is ready to `out`.
+    pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), String> {
+        match self {
+            Converter::Usual(r) => r.process(input, out),
+            Converter::Chosen(u) => {
+                u.process(input, out);
+                Ok(())
+            }
+        }
+    }
+
+    /// The tail: after it the output is exactly as long as it should be.
+    pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+        match self {
+            Converter::Usual(r) => r.flush(out),
+            Converter::Chosen(u) => {
+                u.flush(out);
+                Ok(())
+            }
+        }
     }
 }
 

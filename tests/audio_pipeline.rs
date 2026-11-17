@@ -2989,3 +2989,150 @@ fn another_speed_changes_the_length_and_keeps_the_pitch() {
         );
     }
 }
+
+/// Plays `names` at `rate` with the upsampling filter the listener chose.
+fn play_filtered(names: &[&str], rate: u32, filter: oneum::audio::upsample::Filter) -> Played {
+    let (mut engine, mut renderer) = Engine::new_offline(rate, 1.0, ReplayGainSettings::default());
+    engine.set_output_settings(OutputSettings {
+        filter,
+        ..OutputSettings::default()
+    });
+    let queue: Vec<TrackRequest> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| request(i as u64 + 1, n))
+        .collect();
+    let slot = NextSlot::new();
+    slot.set(
+        queue
+            .get(1)
+            .cloned()
+            .map_or(NextTrack::End, NextTrack::Track),
+    );
+    engine
+        .start_feed(queue[0].clone(), 0, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    pump(&mut engine, &mut renderer, &queue, &slot)
+}
+
+/// With another upsampling filter, two songs that are one tone cut in two come out
+/// at a whole multiple of their rate exactly that many times as long, the second
+/// where the first ends, and as one tone still. Where the rate is not a whole multiple
+/// the filter does not come into it.
+#[test]
+fn a_chosen_upsampling_filter_raises_songs_without_a_gap() {
+    use oneum::audio::upsample::Filter;
+    let songs = ["gap_a.flac", "gap_b.flac"];
+    for factor in [2u32, 4, 8] {
+        let rate = 44_100 * factor;
+        let usual = play_filtered(&songs, rate, Filter::Sharp);
+        assert_eq!(usual.frames(), 88_200 * factor as usize);
+        for filter in [Filter::Slow, Filter::Minimum] {
+            let played = play_filtered(&songs, rate, filter);
+            let what = format!("{filter:?} at {rate} Hz");
+            assert_eq!(played.underruns, 0, "{what}");
+            assert_eq!(played.frames(), 88_200 * factor as usize, "{what}");
+            assert_eq!(
+                played.started(),
+                vec![(1, 0), (2, 44_100 * u64::from(factor))],
+                "{what}"
+            );
+            // The tone is there at its level, and nothing happens where the two
+            // songs meet: around that place the signal is as smooth as anywhere.
+            let left = played.left();
+            let usual_left = usual.left();
+            let level = level_at(&left[rate as usize / 2..rate as usize * 3 / 2], 441.0, rate);
+            let usual_level = level_at(
+                &usual_left[rate as usize / 2..rate as usize * 3 / 2],
+                441.0,
+                rate,
+            );
+            assert!(
+                (level / usual_level - 1.0).abs() < 1e-3,
+                "{what}: {level} for {usual_level}"
+            );
+            let step = |from: usize, to: usize| {
+                left[from..to]
+                    .windows(2)
+                    .map(|w| (w[1] - w[0]).abs())
+                    .fold(0.0f32, f32::max)
+            };
+            let seam = 44_100 * factor as usize;
+            let reach = 200 * factor as usize;
+            let (at_seam, elsewhere) = (
+                step(seam - reach, seam + reach),
+                step(seam / 2 - reach, seam / 2 + reach),
+            );
+            assert!(
+                at_seam <= elsewhere * 1.02,
+                "{what}: {at_seam} at the seam, {elsewhere} elsewhere"
+            );
+            // The symmetric filter is in step with the usual conversion, sample for
+            // sample (the tone lies far below where the two differ).
+            if filter == Filter::Slow {
+                let guard = FADE_GUARD * factor as usize * 2;
+                let diff = max_abs_diff(
+                    &played.pcm[guard..played.pcm.len() - guard],
+                    &usual.pcm[guard..usual.pcm.len() - guard],
+                );
+                assert!(diff < 1e-4, "{what}: {diff}");
+            }
+        }
+    }
+    // 44.1 → 48 kHz is no whole multiple: converted as ever, whatever the filter.
+    let usual = play_filtered(&songs, 48_000, Filter::Sharp);
+    for filter in [Filter::Slow, Filter::Minimum] {
+        assert_eq!(play_filtered(&songs, 48_000, filter).pcm, usual.pcm);
+    }
+    // And a song at the output's own rate is not touched by any of them.
+    let (_, _, whole) = decode_all("gap_a.flac");
+    let played = play_filtered(&["gap_a.flac"], 44_100, Filter::Minimum);
+    assert_eq!(
+        max_abs_diff(&played.pcm[FADE_GUARD * 2..], &whole[FADE_GUARD * 2..]),
+        0.0
+    );
+}
+
+/// Upsampling asks the device for the highest of eight, four and two times a song's
+/// rate that it offers; a device that offers none is left as it is.
+#[test]
+fn upsampling_runs_the_device_at_the_highest_whole_multiple_it_offers() {
+    let (mut engine, _renderer) = Engine::new_offline(44_100, 1.0, ReplayGainSettings::default());
+    engine.set_offline_rates(&[44_100, 48_000, 88_200, 96_000, 176_400, 192_000]);
+    assert_eq!(
+        engine.preferred_rate(Some(44_100)),
+        None,
+        "the device is left alone"
+    );
+    engine.set_output_settings(OutputSettings {
+        upsample: true,
+        ..OutputSettings::default()
+    });
+    assert_eq!(engine.preferred_rate(Some(44_100)), Some(176_400));
+    assert_eq!(engine.preferred_rate(Some(48_000)), Some(192_000));
+    assert_eq!(engine.preferred_rate(Some(88_200)), Some(176_400));
+    assert_eq!(engine.preferred_rate(Some(96_000)), Some(192_000));
+    assert_eq!(engine.preferred_rate(Some(192_000)), None);
+    assert_eq!(engine.preferred_rate(None), None);
+    assert_eq!(engine.preferred_rate(Some(22_050)), Some(176_400));
+    // A device without a whole multiple is left alone, unless the song's own rate is
+    // asked for as well.
+    engine.set_offline_rates(&[44_100, 48_000]);
+    assert_eq!(engine.preferred_rate(Some(44_100)), None);
+    assert_eq!(engine.preferred_rate(Some(22_050)), Some(44_100));
+    engine.set_output_settings(OutputSettings {
+        upsample: true,
+        match_sample_rate: true,
+        ..OutputSettings::default()
+    });
+    assert_eq!(engine.preferred_rate(Some(44_100)), Some(44_100));
+    assert_eq!(engine.preferred_rate(Some(96_000)), Some(48_000));
+    // Following the song's rate alone asks for that rate, as before.
+    engine.set_offline_rates(&[44_100, 48_000, 88_200, 176_400]);
+    engine.set_output_settings(OutputSettings {
+        match_sample_rate: true,
+        ..OutputSettings::default()
+    });
+    assert_eq!(engine.preferred_rate(Some(44_100)), Some(44_100));
+}

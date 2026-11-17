@@ -14,6 +14,9 @@ const ASK_AGAIN_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// After the service could not be reached it is left alone for this long: without the
 /// internet, every song looked at would otherwise wait for an answer that cannot come.
 const LEFT_ALONE_FOR: Duration = Duration::from_secs(60);
+/// And for this long after it said that it is asked too much (status 429). (It also
+/// says how long to wait, which is minutes at most for who asks as rarely as this.)
+const LEFT_ALONE_WHEN_ASKED_TOO_MUCH: Duration = Duration::from_secs(15 * 60);
 /// The largest file of the cache that is read.
 const MAX_KEPT_BYTES: u64 = 1 << 20;
 
@@ -90,7 +93,7 @@ pub struct Source {
     cache_dir: PathBuf,
     /// The address of the service.
     base: String,
-    /// When the service could last not be reached.
+    /// Until when the service is left alone, after it could not be reached.
     out_of_reach: Mutex<Option<Instant>>,
 }
 
@@ -115,7 +118,7 @@ impl Source {
         if let Some(answer) = kept(&file) {
             return lyrics_of(&answer);
         }
-        let left_alone = |at: &Option<Instant>| at.is_some_and(|at| at.elapsed() < LEFT_ALONE_FOR);
+        let left_alone = |until: &Option<Instant>| until.is_some_and(|t| Instant::now() < t);
         if left_alone(&self.out_of_reach.lock().unwrap_or_else(|p| p.into_inner())) {
             return None;
         }
@@ -129,7 +132,12 @@ impl Source {
                 // (The error, never what was asked for: a log is not where the songs
                 // a person listens to belong.)
                 tracing::info!(%error, "the lyrics service did not answer");
-                *self.out_of_reach.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+                let pause = match error {
+                    crate::net::NetError::Status(429) => LEFT_ALONE_WHEN_ASKED_TOO_MUCH,
+                    _ => LEFT_ALONE_FOR,
+                };
+                *self.out_of_reach.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Instant::now().checked_add(pause);
                 None
             }
         }

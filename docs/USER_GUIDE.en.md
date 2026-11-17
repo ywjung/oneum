@@ -194,13 +194,15 @@ Open it with the meter button at the top right or with ⌘⇧U (View → Show/Hi
 - When playback pauses, the needles slowly return to the left.
 
 ## Output Quality
-Options for listening through a DAC or good headphones (Settings → Playback). All three are off at first, and while they are off OnEum does not change any device setting.
+Options for listening through a DAC or good headphones (Settings → Playback). All are off at first (the filter is "Sharp"), and while they are off OnEum does not change any device setting.
 
 | Setting | What it does | Good to know |
 |---|---|---|
 | **Match the Song's Sample Rate** | Sets the device to each song's sample rate (44.1 kHz, 96 kHz …) and plays it without converting (resampling). If the device does not offer that rate, it uses a whole multiple of it, else the next higher rate, else the device's highest rate, and converts to that. | Moving to a song with another sample rate pauses for under a second while the device changes. Songs of the same rate (the same album) follow without a gap. The device setting applies to other apps too. |
 | **Exclusive Access** | While it plays, only OnEum uses the device. Alert sounds and other apps are not mixed in, and other apps cannot change the device's settings. | While playing, other apps' sound does not come out of that device (video calls, the browser …). |
 | **Memory Playback** | Loads the file being played and the next one into memory ahead of time. Playback goes on even if an external drive goes to sleep or a network folder slows down. | Uses as much memory as the files being played (at most two, the next one included). Files larger than 1 GB are read from the disk as usual. |
+| **Upsampling** | Raises each song to the highest whole multiple of its sample rate the device offers (×8, ×4 or ×2, up to 384 kHz). A 44.1 kHz song becomes 352.8 or 176.4 kHz, a 48 kHz song 384 or 192 kHz. If the device offers no whole multiple, it is set to the song's own rate. | Nothing is added to the sound (the app does what the DAC would otherwise do). Works only on macOS, and there is a short break while the device changes between songs of the two rate families. |
+| **Upsampling Filter** | Chooses the filter a song is raised with when the output runs at a whole multiple of its sample rate. **Sharp**: flat to the top of the band with nothing left above it, but it rings for a while before and after anything sudden (the setting at first). **Slow**: rings for under a millisecond, rolls off gently from 18 kHz and leaves a little just above the band. **Minimum Phase**: flat to 20 kHz, and all of its ringing comes after the sound. | Conversions that are not a whole multiple (44.1 → 48 kHz and the like) always use the sharp one. What a song is being raised with is shown in the signal path of Song Info. |
 
 - If a device setting was changed, it is **put back and exclusive access is released** when the queue ends, playback stops, or playback stays paused for more than 30 seconds. The same happens when you quit.
 - How a song is being played right now can be seen in the **Signal Path** of the Song Info panel (⌘I) and in **Output** and **Processing** on the meter deck. For example: `Output DAC · 96,000 Hz · 24 bit · exclusive`, `Processing: None`.

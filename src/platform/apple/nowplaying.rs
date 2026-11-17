@@ -45,6 +45,9 @@ pub struct NowPlayingInfo {
     pub duration_s: f64,
     pub position_s: f64,
     pub playing: bool,
+    /// How fast the song goes, as a multiple of its own speed: the system moves the
+    /// position it shows by this between what it is told.
+    pub rate: f64,
     /// Cached cover image file, if any.
     pub art_path: Option<PathBuf>,
 }
@@ -199,7 +202,7 @@ impl MediaSession {
             );
             dict.insert(
                 MPNowPlayingInfoPropertyPlaybackRate,
-                &*NSNumber::new_f64(if info.playing { 1.0 } else { 0.0 }),
+                &*NSNumber::new_f64(if info.playing { info.rate } else { 0.0 }),
             );
             if let Some(artwork) = &artwork {
                 dict.insert(MPMediaItemPropertyArtwork, &**artwork);

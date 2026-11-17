@@ -62,8 +62,12 @@ class Handler(BaseHTTPRequestHandler):
                 line = {"path": parts.path, "query": query, "headers": sorted(k.lower() for k in self.headers.keys())}
                 log.write(json.dumps(line, ensure_ascii=False) + "\n")
         title = query.get("track_name", "")
+        seconds = query.get("duration", "1")
         if parts.path != "/api/get" or not title or not query.get("artist_name"):
-            self.answer(400, {"code": 400, "name": "BadRequest", "message": "what song?"})
+            self.answer(400, {"statusCode": 400, "name": "BadRequest", "message": "what song?"})
+        elif not seconds.isdigit() or not 1 <= int(seconds) <= 3600:
+            # (As the real service: it takes no length of more than an hour.)
+            self.answer(400, {"statusCode": 400, "name": "ValidationError", "message": "duration: must be between 1 and 3600"})
         elif title in ARGS.unknown:
             self.answer(404, {"code": 404, "name": "TrackNotFound", "message": "Failed to find specified track"})
         else:

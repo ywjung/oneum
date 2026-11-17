@@ -288,6 +288,15 @@ impl Phone {
         self.stacks[self.tab_index()].last()
     }
 
+    /// Whether a page of Settings is among the pages of any tab (shown, or under
+    /// another page).
+    pub(super) fn holds_settings(&self) -> bool {
+        self.stacks
+            .iter()
+            .flatten()
+            .any(|page| matches!(page, Page::Settings(_)))
+    }
+
     /// Puts `page` above the ones of the open tab; it slides in.
     fn push(&mut self, page: Page) {
         let was = self.page().cloned();
@@ -909,6 +918,9 @@ impl OneumApp {
     pub(super) fn phone_back(&mut self, ctx: &egui::Context) {
         if self.dialog.is_some() {
             self.dialog = None;
+        } else if self.folder_form.is_some() {
+            // The form for a network folder is put away, like a dialog.
+            self.folder_form = None;
         } else if let Some(sheet) = self.phone.sheet.clone() {
             if self.phone.sheet_leaving.is_none() {
                 self.phone.sheet_leaving = Some((Instant::now(), sheet));

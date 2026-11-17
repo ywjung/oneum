@@ -170,6 +170,10 @@ strings! {
     folder_refused: "서버가 이 이름과 비밀번호를 받아들이지 않습니다.", "The server does not accept this name and password.";
     folder_bad_address: "폴더의 주소가 아닙니다. http:// 또는 https:// 로 시작하는 주소를 넣으세요.", "That is no address of a folder. Enter one that begins with http:// or https://.";
     folder_unreachable: "그 주소의 폴더를 읽지 못했습니다.", "The folder at that address could not be read.";
+    folder_no_password: "이 폴더의 비밀번호를 시스템의 보관소에서 읽지 못했습니다. 기기의 잠금을 풀고 다시 열어 보세요. 계속 안 되면 목록에서 지우고 다시 추가하세요.",
+        "The password of this folder could not be read from the system's store. Unlock the device and open the folder again; if that does not help, remove it from the list and add it again.";
+    folder_full: "네트워크 폴더는 32개까지 둘 수 있습니다. 쓰지 않는 폴더를 목록에서 지운 뒤 추가하세요.",
+        "Up to 32 network folders are kept. Remove one you do not use from the list, then add this one.";
     folder_refused_later: "서버가 저장된 이름과 비밀번호를 받아들이지 않습니다. 목록에서 지우고 다시 추가하세요.", "The server no longer accepts the kept name and password. Remove the folder from the list and add it again.";
     folder_changed_certificate: "서버가 전에 신뢰한 것과 다른 인증서를 보여 연결하지 않았습니다. 인증서를 바꾼 것이 맞다면 목록에서 지우고 다시 추가하세요.", "The server shows another certificate than the one that was trusted, so nothing was sent to it. If the certificate was replaced on purpose, remove the folder from the list and add it again.";
     network_reload: "다시 읽기", "Reload";
@@ -322,6 +326,19 @@ strings! {
     out_memory_desc: "재생할 파일을 미리 메모리에 올려 디스크 상태와 상관없이 이어 재생합니다.",
         "Loads each file into memory ahead of time, so playback does not depend on the disk.";
     out_macos_only: "macOS에서만 쓸 수 있습니다.", "Available on macOS only.";
+    out_upsample: "업샘플링", "Upsampling";
+    out_upsample_desc: "장치가 낼 수 있는 가장 높은 정수배(8·4·2배, 384kHz까지)로 곡을 올려 내보냅니다.",
+        "Raises each song to the highest whole multiple of its sample rate the device offers (×8, ×4 or ×2, up to 384 kHz).";
+    phone_upsample_desc: "곡의 샘플레이트의 정수배로 내보내 달라고 iPhone에 요청하고, 받아 주면 그 레이트로 올립니다.",
+        "Asks the iPhone for a whole multiple of each song's sample rate, and raises the song to it when it agrees.";
+    out_filter: "업샘플링 필터", "Upsampling Filter";
+    out_filter_desc: "출력이 곡의 정수배 샘플레이트일 때 곡을 올리는 필터입니다.",
+        "The filter a song is raised with when the output runs at a whole multiple of its sample rate.";
+    filter_sharp: "선명", "Sharp";
+    filter_slow: "완만", "Slow";
+    filter_minimum: "최소 위상", "Minimum Phase";
+    out_filter_hint: "선명: 대역 끝까지 평탄하고 그 위는 남기지 않지만, 갑작스러운 소리의 앞뒤로 길게 울립니다(지금까지의 변환). 완만: 울림이 1ms 안쪽으로 짧고, 18kHz부터 천천히 내려가며 대역 바로 위의 소리가 조금 남습니다. 최소 위상: 20kHz까지 평탄하고, 울림이 소리 뒤에만 있습니다.",
+        "Sharp: flat to the top of the band with nothing left above it, but it rings for a while before and after anything sudden (the conversion used so far). Slow: rings for under a millisecond, rolls off gently from 18 kHz and leaves a little just above the band. Minimum Phase: flat to 20 kHz, and all of its ringing comes after the sound.";
     out_quality_hint: "장치 설정을 바꿨다면 재생이 끝나거나 30초 넘게 멈춰 있을 때 원래대로 되돌립니다. 샘플레이트가 다른 곡으로 넘어갈 때는 장치를 바꾸는 동안 잠깐 끊깁니다.",
         "Changed device settings are put back when playback ends or stays paused for 30 seconds. Moving to a song with another sample rate pauses briefly while the device switches.";
     rg_mode: "기준", "Mode";

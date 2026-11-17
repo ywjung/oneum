@@ -83,15 +83,25 @@ impl ServerCertVerifier for Verifier {
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         let shown = fingerprint(end_entity.as_ref());
-        let trusted = self.pinned.as_deref() == Some(shown.as_str());
+        let trusted = self.pinned.as_deref().map(|pinned| pinned == shown);
         *self.shown.lock().unwrap_or_else(|p| p.into_inner()) = Some(shown);
-        if trusted {
+        match trusted {
             // (That the server holds this certificate's key is still checked: the
             // handshake's signature is verified below like any other.)
-            return Ok(ServerCertVerified::assertion());
+            Some(true) => Ok(ServerCertVerified::assertion()),
+            // Who trusts one certificate of a server trusts no other from it, whoever
+            // vouches for that one: the listener was told so.
+            Some(false) => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            )),
+            None => self.usual.verify_server_cert(
+                end_entity,
+                intermediates,
+                server_name,
+                ocsp_response,
+                now,
+            ),
         }
-        self.usual
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
     }
 
     fn verify_tls12_signature(
@@ -155,7 +165,18 @@ pub(super) fn connect(
     while connection.is_handshaking() {
         if let Err(error) = connection.complete_io(&mut stream) {
             let shown = shown.lock().unwrap_or_else(|p| p.into_inner()).take();
+            let pinned = pinned.map(str::to_ascii_lowercase);
             return Err(match shown {
+                // The certificate is the one that is trusted, and still it cannot be
+                // used: of a kind that is not checked here (a key too short, a
+                // certificate of the first version). Trusting it once more would
+                // change nothing.
+                Some(fingerprint)
+                    if about_the_certificate(&error)
+                        && pinned.as_deref() == Some(fingerprint.as_str()) =>
+                {
+                    failed("the server's certificate is of a kind that cannot be checked")
+                }
                 Some(fingerprint) if about_the_certificate(&error) => {
                     NetError::Untrusted { fingerprint }
                 }

@@ -297,16 +297,16 @@ check pm3.json 'not d["dialog_open"] and len(d["playlists"]) == 1' "…and Escap
 
 echo "== settings"
 # Tab and control centres for the 620-point settings window in a 1180x760 window (Korean).
-# On the Playback tab only the memory playback switch is flipped: the other two output
-# options reconfigure the real output device. Volume leveling is below the fold.
-ui 'click 1081 20' 'wait 600' 'dump se1.json' 'click 510 176' 'wait 500' 'click 846 535' 'wait 400' 'dump se2a.json' \
-   'click 846 535' 'wait 400' 'dump se2b.json' 'scroll 590 400 -264' 'wait 500' 'click 758 419' 'wait 500' 'dump se2.json' \
-   'click 703 419' 'wait 400' 'click 332 176' 'wait 500' 'click 845 448' 'wait 500' 'dump se3.json' 'click 845 448' 'wait 400' \
+# On the Playback tab only the memory playback switch is flipped: the other output
+# options reconfigure the real output device. It and volume leveling are below the fold.
+ui 'click 1081 20' 'wait 600' 'dump se1.json' 'click 510 176' 'wait 500' 'scroll 590 400 -330' 'wait 500' 'click 846 315' 'wait 400' 'dump se2a.json' \
+   'click 846 315' 'wait 400' 'dump se2b.json' 'click 758 510' 'wait 500' 'dump se2.json' \
+   'click 703 510' 'wait 400' 'click 332 176' 'wait 500' 'click 845 448' 'wait 500' 'dump se3.json' 'click 845 448' 'wait 400' \
    'click 590 176' 'wait 400' 'dump se4.json' 'key Escape' 'wait 400' 'dump se5.json' \
    'menu user_guide' 'wait 500' 'dump se7.json' 'key Escape' 'wait 400' 'dump se8.json' \
    'click 1081 20' 'wait 500' 'click 100 600' 'wait 400' 'dump se6.json'
 check se1.json 'd["settings_open"]' "the gear opens Settings"
-check se2a.json 'd["settings_tab"] == "Playback" and d["output_options"] == {"match_sample_rate": False, "exclusive": False, "memory_playback": True}' "Playback tab: the memory playback switch"
+check se2a.json 'd["settings_tab"] == "Playback" and d["output_options"] == {"match_sample_rate": False, "exclusive": False, "memory_playback": True, "upsample": False, "filter": "Sharp"}' "Playback tab: the memory playback switch"
 check se2b.json 'not d["output_options"]["memory_playback"]' "…and off again"
 check se2.json 'd["settings_tab"] == "Playback" and d["replaygain"].startswith("Track")' "Playback tab: volume leveling mode"
 check se3.json 'd["settings_tab"] == "General" and d["show_format_column"]' "General tab: the Format column switch"

@@ -98,6 +98,12 @@ pub trait PlayerHost: Send + Sync + 'static {
     fn album_of(&self, id: TrackId) -> Option<u64> {
         self.track(id).map(|t| t.album_key)
     }
+    /// Whether the track's file names an album. Songs without one that lie in one
+    /// folder count as an album where albums are shown or shuffled; they are loose
+    /// songs all the same, and follow each other as songs of different albums do.
+    fn names_an_album(&self, _id: TrackId) -> bool {
+        true
+    }
     /// The stars the listener gave a track (0: none), for a shuffle that goes by them.
     fn rating_of(&self, _id: TrackId) -> u8 {
         0
@@ -1032,10 +1038,17 @@ impl<H: PlayerHost> Player<H> {
                     .iter()
                     .find(|item| item.id == item_id)
                     .map(|item| item.track);
+                // (A song of which a section is repeated does not end by itself:
+                // nothing is mixed into what would be the middle of a round.)
+                let repeated = self
+                    .section
+                    .as_ref()
+                    .is_some_and(|(of, section)| *of == item_id && section.to_ms.is_some());
                 self.request_for(next)
                     .map(|mut request| {
-                        request.crossfade_ms =
-                            after.map_or(0, |after| self.crossfade_between(after, next.track));
+                        request.crossfade_ms = after
+                            .filter(|_| !repeated)
+                            .map_or(0, |after| self.crossfade_between(after, next.track));
                         request
                     })
                     .map_or(NextTrack::End, NextTrack::Track)
@@ -1051,7 +1064,10 @@ impl<H: PlayerHost> Player<H> {
     /// without a gap and without a fade; a fade never takes more than half of either
     /// song.
     fn crossfade_between(&self, ending: TrackId, beginning: TrackId) -> u32 {
-        if self.crossfade_secs == 0 || self.host.album_of(ending) == self.host.album_of(beginning) {
+        let one_album = self.host.album_of(ending) == self.host.album_of(beginning)
+            && self.host.names_an_album(ending)
+            && self.host.names_an_album(beginning);
+        if self.crossfade_secs == 0 || one_album {
             return 0;
         }
         let length = |track: TrackId| self.host.track(track).map_or(0, |t| t.duration_ms);
@@ -1655,9 +1671,7 @@ impl<H: PlayerHost> Player<H> {
                 self.dirty = true;
                 // Memory playback applies from the next feed on its own. How the device
                 // is used changes now: reopen the output and continue where we were.
-                if (before.match_sample_rate, before.exclusive)
-                    != (settings.match_sample_rate, settings.exclusive)
-                {
+                if before.of_the_stream() != settings.of_the_stream() {
                     let playing_from = self.chain.is_some().then(|| self.position_ms());
                     self.chain = None;
                     self.engine.close_output();
@@ -1834,6 +1848,8 @@ impl<H: PlayerHost> Player<H> {
         }
         .map(|section| (item, section));
         self.dirty = true;
+        // (Whether the next song is mixed in goes by whether a section is repeated.)
+        self.announce_next_after(item);
     }
 
     /// The section that is repeated belongs to one song: another one being current

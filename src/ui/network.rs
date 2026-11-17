@@ -39,6 +39,10 @@ pub(super) enum Why {
     Untrusted(String),
     /// What was typed is no address of a folder.
     Address,
+    /// The system's store does not hand out the folder's password right now.
+    NoPassword,
+    /// There are as many folders as are kept.
+    Full,
     /// Anything else, in the words of what went wrong.
     Other(String),
 }
@@ -295,8 +299,14 @@ impl Browser {
         self.last_try_failed = None;
         self.run("oneum-net-folder", move |tx| {
             let credentials = Credentials::of(&folder.user, &password, folder.pinned.as_deref());
-            let result = dav::list(&folder.url, &credentials.access())
-                .map(|_| ())
+            let mut folder = folder;
+            let result = dav::listing(&folder.url, &credentials.access())
+                .map(|listing| {
+                    // The folder is kept by the address its server names it by (a
+                    // server may send a request on to another of its addresses):
+                    // what is in the folder lies under that one.
+                    folder.url = listing.place;
+                })
                 .map_err(why_of);
             let _ = tx.send(Event::Tried {
                 folder,
@@ -450,7 +460,12 @@ impl Browser {
                 let credentials = folders::credentials_for(&url);
                 let result = dav::list(&url, &credentials.access())
                     .map(folder_page)
-                    .map_err(why_of);
+                    .map_err(|error| match why_of(error) {
+                        // Refused, and the name and password were not even given:
+                        // the system's store did not hand the password out.
+                        Why::Refused if folders::password_unreadable(&url) => Why::NoPassword,
+                        why => why,
+                    });
                 let _ = tx.send(Event::FolderPage { ticket, result });
             });
             return;
@@ -926,6 +941,7 @@ impl OneumApp {
                         let words = match &self.network.why {
                             Some(Why::Refused) => s.folder_refused_later,
                             Some(Why::Untrusted(_)) => s.folder_changed_certificate,
+                            Some(Why::NoPassword) => s.folder_no_password,
                             _ => s.network_failed,
                         };
                         ui.label(RichText::new(words).color(theme::dim(ui)));
@@ -1148,6 +1164,8 @@ impl OneumApp {
                 Why::Refused => "refused".to_string(),
                 Why::Untrusted(_) => "untrusted".to_string(),
                 Why::Address => "address".to_string(),
+                Why::NoPassword => "no password".to_string(),
+                Why::Full => "full".to_string(),
                 Why::Other(reason) => format!("other: {reason}"),
             }),
             "secret_selftest": network.secret_selftest.clone().map(|r| match r {

@@ -45,7 +45,7 @@ pub(super) struct Stage {
     kind: StageKind,
     pub(super) name: String,
     /// What exactly ("44,100 → 48,000 Hz", "−6.0 dB"); may be empty.
-    detail: String,
+    pub(super) detail: String,
 }
 
 /// The signal path in a word.
@@ -93,6 +93,9 @@ struct PathInputs<'a> {
     crossfade: Option<String>,
     /// The playback speed in words, while it is not the song's own.
     speed: Option<String>,
+    /// The name of the upsampling filter, while the song's rate is raised with one
+    /// the listener chose.
+    filter: Option<&'a str>,
     peak_protection: bool,
     /// The volume slider, 0..=1.
     volume: f32,
@@ -147,14 +150,18 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
         );
     }
     if input.source_rate != input.out_rate {
+        let rates = format!(
+            "{} → {} Hz",
+            group_digits(input.source_rate as usize),
+            group_digits(input.out_rate as usize)
+        );
         add(
             StageKind::Conversion,
             s.info_proc_resample,
-            format!(
-                "{} → {} Hz",
-                group_digits(input.source_rate as usize),
-                group_digits(input.out_rate as usize)
-            ),
+            match input.filter {
+                Some(filter) => format!("{rates} · {filter}"),
+                None => rates,
+            },
         );
     }
     if let Some(setting) = &input.equalizer {
@@ -299,8 +306,10 @@ pub(super) struct Extras {
     pending: Option<std::sync::mpsc::Receiver<crate::library::details::Details>>,
     pub(super) details: Option<std::sync::Arc<crate::library::details::Details>>,
     /// The song's lyrics were looked for on the internet (or are being looked for:
-    /// `pending`). Only ever true for a listener who switched online lyrics on.
+    /// `lookup`). Only ever true for a listener who switched online lyrics on.
     asked_online: bool,
+    /// The lookup of the lyrics on the internet, while it is out.
+    lookup: Option<std::sync::mpsc::Receiver<crate::library::details::Details>>,
     /// Other tracks in the library that are the same song (see `other_versions`).
     versions: Vec<crate::model::TrackId>,
     /// The synchronised line that was current when the panel was last drawn, so that
@@ -1233,33 +1242,67 @@ impl OneumApp {
         track: &crate::model::Track,
         words: bool,
     ) -> Option<std::sync::Arc<crate::library::details::Details>> {
-        // Collect a read that has finished, whichever song it was for.
-        if let Some(extras) = self.extras.as_mut()
-            && let Some(pending) = &extras.pending
-        {
-            match pending.try_recv() {
-                Ok(details) => {
-                    extras.details = Some(std::sync::Arc::new(details));
-                    extras.pending = None;
+        // Two places show what a file says, and on a phone both can be up at once
+        // with different songs (the lyrics of the song that plays, and the sheet of
+        // another song over them): each has its own, or they would take it from
+        // each other frame after frame.
+        let mut slot = match words {
+            true => self.extras.take(),
+            false => self.info_extras.take(),
+        };
+        let details = self.extras_in(&mut slot, track, words);
+        match words {
+            true => self.extras = slot,
+            false => self.info_extras = slot,
+        }
+        details
+    }
+
+    fn extras_in(
+        &mut self,
+        slot: &mut Option<Extras>,
+        track: &crate::model::Track,
+        words: bool,
+    ) -> Option<std::sync::Arc<crate::library::details::Details>> {
+        use std::sync::mpsc::TryRecvError;
+        // Collect what has finished: the read of the file, the lookup of the lyrics.
+        if let Some(extras) = slot.as_mut() {
+            if let Some(pending) = &extras.pending {
+                match pending.try_recv() {
+                    Ok(details) => {
+                        extras.details = Some(std::sync::Arc::new(details));
+                        extras.pending = None;
+                    }
+                    Err(TryRecvError::Disconnected) => extras.pending = None,
+                    Err(TryRecvError::Empty) => {}
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => extras.pending = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if let Some(lookup) = &extras.lookup {
+                match lookup.try_recv() {
+                    Ok(details) => {
+                        extras.details = Some(std::sync::Arc::new(details));
+                        extras.lookup = None;
+                    }
+                    Err(TryRecvError::Disconnected) => extras.lookup = None,
+                    Err(TryRecvError::Empty) => {}
+                }
             }
         }
-        let known = self.extras.as_ref().is_some_and(|e| {
+        let known = slot.as_ref().is_some_and(|e| {
             e.track == track.id && e.mtime_ns == track.mtime_ns && e.available == track.available
         });
         if known {
             if words && self.settings.online_lyrics {
-                self.seek_lyrics_online(track);
+                self.seek_lyrics_online(slot, track);
             }
-            return self.extras.as_ref().and_then(|e| e.details.clone());
+            return slot.as_ref().and_then(|e| e.details.clone());
         }
         // Another song. One read at a time: stepping through a list on a drive that is
         // slow to answer must not start a thread for every row passed. While a read
         // for an earlier song is still out, this one waits (the thread wakes the
-        // window when it is done, and the question is asked again).
-        if self.extras.as_ref().is_some_and(|e| e.pending.is_some()) {
+        // window when it is done, and the question is asked again). (A lookup of
+        // lyrics on the internet does not make a file wait: it may take seconds.)
+        if slot.as_ref().is_some_and(|e| e.pending.is_some()) {
             return None;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1273,13 +1316,14 @@ impl OneumApp {
                     core.request_repaint();
                 })
                 .is_ok();
-        self.extras = Some(Extras {
+        *slot = Some(Extras {
             track: track.id,
             mtime_ns: track.mtime_ns,
             available: track.available,
             pending: started.then_some(rx),
             details: None,
             asked_online: false,
+            lookup: None,
             versions: other_versions(&self.snapshot.tracks, track),
             shown_line: None,
             line_top: None,
@@ -1290,18 +1334,19 @@ impl OneumApp {
 
     /// Looks for the lyrics of `track` on the internet, once: when its file has been
     /// read and has none that follow the song. Only called while the listener has
-    /// online lyrics switched on and the lyrics are shown.
-    fn seek_lyrics_online(&mut self, track: &crate::model::Track) {
-        let Some(extras) = self.extras.as_mut() else {
+    /// online lyrics switched on and the lyrics are shown. One song at a time: while
+    /// a lookup for another song is still out, this one waits its turn.
+    fn seek_lyrics_online(&mut self, slot: &mut Option<Extras>, track: &crate::model::Track) {
+        use std::sync::atomic::Ordering;
+        let Some(extras) = slot.as_mut() else {
             return;
         };
         let Some(details) = extras.details.clone() else {
             return;
         };
-        if extras.asked_online || extras.pending.is_some() {
+        if extras.asked_online {
             return;
         }
-        extras.asked_online = true;
         let song = crate::net::lyrics::Song {
             title: &track.title,
             artist: &track.artist,
@@ -1309,8 +1354,14 @@ impl OneumApp {
             duration_ms: track.duration_ms,
         };
         if !details.wants_online_lyrics() || !song.can_be_asked_for() {
+            extras.asked_online = true;
             return;
         }
+        // (The thread that is out wakes the window when it is done: asked again then.)
+        if self.lyrics_busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        extras.asked_online = true;
         let (title, artist, album, duration_ms) = (
             track.title.clone(),
             track.artist.clone(),
@@ -1319,6 +1370,7 @@ impl OneumApp {
         );
         let source = self.lyrics_source.clone();
         let core = self.core.clone();
+        let busy = self.lyrics_busy.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let started = std::thread::Builder::new()
             .name("oneum-lyrics".into())
@@ -1334,11 +1386,15 @@ impl OneumApp {
                     &source,
                     &song,
                 );
+                busy.store(false, Ordering::Release);
                 let _ = tx.send(details);
                 core.request_repaint();
             })
             .is_ok();
-        extras.pending = started.then_some(rx);
+        if !started {
+            self.lyrics_busy.store(false, Ordering::Release);
+        }
+        extras.lookup = started.then_some(rx);
     }
 
     /// Switches lyrics from the internet on or off. What is shown of the song at hand
@@ -1352,9 +1408,7 @@ impl OneumApp {
     /// The lyrics of the song whose details are shown are being looked for on the
     /// internet right now.
     pub(super) fn seeking_lyrics(&self) -> bool {
-        self.extras
-            .as_ref()
-            .is_some_and(|e| e.asked_online && e.pending.is_some())
+        self.extras.as_ref().is_some_and(|e| e.lookup.is_some())
     }
 
     /// Synchronised lyrics of the song that is playing, in a box of their own that
@@ -1529,6 +1583,18 @@ impl OneumApp {
                 .then(|| self.lang.crossfade_detail(self.player.crossfade_secs)),
             speed: (self.player.speed_percent != 100)
                 .then(|| self.lang.speed_detail(self.player.speed_percent)),
+            filter: {
+                use crate::audio::upsample::Filter;
+                let filter = self.player.output_settings.filter;
+                // (At another speed the song goes through a rate of its own on the
+                // way: converted the usual way.)
+                (self.player.speed_percent == 100 && filter.applies(source.sample_rate, out_rate))
+                    .then_some(match filter {
+                        Filter::Sharp => s.filter_sharp,
+                        Filter::Slow => s.filter_slow,
+                        Filter::Minimum => s.filter_minimum,
+                    })
+            },
             peak_protection: self.player.peak_limited_frames > 0,
             volume: self.player.volume,
             dither_bits: self.player.dither_bits,
@@ -2177,9 +2243,10 @@ impl OneumApp {
         &self,
         track: crate::model::TrackId,
     ) -> Vec<std::sync::Arc<crate::model::Track>> {
-        self.extras
-            .as_ref()
-            .filter(|extras| extras.track == track)
+        [&self.extras, &self.info_extras]
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .find(|extras| extras.track == track)
             .map(|extras| {
                 extras
                     .versions
@@ -2593,6 +2660,7 @@ mod tests {
             crossfeed: None,
             crossfade: None,
             speed: None,
+            filter: None,
             peak_protection: false,
             volume: 1.0,
             dither_bits: None,

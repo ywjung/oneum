@@ -1059,8 +1059,12 @@ impl Db {
         let dropped = all.len().saturating_sub(keep);
         tx.execute("DELETE FROM history", [])?;
         {
-            let mut stmt =
-                tx.prepare("INSERT INTO history (track_id, played_at) VALUES (?1, ?2)")?;
+            // (A song that was taken out of the library since the plays were matched
+            // has no plays any more: a scan may run beside this.)
+            let mut stmt = tx.prepare(
+                "INSERT INTO history (track_id, played_at)
+                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1)",
+            )?;
             for (id, at) in &all[dropped..] {
                 stmt.execute(params![id, at])?;
             }

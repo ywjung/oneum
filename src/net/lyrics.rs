@@ -5,8 +5,10 @@
 //! This is the one thing in the app that talks to the internet, and it does so only
 //! when the listener has switched it on (it is off unless they do) and only for a
 //! song whose lyrics are being looked at. What leaves the device is what identifies
-//! the song to the service: its title, its artist, its album and its length. Nothing
-//! else does: no name of a file or a folder, nothing about the library or the device.
+//! the song to the service: its title, its artist, its album and its length, as the
+//! library shows them. (The title of a file whose tags give none is the file's name
+//! without its folder; such a file mostly has no artist either, and is then not asked
+//! for.) Nothing else does: no path, nothing about the library or the device.
 use super::NetError;
 use super::http::{self, Access, Limits};
 use std::fmt::Write as _;
@@ -58,19 +60,25 @@ fn encoded(value: &str) -> String {
     out
 }
 
-/// The address the song is asked for at, on the service at `base`.
-pub fn address(base: &str, song: &Song<'_>) -> String {
+/// The longest song the service takes a length for, in seconds: a longer one is
+/// refused as a whole (status 400), so its length is left out.
+const MAX_ASKED_SECONDS: u64 = 3600;
+
+/// The address the song is asked for at, on the service at `base`. `with_album`: the
+/// album is named too (then only a song the service has under that album is found).
+pub fn address(base: &str, song: &Song<'_>, with_album: bool) -> String {
     let mut address = format!(
         "{}/api/get?track_name={}&artist_name={}",
         base.trim_end_matches('/'),
         encoded(song.title),
         encoded(song.artist)
     );
-    if !song.album.trim().is_empty() {
+    if with_album && !song.album.trim().is_empty() {
         let _ = write!(address, "&album_name={}", encoded(song.album));
     }
-    if song.duration_ms > 0 {
-        let _ = write!(address, "&duration={}", (song.duration_ms + 500) / 1000);
+    let seconds = (song.duration_ms + 500) / 1000;
+    if (1..=MAX_ASKED_SECONDS).contains(&seconds) {
+        let _ = write!(address, "&duration={seconds}");
     }
     address
 }
@@ -98,13 +106,29 @@ fn read_answer(bytes: &[u8]) -> Option<Answer> {
 }
 
 /// Asks the service at `base` for a song's lyrics. `Ok(None)`: it knows no such song.
+///
+/// The service finds a song under an album only when the album is spelled as it has
+/// it, and albums are spelled in many ways (a translated title, "(Deluxe Edition)").
+/// So a song it does not find under its album is asked for once more without one:
+/// then title, artist and length decide.
 pub fn ask(base: &str, song: &Song<'_>) -> Result<Option<Answer>, NetError> {
+    let named = !song.album.trim().is_empty();
+    match ask_at(&address(base, song, true))? {
+        None if named => ask_at(&address(base, song, false)),
+        answer => Ok(answer),
+    }
+}
+
+fn ask_at(address: &str) -> Result<Option<Answer>, NetError> {
     let limits = Limits::new(MAX_ANSWER_BYTES);
-    match http::get_web(&address(base, song), &limits, &Access::default()) {
+    match http::get_web(address, &limits, &Access::default()) {
         Ok(body) => read_answer(&body)
             .map(Some)
             .ok_or(NetError::BadResponse("not an answer of the lyrics service")),
-        Err(NetError::Status(404)) => Ok(None),
+        // 404: no such song. 400: a song it cannot be asked for this way (asking
+        // again would be answered the same). And an address longer than addresses
+        // may be (a title of hundreds of letters): not asked at all.
+        Err(NetError::Status(404 | 400) | NetError::BadAddress) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -122,11 +146,27 @@ mod tests {
             duration_ms: 253_600,
         };
         assert_eq!(
-            address("https://lrclib.net/", &song),
+            address("https://lrclib.net/", &song, true),
             "https://lrclib.net/api/get?track_name=%EB%B0%A4%ED%8E%B8%EC%A7%80\
              &artist_name=%EC%95%84%EC%9D%B4%EC%9C%A0%20%28IU%29\
              &album_name=Palette%20%26%20more&duration=254"
         );
+        assert_eq!(
+            address("https://lrclib.net/", &song, false),
+            "https://lrclib.net/api/get?track_name=%EB%B0%A4%ED%8E%B8%EC%A7%80\
+             &artist_name=%EC%95%84%EC%9D%B4%EC%9C%A0%20%28IU%29&duration=254"
+        );
+        // The service takes a length of up to an hour: a longer song is asked for
+        // without one (it would be refused with it).
+        for (duration_ms, said) in [(3_600_400, "&duration=3600"), (3_600_600, ""), (400, "")] {
+            let long = Song {
+                duration_ms,
+                ..song
+            };
+            let address = address("https://lrclib.net", &long, false);
+            assert_eq!(address.contains("duration"), !said.is_empty(), "{address}");
+            assert!(address.ends_with(said), "{address}");
+        }
         let bare = Song {
             title: "A-b_c.d~e",
             artist: "X",
@@ -134,7 +174,7 @@ mod tests {
             duration_ms: 0,
         };
         assert_eq!(
-            address("http://127.0.0.1:9", &bare),
+            address("http://127.0.0.1:9", &bare, true),
             "http://127.0.0.1:9/api/get?track_name=A-b_c.d~e&artist_name=X"
         );
         assert!(song.can_be_asked_for());

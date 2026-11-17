@@ -123,8 +123,8 @@ pub struct DataImport {
 
 /// How the file names a song: its path below its music folder, the folder's own name
 /// first, with `/` between the parts ("Music/Artist/Album/01 Song.flac"). A song of no
-/// music folder (a file that was opened by itself) is named by the last three parts of
-/// its path.
+/// music folder (a file that was opened by itself) is named by its file's name
+/// alone: the folders above it may tell of the person or the device.
 pub fn song_key(root: Option<&Path>, path: &Path) -> String {
     let parts = |path: &Path| -> Vec<String> {
         path.components()
@@ -137,7 +137,7 @@ pub fn song_key(root: Option<&Path>, path: &Path) -> String {
     let all = parts(path);
     let kept = match root.and_then(|root| Some((root, path.strip_prefix(root).ok()?))) {
         Some((root, below)) => parts(below).len() + usize::from(root.file_name().is_some()),
-        None => 3,
+        None => 1,
     };
     all[all.len().saturating_sub(kept)..].join("/")
 }
@@ -409,14 +409,15 @@ mod tests {
             song_key(Some(Path::new("/")), Path::new("/Artist/Album/a.mp3")),
             "Artist/Album/a.mp3"
         );
-        // Of no music folder, or of one it does not lie in: the end of its path.
+        // Of no music folder, or of one it does not lie in: its file's name alone
+        // (the folders above it are the person's, not the library's).
         assert_eq!(
             song_key(None, Path::new("/Volumes/Stick/x/y/z/a.mp3")),
-            "y/z/a.mp3"
+            "a.mp3"
         );
         assert_eq!(
             song_key(Some(root), Path::new("/elsewhere/b/a.mp3")),
-            "elsewhere/b/a.mp3"
+            "a.mp3"
         );
     }
 

@@ -346,7 +346,7 @@ fn build_rows(
         }
         _ => None,
     };
-    if is_track_list && let Some((key, ascending)) = effective_sort {
+    let put_in_order = |rows: &mut Vec<Row>, key: SortKey, ascending: bool| {
         // Sort distinct track indices once, then order rows by rank (rows may repeat a track).
         let mut indices: Vec<u32> = rows.iter().map(|r| r.idx).collect();
         indices.sort_unstable();
@@ -358,9 +358,22 @@ fn build_rows(
             .map(|(r, i)| (i, r))
             .collect();
         rows.sort_by_key(|r| rank.get(&r.idx).copied().unwrap_or(usize::MAX));
+    };
+    // No more songs than the search that was typed wants, counted in the order the
+    // search itself names ("sort:plays limit:10": the ten most played), whatever
+    // order the list is then shown in.
+    let counted_first = is_track_list && q.limit.is_some() && q.order.is_some();
+    if counted_first && let (Some((key, ascending)), Some(most)) = (q.order, q.limit) {
+        put_in_order(&mut rows, key, ascending);
+        rows.truncate(most);
     }
-    // No more songs than the search that was typed wants.
-    if is_track_list && let Some(most) = q.limit {
+    if is_track_list && let Some((key, ascending)) = effective_sort {
+        put_in_order(&mut rows, key, ascending);
+    }
+    if is_track_list
+        && !counted_first
+        && let Some(most) = q.limit
+    {
         rows.truncate(most);
     }
     rows

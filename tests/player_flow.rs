@@ -1736,6 +1736,7 @@ fn changing_output_settings_keeps_the_position() {
         match_sample_rate: true,
         exclusive: true,
         memory_playback: true,
+        ..OutputSettings::default()
     }));
     let snap = rig.wait("reopened and playing", |s| {
         s.output_settings.exclusive && s.state == PlayState::Playing && rig.feeds() > feeds

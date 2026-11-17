@@ -81,8 +81,9 @@ impl Folder {
         let Ok(own) = Url::parse_web(&self.url) else {
             return false;
         };
-        let own_path = own.path.split('?').next().unwrap_or("/");
-        own.origin() == url.origin() && url.path.starts_with(own_path)
+        // (As places: a server may write the folder's own path in another way than
+        // it was typed here, and the entries of its listing come as it writes them.)
+        own.origin() == url.origin() && url.place().starts_with(&own.place())
     }
 }
 
@@ -189,16 +190,38 @@ pub fn credentials_for(url: &str) -> Credentials {
     let Some(folder) = folder_of(url) else {
         return Credentials::default();
     };
-    let password = if folder.user.is_empty() {
-        Secret::default()
-    } else {
-        password_of(&folder.id).unwrap_or_default()
+    let password = match folder.user.is_empty() {
+        true => Some(Secret::default()),
+        false => password_of(&folder.id),
     };
-    Credentials {
-        user: folder.user,
-        password,
-        pinned: folder.pinned,
+    match password {
+        Some(password) => Credentials {
+            user: folder.user,
+            password,
+            pinned: folder.pinned,
+        },
+        // The system's store does not hand the password out (locked, or the person
+        // said no): the server is asked as nobody. A name with a password that is
+        // not the right one would count as a failed sign-in there, request after
+        // request, and a NAS shuts out who fails too often.
+        None => {
+            tracing::warn!(
+                "the password of a network folder is not handed out by the system's store"
+            );
+            Credentials {
+                user: String::new(),
+                password: Secret::default(),
+                pinned: folder.pinned,
+            }
+        }
     }
+}
+
+/// Whether the address lies in a folder that has a name to sign in with, the password
+/// of which the system's store does not hand out right now.
+pub fn password_unreadable(url: &str) -> bool {
+    folder_of(url)
+        .is_some_and(|folder| !folder.user.is_empty() && password_of(&folder.id).is_none())
 }
 
 #[cfg(test)]
@@ -266,13 +289,61 @@ mod tests {
             "me"
         );
         forget_password("folder-a");
-        assert_eq!(
-            of("https://nas.local:5006/music/a.flac"),
-            Some(("me".into(), String::new()))
-        );
+        // (Without its password the folder is asked as nobody.)
+        assert_eq!(of("https://nas.local:5006/music/a.flac"), None);
         assert!(secrets::get("folder-a").is_none());
         secrets::remove("folder-b");
         set_known(&[]);
+
+        // A folder whose password the system's store does not hand out is asked as
+        // nobody: never with the name and a password that is not the right one.
+        // (In this test, which owns the list of folders: the tests run side by side.)
+        let locked = folder("folder-locked", "https://locked.example/share/", "me");
+        let open = folder("folder-open-2", "https://open.example/share/", "");
+        set_known(&[locked, open]);
+        let found = credentials_for("https://locked.example/share/a.flac");
+        assert!(found.access().account.is_none());
+        assert!(password_unreadable("https://locked.example/share/a.flac"));
+        // A folder without a name has no password to miss.
+        assert!(!password_unreadable("https://open.example/share/a.flac"));
+        assert!(!password_unreadable("https://elsewhere.example/a.flac"));
+        keep_password("folder-locked", &Secret::new("word")).unwrap();
+        assert!(!password_unreadable("https://locked.example/share/a.flac"));
+        let found = credentials_for("https://locked.example/share/a.flac");
+        assert_eq!(found.access().account, Some(("me", "word")));
+        forget_password("folder-locked");
+    }
+
+    /// A server writes the places in a folder its own way: the hex digits of an
+    /// escape in lower case, an escape where none is needed, the folder's name in
+    /// another case. They are in the folder all the same, and what only begins
+    /// like it is not.
+    #[test]
+    fn a_place_written_another_way_is_still_in_its_folder() {
+        let korean = folder(
+            "folder-k",
+            "https://nas.example/%EC%9D%8C%EC%95%85/Live%20(2020)/",
+            "me",
+        );
+        let url = |text: &str| Url::parse_web(text).unwrap();
+        for inside in [
+            "https://nas.example/%EC%9D%8C%EC%95%85/Live%20(2020)/a.flac",
+            "https://nas.example/%ec%9d%8c%ec%95%85/Live%20%282020%29/a.flac",
+            "https://nas.example/음악/live%20(2020)/sub/b.flac",
+            "https://NAS.example/%EC%9D%8C%EC%95%85/Live%20(2020)/",
+        ] {
+            assert!(korean.holds(&url(inside)), "{inside}");
+        }
+        for outside in [
+            "https://nas.example/%EC%9D%8C%EC%95%85/Live%20(2020)2/a.flac",
+            "https://nas.example/%EC%9D%8C%EC%95%85/a.flac",
+            "https://nas.example/%EC%9D%8C%EC%95%85/Live%20(2020)%2Fa.flac",
+            "http://nas.example/%EC%9D%8C%EC%95%85/Live%20(2020)/a.flac",
+            "https://nas.example:8443/%EC%9D%8C%EC%95%85/Live%20(2020)/a.flac",
+        ] {
+            assert!(!korean.holds(&url(outside)), "{outside}");
+        }
+        assert_eq!(url("https://h/A%2fB/%ED%95%9C?x=%41").place(), "/a%2fb/한");
     }
 
     #[test]

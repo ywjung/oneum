@@ -347,7 +347,16 @@ impl WavPack {
         let mut at = lo;
         loop {
             let Some(header) = self.header_at(at)? else {
-                return Ok(None);
+                // No block begins here: the end of the file, or a block whose
+                // beginning is damaged. Past such a block the walk goes on from the
+                // next one that can be found (as playing through does).
+                match self.sync(at.saturating_add(1), self.file_len)? {
+                    Some((place, _)) => {
+                        at = place;
+                        continue;
+                    }
+                    None => return Ok(None),
+                }
             };
             let frames = u64::from(header.block_samples);
             if frames > 0 && header.block_index + frames > frame {
@@ -468,7 +477,13 @@ impl Blocks for WavPack {
                     let skip = std::mem::take(&mut self.skip).min(frames) as usize;
                     let samples = &decoded.samples[skip * self.format.channels..];
                     if self.format.float {
-                        out.extend(samples.iter().map(|s| f32::from_bits(*s as u32)));
+                        // (What is no number must not get into the filters behind
+                        // the decoder: it would stay in them.)
+                        out.extend(samples.iter().map(|s| {
+                            Some(f32::from_bits(*s as u32))
+                                .filter(|sample| sample.is_finite())
+                                .unwrap_or(0.0)
+                        }));
                     } else {
                         let scale = 1.0 / (1u64 << (self.format.bits - 1)) as f64;
                         out.extend(samples.iter().map(|s| (f64::from(*s) * scale) as f32));
@@ -505,7 +520,9 @@ impl Blocks for WavPack {
             Some((place, first_frame)) => {
                 self.next_block = place;
                 self.next_frame = first_frame;
-                self.skip = frame - first_frame;
+                // (A block that begins after the place sought, where the file has
+                // a hole in it, is played from its beginning.)
+                self.skip = frame.saturating_sub(first_frame);
             }
             None => self.ended = true,
         }
@@ -522,8 +539,36 @@ impl Blocks for WavPack {
 
 use ape_decoder::{ApeDecoder, ApeError};
 
+/// A reader that gives as many bytes as were asked for, but at the end of the file.
+///
+/// The Monkey's Audio decoder reads a whole frame (megabytes) with one call and takes
+/// fewer bytes for a broken file. A file that is still arriving, from a server or
+/// into memory, gives what has arrived so far, as readers may.
+struct Filling(Box<dyn ReadSeek>);
+
+impl Read for Filling {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut got = 0;
+        while got < buf.len() {
+            match self.0.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(got)
+    }
+}
+
+impl Seek for Filling {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
 pub(super) struct Ape {
-    decoder: ApeDecoder<Box<dyn ReadSeek>>,
+    decoder: ApeDecoder<Filling>,
     info: SourceInfo,
     bytes_per_sample: usize,
     /// The frame of the file decoded next (a frame of this format is seconds long).
@@ -542,7 +587,7 @@ fn ape_refusal(e: ApeError) -> PlaybackError {
 
 impl Ape {
     fn new(reader: Box<dyn ReadSeek>, in_memory: bool) -> Result<Self, PlaybackError> {
-        let decoder = ApeDecoder::new(reader).map_err(ape_refusal)?;
+        let decoder = ApeDecoder::new(Filling(reader)).map_err(ape_refusal)?;
         let ape = decoder.info();
         if ape.is_floating_point {
             return Err(refuse("Monkey's Audio with floating point samples"));
@@ -792,6 +837,29 @@ mod tests {
         assert_eq!(all[..from], round[..from], "before it");
         assert_eq!(all[to..44_100 * 2], round[to..], "after it");
 
+        // A block whose very beginning is damaged, in a short file (which is walked
+        // from block to block): a place after it is still found, and the song plays
+        // on from there. (It ended the song without a word.)
+        let (mut short, round) = long_wavpack(1);
+        let first = BlockHeader::parse(&short).unwrap();
+        let second_at = first.block_len();
+        let second = BlockHeader::parse(&short[second_at..]).unwrap();
+        short[second_at + 2] ^= 0x5A;
+        let sought = u64::from(first.block_samples) + u64::from(second.block_samples) + 1_000;
+        let mut decoder = WavPack::new(Box::new(std::io::Cursor::new(short)), 0, true).unwrap();
+        decoder.seek(sought).unwrap();
+        let mut after = Vec::new();
+        while decoder.next(&mut out).unwrap() {
+            after.extend_from_slice(&out);
+        }
+        assert_eq!(after.len() as u64, (44_100 - sought) * 2);
+        assert_eq!(after[..], round[sought as usize * 2..]);
+        // And one into the damaged block itself begins at the next block.
+        decoder.seek(u64::from(first.block_samples) + 10).unwrap();
+        assert!(decoder.next(&mut out).unwrap());
+        let next = (first.block_samples + second.block_samples) as usize * 2;
+        assert_eq!(out[..64], round[next..next + 64]);
+
         // Cut in the middle of a block: what is whole plays, and the song ends.
         file.truncate(second_at + 100);
         let mut decoder = WavPack::new(Box::new(std::io::Cursor::new(file)), 0, true).unwrap();
@@ -800,6 +868,41 @@ mod tests {
             frames += out.len() / 2;
         }
         assert_eq!(frames, first.block_samples as usize);
+    }
+
+    /// A file that arrives in pieces (from a server, or while it is loaded into
+    /// memory) gives a few bytes at a time: Monkey's Audio decodes all the same.
+    #[test]
+    fn monkeys_audio_reads_a_file_that_comes_in_pieces() {
+        /// At most three bytes a read.
+        struct Trickle(std::io::Cursor<Vec<u8>>);
+        impl Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let most = buf.len().min(3);
+                self.0.read(&mut buf[..most])
+            }
+        }
+        impl Seek for Trickle {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/silence.ape");
+        let file = std::fs::read(path).expect("fixture");
+        let frames_of = |reader: Box<dyn ReadSeek>| {
+            let mut decoder = Ape::new(reader, false).expect("opens");
+            let (mut frames, mut out) = (0, Vec::new());
+            while decoder.next(&mut out).expect("decodes") {
+                frames += out.len() / 2;
+            }
+            frames
+        };
+        let whole = frames_of(Box::new(std::io::Cursor::new(file.clone())));
+        assert_eq!(whole, 183_456);
+        assert_eq!(
+            frames_of(Box::new(Trickle(std::io::Cursor::new(file)))),
+            whole
+        );
     }
 
     #[test]

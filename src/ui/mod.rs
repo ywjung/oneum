@@ -257,6 +257,9 @@ pub(super) struct PeqEdit {
     pub(super) selected_before: Option<String>,
     /// What the player was last sent, so that it is sent again only when it changed.
     pub(super) heard: Option<crate::audio::PeqProfile>,
+    /// The editor has been on screen with it. (One that a verification script makes
+    /// without the screen never is.)
+    pub(super) shown: bool,
 }
 
 /// What a file dialog was shown for.
@@ -399,8 +402,14 @@ pub struct OneumApp {
     about_icon: Option<egui::TextureHandle>,
     /// The open source notices in Settings ▸ About are shown.
     licenses_shown: bool,
-    /// What the file of the song in the info panel says beyond the library.
+    /// What the file of the song in the info panel says beyond the library (on a
+    /// phone: of the song whose lyrics are shown).
     extras: Option<panels::Extras>,
+    /// The same for the song of the phone's Song Info sheet, which may be another
+    /// one than the song whose lyrics are up behind it.
+    info_extras: Option<panels::Extras>,
+    /// A lookup of lyrics on the internet is out (one at a time).
+    lyrics_busy: Arc<std::sync::atomic::AtomicBool>,
     /// Where lyrics are looked for on the internet, for a listener who switched that
     /// on, and where what was found is kept.
     lyrics_source: Arc<crate::library::online_lyrics::Source>,
@@ -580,6 +589,8 @@ impl OneumApp {
             about_icon: None,
             licenses_shown: false,
             extras: None,
+            info_extras: None,
+            lyrics_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lyrics_source,
             rediscover: lists::Rediscover::default(),
             eq_open: false,
@@ -1778,6 +1789,7 @@ impl OneumApp {
             profile,
             selected_before: self.settings.correction.clone(),
             heard: None,
+            shown: false,
         });
         self.peq_edit_listen();
     }
@@ -1840,6 +1852,9 @@ impl OneumApp {
                 // What only the full window shows is put away.
                 self.settings_open = false;
                 self.eq_open = false;
+                self.guide_open = false;
+                self.dialog = None;
+                self.folder_form = None;
                 let size = egui::vec2(MINI_WIDTH, theme::PLAYER_BAR_HEIGHT);
                 ctx.send_viewport_cmd(Tell::MinInnerSize(size));
                 ctx.send_viewport_cmd(Tell::InnerSize(size));
@@ -1927,21 +1942,30 @@ impl OneumApp {
         let mut taken = 0;
         for search in searches {
             let list = &mut self.settings.smart_playlists;
-            let marked = format!("{} (2)", search.name);
-            if list.iter().any(|own| {
-                (own.name == search.name || own.name == marked) && own.query == search.query
-            }) {
+            // (As the settings keep them: one line, of a length that is kept.)
+            let wanted =
+                app::settings::tidy_text(&search.name, app::settings::MAX_SMART_NAME_CHARS);
+            let query =
+                app::settings::tidy_text(&search.query, app::settings::MAX_SMART_QUERY_CHARS);
+            if wanted.is_empty() || query.is_empty() {
                 continue;
             }
-            let name = if list.iter().any(|own| own.name == search.name) {
-                marked
-            } else {
-                search.name.clone()
-            };
-            list.push(app::settings::SmartPlaylist {
-                name,
-                query: search.query.clone(),
-            });
+            // The search is here already, under any name: passed over.
+            if list.iter().any(|own| own.query == query) {
+                continue;
+            }
+            if list.len() >= app::settings::MAX_SMART_PLAYLISTS {
+                break;
+            }
+            // A name that stands for another search here gets a number, the first
+            // that is free ("Rock (2)", "Rock (3)").
+            let mut name = wanted.clone();
+            let mut number = 1u32;
+            while list.iter().any(|own| own.name == name) {
+                number += 1;
+                name = format!("{wanted} ({number})");
+            }
+            list.push(app::settings::SmartPlaylist { name, query });
             taken += 1;
         }
         taken
@@ -2700,6 +2724,48 @@ impl OneumApp {
                         self.extras = None;
                         continue;
                     }
+                    // How the output is used, as the playback settings set it: a
+                    // switch flipped (`output match_rate|exclusive|memory|upsample`),
+                    // the upsampling filter (`filter sharp|slow|minimum`), and the
+                    // device by a part of its name (`output_device <text>`, or
+                    // `output_device default`).
+                    if let Some(option) = id.strip_prefix("output ") {
+                        let output = &mut self.settings.output;
+                        match option {
+                            "match_rate" => output.match_sample_rate = !output.match_sample_rate,
+                            "exclusive" => output.exclusive = !output.exclusive,
+                            "memory" => output.memory_playback = !output.memory_playback,
+                            "upsample" => output.upsample = !output.upsample,
+                            _ => {}
+                        }
+                        self.core
+                            .player
+                            .send(Command::SetOutput(self.settings.output));
+                        continue;
+                    }
+                    if let Some(name) = id.strip_prefix("filter ") {
+                        if let Some(filter) = crate::audio::upsample::Filter::named(name) {
+                            self.settings.output.filter = filter;
+                            self.core
+                                .player
+                                .send(Command::SetOutput(self.settings.output));
+                        }
+                        continue;
+                    }
+                    if let Some(name) = id.strip_prefix("output_device ") {
+                        let devices = crate::audio::output::list_output_devices();
+                        let wanted = (name != "default")
+                            .then(|| devices.iter().find(|d| d.name.contains(name)))
+                            .flatten()
+                            .map(|device| device.id.clone());
+                        if name == "default" || wanted.is_some() {
+                            self.settings.output_device = wanted;
+                            self.core.player.send(Command::SetOutputDevice(
+                                self.settings.output_device.clone(),
+                            ));
+                        }
+                        continue;
+                    }
                     // Playback speed, in percent (as the playback settings set it).
                     if let Some(percent) = id.strip_prefix("speed ") {
                         if let Ok(percent) = percent.parse::<u16>() {
@@ -3141,10 +3207,19 @@ impl OneumApp {
             ],
             "peak": [self.meter.peak_lit(0), self.meter.peak_lit(1)],
         });
+        // What is done to the samples of the song that plays, stage by stage.
+        state["signal_path"] = serde_json::json!(self.signal_path().map(|path| {
+            path.stages
+                .iter()
+                .map(|stage| format!("{}: {}", stage.name, stage.detail))
+                .collect::<Vec<_>>()
+        }));
         state["output_options"] = serde_json::json!({
             "match_sample_rate": self.settings.output.match_sample_rate,
             "exclusive": self.settings.output.exclusive,
             "memory_playback": self.settings.output.memory_playback,
+            "upsample": self.settings.output.upsample,
+            "filter": format!("{:?}", self.settings.output.filter),
         });
         state["perf"] = serde_json::json!({
             "first_frame_ms": self.perf.first_frame_ms,
@@ -3608,6 +3683,29 @@ impl eframe::App for OneumApp {
         memory::note_frame(atlas, rows_used);
         if !self.phone_mode && std::mem::take(&mut self.mini_toggle) {
             self.toggle_mini(&ctx);
+        }
+        // The mini player shows the player bar and nothing else. What needs the whole
+        // window (a question, Settings, the guide, the equalizer, a form, a message
+        // with something to press) brings the whole window back: it would otherwise
+        // be there unseen, and keys would go to it.
+        if self.mini.is_some()
+            && (self.dialog.is_some()
+                || self.settings_open
+                || self.eq_open
+                || self.guide_open
+                || self.folder_form.is_some()
+                || self.alert.is_some())
+        {
+            self.toggle_mini(&ctx);
+        }
+        // A correction that is being made on screen is heard while it is made. Where
+        // its editor is gone (Settings was closed), so is what was not saved of it.
+        let editor_there = match self.phone_mode {
+            true => self.phone.holds_settings(),
+            false => self.settings_open,
+        };
+        if self.peq_edit.as_ref().is_some_and(|edit| edit.shown) && !editor_there {
+            self.peq_edit_cancel();
         }
         self.sync_frame(&ctx);
         self.global_shortcuts(&ctx);

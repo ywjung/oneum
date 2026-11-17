@@ -242,7 +242,7 @@ fn get_returns_the_body_and_sends_what_servers_expect() {
         request.header("host"),
         Some(server.addr().to_string().as_str())
     );
-    assert_eq!(request.header("user-agent"), Some("OnEum"));
+    assert_eq!(request.header("user-agent"), Some(http::USER_AGENT));
     assert_eq!(request.header("connection"), Some("close"));
     assert_eq!(request.header("accept-encoding"), Some("identity"));
     assert_eq!(request.header("range"), None);
@@ -384,7 +384,7 @@ fn post_sends_the_body_and_returns_any_status() {
     );
     assert_eq!(request.header("soapaction"), Some("\"urn:x#Browse\""));
     assert_eq!(request.header("content-length"), Some("13"));
-    assert_eq!(request.header("user-agent"), Some("OnEum"));
+    assert_eq!(request.header("user-agent"), Some(http::USER_AGENT));
     assert_eq!(request.header("connection"), Some("close"));
 }
 

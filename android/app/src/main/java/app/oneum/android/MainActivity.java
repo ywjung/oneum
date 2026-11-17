@@ -571,9 +571,9 @@ public final class MainActivity extends NativeActivity {
     }
 
     public void updatePlayback(String title, String artist, String album, long durationMs,
-            long positionMs, boolean playing, String artPath) {
+            long positionMs, boolean playing, float speed, String artPath) {
         PlaybackService.State state = new PlaybackService.State(
-                title, artist, album, durationMs, positionMs, playing, artPath);
+                title, artist, album, durationMs, positionMs, playing, speed, artPath);
         runOnUiThread(() -> {
             if (playing) {
                 askForNotifications();
@@ -583,7 +583,11 @@ public final class MainActivity extends NativeActivity {
     }
 
     public void stopPlayback() {
-        runOnUiThread(PlaybackService::end);
+        runOnUiThread(() -> {
+            PlaybackService.end();
+            // (The notification goes with the service; the widgets are told.)
+            NowPlayingWidget.nothing(this);
+        });
     }
 
     // ----- pickers, files from other apps -----------------------------------------------

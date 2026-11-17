@@ -25,6 +25,9 @@ pub struct NowPlayingInfo {
     pub duration_s: f64,
     pub position_s: f64,
     pub playing: bool,
+    /// How fast the song goes, as a multiple of its own speed: the system moves the
+    /// position it shows by this between what it is told.
+    pub rate: f64,
     /// Cached cover image file, if any.
     pub art_path: Option<PathBuf>,
 }
@@ -43,19 +46,7 @@ impl MediaSession {
 
     pub fn update(&mut self, info: Option<&NowPlayingInfo>) {
         match info {
-            Some(info) => super::java::update_playback(
-                &info.title,
-                &info.artist,
-                &info.album,
-                (info.duration_s * 1000.0) as i64,
-                (info.position_s * 1000.0) as i64,
-                info.playing,
-                &info
-                    .art_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ),
+            Some(info) => super::java::update_playback(info),
             None => super::java::stop_playback(),
         }
     }

@@ -84,12 +84,15 @@ pub struct Settings {
     /// Headphone crossfeed (off by default).
     pub crossfeed: Crossfeed,
     /// Crossfade between songs, in seconds (0, the default: none).
+    #[serde(deserialize_with = "lenient_number")]
     pub crossfade_secs: u8,
     /// Network folders the listener added (a share of a NAS): where each is and who
     /// to be there. Never a password: those are in the system's store for passwords.
+    #[serde(deserialize_with = "lenient_list")]
     pub network_folders: Vec<crate::net::folders::Folder>,
     /// How fast songs go, in percent of their own speed (100, the default: as they
     /// are; see `audio::pace`).
+    #[serde(deserialize_with = "lenient_number")]
     pub speed_percent: u16,
     /// Parametric correction profiles that were imported (headphone corrections), in
     /// the order they were imported.
@@ -187,6 +190,40 @@ where
     })
 }
 
+/// A whole number read for what it is worth: one too large for its place is the
+/// largest that fits, and what is no such number at all is the number's zero (which
+/// `sanitized` then brings into range), instead of costing the whole file.
+fn lenient_number<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: TryFrom<u64> + Default + num_bound::Largest,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(number) => match number.as_u64() {
+            Some(value) => T::try_from(value).unwrap_or_else(|_| T::largest()),
+            None => T::default(),
+        },
+        _ => T::default(),
+    })
+}
+
+mod num_bound {
+    /// The largest value of a number's kind.
+    pub trait Largest {
+        fn largest() -> Self;
+    }
+    impl Largest for u8 {
+        fn largest() -> Self {
+            u8::MAX
+        }
+    }
+    impl Largest for u16 {
+        fn largest() -> Self {
+            u16::MAX
+        }
+    }
+}
+
 /// A name or a search as it is kept: one line, without control characters, cut at `max`.
 pub fn tidy_text(text: &str, max: usize) -> String {
     text.chars()
@@ -203,6 +240,7 @@ impl Settings {
     pub fn sanitized(mut self) -> Self {
         self.eq = self.eq.sanitized();
         self.speed_percent = crate::audio::pace::speed_of(self.speed_percent);
+        self.crossfade_secs = self.crossfade_secs.min(MAX_CROSSFADE_SECS);
         self.eq_presets.truncate(MAX_EQ_PRESETS);
         for preset in &mut self.eq_presets {
             let values = EqSettings {
@@ -615,5 +653,39 @@ mod tests {
         assert_eq!(s.corrections.len(), 1);
         assert_eq!(s.corrections[0].name, "Phones");
         assert!(s.eq_presets.is_empty());
+    }
+
+    /// A network folder that cannot be read, or a number too large for its place,
+    /// costs itself and not the other settings (the whole file was set aside for it).
+    #[test]
+    fn one_setting_that_cannot_be_read_does_not_cost_the_others() {
+        let file = r#"{
+            "theme": "Dark",
+            "network_folders": [
+                {"pinned": 5},
+                null,
+                {"id": "folder-1", "name": "NAS", "url": "https://nas.example/music/", "user": "me", "pinned": null}
+            ],
+            "crossfade_secs": 300,
+            "speed_percent": 70000,
+            "online_lyrics": true
+        }"#;
+        let read: Settings = serde_json::from_str(file).expect("the file is read");
+        let read = read.sanitized();
+        assert_eq!(read.theme, ThemeChoice::Dark);
+        assert!(read.online_lyrics);
+        assert_eq!(read.network_folders.len(), 1);
+        assert_eq!(read.network_folders[0].user, "me");
+        assert_eq!(read.crossfade_secs, MAX_CROSSFADE_SECS);
+        // (A speed that is none of those there are is the song's own.)
+        assert_eq!(read.speed_percent, 100);
+        // What is no number at all is the setting's default.
+        let odd: Settings = serde_json::from_str(
+            r#"{"crossfade_secs": "long", "speed_percent": -3, "theme": "Light"}"#,
+        )
+        .expect("the file is read");
+        let odd = odd.sanitized();
+        assert_eq!((odd.crossfade_secs, odd.speed_percent), (0, 100));
+        assert_eq!(odd.theme, ThemeChoice::Light);
     }
 }

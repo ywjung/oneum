@@ -38,6 +38,21 @@ pub struct Entry {
 /// What the folder at `url` holds: folders first, each kind by name (numbers in names
 /// by their value, so that "2" comes before "10").
 pub fn list(url: &str, access: &Access<'_>) -> Result<Vec<Entry>, NetError> {
+    listing(url, access).map(|listing| listing.entries)
+}
+
+/// What a folder holds, and the folder's own address as its server names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    pub entries: Vec<Entry>,
+    /// The address of the folder itself. It is the one that was asked, unless the
+    /// server sent the request on to another of its addresses: what is in the folder
+    /// lies under this one.
+    pub place: String,
+}
+
+/// [`list`], with the folder's own address.
+pub fn listing(url: &str, access: &Access<'_>) -> Result<Listing, NetError> {
     let base = Url::parse_web(url)?;
     let headers = [
         ("Depth", "1"),
@@ -54,13 +69,13 @@ pub fn list(url: &str, access: &Access<'_>) -> Result<Vec<Entry>, NetError> {
     if status != 207 {
         return Err(NetError::Status(status));
     }
-    let mut entries = read_listing(&String::from_utf8_lossy(&body), &base)?;
-    entries.sort_by(|a, b| {
+    let mut listing = read_listing(&String::from_utf8_lossy(&body), &base)?;
+    listing.entries.sort_by(|a, b| {
         b.folder
             .cmp(&a.folder)
             .then_with(|| natural_key(&a.name).cmp(&natural_key(&b.name)))
     });
-    Ok(entries)
+    Ok(listing)
 }
 
 /// A name as it is ordered: lower case, with every run of digits as its number.
@@ -126,7 +141,7 @@ fn trimmed(path: &str) -> &str {
 /// The entries of a `multistatus` answer to a listing of `base`, as the server orders
 /// them. The folder itself (which the answer names too) is left out, and so is
 /// everything that is not directly in it or not on the same server.
-fn read_listing(text: &str, base: &Url) -> Result<Vec<Entry>, NetError> {
+fn read_listing(text: &str, base: &Url) -> Result<Listing, NetError> {
     #[derive(Default)]
     struct Response {
         href: Option<String>,
@@ -134,13 +149,13 @@ fn read_listing(text: &str, base: &Url) -> Result<Vec<Entry>, NetError> {
         size: Option<u64>,
     }
     let mut reader = xml::Reader::new(text);
-    let mut entries = Vec::new();
+    // What is listed: its address, its path as a place, whether it is a folder, its size.
+    let mut found: Vec<(Url, String, bool, Option<u64>)> = Vec::new();
     let mut current: Option<Response> = None;
     // The element whose text is being read ("href", "getcontentlength").
     let mut reading: Option<&'static str> = None;
     let mut text_so_far = String::new();
     let mut seen_multistatus = false;
-    let own = decoded(trimmed(&base.path));
     while let Some(event) = reader.next_event() {
         let event = event.map_err(|_| NetError::BadResponse("the listing is not XML"))?;
         match event {
@@ -188,35 +203,16 @@ fn read_listing(text: &str, base: &Url) -> Result<Vec<Entry>, NetError> {
                     let Some(response) = current.take() else {
                         continue;
                     };
-                    let Some(url) = response.href.and_then(|href| base.join(&href).ok()) else {
-                        continue;
-                    };
-                    // On this server, and directly in this folder.
-                    if url.origin() != base.origin() {
-                        continue;
-                    }
-                    let path = decoded(trimmed(&url.path));
-                    let Some(name) = path
-                        .strip_prefix(own.as_str())
-                        .and_then(|rest| rest.strip_prefix('/'))
-                        .filter(|name| !name.is_empty() && !name.contains('/'))
+                    let Some(url) = response
+                        .href
+                        .and_then(|href| base.join(&path_of(&href)).ok())
                     else {
                         continue;
                     };
-                    if name.starts_with('.') || name.chars().any(char::is_control) {
-                        continue;
-                    }
-                    let mut address = url.to_string();
-                    if response.folder && !trimmed_ends_with_slash(&address) {
-                        address.push('/');
-                    }
-                    entries.push(Entry {
-                        name: capped(name, MAX_NAME_CHARS).to_string(),
-                        url: address,
-                        folder: response.folder,
-                        size: response.size.filter(|_| !response.folder),
-                    });
-                    if entries.len() >= MAX_ENTRIES {
+                    let path = decoded(trimmed(&url.path));
+                    found.push((url, path, response.folder, response.size));
+                    // (The folder itself is one of them.)
+                    if found.len() > MAX_ENTRIES {
                         break;
                     }
                 }
@@ -227,7 +223,81 @@ fn read_listing(text: &str, base: &Url) -> Result<Vec<Entry>, NetError> {
     if !seen_multistatus {
         return Err(NetError::BadResponse("not the answer to a listing"));
     }
-    Ok(entries)
+    // The folder itself is among what is listed. A server that was asked at one
+    // address and answered for another (it sent the request on) names the folder as
+    // it knows it, and what is in the folder is told by that name: the folder whose
+    // path all the others begin with. (Letters may come in another case than they
+    // were typed in, from a server whose disk does not tell them apart.)
+    let begins = |path: &str, with: &str| {
+        path.len() >= with.len()
+            && path.is_char_boundary(with.len())
+            && path[..with.len()].eq_ignore_ascii_case(with)
+    };
+    let asked = decoded(trimmed(&base.path));
+    let own = if found
+        .iter()
+        .any(|(_, path, ..)| path.eq_ignore_ascii_case(&asked))
+    {
+        asked
+    } else {
+        found
+            .iter()
+            .filter(|(_, _, folder, _)| *folder)
+            .map(|(_, path, ..)| path)
+            .min_by_key(|path| path.len())
+            .filter(|own| found.iter().all(|(_, path, ..)| begins(path, own)))
+            .cloned()
+            .unwrap_or(asked)
+    };
+    let mut place = base.clone();
+    let mut entries = Vec::new();
+    for (url, path, folder, size) in found {
+        if path.eq_ignore_ascii_case(&own) {
+            place = url;
+            continue;
+        }
+        // Directly in this folder.
+        let Some(name) = begins(&path, &own)
+            .then(|| &path[own.len()..])
+            .and_then(|rest| rest.strip_prefix('/'))
+            .filter(|name| !name.is_empty() && !name.contains('/'))
+        else {
+            continue;
+        };
+        if name.starts_with('.') || name.chars().any(char::is_control) {
+            continue;
+        }
+        let mut address = url.to_string();
+        if folder && !trimmed_ends_with_slash(&address) {
+            address.push('/');
+        }
+        entries.push(Entry {
+            name: capped(name, MAX_NAME_CHARS).to_string(),
+            url: address,
+            folder,
+            size: size.filter(|_| !folder),
+        });
+    }
+    let mut place = place.to_string();
+    if !trimmed_ends_with_slash(&place) {
+        place.push('/');
+    }
+    Ok(Listing { entries, place })
+}
+
+/// The path an entry is named by. A server may name its entries by whole addresses,
+/// and one that stands behind another (which speaks TLS for it) writes its own name
+/// and `http://` there, not what it is reached by: only the path is taken, on the
+/// server that was asked. A space that was left as it is gets its escape.
+fn path_of(href: &str) -> String {
+    let href = href.trim();
+    let path = match href.split_once("://") {
+        Some((scheme, rest)) if scheme.bytes().all(|b| b.is_ascii_alphabetic()) => {
+            rest.find('/').map_or("/", |at| &rest[at..])
+        }
+        _ => href,
+    };
+    path.replace(' ', "%20")
 }
 
 fn trimmed_ends_with_slash(address: &str) -> bool {
@@ -281,25 +351,26 @@ mod tests {
                     false,
                     Some(5),
                 ),
-                // Left out: deeper, elsewhere, another server, hidden, the parent.
+                // A server behind another one (which speaks TLS for it) writes the
+                // name and the scheme it knows itself by: the path is what counts.
+                response(
+                    "http://nas-inside:5005/music/My%20Albums/d.flac",
+                    false,
+                    Some(7),
+                ),
+                // A space left as it is, and the folder's own name in another case
+                // (a server whose disk does not tell the cases apart).
+                response("/music/my%20albums/e f.flac", false, Some(9)),
+                // Left out: deeper, elsewhere, hidden, the parent.
                 response("/music/My%20Albums/Abbey%20Road/01.flac", false, Some(1)),
                 response("/other/x.flac", false, Some(1)),
-                response(
-                    "https://elsewhere.example/music/My%20Albums/c.flac",
-                    false,
-                    Some(1),
-                ),
-                response(
-                    "http://nas.local:5006/music/My%20Albums/d.flac",
-                    false,
-                    Some(1),
-                ),
+                response("https://elsewhere.example/other/c.flac", false, Some(1)),
                 response("/music/My%20Albums/.DS_Store", false, Some(1)),
                 response("/music/", true, None),
             ]
             .concat(),
         );
-        let entries = read_listing(&text, &base()).unwrap();
+        let entries = read_listing(&text, &base()).unwrap().entries;
         assert_eq!(
             entries,
             vec![
@@ -322,8 +393,65 @@ mod tests {
                     folder: false,
                     size: Some(5),
                 },
+                // (Asked for on the server that was asked for the listing.)
+                Entry {
+                    name: "d.flac".into(),
+                    url: "https://nas.local:5006/music/My%20Albums/d.flac".into(),
+                    folder: false,
+                    size: Some(7),
+                },
+                Entry {
+                    name: "e f.flac".into(),
+                    url: "https://nas.local:5006/music/my%20albums/e%20f.flac".into(),
+                    folder: false,
+                    size: Some(9),
+                },
             ]
         );
+        assert_eq!(path_of("http://inside/a b/c"), "/a%20b/c");
+        assert_eq!(path_of("https://inside"), "/");
+        assert_eq!(path_of("/a/b"), "/a/b");
+        assert_eq!(path_of("b c"), "b%20c");
+    }
+
+    /// A server that was asked at one address and answered for another (it sent the
+    /// request on) lists what is in the folder as it names it: that is what is
+    /// shown, and the folder's own address is the server's.
+    #[test]
+    fn a_folder_that_the_server_names_otherwise_is_read_by_that_name() {
+        let text = listing(
+            &[
+                response("/remote/dav/files/me/", true, None),
+                response("/remote/dav/files/me/Albums/", true, None),
+                response("/remote/dav/files/me/a.flac", false, Some(3)),
+            ]
+            .concat(),
+        );
+        let found = read_listing(&text, &base()).unwrap();
+        assert_eq!(found.place, "https://nas.local:5006/remote/dav/files/me/");
+        let names: Vec<&str> = found.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Albums", "a.flac"]);
+        assert_eq!(
+            found.entries[1].url,
+            "https://nas.local:5006/remote/dav/files/me/a.flac"
+        );
+        // Asked and answered at the same address: that address, and an empty folder
+        // is an empty folder.
+        let empty = listing(&response("/music/My%20Albums/", true, None));
+        let found = read_listing(&empty, &base()).unwrap();
+        assert_eq!(found.place, "https://nas.local:5006/music/My%20Albums/");
+        assert!(found.entries.is_empty());
+        // Entries that have no folder in common are not made into one.
+        let apart = listing(
+            &[
+                response("/one/", true, None),
+                response("/two/b.flac", false, Some(1)),
+            ]
+            .concat(),
+        );
+        let found = read_listing(&apart, &base()).unwrap();
+        assert_eq!(found.place, "https://nas.local:5006/music/My%20Albums/");
+        assert!(found.entries.is_empty());
     }
 
     /// Other servers write the same answer with other prefixes, or with none.
@@ -335,7 +463,7 @@ mod tests {
                     </propstat></response><d:response xmlns:d=\"DAV:\"><d:href>/music/My%20Albums/sub</d:href>\
                     <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>\
                     </d:propstat></d:response></multistatus>";
-        let entries = read_listing(text, &base()).unwrap();
+        let entries = read_listing(text, &base()).unwrap().entries;
         assert_eq!(entries.len(), 2);
         assert_eq!(
             (entries[0].name.as_str(), entries[0].size),
@@ -363,7 +491,7 @@ mod tests {
             ]
             .concat(),
         );
-        let entries = read_listing(&text, &base()).unwrap();
+        let entries = read_listing(&text, &base()).unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].size, None);
     }

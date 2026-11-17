@@ -2678,17 +2678,40 @@ impl Library {
             if tracks.is_empty() {
                 continue;
             }
-            let marked = format!("{name} ({mark})");
+            // The list is here already, under its name or a marked one: passed over.
+            let its_names = |known: &str| {
+                known == name
+                    || known
+                        .strip_prefix(name.as_str())
+                        .and_then(|rest| rest.strip_prefix(" ("))
+                        .and_then(|rest| rest.strip_suffix(')'))
+                        .is_some_and(|mark| !mark.is_empty())
+            };
             if existing
                 .iter()
-                .any(|(known, items)| (known == name || *known == marked) && items == tracks)
+                .any(|(known, items)| its_names(known) && items == tracks)
             {
                 continue;
             }
-            let name = if existing.iter().any(|(known, _)| known == name) {
-                marked
-            } else {
+            // A name that stands for another list here gets a mark, and where that
+            // one is taken too, the next ("Drive (2)", "Drive (3)").
+            let taken = |wanted: &str| existing.iter().any(|(known, _)| known == wanted);
+            let name = if !taken(name) {
                 name.clone()
+            } else {
+                // (A mark that is a number counts on; one that is a word gets a
+                // number behind it.)
+                let counted = mark.parse::<u32>().ok();
+                let mut marked = format!("{name} ({mark})");
+                let mut number = counted.unwrap_or(1);
+                while taken(&marked) {
+                    number += 1;
+                    marked = match counted {
+                        Some(_) => format!("{name} ({number})"),
+                        None => format!("{name} ({mark} {number})"),
+                    };
+                }
+                marked
             };
             lock(&self.inner.db).create_playlist_with_items(&name, unix_now(), tracks)?;
             existing.push((name, tracks.clone()));

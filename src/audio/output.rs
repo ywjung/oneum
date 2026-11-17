@@ -31,13 +31,45 @@ pub struct OutputSettings {
     /// Load each file into memory while it plays (and the next one ahead of time), so
     /// playback does not depend on the disk.
     pub memory_playback: bool,
+    /// Run the device at the highest whole multiple of the track's sample rate it
+    /// offers (44.1 kHz → 352.8 or 176.4 kHz), and raise the track to it here.
+    pub upsample: bool,
+    /// The filter a track's rate is raised with when the output runs at a whole
+    /// multiple of it (whether this setting or the device made it so).
+    pub filter: super::upsample::Filter,
 }
 
 impl OutputSettings {
     /// True when the settings ask for anything that touches the device itself.
     pub fn touches_device(&self) -> bool {
-        self.match_sample_rate || self.exclusive
+        self.match_sample_rate || self.exclusive || self.upsample
     }
+
+    /// The part of the settings that decides how the device is opened and what a
+    /// track is turned into on its way there: when it changes, what plays starts
+    /// over at the place it is at.
+    pub fn of_the_stream(&self) -> (bool, bool, bool, super::upsample::Filter) {
+        (
+            self.match_sample_rate,
+            self.exclusive,
+            self.upsample,
+            self.filter,
+        )
+    }
+}
+
+/// The highest rate upsampling goes to.
+pub const MAX_UPSAMPLED_RATE: u32 = 384_000;
+
+/// The rate to run a device at for a track of `source` Hz that is to be upsampled: the
+/// highest of eight, four and two times the track's rate that the device offers (up
+/// to 384 kHz). `None` when it offers none of them: then the rate is chosen as usual.
+pub fn choose_raised_rate(source: u32, ranges: &[(u32, u32)]) -> Option<u32> {
+    let offered = |rate: u32| ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&rate));
+    [8u32, 4, 2]
+        .iter()
+        .filter_map(|k| source.checked_mul(*k))
+        .find(|rate| *rate <= MAX_UPSAMPLED_RATE && offered(*rate))
 }
 
 /// The rate to run a device at for a track of `source` Hz, given the rates the device
@@ -620,6 +652,27 @@ mod tests {
         }
         // A virtual device offering a continuous range.
         assert_eq!(choose_rate(44_100, &[(8_000, 384_000)]), Some(44_100));
+        // Upsampling: the highest of ×8, ×4 and ×2 the device has, up to 384 kHz.
+        assert_eq!(choose_raised_rate(44_100, &dac), Some(176_400));
+        assert_eq!(choose_raised_rate(48_000, &dac), Some(192_000));
+        assert_eq!(choose_raised_rate(96_000, &dac), Some(192_000));
+        assert_eq!(choose_raised_rate(192_000, &dac), None);
+        let wide = [(8_000, 768_000)];
+        assert_eq!(choose_raised_rate(44_100, &wide), Some(352_800));
+        assert_eq!(choose_raised_rate(48_000, &wide), Some(384_000));
+        assert_eq!(choose_raised_rate(96_000, &wide), Some(384_000));
+        assert_eq!(choose_raised_rate(192_000, &wide), Some(384_000));
+        assert_eq!(choose_raised_rate(352_800, &wide), None);
+        assert_eq!(
+            choose_raised_rate(44_100, &[(44_100, 44_100), (96_000, 96_000)]),
+            None
+        );
+        assert_eq!(
+            choose_raised_rate(48_000, &[(44_100, 96_000)]),
+            Some(96_000)
+        );
+        assert_eq!(choose_raised_rate(0, &dac), None);
+        assert_eq!(choose_raised_rate(44_100, &[]), None);
     }
 
     #[test]

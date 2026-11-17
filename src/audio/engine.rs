@@ -218,20 +218,30 @@ impl Engine {
     /// the device is to be left alone: rate matching is off, the track's rate is not
     /// known, or the device cannot be asked.
     pub fn preferred_rate(&self, source_rate: Option<u32>) -> Option<u32> {
-        if !self.settings.match_sample_rate {
+        if !self.settings.match_sample_rate && !self.settings.upsample {
             return None;
         }
         let source = source_rate.filter(|r| *r > 0)?;
-        match &self.sink {
-            Sink::Offline(_) => choose_rate(source, &self.offline_rates),
-            _ => {
-                let ranges = match &self.hold {
-                    Some(hold) => hold.rate_ranges(),
-                    None => output::device_rate_ranges(&self.target_device_id()?),
-                };
-                choose_rate(source, &ranges)
-            }
-        }
+        let ranges = match &self.sink {
+            Sink::Offline(_) => self.offline_rates.clone(),
+            _ => match &self.hold {
+                Some(hold) => hold.rate_ranges(),
+                None => output::device_rate_ranges(&self.target_device_id()?),
+            },
+        };
+        // Upsampling: a whole multiple of the track's rate, as high as the device
+        // goes. A device that has none is run as for a track that is not upsampled:
+        // at the track's rate where that is asked for, and left alone otherwise.
+        self.settings
+            .upsample
+            .then(|| output::choose_raised_rate(source, &ranges))
+            .flatten()
+            .or_else(|| {
+                self.settings
+                    .match_sample_rate
+                    .then(|| choose_rate(source, &ranges))
+                    .flatten()
+            })
     }
 
     pub fn output_status(&self) -> Option<OutputStatus> {
@@ -449,6 +459,7 @@ impl Engine {
             crossfeed: self.crossfeed.clone(),
             peq: self.peq.clone(),
             speed: self.speed,
+            filter: self.settings.filter,
         };
         let handle = FeedHandle::spawn(params)
             .ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;

@@ -111,6 +111,7 @@ impl Core {
                 snap.state,
                 PlayState::Playing | PlayState::Loading | PlayState::Seeking
             ),
+            rate: f64::from(snap.speed_percent) / 100.0,
             art_path: track
                 .art_id
                 .as_deref()

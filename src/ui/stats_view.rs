@@ -27,8 +27,13 @@ impl Period {
         match self {
             Period::Week => (now - 7 * 86_400, i64::MAX),
             Period::Month => (now - 30 * 86_400, i64::MAX),
-            Period::ThisYear => stats::year_span(year, offset_secs),
-            Period::LastYear => stats::year_span(year - 1, offset_secs),
+            // (By the clock of the nights the years begin with: see `year_span_by`.)
+            Period::ThisYear => {
+                stats::year_span_by(year, crate::platform::clock::utc_offset_secs_at)
+            }
+            Period::LastYear => {
+                stats::year_span_by(year - 1, crate::platform::clock::utc_offset_secs_at)
+            }
             Period::All => (i64::MIN, i64::MAX),
         }
     }

@@ -4,7 +4,7 @@
 - Closing the window quits the program and stops playback. What this guide says about the Dock does not apply to Windows.
 - Drop music files onto `OnEum.exe`, or open them with "Open with", to play them.
 - The media keys of the keyboard and the media controls of Windows (shown when you change the volume, and in the taskbar) play, pause, skip and move within the song. Opening music files with OnEum while it is open already plays them in the open window instead of starting another one.
-- In Output Quality, **Match the Song's Sample Rate** and **Exclusive Access** work only on macOS. On Windows, songs are converted to the sample rate the system has set. **Memory Playback** and the VU meter work the same.
+- In Output Quality, **Match the Song's Sample Rate**, **Exclusive Access** and **Upsampling** work only on macOS. The **Upsampling Filter** applies when the system's sample rate is a whole multiple of the song's (a 48 kHz song at a 96 kHz output, for one). On Windows, songs are converted to the sample rate the system has set. **Memory Playback** and the VU meter work the same.
 - Your data is in `%APPDATA%\OnEum` (library and settings) and `%LOCALAPPDATA%\OnEum` (image cache and logs).
 - The password of a network folder (WebDAV) is kept in Windows' **Credential Manager** (shown as "OnEum network folder: …", and it can be removed there too). Where this guide speaks of the keychain, on Windows that is the Credential Manager.
 - If an error window appears at start-up, press Ctrl+C in it to copy its text. If it says no graphics device could be set up, update the graphics driver or, in a virtual machine, turn on 3D acceleration, then start OnEum again. The details are in `%LOCALAPPDATA%\OnEum\Logs\oneum.log`.

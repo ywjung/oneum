@@ -64,6 +64,17 @@ fn service() -> (HttpServer, Arc<Mutex<Vec<Request>>>) {
                 return Reply::Bytes(response(400, "Bad Request", &[], b""));
             }
             let query = query(request);
+            // As the real service: a length of more than an hour is refused, and a
+            // song is found under an album only if the album is the one it has.
+            let seconds = value(&query, "duration").parse::<u64>().unwrap_or(1);
+            if !(1..=3600).contains(&seconds) {
+                return Reply::Bytes(response(400, "Bad Request", &[], b"duration"));
+            }
+            let album = query.iter().find(|(key, _)| key == "album_name");
+            if album.is_some_and(|(_, album)| album != "Palette") {
+                let body = br#"{"statusCode":404,"name":"TrackNotFound","message":"none"}"#;
+                return Reply::Bytes(response(404, "Not Found", &[], body));
+            }
             let body = match (value(&query, "track_name"), value(&query, "artist_name")) {
                 ("밤편지", "아이유 (IU)") => serde_json::json!({
                     "id": 7, "trackName": "밤편지", "artistName": "아이유 (IU)",
@@ -146,7 +157,9 @@ fn a_song_is_asked_for_once_by_its_title_artist_album_and_length_and_nothing_els
             names,
             ["accept-encoding", "connection", "host", "user-agent"]
         );
-        assert_eq!(request.header("user-agent"), Some("OnEum"));
+        // (The app's name and version, as the service asks of its clients.)
+        let agent = request.header("user-agent").expect("a user agent");
+        assert_eq!(agent, format!("OnEum/{}", env!("CARGO_PKG_VERSION")));
         assert!(request.body.is_empty());
     }
 
@@ -286,4 +299,79 @@ fn a_service_that_is_not_there_costs_one_try_and_no_lyrics() {
     // An address that is none is no lyrics either.
     let nowhere = Source::new(cache.path(), "ftp://lyrics.example");
     assert_eq!(nowhere.find(&night_letter()), None);
+}
+
+/// The service finds a song under an album only as it spells the album, and takes no
+/// length of more than an hour: a song whose album is written otherwise is found
+/// without it, and a long one is asked for without its length.
+#[test]
+fn another_spelling_of_the_album_and_a_very_long_song_are_found_all_the_same() {
+    let (mut server, seen) = service();
+    let cache = tempfile::tempdir().unwrap();
+    let source = Source::new(cache.path(), &server.url(""));
+    let asked = || seen.lock().unwrap().len();
+    let other_album = Song {
+        album: "Palette (Deluxe Edition)",
+        ..night_letter()
+    };
+    let lyrics = source.find(&other_album).expect("found without the album");
+    assert_eq!(lyrics.timed.as_ref().map(Vec::len), Some(3));
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "once with the album, once without");
+        assert_eq!(
+            value(&query(&seen[0]), "album_name"),
+            "Palette (Deluxe Edition)"
+        );
+        let second = query(&seen[1]);
+        assert!(second.iter().all(|(key, _)| key != "album_name"));
+        assert_eq!(value(&second, "track_name"), "밤편지");
+        assert_eq!(value(&second, "duration"), "253");
+    }
+    // Kept: not asked for again.
+    assert!(source.find(&other_album).is_some());
+    assert_eq!(asked(), 2);
+
+    // A song of an hour and a half: asked for without a length, and found.
+    let long = Song {
+        duration_ms: 90 * 60 * 1000,
+        ..song("Words Only")
+    };
+    assert!(source.find(&long).is_some());
+    let last = seen.lock().unwrap().last().cloned().unwrap();
+    assert!(query(&last).iter().all(|(key, _)| key != "duration"));
+    assert_eq!(asked(), 3);
+
+    // A song the service knows under no album: asked for twice, remembered as none.
+    let unknown = Song {
+        album: "Some Album",
+        ..song("Nobody Knows This")
+    };
+    assert_eq!(source.find(&unknown), None);
+    assert_eq!(source.find(&unknown), None);
+    assert_eq!(asked(), 5);
+    server.stop();
+}
+
+/// A service that says it is asked too much is left alone for a good while, and
+/// nothing is kept of the song that was asked for.
+#[test]
+fn a_service_that_is_asked_too_much_is_left_alone() {
+    let seen = Arc::new(Mutex::new(0u32));
+    let mut server = {
+        let seen = seen.clone();
+        HttpServer::start(move |_| {
+            *seen.lock().unwrap() += 1;
+            let wait = [("Retry-After", "30")];
+            Reply::Bytes(response(429, "Too Many Requests", &wait, b""))
+        })
+    };
+    let cache = tempfile::tempdir().unwrap();
+    let source = Source::new(cache.path(), &server.url(""));
+    assert_eq!(source.find(&night_letter()), None);
+    assert_eq!(source.find(&song("Words Only")), None);
+    assert_eq!(source.find(&night_letter()), None);
+    assert_eq!(*seen.lock().unwrap(), 1, "one request, then none");
+    assert!(!cache.path().join("lyrics").exists());
+    server.stop();
 }

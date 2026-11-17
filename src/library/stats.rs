@@ -67,8 +67,20 @@ pub fn year_of(unix_secs: i64, offset_secs: i32) -> i32 {
 /// A calendar year as a span of Unix seconds, from its first moment to the first of
 /// the next year (not included), where local time is `offset_secs` ahead of UTC.
 pub fn year_span(year: i32, offset_secs: i32) -> (i64, i64) {
-    let start =
-        |year: i32| days_from_civil(i64::from(year), 1, 1) * 86_400 - i64::from(offset_secs);
+    year_span_by(year, |_| offset_secs)
+}
+
+/// [`year_span`] where local time is not the same distance from UTC all year (clocks
+/// moved for the summer): `offset_at` tells it for a moment. A year begins at
+/// midnight by the clock of that night, not by today's.
+pub fn year_span_by(year: i32, offset_at: impl Fn(i64) -> i32) -> (i64, i64) {
+    let start = |year: i32| {
+        let by_utc = days_from_civil(i64::from(year), 1, 1) * 86_400;
+        // (The offset of that night, asked for at about that night: no clock is
+        // moved within hours of the new year.)
+        let about = by_utc - i64::from(offset_at(by_utc));
+        by_utc - i64::from(offset_at(about))
+    };
     (start(year), start(year + 1))
 }
 
@@ -290,6 +302,22 @@ mod tests {
         assert_eq!(year_of(1_767_225_600, -5 * 3600), 2025);
         // Leap years, and days before 1970.
         assert_eq!(year_span(2024, 0).1 - year_span(2024, 0).0, 366 * 86_400);
+        // Where the clocks are moved for the summer (New York: five hours behind in
+        // winter, four in summer), a year begins by the clock of its first night,
+        // whenever it is looked at.
+        let new_york = |at: i64| {
+            let (march, november) = (1_772_953_200, 1_793_512_800);
+            if (march..november).contains(&at) {
+                -4 * 3600
+            } else {
+                -5 * 3600
+            }
+        };
+        assert_eq!(
+            year_span_by(2026, new_york),
+            (1_767_225_600 + 5 * 3600, 1_798_761_600 + 5 * 3600)
+        );
+        assert_eq!(year_span_by(2026, |_| 9 * 3600), year_span(2026, 9 * 3600));
         assert_eq!(year_of(0, 0), 1970);
         assert_eq!(year_of(-1, 0), 1969);
         assert_eq!(year_of(951_782_400, 0), 2000, "2000-02-29");

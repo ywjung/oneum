@@ -280,25 +280,25 @@ pub(super) fn hand_out(path: &str, name: &str) {
 }
 
 /// What plays, for the notification and the lock screen. Times in milliseconds.
-pub(super) fn update_playback(
-    title: &str,
-    artist: &str,
-    album: &str,
-    duration_ms: i64,
-    position_ms: i64,
-    playing: bool,
-    art_path: &str,
-) {
+pub(super) fn update_playback(info: &super::nowplaying::NowPlayingInfo) {
+    let duration_ms = (info.duration_s * 1000.0) as i64;
+    let position_ms = (info.position_s * 1000.0) as i64;
+    let (playing, speed) = (info.playing, info.rate as f32);
+    let art_path = info
+        .art_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
     with_activity("updatePlayback", |env, activity| {
-        let title = env.new_string(title)?;
-        let artist = env.new_string(artist)?;
-        let album = env.new_string(album)?;
-        let art_path = env.new_string(art_path)?;
+        let title = env.new_string(&info.title)?;
+        let artist = env.new_string(&info.artist)?;
+        let album = env.new_string(&info.album)?;
+        let art_path = env.new_string(&art_path)?;
         env.call_method(
             activity,
             jni_str!("updatePlayback"),
             jni_sig!(
-                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JJZLjava/lang/String;)V"
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JJZFLjava/lang/String;)V"
             ),
             &[
                 JValue::Object(&title),
@@ -307,6 +307,7 @@ pub(super) fn update_playback(
                 JValue::Long(duration_ms),
                 JValue::Long(position_ms),
                 JValue::from(playing),
+                JValue::Float(speed),
                 JValue::Object(&art_path),
             ],
         )?;

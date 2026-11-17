@@ -12,7 +12,7 @@ use super::limiter::PeakLimiter;
 use super::pace::{self, Pacer};
 use super::peq::{Corrector, PeqShared};
 use super::render::FeedConsumer;
-use super::resample::StereoResampler;
+use super::resample::{Converter, StereoResampler};
 use super::source::{Budget, FileInMemory, LoadCompletion};
 use super::{PlaybackError, PlaybackErrorKind};
 use crate::model::{ReplayGainTags, TrackId};
@@ -204,6 +204,9 @@ pub struct FeedParams {
     /// How fast the songs of this feed go, as a multiple of their own speed (1.0: as
     /// they are). One for the whole feed: another speed is another feed.
     pub speed: f32,
+    /// The filter a song's rate is raised with when the output runs at a whole
+    /// multiple of it. One for the whole feed, like the speed.
+    pub filter: super::upsample::Filter,
 }
 
 impl FeedHandle {
@@ -584,7 +587,7 @@ impl Worker {
         let mut req = self.params.first.clone();
         let mut start_ms = self.params.start_ms;
         let mut written: u64 = 0;
-        let mut resampler: Option<StereoResampler> = None;
+        let mut resampler: Option<Converter> = None;
         // Output frames written before the current resampler instance was created.
         let mut chain_base: u64 = 0;
         let mut decoded: Vec<f32> = Vec::new();
@@ -750,7 +753,7 @@ impl Worker {
                     }
                 }
                 if needs_resampling {
-                    match StereoResampler::new(info.sample_rate, mid_rate) {
+                    match Converter::new(info.sample_rate, mid_rate, self.params.filter) {
                         Ok(r) => {
                             resampler = Some(r);
                             chain_base = written + limiter.held_frames();
@@ -932,9 +935,20 @@ impl Worker {
                 None => self.wait_next(),
             };
             // A track that ended before the end of the one before it had faded out
-            // under it: the rest of that end follows, fading as it was going to.
+            // under it (a track shorter than the fade, or one that broke off): what
+            // was held back of it comes first, as it was mixed, and then the rest of
+            // that end, fading as it was going to. Nothing of so short a track is
+            // left to be mixed with the next one.
             if let Some((tail, done)) = mixing.take() {
+                if !held.is_empty() {
+                    released.clear();
+                    released.extend(held.drain(..));
+                    stages!(&mut released);
+                }
                 released = rest_of(&tail, done);
+                // (Frames that did not come through the rate conversion: where the
+                // next track begins is counted from behind them.)
+                chain_base += (released.len() / 2) as u64;
                 stages!(&mut released);
             }
             // What was held back of this track: mixed into the beginning of the next
@@ -974,16 +988,20 @@ impl Worker {
         // A feed that ends where a track could not be opened or read: the end of the
         // track before it that was to be mixed with it, and what was held back of the
         // one that was playing, are played as they are.
-        if let Some((tail, done)) = mixing.take() {
-            released = rest_of(&tail, done);
-            stages!(&mut released);
-        }
+        // (In the order they are in time: what was held back was mixed with the
+        // beginning of that end.)
         if !held.is_empty() {
             released.clear();
             released.extend(held.drain(..));
             stages!(&mut released);
         }
-        if let Some(mut rs) = resampler.take() {
+        if let Some((tail, done)) = mixing.take() {
+            released = rest_of(&tail, done);
+            stages!(&mut released);
+        }
+        // (At another speed the converter stands before the pacer, at a rate of its
+        // own: what it still holds is not at the output's rate, and is let go.)
+        if let Some(mut rs) = resampler.take().filter(|_| !pacing) {
             resampled.clear();
             if rs.flush(&mut resampled).is_ok() {
                 stages!(&mut resampled);
@@ -1077,6 +1095,7 @@ mod tests {
             crossfeed: Arc::new(AtomicU8::new(0)),
             peq: PeqShared::new(None),
             speed: 1.0,
+            filter: Default::default(),
             events,
             memory: false,
         }

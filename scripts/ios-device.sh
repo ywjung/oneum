@@ -19,8 +19,11 @@
 # The same can be done in Xcode: open ios/OnEum.xcodeproj, choose the team under
 # Signing & Capabilities, choose the iPhone and press Run.
 set -eu
+# (A pipe fails when the build in it does.)
+set -o pipefail 2>/dev/null || true
 cd "$(dirname "$0")/.."
 CONFIG=Release
+WITHOUT_GROUP=0
 INSTALL=1
 for arg in "$@"; do
   case "$arg" in
@@ -44,11 +47,35 @@ fi
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 
-xcodebuild -project ios/OnEum.xcodeproj -scheme OnEum -configuration "$CONFIG" \
-  -destination 'generic/platform=iOS' -derivedDataPath target/xcode \
-  -allowProvisioningUpdates \
-  DEVELOPMENT_TEAM="$TEAM" ONEUM_BUNDLE_ID="$BUNDLE_ID" \
-  MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" build
+build() { # build [more settings for xcodebuild…]
+  xcodebuild -project ios/OnEum.xcodeproj -scheme OnEum -configuration "$CONFIG" \
+    -destination 'generic/platform=iOS' -derivedDataPath target/xcode \
+    -allowProvisioningUpdates \
+    DEVELOPMENT_TEAM="$TEAM" ONEUM_BUNDLE_ID="$BUNDLE_ID" \
+    MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" "$@" build
+}
+# The app and its widgets share a folder (the song the widgets show), which takes an
+# App Group "group.<the app's identifier>" on the developer account. Xcode makes the
+# profiles by itself but not the group: on a team that has none, signing is refused.
+# The app is then built without the group: it works as ever, and its widgets show no
+# song until the group is there (once, in Xcode: the OnEum target ▸ Signing &
+# Capabilities ▸ App Groups ▸ +, with the team and identifier used here).
+LOG=$(mktemp)
+if ! build 2>&1 | tee "$LOG"; then
+  if grep -q "application-groups entitlement" "$LOG"; then
+    echo >&2
+    echo "This team has no App Group \"group.$BUNDLE_ID\": building without it." >&2
+    echo "The app works as ever; its widgets show no song until the group is registered" >&2
+    echo "(Xcode ▸ the OnEum target ▸ Signing & Capabilities ▸ App Groups ▸ +)." >&2
+    echo >&2
+    WITHOUT_GROUP=1
+    build CODE_SIGN_ENTITLEMENTS= || { rm -f "$LOG"; exit 1; }
+  else
+    rm -f "$LOG"
+    exit 1
+  fi
+fi
+rm -f "$LOG"
 APP=target/xcode/Build/Products/$CONFIG-iphoneos/OnEum.app
 # An iPhone refuses an app whose signature is missing or not of what is in it, with a
 # message that does not say so plainly: better to find out here.
@@ -57,6 +84,7 @@ if ! codesign --verify --strict "$APP" 2>/dev/null; then
   codesign --verify --strict "$APP" >&2 || true
   exit 1
 fi
+[ "$WITHOUT_GROUP" = 0 ] || echo "(Built without the App Group: the widgets of this build show no song.)" >&2
 [ "$INSTALL" = 1 ] || { echo "$APP"; exit 0; }
 
 DEVICE=${ONEUM_IOS_DEVICE:-}

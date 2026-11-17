@@ -65,16 +65,19 @@ public final class PlaybackService extends Service {
         final long durationMs;
         final long positionMs;
         final boolean playing;
+        /** How fast the song goes, as a multiple of its own speed. */
+        final float speed;
         final String artPath;
 
         State(String title, String artist, String album, long durationMs, long positionMs,
-                boolean playing, String artPath) {
+                boolean playing, float speed, String artPath) {
             this.title = title;
             this.artist = artist;
             this.album = album;
             this.durationMs = durationMs;
             this.positionMs = positionMs;
             this.playing = playing;
+            this.speed = speed;
             this.artPath = artPath;
         }
     }
@@ -336,7 +339,7 @@ public final class PlaybackService extends Service {
         State state = latest;
         if (state == null) {
             // Started with nothing to show (the system brought the service back).
-            goForeground(notification(new State("OnEum", "", "", 0, 0, false, "")));
+            goForeground(notification(new State("OnEum", "", "", 0, 0, false, 1f, "")));
             stopSelf();
         } else {
             // A service started with startForegroundService has to go to the foreground
@@ -411,7 +414,7 @@ public final class PlaybackService extends Service {
                         | PlaybackState.ACTION_SKIP_TO_NEXT
                         | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_SEEK_TO)
                 .setState(state.playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
-                        state.positionMs, state.playing ? 1f : 0f)
+                        state.positionMs, state.playing ? state.speed : 0f)
                 .build());
         session.setActive(true);
 

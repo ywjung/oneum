@@ -58,6 +58,25 @@ public final class NowPlayingWidget extends AppWidgetProvider {
         push(context, state.title, state.artist, state.artPath, state.playing);
     }
 
+    /** Nothing is current any more (the queue was emptied): the widgets say so. */
+    static void nothing(Context context) {
+        boolean same = shownTitle != null && shownTitle.isEmpty()
+                && shownPlaying != null && !shownPlaying;
+        if (same) {
+            return;
+        }
+        shownTitle = "";
+        shownArtist = "";
+        shownArt = "";
+        shownPlaying = false;
+        context.getSharedPreferences(KEPT, Context.MODE_PRIVATE).edit()
+                .putString("title", "")
+                .putString("artist", "")
+                .putString("art", "")
+                .apply();
+        push(context, "", "", "", false);
+    }
+
     /** The app is ending: the song stays on the widgets, not playing. */
     static void appGone(Context context) {
         if (shownPlaying == null || shownPlaying) {
