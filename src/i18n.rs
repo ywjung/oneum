@@ -429,6 +429,22 @@ strings! {
     correction_file_row: "보정값 파일", "Correction File";
     correction_file_desc: "목록에 없는 헤드폰은 AutoEq의 ParametricEQ.txt 같은 Equalizer APO 형식의 파일을 불러옵니다.", "For a headphone that is not listed: imports a file in Equalizer APO format, such as AutoEq's ParametricEQ.txt.";
     correction_import: "불러오기…", "Import…";
+    correction_edit_row: "화면에서 만들기", "Make One on Screen";
+    correction_edit_desc: "밴드의 종류·주파수·게인·Q를 직접 정합니다. 고른 프로필에서 시작해 고칠 수도 있습니다.", "Set the kind, frequency, gain and Q of each band yourself, or start from the selected profile and change it.";
+    correction_new: "새로 만들기", "New";
+    correction_edit: "편집", "Edit";
+    correction_editor: "보정 프로필 편집", "Editing a Correction Profile";
+    correction_name: "이름", "Name";
+    correction_preamp: "프리앰프", "Preamp";
+    correction_add_band: "밴드 추가", "Add Band";
+    correction_remove_band: "밴드 지우기", "Remove Band";
+    correction_kind_peak: "피크", "Peak";
+    correction_kind_low: "로우 셸프", "Low Shelf";
+    correction_kind_high: "하이 셸프", "High Shelf";
+    correction_save: "저장", "Save";
+    correction_new_name: "내 보정", "My Correction";
+    correction_copy_mark: "내 값", "mine";
+    correction_edit_hint: "바꾸는 대로 소리에 적용됩니다. 저장하면 \"불러온 프로필\" 묶음에 들어가고, 취소하면 전에 고른 프로필로 돌아갑니다. 밴드를 올려 소리가 원래보다 12dB 넘게 커지면 프리앰프가 그만큼 스스로 내려갑니다(곡선에 그대로 보입니다). 밴드는 32개까지입니다.", "What you change is heard at once. Saving puts the profile among the imported ones; cancelling goes back to the profile that was selected before. Where bands would make the sound more than 12 dB louder than it was, the preamp gives way by as much (the curve shows it). Up to 32 bands.";
     correction_group_imported: "불러온 프로필", "Imported";
     correction_group_builtin: "기본 프로필 (AutoEq)", "Built in (AutoEq)";
     correction_choose: "보정값 파일 선택", "Choose a Correction File";
@@ -1143,6 +1159,13 @@ impl Lang {
         }
         text.push('.');
         text
+    }
+
+    pub fn correction_saved(self, name: &str) -> String {
+        match self {
+            Lang::Ko => format!("보정 프로필 \"{name}\"을(를) 저장했습니다."),
+            Lang::En => format!("Correction profile \"{name}\" saved."),
+        }
     }
 
     /// The crossfade as the signal path tells of it.

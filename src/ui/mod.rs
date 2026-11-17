@@ -242,6 +242,20 @@ enum AppEvent {
     Picked(PickFor, Vec<PathBuf>),
 }
 
+/// A correction profile (parametric equalizer) that is being made or changed on screen
+/// (see `settings_window::correction_editor`). What it holds is heard while it is
+/// edited; nothing is kept until it is saved.
+pub(super) struct PeqEdit {
+    /// The name the profile is kept under, when one of the user's own is being
+    /// changed: saving replaces that one, also under a new name.
+    pub(super) original: Option<String>,
+    pub(super) profile: crate::audio::PeqProfile,
+    /// What was selected when the editing began: cancelling goes back to it.
+    pub(super) selected_before: Option<String>,
+    /// What the player was last sent, so that it is sent again only when it changed.
+    pub(super) heard: Option<crate::audio::PeqProfile>,
+}
+
 /// What a file dialog was shown for.
 #[derive(Clone, Copy)]
 enum PickFor {
@@ -387,6 +401,8 @@ pub struct OneumApp {
     rediscover: lists::Rediscover,
     /// The equalizer sheet is open.
     eq_open: bool,
+    /// A correction profile that is being made or changed on screen.
+    peq_edit: Option<PeqEdit>,
     /// The name being typed for a preset of the user's own.
     eq_name: String,
     /// Transient message.
@@ -540,6 +556,7 @@ impl OneumApp {
             extras: None,
             rediscover: lists::Rediscover::default(),
             eq_open: false,
+            peq_edit: None,
             eq_name: String::new(),
             toast: None,
             alert: None,
@@ -1692,6 +1709,92 @@ impl OneumApp {
         })
     }
 
+    /// Begins making a correction profile on screen: from the profile that is selected
+    /// (`from_selected`; one of the user's own is changed in place, one that comes with
+    /// the app is the pattern of a new one), or from nothing but one flat band.
+    pub(super) fn peq_edit_begin(&mut self, from_selected: bool) {
+        use crate::audio::{PeqFilter, PeqKind, PeqProfile};
+        let s = self.s();
+        let own = self.settings.correction_is_imported();
+        let pattern = self
+            .settings
+            .active_correction()
+            .filter(|_| from_selected)
+            .cloned();
+        let (original, profile) = match pattern {
+            Some(profile) if own => (Some(profile.name.clone()), profile),
+            Some(profile) => {
+                let name = format!("{} ({})", profile.name, s.correction_copy_mark);
+                (None, PeqProfile { name, ..profile })
+            }
+            None => (
+                None,
+                PeqProfile {
+                    name: s.correction_new_name.to_string(),
+                    preamp_db: 0.0,
+                    filters: vec![PeqFilter {
+                        kind: PeqKind::Peak,
+                        hz: 1_000.0,
+                        gain_db: 0.0,
+                        q: 1.0,
+                    }],
+                },
+            ),
+        };
+        self.peq_edit = Some(PeqEdit {
+            original,
+            profile,
+            selected_before: self.settings.correction.clone(),
+            heard: None,
+        });
+        self.peq_edit_listen();
+    }
+
+    /// What is being edited is what is heard: sent to the player when it changed.
+    pub(super) fn peq_edit_listen(&mut self) {
+        let Some(edit) = self.peq_edit.as_mut() else {
+            return;
+        };
+        let now = edit.profile.clone().sanitized();
+        if edit.heard.as_ref() != Some(&now) {
+            edit.heard = Some(now.clone());
+            self.core.player.send(Command::SetCorrection(Some(now)));
+        }
+    }
+
+    /// Keeps the profile that was edited among the user's own, and selects it. One
+    /// that was changed is replaced, and so is another of the name it is saved under
+    /// (as a profile that is imported again replaces the one of its name).
+    pub(super) fn peq_edit_save(&mut self) {
+        let Some(edit) = self.peq_edit.take() else {
+            return;
+        };
+        let mut profile = edit.profile.sanitized();
+        if profile.name.is_empty() {
+            profile.name = self.s().correction_new_name.to_string();
+        }
+        let list = &mut self.settings.corrections;
+        list.retain(|p| p.name != profile.name && Some(&p.name) != edit.original.as_ref());
+        if list.len() >= app::settings::MAX_CORRECTIONS {
+            list.remove(0);
+        }
+        list.push(profile.clone());
+        self.settings.correction = Some(profile.name.clone());
+        self.info_toast(self.lang.correction_saved(&profile.name));
+        self.core.player.send(Command::SetCorrection(Some(profile)));
+    }
+
+    /// Gives up what was edited: the profile that was selected before is heard again.
+    pub(super) fn peq_edit_cancel(&mut self) {
+        let Some(edit) = self.peq_edit.take() else {
+            return;
+        };
+        self.settings.correction = edit.selected_before;
+        self.core.player.send(Command::SetCorrection(
+            self.settings.active_correction().cloned(),
+        ));
+    }
+
     /// What a rating is called in a menu ("3 Stars"; "No Rating" for 0).
     pub(super) fn rating_words(&self, stars: u8) -> &'static str {
         let s = self.s();
@@ -2547,6 +2650,38 @@ impl OneumApp {
                         }
                         continue;
                     }
+                    // Making a correction profile on screen, as its buttons do: begun
+                    // anew, a band added, saved, given up.
+                    if id == "correction_edit_new" {
+                        self.peq_edit_begin(false);
+                        continue;
+                    }
+                    if let Some(band) = id.strip_prefix("correction_edit_band ") {
+                        let numbers: Vec<f32> = band
+                            .split_whitespace()
+                            .filter_map(|n| n.parse().ok())
+                            .collect();
+                        if let (Some(edit), [hz, gain_db, q]) =
+                            (self.peq_edit.as_mut(), numbers.as_slice())
+                        {
+                            edit.profile.filters.push(crate::audio::PeqFilter {
+                                kind: crate::audio::PeqKind::Peak,
+                                hz: *hz,
+                                gain_db: *gain_db,
+                                q: *q,
+                            });
+                        }
+                        self.peq_edit_listen();
+                        continue;
+                    }
+                    if id == "correction_edit_save" {
+                        self.peq_edit_save();
+                        continue;
+                    }
+                    if id == "correction_edit_cancel" {
+                        self.peq_edit_cancel();
+                        continue;
+                    }
                     if id == "correction_off" {
                         self.settings.correction = None;
                         self.core.player.send(Command::SetCorrection(None));
@@ -2709,6 +2844,11 @@ impl OneumApp {
         state["graphics_errors"] = serde_json::json!(renderer::errors());
         state["section"] = serde_json::json!(p.section.map(|s| (s.from_ms, s.to_ms)));
         state["crossfade_secs"] = serde_json::json!(p.crossfade_secs);
+        state["correction_editing"] = serde_json::json!(
+            self.peq_edit
+                .as_ref()
+                .map(|edit| (edit.profile.name.clone(), edit.profile.filters.len()))
+        );
         state["current_rating"] = serde_json::json!(
             p.current
                 .and_then(|c| self.snapshot.get(c.track_id))

@@ -403,6 +403,10 @@ check n7.json 'd["current_rating"] == 4' "…and the data, taken in again, gives
 ui 'menu crossfade 4' 'wait 400' 'dump n8.json' 'menu crossfade 0' 'wait 400' 'dump n9.json'
 check n8.json 'd["crossfade_secs"] == 4 and d["state"] == "Playing"' "crossfade is set to four seconds while a song plays"
 check n9.json 'd["crossfade_secs"] == 0' "…and switched off again"
+ui 'menu correction_edit_new' 'wait 300' 'menu correction_edit_band 3200 5 2.5' 'wait 400' 'dump n10.json' \
+   'menu correction_edit_save' 'wait 400' 'dump n11.json' 'menu correction_off' 'wait 300'
+check n10.json 'd["correction_editing"][1] == 2 and d["correction"]["applied"] == d["correction_editing"][0]' "a correction profile is made band by band, and heard while it is edited"
+check n11.json 'd["correction_editing"] is None and d["correction"]["profiles"][-1][1] == 2 and d["correction"]["selected"] == d["correction"]["profiles"][-1][0]' "saved, it is one of the user's own profiles and selected"
 lose=device
 if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
   # That no error was told means something only if the driver is really asked: OpenGL

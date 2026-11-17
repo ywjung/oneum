@@ -289,13 +289,13 @@ check la3.json 'd["rediscover"] == "Played" and d["rows"] > 0' "…and back"
 check la4.json 'd["nav"] == "Songs" and d["rows"] == 20' "back to all songs"
 
 echo "== equalizer, crossfeed, radio"
-# The Playback tab: scrolled to its end for the radio switch, and 263 points back up from
+# The Playback tab: scrolled to its end for the radio switch, and 318 points back up from
 # there for the equalizer row and the crossfeed strengths (the correction card lies between:
 # when the explanation under it gains or loses a line, 13 points, this number moves with it).
 # Then the equalizer sheet: preset list, on/off switch, reset.
-ui 'click 1081 20' 'wait 600' 'click 510 176' 'wait 500' 'scroll 590 400 -2000' 'wait 500' 'scroll 590 400 263' 'wait 500' \
+ui 'click 1081 20' 'wait 600' 'click 510 176' 'wait 500' 'scroll 590 400 -2000' 'wait 500' 'scroll 590 400 318' 'wait 500' \
    'click 779 413' 'wait 400' 'dump sh1.json' 'click 671 413' 'wait 300' 'scroll 590 400 -2000' 'wait 500' 'click 846 526' 'wait 400' 'dump sh2.json' \
-   'click 846 526' 'wait 400' 'dump sh3.json' 'scroll 590 400 263' 'wait 500' 'click 843 301' 'wait 600' 'dump sh4.json' \
+   'click 846 526' 'wait 400' 'dump sh3.json' 'scroll 590 400 318' 'wait 500' 'click 843 301' 'wait 600' 'dump sh4.json' \
    'click 435 183' 'wait 500' 'click 342 435' 'wait 500' 'dump sh5.json' 'click 855 133' 'wait 400' 'dump sh6.json' \
    'click 883 183' 'wait 400' 'dump sh7.json' 'key Escape' 'wait 400' 'dump sh8.json'
 check sh1.json 'd["crossfeed"] == "Medium"' "Playback tab: headphone crossfeed strength"
@@ -337,6 +337,16 @@ check hc2.json 'd["correction"]["applied"] is None and d["correction"]["profiles
 check hc3.json 'd["correction"]["selected"] == "Sennheiser HD 800 S" and d["correction"]["applied"] == "Sennheiser HD 800 S" and d["correction"]["profiles"] == [["Test Phones", 2]]' "a built-in headphone profile is applied without being copied into the settings"
 check hc4.json 'd["correction"]["applied"] == "Sennheiser HD 800 S"' "a name that is no profile changes nothing"
 check hc5.json 'd["correction"]["applied"] is None' "…and the built-in profile can be switched off"
+# A profile made on screen: begun anew (one flat band), two bands added (what is edited
+# is what is heard), kept among the user's own when saved; one that is given up leaves
+# the saved one selected.
+ui 'menu correction_edit_new' 'wait 300' 'menu correction_edit_band 105 -4.5 0.7' 'menu correction_edit_band 3200 5 2.5' 'wait 400' 'dump he1.json' \
+   'menu correction_edit_save' 'wait 400' 'dump he2.json' 'menu correction_edit_new' 'wait 300' 'dump he3.json' \
+   'menu correction_edit_cancel' 'wait 300' 'dump he4.json' 'menu correction_off' 'wait 300'
+check he1.json 'd["correction_editing"][1] == 3 and d["correction"]["applied"] == d["correction_editing"][0]' "a correction profile is made on screen, and heard while it is edited"
+check he2.json 'd["correction_editing"] is None and d["correction"]["profiles"][-1][1] == 3 and d["correction"]["selected"] == d["correction"]["profiles"][-1][0] == d["correction"]["applied"]' "saved, it is one of the user's own profiles, selected and applied"
+check he3.json 'd["correction_editing"][1] == 1 and len(d["correction"]["profiles"]) == 2' "another is begun…"
+check he4.json 'd["correction_editing"] is None and len(d["correction"]["profiles"]) == 2 and d["correction"]["profiles"][-1][1] == 3 and d["correction"]["selected"] == d["correction"]["profiles"][-1][0]' "…and given up: the saved one is as it was, and selected again"
 
 echo "== loudness of untagged songs"
 # 18 of the 20 songs have no ReplayGain tags. Measured values are forgotten again right

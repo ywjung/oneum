@@ -276,6 +276,20 @@ fn curve_hz(t: f32) -> f32 {
 
 /// The frequency response of the settings, drawn over the sliders.
 fn paint_curve(ui: &egui::Ui, rect: Rect, settings: &EqSettings, rate: u32) {
+    // The curve is that of the values on the sliders, also while the equalizer is
+    // switched off: it shows what switching it on would do, in a duller colour.
+    let shown = EqSettings {
+        enabled: true,
+        ..*settings
+    };
+    paint_response(ui, rect, settings.enabled, |hz| {
+        eq::response_db(&shown, rate, hz)
+    });
+}
+
+/// A frequency response (`response`: decibels at a frequency in Hz) from 20 Hz to
+/// 20 kHz, between -15 and +15 dB; `lit`: in the accent colour, else dull.
+pub(super) fn paint_response(ui: &egui::Ui, rect: Rect, lit: bool, response: impl Fn(f32) -> f32) {
     let visuals = ui.visuals();
     let dark = visuals.dark_mode;
     let painter = ui.painter().with_clip_rect(rect);
@@ -307,25 +321,19 @@ fn paint_curve(ui: &egui::Ui, rect: Rect, settings: &EqSettings, rate: u32) {
             dim,
         );
     }
-    // The curve is that of the values on the sliders, also while the equalizer is
-    // switched off: it shows what switching it on would do, in a duller colour.
-    let shown = EqSettings {
-        enabled: true,
-        ..*settings
-    };
     let accent = theme::accent(dark);
-    let color = if settings.enabled { accent } else { dim };
+    let color = if lit { accent } else { dim };
     const POINTS: usize = 160;
     let points: Vec<egui::Pos2> = (0..=POINTS)
         .map(|i| {
             let t = i as f32 / POINTS as f32;
-            let db = eq::response_db(&shown, rate, curve_hz(t));
+            let db = response(curve_hz(t));
             pos2(rect.left() + t * rect.width(), y_of(db))
         })
         .collect();
     // Filled between the curve and 0 dB.
     let zero = y_of(0.0);
-    let fill = color.gamma_multiply(if settings.enabled { 0.22 } else { 0.10 });
+    let fill = color.gamma_multiply(if lit { 0.22 } else { 0.10 });
     let mut mesh = egui::Mesh::default();
     for (i, pair) in points.windows(2).enumerate() {
         let base = (i * 4) as u32;

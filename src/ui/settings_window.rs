@@ -987,6 +987,9 @@ impl OneumApp {
         });
         let mut import = false;
         let mut remove = false;
+        // (begin anew, begin from the selected profile)
+        let mut edit = (false, false);
+        let editing = self.peq_edit.is_some();
         widgets::card(ui, |ui| {
             let desc = summary.as_deref().unwrap_or(s.correction_none_desc);
             widgets::setting_row(ui, s.correction_row, Some(desc), true, |ui| {
@@ -1044,24 +1047,189 @@ impl OneumApp {
                     import = ui.add(button(s.correction_import)).clicked();
                     // Removes the selected profile, if it is one that was imported.
                     remove = ui
-                        .add_enabled(self.settings.correction_is_imported(), button(s.delete))
+                        .add_enabled(
+                            self.settings.correction_is_imported() && !editing,
+                            button(s.delete),
+                        )
+                        .clicked();
+                },
+            );
+            widgets::row_divider(ui);
+            widgets::setting_row(
+                ui,
+                s.correction_edit_row,
+                Some(s.correction_edit_desc),
+                true,
+                |ui| {
+                    let button =
+                        |text: &str| egui::Button::new(text).min_size(egui::vec2(0.0, 26.0));
+                    edit.0 = ui.add_enabled(!editing, button(s.correction_new)).clicked();
+                    edit.1 = ui
+                        .add_enabled(
+                            !editing && self.settings.correction.is_some(),
+                            button(s.correction_edit),
+                        )
                         .clicked();
                 },
             );
         });
+        if edit.0 || edit.1 {
+            self.peq_edit_begin(edit.1);
+        }
+        self.correction_editor(ui, rate);
         widgets::section_note(ui, s.correction_hint);
         if remove && let Some(name) = &before {
             self.settings.corrections.retain(|p| &p.name != name);
             // A built-in profile of the same name stays available; nothing is selected.
             self.settings.correction = None;
         }
-        if self.settings.correction != before {
+        // (While a profile is edited, what is edited is what is heard.)
+        if self.settings.correction != before && self.peq_edit.is_none() {
             player.send(Command::SetCorrection(
                 self.settings.active_correction().cloned(),
             ));
         }
         if import {
             self.pick_correction_file();
+        }
+    }
+
+    /// The correction profile that is being made or changed on screen: its name, its
+    /// response as a curve, the preamp, and a line for each band (kind, frequency,
+    /// gain, Q). Nothing here while no profile is being edited.
+    fn correction_editor(&mut self, ui: &mut egui::Ui, rate: u32) {
+        use crate::audio::{PeqFilter, PeqKind};
+        let s = self.s();
+        let Some(mut edit) = self.peq_edit.take() else {
+            return;
+        };
+        let touch = super::theme::touch(ui.ctx());
+        let (mut save, mut cancel) = (false, false);
+        ui.add_space(10.0);
+        widgets::section_title(ui, s.correction_editor);
+        widgets::card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(s.correction_name).color(super::theme::dim(ui)));
+                ui.add(
+                    egui::TextEdit::singleline(&mut edit.profile.name)
+                        .desired_width(ui.available_width().min(260.0))
+                        .char_limit(crate::audio::peq::MAX_NAME_CHARS),
+                );
+            });
+            // What the bands and the preamp do together, as the player applies them
+            // (a preamp that had to give way shows here).
+            let applied = edit.profile.clone().sanitized();
+            let (curve, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), if touch { 130.0 } else { 150.0 }),
+                egui::Sense::hover(),
+            );
+            super::equalizer::paint_response(ui, curve, true, |hz| applied.response_db(rate, hz));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(s.correction_preamp).color(super::theme::dim(ui)));
+                ui.add(
+                    egui::DragValue::new(&mut edit.profile.preamp_db)
+                        .range(-24.0..=12.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dB"),
+                );
+                if applied.preamp_db < edit.profile.preamp_db - 0.05 {
+                    ui.label(
+                        RichText::new(format!("→ {:.1} dB", applied.preamp_db))
+                            .small()
+                            .color(super::theme::dim(ui)),
+                    );
+                }
+            });
+            let mut removed = None;
+            for (at, filter) in edit.profile.filters.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let kind = match filter.kind {
+                        PeqKind::Peak => s.correction_kind_peak,
+                        PeqKind::LowShelf => s.correction_kind_low,
+                        PeqKind::HighShelf => s.correction_kind_high,
+                    };
+                    egui::ComboBox::from_id_salt(("correction-band-kind", at))
+                        .selected_text(kind)
+                        .width(if touch { 86.0 } else { 104.0 })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in [
+                                (PeqKind::Peak, s.correction_kind_peak),
+                                (PeqKind::LowShelf, s.correction_kind_low),
+                                (PeqKind::HighShelf, s.correction_kind_high),
+                            ] {
+                                ui.selectable_value(&mut filter.kind, value, label);
+                            }
+                        });
+                    // (The higher the frequency, the wider a step of the drag.)
+                    let step = f64::from(filter.hz) * 0.01;
+                    ui.add(
+                        egui::DragValue::new(&mut filter.hz)
+                            .range(20.0..=20_000.0)
+                            .speed(step)
+                            .fixed_decimals(0)
+                            .suffix(" Hz"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut filter.gain_db)
+                            .range(-24.0..=24.0)
+                            .speed(0.1)
+                            .fixed_decimals(1)
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut filter.q)
+                            .range(0.1..=10.0)
+                            .speed(0.01)
+                            .fixed_decimals(2)
+                            .prefix("Q "),
+                    );
+                    if widgets::icon_button(
+                        ui,
+                        super::icons::Icon::Close,
+                        s.correction_remove_band,
+                        if touch { 30.0 } else { 20.0 },
+                        false,
+                    )
+                    .clicked()
+                    {
+                        removed = Some(at);
+                    }
+                });
+            }
+            if let Some(at) = removed {
+                edit.profile.filters.remove(at);
+            }
+            ui.horizontal(|ui| {
+                let button = |text: &str| egui::Button::new(text).min_size(egui::vec2(0.0, 26.0));
+                let room = edit.profile.filters.len() < crate::audio::peq::MAX_FILTERS;
+                if ui
+                    .add_enabled(room, button(s.correction_add_band))
+                    .clicked()
+                {
+                    edit.profile.filters.push(PeqFilter {
+                        kind: PeqKind::Peak,
+                        hz: 1_000.0,
+                        gain_db: 0.0,
+                        q: 1.0,
+                    });
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    save = ui.add(button(s.correction_save)).clicked();
+                    cancel = ui.add(button(s.cancel)).clicked();
+                });
+            });
+        });
+        widgets::section_note(ui, s.correction_edit_hint);
+        self.peq_edit = Some(edit);
+        if save {
+            self.peq_edit_save();
+        } else if cancel {
+            self.peq_edit_cancel();
+        } else {
+            self.peq_edit_listen();
         }
     }
 
