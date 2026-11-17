@@ -108,6 +108,11 @@ impl AppPaths {
         .clone()
     }
 
+    /// The impulse response of the room correction, as the app keeps it.
+    pub fn room_file(&self) -> PathBuf {
+        self.data_dir.join("room.ir")
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.data_dir.join("settings.json")
     }

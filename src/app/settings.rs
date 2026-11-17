@@ -100,6 +100,9 @@ pub struct Settings {
     pub corrections: Vec<PeqProfile>,
     /// Name of the profile that is applied; `None`: none.
     pub correction: Option<String>,
+    /// Room correction: the impulse response that was imported (kept in a file of
+    /// the app's own), and whether it is applied.
+    pub room: Option<RoomSetting>,
     /// Radio: when the queue runs out, go on with songs like the last one (off by default).
     pub radio: bool,
     /// Lyrics are looked for on the internet for a song whose file has none that
@@ -170,6 +173,17 @@ pub const MAX_SMART_PLAYLISTS: usize = 100;
 pub const MAX_NETWORK_SERVERS: usize = 16;
 pub const MAX_SMART_NAME_CHARS: usize = 60;
 pub const MAX_SMART_QUERY_CHARS: usize = 300;
+/// The room correction as the settings keep it. The response itself is in a file of
+/// the app's own (`AppPaths::room_file`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoomSetting {
+    /// What the response is called (the name of the file it came from).
+    pub name: String,
+    /// Whether it is applied.
+    pub enabled: bool,
+}
+
 /// How long an artist or genre name kept in a pin may be.
 const MAX_PIN_NAME_CHARS: usize = 300;
 
@@ -240,6 +254,9 @@ impl Settings {
     pub fn sanitized(mut self) -> Self {
         self.eq = self.eq.sanitized();
         self.speed_percent = crate::audio::pace::speed_of(self.speed_percent);
+        if let Some(room) = self.room.as_mut() {
+            room.name = tidy_text(&room.name, 120);
+        }
         self.crossfade_secs = self.crossfade_secs.min(MAX_CROSSFADE_SECS);
         self.eq_presets.truncate(MAX_EQ_PRESETS);
         for preset in &mut self.eq_presets {
@@ -375,6 +392,7 @@ impl Default for Settings {
             speed_percent: 100,
             corrections: Vec::new(),
             correction: None,
+            room: None,
             radio: false,
             online_lyrics: false,
             shuffle_by_album: false,

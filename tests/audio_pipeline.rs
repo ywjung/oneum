@@ -3136,3 +3136,67 @@ fn upsampling_runs_the_device_at_the_highest_whole_multiple_it_offers() {
     });
     assert_eq!(engine.preferred_rate(Some(44_100)), Some(44_100));
 }
+
+/// Room correction: everything that plays is filtered with the impulse response,
+/// each channel with its own, nothing comes out late, and two songs that are one tone
+/// cut in two are still one tone. At another output rate the response is converted.
+#[test]
+fn room_correction_filters_what_plays_and_adds_no_delay() {
+    use oneum::audio::room::Impulse;
+    // Left: half as loud. Right: three frames late, and the other way up.
+    let impulse = Impulse::from_frames(
+        "test room",
+        44_100,
+        &[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+    )
+    .expect("an impulse response");
+    let play_with_room = |names: &[&str], rate: u32| {
+        let (mut engine, mut renderer) =
+            Engine::new_offline(rate, 1.0, ReplayGainSettings::default());
+        engine.set_room(Some(std::sync::Arc::new(impulse.clone())));
+        let queue: Vec<TrackRequest> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| request(i as u64 + 1, n))
+            .collect();
+        let slot = NextSlot::new();
+        slot.set(
+            queue
+                .get(1)
+                .cloned()
+                .map_or(NextTrack::End, NextTrack::Track),
+        );
+        engine
+            .start_feed(queue[0].clone(), 0, slot.clone())
+            .expect("feed starts");
+        engine.set_playing(true);
+        pump(&mut engine, &mut renderer, &queue, &slot)
+    };
+    let songs = ["gap_a.flac", "gap_b.flac"];
+    let plain = play(&songs, 44_100);
+    let filtered = play_with_room(&songs, 44_100);
+    assert_eq!(filtered.underruns, 0);
+    assert_eq!(filtered.frames(), plain.frames(), "no frame more or less");
+    assert_eq!(filtered.started(), plain.started());
+    let frames = plain.frames();
+    for n in FADE_GUARD..frames - FADE_GUARD {
+        let (left, right) = (filtered.pcm[n * 2], filtered.pcm[n * 2 + 1]);
+        assert!(
+            (left - plain.pcm[n * 2] * 0.5).abs() < 1e-6,
+            "left at {n}: {left}"
+        );
+        assert!(
+            (right + plain.pcm[(n - 3) * 2 + 1]).abs() < 1e-6,
+            "right at {n}: {right}"
+        );
+    }
+    // At twice the rate the response is converted: the same tone, half as loud on
+    // the left as without the room.
+    let plain = play(&songs, 88_200);
+    let filtered = play_with_room(&songs, 88_200);
+    assert_eq!(filtered.frames(), plain.frames());
+    let middle = 44_100..132_300;
+    let level = |played: &Played| level_at(&played.left()[middle.clone()], 441.0, 88_200);
+    let ratio = level(&filtered) / level(&plain);
+    assert!((ratio - 0.5).abs() < 0.005, "{ratio}");
+}

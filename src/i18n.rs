@@ -497,6 +497,21 @@ strings! {
     correction_group_imported: "불러온 프로필", "Imported";
     correction_group_builtin: "기본 프로필 (AutoEq)", "Built in (AutoEq)";
     correction_choose: "보정값 파일 선택", "Choose a Correction File";
+    room: "룸 보정", "Room Correction";
+    room_row: "룸 보정 적용", "Apply Room Correction";
+    room_none_desc: "방과 스피커를 측정해 만든 보정 필터(임펄스 응답)를 불러오면 모든 소리에 적용합니다.",
+        "Import a correction filter (an impulse response) made by measuring your room and speakers, and it is applied to everything.";
+    room_file_row: "보정 필터", "Correction Filter";
+    room_file_desc: "REW · DRC 등이 내보낸 임펄스 응답 파일(WAV · FLAC, 모노 또는 스테레오).",
+        "An impulse response file as REW, DRC and the like export it (WAV or FLAC, mono or stereo).";
+    room_choose: "보정 필터 선택", "Choose a Correction Filter";
+    room_filter_text: "소리 파일", "Sound files";
+    room_err_read: "보정 필터로 쓸 수 없는 파일입니다.", "This file cannot be used as a correction filter.";
+    room_err_long: "보정 필터가 너무 깁니다(6초까지).", "The correction filter is too long (up to 6 seconds).";
+    room_err_keep: "보정 필터를 저장하지 못했습니다.", "The correction filter could not be kept.";
+    room_hint: "필터는 곡의 샘플레이트가 달라도 맞게 변환해 쓰고, 어떤 주파수도 원래보다 커지지 않게 전체를 낮춥니다(낮춘 양은 곡 정보의 신호 경로에 나옵니다). 지연은 없습니다. 헤드폰으로 들을 때는 꺼 두세요.",
+        "The filter is converted to fit whatever sample rate plays, and turned down as a whole so that no frequency gets louder than it was (by how much is shown in the signal path of Song Info). It adds no delay. Switch it off for headphones.";
+    info_proc_room: "룸 보정", "Room correction";
     correction_filter_text: "텍스트 파일", "Text files";
     correction_hint: "헤드폰마다 다른 주파수 특성을, 측정해서 만든 필터 값으로 바로잡습니다. 기본 프로필은 AutoEq 프로젝트가 oratory1990의 측정으로 만든 값이며(Harman 목표 곡선 기준; Momentum 5 Wireless만 Super* Review의 측정을 AutoEq로 계산한 값), 같은 모델이라도 제품마다 조금씩 다를 수 있습니다. 이퀄라이저 다음, 크로스피드 앞에서 적용됩니다. 켜면 소리는 원본과 달라집니다. 불러오는 파일에서 지원하는 필터는 PK, LSC, HSC입니다.",
         "Corrects a headphone's frequency response with filter values made from measurements. The built-in profiles are the AutoEq project's results for measurements by oratory1990 (to the Harman target; the Momentum 5 Wireless alone was computed with AutoEq from a measurement by Super* Review); units of the same model differ a little. Applied after the equalizer and before crossfeed. While on, the sound differs from the original. Imported files may use PK, LSC and HSC filters.";

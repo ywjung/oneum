@@ -15,6 +15,7 @@ PROFILE="$WORK/profile"
 DLNA_PID=
 . scripts/dev/smoke-webdav.sh
 . scripts/dev/smoke-lyrics.sh
+. scripts/dev/smoke-room.sh
 trap 'pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true; [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
 
 echo "== generating test library"
@@ -455,6 +456,8 @@ echo "== lyrics from the internet"
 # panel is put away as after the stars: through the queue button.)
 ui "open $MUSIC/아이유/꽃갈피/03 사랑이 지나가면.flac" 'wait 1500' 'menu song_info' 'wait 800'
 lyrics_checks 127.0.0.1 127.0.0.1 "$PROFILE"
+room_file "$WORK/room.wav"
+room_checks "$WORK/room.wav"
 ui 'click 1118 20' 'wait 300' 'click 1118 20' 'wait 400' 'dump ly9.json'
 check ly9.json 'd["right_panel"] != "Info" and not d["lyrics"]["online"]' "the panel is put away, and lyrics from the internet are off again"
 if grep -rq "사랑이 지나가면" "$PROFILE/cache/lyrics" 2>/dev/null && ! ls "$PROFILE/cache/lyrics" | grep -q "사랑"; then

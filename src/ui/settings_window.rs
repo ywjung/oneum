@@ -910,6 +910,7 @@ impl OneumApp {
         }
         self.loudness_card(ui);
         widgets::section_note(ui, s.rg_hint);
+        self.room_card(ui);
 
         ui.add_space(14.0);
         widgets::section_title(ui, s.play_order);
@@ -1070,6 +1071,41 @@ impl OneumApp {
         widgets::section_note(ui, s.radio_hint);
         if self.settings.radio != radio_before {
             player.send(Command::SetRadio(self.settings.radio));
+        }
+    }
+
+    /// Room correction: the impulse response that was imported, whether it is
+    /// applied, importing another and taking it away.
+    fn room_card(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        ui.add_space(14.0);
+        widgets::section_title(ui, s.room);
+        let kept = self.settings.room.clone();
+        let (mut import, mut remove) = (false, false);
+        let mut on = kept.as_ref().is_some_and(|room| room.enabled);
+        widgets::card(ui, |ui| {
+            let desc = kept
+                .as_ref()
+                .map_or(s.room_none_desc, |room| room.name.as_str());
+            widgets::setting_row(ui, s.room_row, Some(desc), kept.is_some(), |ui| {
+                ui.add_enabled_ui(kept.is_some(), |ui| {
+                    widgets::toggle(ui, &mut on, s.room_row);
+                });
+            });
+            widgets::row_divider(ui);
+            widgets::setting_row(ui, s.room_file_row, Some(s.room_file_desc), true, |ui| {
+                let button = |text: &str| egui::Button::new(text).min_size(egui::vec2(0.0, 26.0));
+                import = ui.add(button(s.correction_import)).clicked();
+                remove = ui.add_enabled(kept.is_some(), button(s.delete)).clicked();
+            });
+        });
+        widgets::section_note(ui, s.room_hint);
+        if import {
+            self.pick_room_file();
+        } else if remove {
+            self.remove_room();
+        } else if kept.is_some_and(|room| room.enabled != on) {
+            self.set_room_enabled(on);
         }
     }
 

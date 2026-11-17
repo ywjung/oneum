@@ -474,6 +474,13 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
             .min(crate::app::settings::MAX_CROSSFADE_SECS),
         speed_percent: settings.speed_percent,
         correction: settings.active_correction().cloned(),
+        // The room correction that was imported, where it is switched on.
+        room: settings
+            .room
+            .as_ref()
+            .filter(|room| room.enabled)
+            .and_then(|_| crate::audio::room::Impulse::open(&paths.room_file()))
+            .map(Arc::new),
         radio: settings.radio,
         shuffle_by_album: settings.shuffle_by_album,
         shuffle_by_rating: settings.shuffle_by_rating,

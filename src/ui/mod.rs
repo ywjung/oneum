@@ -270,6 +270,8 @@ enum PickFor {
     ImportMusic,
     Open,
     Correction,
+    /// The impulse response of a room correction.
+    Room,
     Playlist,
     AppleLibrary,
     /// Where to write the library's own data.
@@ -410,6 +412,9 @@ pub struct OneumApp {
     info_extras: Option<panels::Extras>,
     /// A lookup of lyrics on the internet is out (one at a time).
     lyrics_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// How far the room correction that is applied is turned down, as a factor
+    /// (known once it was read here: after an import, or when it was switched on).
+    room_trim: Option<f32>,
     /// Where lyrics are looked for on the internet, for a listener who switched that
     /// on, and where what was found is kept.
     lyrics_source: Arc<crate::library::online_lyrics::Source>,
@@ -591,6 +596,7 @@ impl OneumApp {
             extras: None,
             info_extras: None,
             lyrics_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            room_trim: None,
             lyrics_source,
             rediscover: lists::Rediscover::default(),
             eq_open: false,
@@ -637,6 +643,12 @@ impl OneumApp {
             system_prefers_korean,
             core,
         };
+        // A room correction that is on from the start: how far it is turned down is
+        // shown in the signal path.
+        if this.settings.room.as_ref().is_some_and(|room| room.enabled) {
+            this.room_trim = crate::audio::room::Impulse::open(&this.core.paths.room_file())
+                .map(|impulse| impulse.turned_down());
+        }
         this.install_menu(&ctx);
         report_open_problems(&mut this, &open_report);
         if let Some(state) = cc.wgpu_render_state.as_ref() {
@@ -1564,6 +1576,11 @@ impl OneumApp {
                     self.import_correction(&file);
                 }
             }
+            PickFor::Room => {
+                if let Some(file) = paths.pop() {
+                    self.import_room(&file);
+                }
+            }
             PickFor::Playlist => {
                 if let Some(file) = paths.pop() {
                     self.import_playlist(file);
@@ -1633,6 +1650,72 @@ impl OneumApp {
             .title(s.correction_choose)
             .filter(s.correction_filter_text, &["txt"]);
         self.pick(PickFor::Correction, request);
+    }
+
+    /// Asks for the impulse response of a room correction and imports it.
+    pub(super) fn pick_room_file(&mut self) {
+        let s = self.s();
+        let request = PickRequest::new(PickKind::File)
+            .title(s.room_choose)
+            .filter(s.room_filter_text, &["wav", "flac", "aiff", "aif", "wv"]);
+        self.pick(PickFor::Room, request);
+    }
+
+    /// Reads a sound file as the impulse response of a room correction, keeps it in
+    /// a file of the app's own and applies it. (Read here, on the window's thread:
+    /// such a file is a second or two of sound.)
+    pub(super) fn import_room(&mut self, file: &Path) {
+        use crate::audio::room::{Impulse, Unusable};
+        let s = self.s();
+        let impulse = match Impulse::load(file) {
+            Ok(impulse) => impulse,
+            Err(Unusable::TooLong) => return self.warn_toast(s.room_err_long),
+            Err(Unusable::Unreadable(_) | Unusable::Silent) => {
+                return self.warn_toast(s.room_err_read);
+            }
+        };
+        if let Err(error) = impulse.save(&self.core.paths.room_file()) {
+            tracing::warn!("the room correction could not be kept: {error}");
+            return self.warn_toast(s.room_err_keep);
+        }
+        self.settings.room = Some(app::settings::RoomSetting {
+            name: impulse.name.clone(),
+            enabled: true,
+        });
+        self.room_trim = Some(impulse.turned_down());
+        self.core
+            .player
+            .send(Command::SetRoom(Some(Arc::new(impulse))));
+    }
+
+    /// Switches the room correction that was imported on or off.
+    pub(super) fn set_room_enabled(&mut self, on: bool) {
+        let Some(room) = self.settings.room.as_mut() else {
+            return;
+        };
+        room.enabled = on;
+        let impulse = on
+            .then(|| crate::audio::room::Impulse::open(&self.core.paths.room_file()))
+            .flatten();
+        if on && impulse.is_none() {
+            // What was kept is gone or is no longer what was written: nothing to apply.
+            self.settings.room = None;
+            self.room_trim = None;
+            return self.warn_toast(self.s().room_err_read);
+        }
+        self.room_trim = impulse.as_ref().map(|impulse| impulse.turned_down());
+        self.core
+            .player
+            .send(Command::SetRoom(impulse.map(Arc::new)));
+    }
+
+    /// Takes the room correction away, with the file it is kept in.
+    pub(super) fn remove_room(&mut self) {
+        if self.settings.room.take().is_some() {
+            self.room_trim = None;
+            let _ = std::fs::remove_file(self.core.paths.room_file());
+            self.core.player.send(Command::SetRoom(None));
+        }
     }
 
     /// Reads a correction file, keeps it as a profile named after the file and applies
@@ -2766,6 +2849,21 @@ impl OneumApp {
                         }
                         continue;
                     }
+                    // Room correction, as its card does it: a file imported, the
+                    // switch flipped, the filter taken away.
+                    if let Some(path) = id.strip_prefix("room_import ") {
+                        self.import_room(Path::new(path));
+                        continue;
+                    }
+                    if id == "room_toggle" {
+                        let on = self.settings.room.as_ref().is_some_and(|room| room.enabled);
+                        self.set_room_enabled(!on);
+                        continue;
+                    }
+                    if id == "room_remove" {
+                        self.remove_room();
+                        continue;
+                    }
                     // Playback speed, in percent (as the playback settings set it).
                     if let Some(percent) = id.strip_prefix("speed ") {
                         if let Ok(percent) = percent.parse::<u16>() {
@@ -3214,6 +3312,12 @@ impl OneumApp {
                 .map(|stage| format!("{}: {}", stage.name, stage.detail))
                 .collect::<Vec<_>>()
         }));
+        state["room"] = serde_json::json!({
+            "kept": self.settings.room.as_ref().map(|room| room.name.clone()),
+            "enabled": self.settings.room.as_ref().is_some_and(|room| room.enabled),
+            "applied": p.room,
+            "kept_in_file": self.core.paths.room_file().exists(),
+        });
         state["output_options"] = serde_json::json!({
             "match_sample_rate": self.settings.output.match_sample_rate,
             "exclusive": self.settings.output.exclusive,

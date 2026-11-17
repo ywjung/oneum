@@ -22,6 +22,7 @@ pub mod peq;
 pub mod remote;
 pub mod render;
 pub mod resample;
+pub mod room;
 pub mod source;
 pub mod upsample;
 

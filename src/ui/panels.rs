@@ -96,6 +96,9 @@ struct PathInputs<'a> {
     /// The name of the upsampling filter, while the song's rate is raised with one
     /// the listener chose.
     filter: Option<&'a str>,
+    /// The room correction in words (its name, and how far it is turned down),
+    /// while one is applied.
+    room: Option<String>,
     peak_protection: bool,
     /// The volume slider, 0..=1.
     volume: f32,
@@ -180,6 +183,9 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
             s.info_proc_crossfeed,
             strength.to_string(),
         );
+    }
+    if let Some(room) = &input.room {
+        add(StageKind::Adjustment, s.info_proc_room, room.clone());
     }
     if let Some(between) = &input.crossfade {
         add(
@@ -1595,6 +1601,14 @@ impl OneumApp {
                         Filter::Minimum => s.filter_minimum,
                     })
             },
+            room: self.player.room.as_ref().map(|name| {
+                // (How far it is turned down so that nothing gets louder than it
+                // was, where that is known and more than nothing.)
+                match self.room_trim.filter(|trim| *trim < 0.999) {
+                    Some(trim) => format!("{name} · {}", decibels(trim)),
+                    None => name.clone(),
+                }
+            }),
             peak_protection: self.player.peak_limited_frames > 0,
             volume: self.player.volume,
             dither_bits: self.player.dither_bits,
@@ -2661,6 +2675,7 @@ mod tests {
             crossfade: None,
             speed: None,
             filter: None,
+            room: None,
             peak_protection: false,
             volume: 1.0,
             dither_bits: None,

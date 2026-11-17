@@ -207,6 +207,9 @@ pub struct FeedParams {
     /// The filter a song's rate is raised with when the output runs at a whole
     /// multiple of it. One for the whole feed, like the speed.
     pub filter: super::upsample::Filter,
+    /// Room correction: the impulse response everything is filtered with, last of
+    /// all. One for the whole feed.
+    pub room: Option<Arc<super::room::Impulse>>,
 }
 
 impl FeedHandle {
@@ -620,6 +623,11 @@ impl Worker {
         // The parametric correction, between the equalizer and the crossfeed.
         let mut peq_version = self.params.peq.version();
         let mut corrector = Corrector::new(out_rate, self.params.peq.get().as_deref());
+        let mut room = self
+            .params
+            .room
+            .as_deref()
+            .map(|impulse| super::room::Convolver::new(impulse, out_rate));
         let mut gain_now;
         // The next track's decoder when it was opened early: a DSD track's last frames
         // are computed with the beginning of the one after it.
@@ -664,6 +672,11 @@ impl Worker {
                 corrector.process(block);
                 crossfeed.set(crossfeed_now(&self.params));
                 crossfeed.process(block);
+                // The room's correction is for what comes out of the speakers: the
+                // last thing done to the sound.
+                if let Some(room) = room.as_mut() {
+                    room.process(block);
+                }
                 sanitize(block);
                 match self.push_limited(&mut limiter, block, &mut limited) {
                     Some(frames) => written += frames,
@@ -1096,6 +1109,7 @@ mod tests {
             peq: PeqShared::new(None),
             speed: 1.0,
             filter: Default::default(),
+            room: None,
             events,
             memory: false,
         }

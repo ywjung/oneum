@@ -130,7 +130,7 @@ Open it with the ⓘ button at the top right or with ⌘I. It shows the song tha
 The **Signal Path** in the Song Info panel shows, in order, what the app does to the song that is playing on its way from the file to the output device. For example: `Source FLAC · 44,100 Hz · 16 bit → Resampling 44,100 → 48,000 Hz → Equalizer Rock → Output MacBook Pro Speakers · 48,000 Hz`.
 - The word at the top right sums it up. **Unchanged**: the app does not change the samples. **Adjusted**: features you switched on, such as volume leveling, the equalizer, crossfeed or the app volume, are changing the sound. **Converted**: the sample rate, channels or bit depth are being converted for this device. Point at the word for an explanation.
 - The color of the dot tells the kind of step: violet for adjustments you switched on, teal for conversions for the device, amber for peak protection.
-- The steps that can appear: DSD to PCM, channel mapping (mono or 5.1/7.1 files to stereo), volume leveling, resampling, equalizer, headphone correction, crossfeed, crossfade, playback speed, peak protection, app volume and dither.
+- The steps that can appear: DSD to PCM, channel mapping (mono or 5.1/7.1 files to stereo), volume leveling, resampling, equalizer, headphone correction, crossfeed, room correction, crossfade, playback speed, peak protection, app volume and dither.
 - **Peak protection** means the song has moments above full scale (0 dBFS), and the level was lowered slightly for just those moments so that the sound is not clipped and distorted. Songs without such moments are left alone.
 - **Dither** means a very small noise was added to prevent the distortion that rounding causes when playing to a 16- or 24-bit device. It is not added when the samples go out as they are.
 - "Unchanged" is about what happens inside the app. What comes after it — the operating system, the driver, the DAC — the app cannot see.
@@ -209,6 +209,7 @@ Options for listening through a DAC or good headphones (Settings → Playback). 
   When the Signal Path says "Unchanged" (and the meter deck's processing says "None"), the app sends the samples from the file out as they are. Turning the app volume below 100% or switching on volume leveling or the equalizer is shown there.
 - When the sample rate has to be converted, the conversion is flat up to 20 kHz. When converting a master made as loud as it can be, or playing MP3 or AAC, produces moments above full scale, "peak protection" brings down just those moments.
 - Leaving the app volume at 100% and setting the level on the DAC or amplifier keeps the samples untouched.
+- **Room Correction** (Settings → Playback → Room Correction, for speakers): a correction filter made by measuring your room and speakers (an impulse response as REW, DRC and the like export it — WAV or FLAC, mono or stereo, up to 6 seconds) is put in with **Import…** and applied to everything. The app keeps its own copy, so the file itself may be deleted. When the sample rate that plays is not the filter's, the filter is converted (the sound then comes out 6 ms later), and it is turned down as a whole so that no frequency gets louder than it was — by how much is shown under "Room correction" in the Signal Path. It can be switched off and on; leave it off for headphones.
 
 ## Keyboard Shortcuts
 | Keys | Action |
@@ -268,7 +269,7 @@ Under **Library Data** in Settings → Library, **Export…** saves one file; in
 The gear button at the top right opens them too. Close them with Esc, the close (×) button, or a click outside. Changes apply and are saved at once.
 - **General**: language (Follow System / 한국어 / English), appearance (Follow System / Light / Dark), and the Format column.
 - **Library**: each music folder with its number of songs and when it was last scanned. The magnifier button opens the folder in Finder, and the trash button removes the folder from the library (you are asked first, and the original files stay where they are). **Add Music Folder**, **Rescan**. Below them, the file check and moving over from Apple Music.
-- **Playback**, from the top: output device (with the device and sample rate in use), output quality, volume leveling and the analysis of songs without tags, playing order (shuffle by album, resume long tracks, a shuffle that favors higher ratings), crossfade, playback speed, equalizer, headphone crossfeed, headphone correction and radio.
+- **Playback**, from the top: output device (with the device and sample rate in use), output quality, volume leveling and the analysis of songs without tags, room correction, playing order (shuffle by album, resume long tracks, a shuffle that favors higher ratings), crossfade, playback speed, equalizer, headphone crossfeed, headphone correction and radio.
 - **Shortcuts**: the keyboard shortcuts.
 - **About**: version, opening this guide, showing the log and data folders, and the open source licenses. Click **Show** next to the licenses to unfold the list of components as a table below it; click a source address to open it in the browser.
 

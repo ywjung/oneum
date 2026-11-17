@@ -19,6 +19,7 @@ PROFILE="$WORK/profile"
 DLNA_PID=
 . scripts/dev/smoke-webdav.sh
 . scripts/dev/smoke-lyrics.sh
+. scripts/dev/smoke-room.sh
 trap '[ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done; xcrun simctl terminate "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; xcrun simctl uninstall "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
 export ONEUM_NO_MEDIA_SESSION=1
 
@@ -261,6 +262,9 @@ check v2.json 'p["player_view"] == "Lyrics"' "the lyrics take the cover's place"
 # Lyrics from the internet, while the lyrics of a song without any are in view. (The
 # Simulator shares this computer's network.)
 lyrics_checks 127.0.0.1 127.0.0.1 "$PROFILE"
+# (The Simulator reads this computer's files.)
+room_file "$WORK/room.wav"
+room_checks "$WORK/room.wav"
 ui "tap $VIEW_LYRICS $HEAD" 'wait 500' 'dump v3.json'
 check v3.json 'p["player_view"] == "Cover"' "a second tap brings the cover back"
 ui "click 28 $HEAD" 'wait 600' 'dump p9.json'

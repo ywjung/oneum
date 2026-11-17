@@ -173,6 +173,9 @@ pub enum Command {
     SetCrossfeed(Crossfeed),
     /// The parametric correction profile (headphone correction); `None` switches it off.
     SetCorrection(Option<PeqProfile>),
+    /// Room correction: everything is filtered with this impulse response (or with
+    /// none). What plays starts over at the place it is at.
+    SetRoom(Option<Arc<crate::audio::room::Impulse>>),
     /// Radio on or off: when the queue runs out, go on with songs like the last one.
     SetRadio(bool),
     /// Shuffle whole albums instead of single tracks.
@@ -333,6 +336,8 @@ pub struct PlayerSnapshot {
     pub crossfeed: Crossfeed,
     /// Name of the parametric correction profile that is applied, if one is.
     pub correction: Option<String>,
+    /// Name of the room correction that is applied, if one is.
+    pub room: Option<String>,
     /// Radio is on (see `Command::SetRadio`).
     pub radio: bool,
     /// Playback stops when the current song ends (see `Command::SetStopAfterCurrent`).
@@ -382,6 +387,7 @@ impl PlayerSnapshot {
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
             correction: None,
+            room: None,
             radio: false,
             stop_after_current: false,
             sleep_at: None,
@@ -420,6 +426,8 @@ pub struct PlayerConfig {
     pub speed_percent: u16,
     /// The parametric correction profile to start with.
     pub correction: Option<PeqProfile>,
+    /// The room correction to start with.
+    pub room: Option<Arc<crate::audio::room::Impulse>>,
     pub radio: bool,
     pub shuffle_by_album: bool,
     /// Shuffle by stars (see `Command::SetShuffleByRating`).
@@ -442,6 +450,7 @@ impl Default for PlayerConfig {
             crossfade_secs: 0,
             speed_percent: 100,
             correction: None,
+            room: None,
             radio: false,
             shuffle_by_album: false,
             shuffle_by_rating: false,
@@ -731,6 +740,8 @@ struct Player<H: PlayerHost> {
     /// Name of the correction profile that is applied (one that changes nothing is
     /// not applied).
     correction: Option<String>,
+    /// Name of the room correction that is applied, if one is.
+    room: Option<String>,
     radio: bool,
     /// Start long tracks where they were left off (see `start_fresh`).
     resume_long_tracks: bool,
@@ -789,6 +800,7 @@ impl<H: PlayerHost> Player<H> {
         volume: f32,
     ) -> Self {
         engine.set_speed(f32::from(crate::audio::pace::speed_of(config.speed_percent)) / 100.0);
+        engine.set_room(config.room.clone());
         let (mut queue, resume_ms) = match session {
             Some(s) => {
                 let mut queue = Queue::from_state(s.queue);
@@ -839,6 +851,7 @@ impl<H: PlayerHost> Player<H> {
                 .as_ref()
                 .filter(|p| !p.is_flat())
                 .map(|p| p.name.clone()),
+            room: config.room.as_ref().map(|impulse| impulse.name.clone()),
             radio: config.radio,
             resume_long_tracks: config.resume_long_tracks,
             stop_after: None,
@@ -1125,6 +1138,7 @@ impl<H: PlayerHost> Player<H> {
             || self.crossfade_secs > 0
             || self.crossfeed != Crossfeed::Off
             || self.correction.is_some()
+            || self.room.is_some()
             || !integer_pcm
             || !fits
             || info.channels != 2
@@ -1615,6 +1629,16 @@ impl<H: PlayerHost> Player<H> {
                     }
                     self.review_processed();
                 }
+            }
+            Command::SetRoom(impulse) => {
+                let position = self.position_ms();
+                self.room = impulse.as_ref().map(|impulse| impulse.name.clone());
+                self.engine.set_room(impulse);
+                self.dirty = true;
+                if self.chain.is_some() {
+                    self.start_current(position, true);
+                }
+                self.review_processed();
             }
             Command::SetCorrection(profile) => {
                 let profile = profile.map(PeqProfile::sanitized);
@@ -2338,6 +2362,7 @@ impl<H: PlayerHost> Player<H> {
             eq: self.eq,
             crossfeed: self.crossfeed,
             correction: self.correction.clone(),
+            room: self.room.clone(),
             radio: self.radio,
             stop_after_current: self.stop_after.is_some(),
             sleep_at: self.sleep_at,

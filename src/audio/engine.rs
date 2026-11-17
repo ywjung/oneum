@@ -76,6 +76,8 @@ pub struct Engine {
     peq: Arc<PeqShared>,
     /// How fast the feeds started from now on go (see `FeedParams::speed`).
     speed: f32,
+    /// The room correction of the feeds started from now on (see `FeedParams::room`).
+    room: Option<Arc<super::room::Impulse>>,
     sink: Sink,
     /// `None` = follow the system default device.
     device_pref: Option<String>,
@@ -133,6 +135,7 @@ impl Engine {
             eq: EqShared::new(EqSettings::default()),
             crossfeed: Arc::new(AtomicU8::new(0)),
             speed: 1.0,
+            room: None,
             peq: PeqShared::new(None),
             sink: Sink::Closed,
             device_pref,
@@ -460,6 +463,7 @@ impl Engine {
             peq: self.peq.clone(),
             speed: self.speed,
             filter: self.settings.filter,
+            room: self.room.clone(),
         };
         let handle = FeedHandle::spawn(params)
             .ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;
@@ -559,6 +563,12 @@ impl Engine {
     /// feeds started after this: the one that is playing goes on as it was started.
     pub fn set_speed(&mut self, speed: f32) {
         self.speed = speed;
+    }
+
+    /// Sets the room correction (or none). Like the speed it holds for the feeds
+    /// started after this.
+    pub fn set_room(&mut self, room: Option<Arc<super::room::Impulse>>) {
+        self.room = room;
     }
 
     /// `(epoch, frames)` played by the callback, compensated for output latency.
