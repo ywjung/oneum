@@ -21,6 +21,8 @@ pub(super) enum Tab {
     About,
 }
 
+/// The playback speeds offered, in percent of a song's own.
+const SPEEDS: [u16; 6] = [50, 75, 100, 125, 150, 200];
 const LICENSE_NOTICES: &str = include_str!("../../THIRD_PARTY_NOTICES.md");
 /// The notices are small print: a size below the rest of Settings.
 const NOTICES_LOOK: markdown::Look = markdown::Look {
@@ -930,6 +932,25 @@ impl OneumApp {
         widgets::section_note(ui, s.crossfade_hint);
         if self.settings.crossfade_secs != crossfade_before {
             player.send(Command::SetCrossfade(self.settings.crossfade_secs));
+        }
+
+        ui.add_space(14.0);
+        // How fast songs go, at their own pitch.
+        widgets::section_title(ui, s.speed);
+        let speed_before = self.settings.speed_percent;
+        let speeds = SPEEDS.map(|percent| (percent, crate::i18n::Lang::speed_label(percent)));
+        let choices: Vec<(u16, &str)> = speeds
+            .iter()
+            .map(|(percent, label)| (*percent, label.as_str()))
+            .collect();
+        widgets::card(ui, |ui| {
+            widgets::setting_row(ui, s.speed_row, Some(s.speed_desc), true, |ui| {
+                widgets::segmented(ui, "speed", &mut self.settings.speed_percent, &choices);
+            });
+        });
+        widgets::section_note(ui, s.speed_hint);
+        if self.settings.speed_percent != speed_before {
+            player.send(Command::SetSpeed(self.settings.speed_percent));
         }
 
         ui.add_space(14.0);

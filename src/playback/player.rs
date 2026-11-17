@@ -193,6 +193,10 @@ pub enum Command {
     /// joined as they are whatever this says, and so is every song the listener
     /// starts.
     SetCrossfade(u8),
+    /// How fast songs go, in percent of their own speed (50 to 200; 100: as they
+    /// are). The pitch stays. A song that is playing goes on from where it is at the
+    /// new speed.
+    SetSpeed(u16),
     /// Sleep timer: pause when this much time has passed (`None` switches it off).
     /// The sound fades out over the last seconds; the volume setting is not changed.
     SetSleepTimer(Option<Duration>),
@@ -334,6 +338,8 @@ pub struct PlayerSnapshot {
     pub section: Option<SectionRepeat>,
     /// Seconds of crossfade between songs, as it is set (0: none).
     pub crossfade_secs: u8,
+    /// How fast songs go, in percent of their own speed, as it is set.
+    pub speed_percent: u16,
     /// Frames of the current track, as far as it has been decoded, that would have
     /// exceeded full scale and had their gain turned down instead of being clipped.
     pub peak_limited_frames: u64,
@@ -375,6 +381,7 @@ impl PlayerSnapshot {
             sleep_at: None,
             section: None,
             crossfade_secs: 0,
+            speed_percent: 100,
             peak_limited_frames: 0,
             last_start_latency_ms: None,
         }
@@ -384,7 +391,9 @@ impl PlayerSnapshot {
     pub fn position_now_ms(&self) -> u64 {
         let mut pos = self.position_ms;
         if self.state == PlayState::Playing {
-            pos += self.position_at.elapsed().as_millis() as u64;
+            // The song moves on by its speed.
+            pos +=
+                self.position_at.elapsed().as_millis() as u64 * u64::from(self.speed_percent) / 100;
         }
         match self.current {
             Some(c) if c.duration_ms > 0 => pos.min(c.duration_ms),
@@ -401,6 +410,8 @@ pub struct PlayerConfig {
     pub crossfeed: Crossfeed,
     /// Seconds of crossfade between songs (0: none).
     pub crossfade_secs: u8,
+    /// How fast songs go, in percent of their own speed (100: as they are).
+    pub speed_percent: u16,
     /// The parametric correction profile to start with.
     pub correction: Option<PeqProfile>,
     pub radio: bool,
@@ -423,6 +434,7 @@ impl Default for PlayerConfig {
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
             crossfade_secs: 0,
+            speed_percent: 100,
             correction: None,
             radio: false,
             shuffle_by_album: false,
@@ -598,7 +610,8 @@ struct Segment {
 #[derive(Debug, Default)]
 struct Listen {
     item_id: Option<ItemId>,
-    /// Audio heard, in microseconds (frames are converted at the feed's rate).
+    /// How much of the song was heard, in microseconds (frames are converted at the
+    /// feed's rate and speed).
     heard_us: u64,
     credited: bool,
     /// Feed position up to which audio has been accounted: `(epoch, frames)`.
@@ -611,7 +624,7 @@ impl Listen {
     }
 
     /// Accounts for feed `epoch` having played up to `frames` while `seg` is audible.
-    fn hear(&mut self, seg: &Segment, epoch: u16, frames: u64, rate: u32) {
+    fn hear(&mut self, seg: &Segment, epoch: u16, frames: u64, rate: u32, speed_percent: u16) {
         if self.item_id != Some(seg.item_id) {
             *self = Self {
                 item_id: Some(seg.item_id),
@@ -623,7 +636,7 @@ impl Listen {
             _ => seg.at_frame,
         };
         let upto = frames.max(from);
-        self.heard_us += (upto - from).saturating_mul(1_000_000) / u64::from(rate.max(1));
+        self.heard_us += song_ms((upto - from).saturating_mul(1_000), rate, speed_percent);
         self.mark = Some((epoch, upto));
     }
 
@@ -664,6 +677,21 @@ struct Chain {
     /// A track of this feed failed (while opening, or mid-way).
     failed: Option<ItemId>,
     is_seek: bool,
+    /// How fast the songs of this feed go, in percent of their own speed.
+    speed_percent: u16,
+}
+
+impl Chain {
+    /// How much of a song `frames` frames of this feed's output are, in milliseconds:
+    /// at twice the speed, a second of output is two seconds of the song.
+    fn song_ms(&self, frames: u64) -> u64 {
+        song_ms(frames, self.rate, self.speed_percent)
+    }
+}
+
+/// See [`Chain::song_ms`].
+fn song_ms(frames: u64, rate: u32, speed_percent: u16) -> u64 {
+    (u128::from(frames) * 10 * u128::from(speed_percent) / u128::from(rate.max(1))) as u64
 }
 
 enum StartError {
@@ -708,6 +736,8 @@ struct Player<H: PlayerHost> {
     section: Option<(ItemId, SectionRepeat)>,
     /// Seconds of crossfade between songs (0: none), see `Command::SetCrossfade`.
     crossfade_secs: u8,
+    /// How fast songs go, in percent of their own speed, see `Command::SetSpeed`.
+    speed_percent: u16,
     /// When the volume the sleep timer faded out is to be set back (see
     /// [`SLEEP_RESTORE_AFTER`]).
     sleep_restore_at: Option<Instant>,
@@ -745,13 +775,14 @@ struct Player<H: PlayerHost> {
 impl<H: PlayerHost> Player<H> {
     fn new(
         host: Arc<H>,
-        engine: Engine,
+        mut engine: Engine,
         rx: Receiver<Command>,
         shared: Arc<Mutex<PlayerSnapshot>>,
         config: PlayerConfig,
         session: Option<Session>,
         volume: f32,
     ) -> Self {
+        engine.set_speed(f32::from(crate::audio::pace::speed_of(config.speed_percent)) / 100.0);
         let (mut queue, resume_ms) = match session {
             Some(s) => {
                 let mut queue = Queue::from_state(s.queue);
@@ -808,6 +839,7 @@ impl<H: PlayerHost> Player<H> {
             sleep_at: None,
             section: None,
             crossfade_secs: config.crossfade_secs,
+            speed_percent: crate::audio::pace::speed_of(config.speed_percent),
             sleep_restore_at: None,
             processed_until: None,
             notice: None,
@@ -923,9 +955,7 @@ impl<H: PlayerHost> Player<H> {
                 let (epoch, frames) = self.engine.played();
                 match chain.segments.front() {
                     Some(seg) if epoch == chain.epoch => {
-                        seg.start_ms
-                            + frames.saturating_sub(seg.at_frame) * 1000
-                                / u64::from(chain.rate.max(1))
+                        seg.start_ms + chain.song_ms(frames.saturating_sub(seg.at_frame))
                     }
                     _ => chain.pending_start_ms,
                 }
@@ -1025,9 +1055,11 @@ impl<H: PlayerHost> Player<H> {
             return 0;
         }
         let length = |track: TrackId| self.host.track(track).map_or(0, |t| t.duration_ms);
+        // (A song lasts as long as its length says at its own speed only.)
+        let lasts = |track: TrackId| length(track) * 100 / u64::from(self.speed_percent.max(1));
         let fade = (u64::from(self.crossfade_secs) * 1000)
-            .min(length(ending) / 2)
-            .min(length(beginning) / 2);
+            .min(lasts(ending) / 2)
+            .min(lasts(beginning) / 2);
         if fade < CROSSFADE_MIN_MS {
             0
         } else {
@@ -1073,6 +1105,7 @@ impl<H: PlayerHost> Player<H> {
         // (With crossfade on, where two songs meet is a mix of both: all of it counts
         // as processed rather than following each meeting to the sample.)
         self.eq.is_active()
+            || self.speed_percent != 100
             || self.crossfade_secs > 0
             || self.crossfeed != Crossfeed::Off
             || self.correction.is_some()
@@ -1276,6 +1309,7 @@ impl<H: PlayerHost> Player<H> {
             pending_start_ms: start_ms,
             failed: None,
             is_seek,
+            speed_percent: self.speed_percent,
         });
         self.announce_next_after(item.id);
         self.engine.set_playing(true);
@@ -1549,6 +1583,20 @@ impl<H: PlayerHost> Player<H> {
                     self.dirty = true;
                     // What the feed is told of the song that follows changes with it.
                     self.sync_next();
+                    self.review_processed();
+                }
+            }
+            Command::SetSpeed(percent) => {
+                let percent = crate::audio::pace::speed_of(percent);
+                if percent != self.speed_percent {
+                    // Where the song is, by the speed it has gone at so far.
+                    let position = self.position_ms();
+                    self.speed_percent = percent;
+                    self.engine.set_speed(f32::from(percent) / 100.0);
+                    self.dirty = true;
+                    if self.chain.is_some() {
+                        self.start_current(position, true);
+                    }
                     self.review_processed();
                 }
             }
@@ -1957,10 +2005,15 @@ impl<H: PlayerHost> Player<H> {
             };
             let boundary = next.at_frame;
             let next_id = next.item_id;
-            self.listen
-                .hear(&finished, chain.epoch, boundary, chain.rate);
-            let length_ms = finished.start_ms
-                + boundary.saturating_sub(finished.at_frame) * 1000 / u64::from(chain.rate.max(1));
+            self.listen.hear(
+                &finished,
+                chain.epoch,
+                boundary,
+                chain.rate,
+                chain.speed_percent,
+            );
+            let length_ms =
+                finished.start_ms + chain.song_ms(boundary.saturating_sub(finished.at_frame));
             if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                 self.host.record_play(finished.track_id);
             }
@@ -1977,9 +2030,9 @@ impl<H: PlayerHost> Player<H> {
         if let Some(seg) = chain.segments.front() {
             // The feed length is only known as "what was played": the track's real length.
             let end = end_frames.unwrap_or(seg.at_frame).max(seg.at_frame);
-            self.listen.hear(seg, chain.epoch, end, chain.rate);
-            let length_ms =
-                seg.start_ms + (end - seg.at_frame) * 1000 / u64::from(chain.rate.max(1));
+            self.listen
+                .hear(seg, chain.epoch, end, chain.rate, chain.speed_percent);
+            let length_ms = seg.start_ms + chain.song_ms(end - seg.at_frame);
             // A track that broke mid-way did not play to its end.
             if failed != Some(seg.item_id) {
                 if self.listen.take_credit(credit_threshold_ms(length_ms)) {
@@ -2062,11 +2115,15 @@ impl<H: PlayerHost> Player<H> {
                     break;
                 };
                 // Played to its natural end.
-                self.listen
-                    .hear(&finished, chain.epoch, boundary, chain.rate);
-                let length_ms = finished.start_ms
-                    + boundary.saturating_sub(finished.at_frame) * 1000
-                        / u64::from(chain.rate.max(1));
+                self.listen.hear(
+                    &finished,
+                    chain.epoch,
+                    boundary,
+                    chain.rate,
+                    chain.speed_percent,
+                );
+                let length_ms =
+                    finished.start_ms + chain.song_ms(boundary.saturating_sub(finished.at_frame));
                 if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                     self.host.record_play(finished.track_id);
                 }
@@ -2113,7 +2170,8 @@ impl<H: PlayerHost> Player<H> {
         if played_epoch == chain.epoch
             && let Some(seg) = chain.segments.front()
         {
-            self.listen.hear(seg, chain.epoch, frames, chain.rate);
+            self.listen
+                .hear(seg, chain.epoch, frames, chain.rate, chain.speed_percent);
             if self
                 .listen
                 .take_credit(credit_threshold_ms(seg.duration_ms))
@@ -2269,6 +2327,7 @@ impl<H: PlayerHost> Player<H> {
             sleep_at: self.sleep_at,
             section: self.section.map(|(_, section)| section),
             crossfade_secs: self.crossfade_secs,
+            speed_percent: self.speed_percent,
             peak_limited_frames: self.peak_limited_frames(),
             last_start_latency_ms: self.last_start_latency_ms,
         };

@@ -85,6 +85,9 @@ pub struct Settings {
     pub crossfeed: Crossfeed,
     /// Crossfade between songs, in seconds (0, the default: none).
     pub crossfade_secs: u8,
+    /// How fast songs go, in percent of their own speed (100, the default: as they
+    /// are; see `audio::pace`).
+    pub speed_percent: u16,
     /// Parametric correction profiles that were imported (headphone corrections), in
     /// the order they were imported.
     #[serde(deserialize_with = "lenient_list")]
@@ -192,6 +195,7 @@ impl Settings {
     /// hold but the app never writes are brought back into range.
     pub fn sanitized(mut self) -> Self {
         self.eq = self.eq.sanitized();
+        self.speed_percent = crate::audio::pace::speed_of(self.speed_percent);
         self.eq_presets.truncate(MAX_EQ_PRESETS);
         for preset in &mut self.eq_presets {
             let values = EqSettings {
@@ -311,6 +315,7 @@ impl Default for Settings {
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
             crossfade_secs: 0,
+            speed_percent: 100,
             corrections: Vec::new(),
             correction: None,
             radio: false,

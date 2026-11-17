@@ -149,6 +149,23 @@ check rt6.json 'd["right_panel"] != "Info" and d["right_panel"] != "Queue"' "the
 ui 'menu crossfade 4' 'wait 400' 'dump cf1.json' 'menu crossfade 0' 'wait 400' 'dump cf2.json'
 check cf1.json 'd["crossfade_secs"] == 4 and d["state"] == "Playing"' "crossfade is set to four seconds while a song plays"
 check cf2.json 'd["crossfade_secs"] == 0 and d["state"] == "Playing"' "…and switched off again"
+# Playback speed: the song goes on at the new speed from where it was (which is a
+# seek: for a moment the state says so), one and a half times as fast as the clock,
+# and at its own speed again. (Length and pitch are the business of the audio tests.)
+ui 'menu speed 150' 'wait 900' 'dump sp1.json' 'wait 2000' 'dump sp2.json' 'menu speed 100' 'wait 900' 'dump sp3.json'
+check sp1.json 'd["speed_percent"] == 150 and d["state"] in ("Playing", "Seeking")' "the playback speed is set to 1.5× while a song plays"
+if python3 - "$PROFILE/sp1.json" "$PROFILE/sp2.json" <<'PY'
+import json, sys
+a, b = (json.load(open(f)) for f in sys.argv[1:3])
+moved = b["position_ms"] - a["position_ms"]
+assert b["state"] == "Playing" and b["underruns"] == a["underruns"], (b["state"], b["underruns"])
+# Two seconds of the clock (and what the script's own steps take): three of the song.
+assert 2700 <= moved <= 4200, moved
+PY
+then echo "  ok   …and the song moves one and a half times as fast as the clock, without a break in the sound"
+else echo "  FAIL the song does not move at 1.5× (see sp1.json, sp2.json)"; exit 1
+fi
+check sp3.json 'd["speed_percent"] == 100 and d["state"] in ("Playing", "Seeking")' "…and at its own speed again"
 # The song is taken back to its beginning: the sections above took a quarter of a
 # minute of it, and what follows was timed for a song that had only just begun (it
 # must not end in the middle of a later check).

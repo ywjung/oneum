@@ -465,6 +465,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         crossfade_secs: settings
             .crossfade_secs
             .min(crate::app::settings::MAX_CROSSFADE_SECS),
+        speed_percent: settings.speed_percent,
         correction: settings.active_correction().cloned(),
         radio: settings.radio,
         shuffle_by_album: settings.shuffle_by_album,

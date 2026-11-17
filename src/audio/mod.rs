@@ -17,6 +17,7 @@ pub mod limiter;
 pub mod loudness;
 pub mod mp4_edit;
 pub mod output;
+pub mod pace;
 pub mod peq;
 pub mod remote;
 pub mod render;

@@ -74,6 +74,8 @@ pub struct Engine {
     eq: Arc<EqShared>,
     crossfeed: Arc<AtomicU8>,
     peq: Arc<PeqShared>,
+    /// How fast the feeds started from now on go (see `FeedParams::speed`).
+    speed: f32,
     sink: Sink,
     /// `None` = follow the system default device.
     device_pref: Option<String>,
@@ -130,6 +132,7 @@ impl Engine {
             limited: Arc::new(AtomicU64::new(0)),
             eq: EqShared::new(EqSettings::default()),
             crossfeed: Arc::new(AtomicU8::new(0)),
+            speed: 1.0,
             peq: PeqShared::new(None),
             sink: Sink::Closed,
             device_pref,
@@ -445,6 +448,7 @@ impl Engine {
             eq: self.eq.clone(),
             crossfeed: self.crossfeed.clone(),
             peq: self.peq.clone(),
+            speed: self.speed,
         };
         let handle = FeedHandle::spawn(params)
             .ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;
@@ -538,6 +542,12 @@ impl Engine {
     /// once the audio already decoded has been played.
     pub fn set_crossfeed(&self, setting: Crossfeed) {
         self.crossfeed.store(setting.to_u8(), Ordering::Relaxed);
+    }
+
+    /// Sets how fast songs go, as a multiple of their own speed. It holds for the
+    /// feeds started after this: the one that is playing goes on as it was started.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
     }
 
     /// `(epoch, frames)` played by the callback, compensated for output latency.

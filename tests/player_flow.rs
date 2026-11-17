@@ -2633,3 +2633,63 @@ fn songs_of_different_albums_are_crossfaded_and_songs_of_one_album_are_not() {
     );
     assert_eq!(rig.host.plays(), vec![A, B]);
 }
+
+/// At twice the speed two seconds of songs take one second, the position runs in the
+/// songs' own time, and both count as played.
+#[test]
+fn songs_go_faster_at_another_speed_and_are_counted_as_before() {
+    let rig = Rig::start(TestHost::new());
+    rig.send(Command::SetSpeed(200));
+    rig.wait("the speed is set", |s| s.speed_percent == 200);
+    rig.send(play(&[A, B], 0));
+    let second = rig.wait("the second song", |s| Rig::track(s) == Some(B));
+    assert!(
+        second.position_ms < 500,
+        "the second song from its beginning"
+    );
+    let ended = rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(Rig::track(&ended), Some(B));
+    let frames = rig.total_frames();
+    assert!(
+        frames.abs_diff(44_100) < 4_000,
+        "two seconds of songs at twice the speed: {frames} frames"
+    );
+    assert_eq!(rig.host.plays(), vec![A, B]);
+
+    // A speed that makes no sense is the songs' own.
+    rig.send(Command::SetSpeed(5));
+    rig.wait("the speed is the songs' own", |s| s.speed_percent == 100);
+}
+
+/// A change of speed while a song plays: the song goes on from where it is.
+#[test]
+fn a_change_of_speed_leaves_the_song_where_it_is() {
+    let rig = Rig::start(TestHost::new());
+    // About real time, so that the change comes in the middle of the first song.
+    rig.pace_ms.store(12, Ordering::Relaxed);
+    rig.send(play(&[A, B], 0));
+    let before = rig.wait("some of the first song", |s| {
+        Rig::track(s) == Some(A) && s.state == PlayState::Playing && s.position_ms >= 300
+    });
+    rig.send(Command::SetSpeed(50));
+    let after = rig.wait("the song at the new speed", |s| {
+        s.speed_percent == 50 && s.state == PlayState::Playing
+    });
+    assert_eq!(Rig::track(&after), Some(A), "the same song");
+    assert!(
+        after.position_ms + 50 >= before.position_ms && after.position_ms < 900,
+        "from {} ms on, not from the beginning: {} ms",
+        before.position_ms,
+        after.position_ms
+    );
+    rig.pace_ms.store(2, Ordering::Relaxed);
+    rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    // What was left of the two songs took twice its time: more frames than the two
+    // seconds the songs hold, fewer than four.
+    let frames = rig.total_frames();
+    assert!(
+        (100_000..176_400).contains(&frames),
+        "{frames} frames for two seconds of songs, most of them at half speed"
+    );
+    assert_eq!(rig.host.plays(), vec![A, B]);
+}

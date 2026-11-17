@@ -6,12 +6,12 @@ own license. The full license texts come with the app in the file
 `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
 next to the program; on Android inside the APK, under assets).
 
-Crates: 322
+Crates: 323
 
 ## License summary
 
 - `MIT OR Apache-2.0` — 145
-- `MIT` — 54
+- `MIT` — 55
 - `Zlib OR Apache-2.0 OR MIT` — 26
 - `Apache-2.0 OR MIT` — 21
 - `MPL-2.0` — 17
@@ -362,6 +362,7 @@ Notes:
 | windowfunctions | 0.1.1 | MIT | https://github.com/HEnquist/windowfunctions-rs |
 | winit | 0.30.13 | Apache-2.0 | https://github.com/rust-windowing/winit |
 | winnow | 1.0.5 | MIT | https://github.com/winnow-rs/winnow |
+| wsola | 0.3.0 | MIT | https://github.com/jhheider/pdcst |
 | x11rb | 0.13.2 | MIT OR Apache-2.0 | https://github.com/psychon/x11rb |
 | x11rb-protocol | 0.13.2 | MIT OR Apache-2.0 | https://github.com/psychon/x11rb |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |

@@ -9,6 +9,7 @@ use super::decoder::{SourceInfo, TrackDecoder, map_file_error, sanitize};
 use super::dsp::{ReplayGainMode, ReplayGainSettings, replaygain_factor, to_stereo};
 use super::eq::{EqShared, Equalizer};
 use super::limiter::PeakLimiter;
+use super::pace::{self, Pacer};
 use super::peq::{Corrector, PeqShared};
 use super::render::FeedConsumer;
 use super::resample::StereoResampler;
@@ -200,6 +201,9 @@ pub struct FeedParams {
     pub crossfeed: Arc<AtomicU8>,
     /// The parametric correction profile; followed like the equalizer.
     pub peq: Arc<PeqShared>,
+    /// How fast the songs of this feed go, as a multiple of their own speed (1.0: as
+    /// they are). One for the whole feed: another speed is another feed.
+    pub speed: f32,
 }
 
 impl FeedHandle {
@@ -586,6 +590,20 @@ impl Worker {
         let mut decoded: Vec<f32> = Vec::new();
         let mut stereo: Vec<f32> = Vec::new();
         let mut resampled: Vec<f32> = Vec::new();
+        // Another speed than the songs' own: each song then goes through a pacer, at
+        // a rate the pacer keeps up with (`mid_rate`: the output's, or below it), and
+        // from there to the output's rate. Nothing is carried from song to song.
+        let speed = self.params.speed;
+        let pacing = Pacer::new(out_rate.max(1), speed).is_some();
+        let mid_rate = if pacing {
+            pace::working_rate(out_rate)
+        } else {
+            out_rate
+        };
+        let mut pacer: Option<Pacer> = None;
+        let mut raiser: Option<StereoResampler> = None;
+        let mut paced: Vec<f32> = Vec::new();
+        let mut raised: Vec<f32> = Vec::new();
         // The last stage before the ring, one for the whole feed: it runs across track
         // boundaries like the audio does. `written` counts what has left it.
         let mut limiter = PeakLimiter::new(out_rate);
@@ -652,6 +670,45 @@ impl Worker {
             }};
         }
 
+        // What a track gives at the output's rate, on its way to the stages above: the
+        // end of the track before fades out under its beginning, and its own end is
+        // held back while the next one is to be mixed with it.
+        macro_rules! deliver {
+            ($ready:expr, $info:expr) => {{
+                let ready: &mut Vec<f32> = $ready;
+                // The end of the track before fades out under this beginning.
+                if let Some((tail, done)) = mixing.as_mut() {
+                    mix_in(tail, done, ready);
+                    if *done * 2 >= tail.len() {
+                        mixing = None;
+                    }
+                }
+                // The end of this track is held back while the next one is to be
+                // mixed with it (not that of a DSD track, whose last frames are
+                // made with the next track's first ones).
+                let hold_ms = match $info.dsd_rate {
+                    None => self.params.next.crossfade_ms(),
+                    Some(_) => 0,
+                };
+                if hold_ms > 0 {
+                    held.extend(ready.iter());
+                    ready.clear();
+                    let keep = frames_of(hold_ms, out_rate) * 2;
+                    if held.len() > keep {
+                        ready.extend(held.drain(..held.len() - keep));
+                    }
+                } else if !held.is_empty() {
+                    // Not to be mixed after all: what was held goes on, in its place.
+                    held.extend(ready.iter());
+                    ready.clear();
+                    ready.extend(held.drain(..));
+                }
+                if !ready.is_empty() {
+                    stages!(ready);
+                }
+            }};
+        }
+
         'tracks: loop {
             self.current = (req.item_id, req.track_id);
             let fail = |error: PlaybackError| FeedEvent::TrackFailed {
@@ -681,7 +738,7 @@ impl Worker {
                 }
             }
             // Keep the resampler across tracks of the same rate so the signal stays continuous.
-            let needs_resampling = info.sample_rate != out_rate;
+            let needs_resampling = info.sample_rate != mid_rate;
             let reusable = resampler
                 .as_ref()
                 .is_some_and(|r| needs_resampling && r.in_rate() == info.sample_rate);
@@ -693,7 +750,7 @@ impl Worker {
                     }
                 }
                 if needs_resampling {
-                    match StereoResampler::new(info.sample_rate, out_rate) {
+                    match StereoResampler::new(info.sample_rate, mid_rate) {
                         Ok(r) => {
                             resampler = Some(r);
                             chain_base = written + limiter.held_frames();
@@ -708,9 +765,27 @@ impl Worker {
                     }
                 }
             }
+            if pacing {
+                pacer = Pacer::new(mid_rate, speed);
+                raiser = match (mid_rate != out_rate)
+                    .then(|| StereoResampler::new(mid_rate, out_rate))
+                {
+                    None => None,
+                    Some(Ok(raiser)) => Some(raiser),
+                    Some(Err(detail)) => {
+                        self.send(fail(PlaybackError {
+                            kind: PlaybackErrorKind::Unsupported,
+                            detail,
+                        }));
+                        break 'tracks;
+                    }
+                };
+            }
+            // (At another speed every track has converters of its own, which have
+            // taken nothing in yet: the track begins where the one before it ends.)
             let at_frame = match &resampler {
-                Some(r) => chain_base + r.expected_out_frames(),
-                None => written + limiter.held_frames(),
+                Some(r) if !pacing => chain_base + r.expected_out_frames(),
+                _ => written + limiter.held_frames(),
             };
             self.send(FeedEvent::TrackStarted {
                 epoch,
@@ -783,7 +858,7 @@ impl Worker {
                             *s *= gain_now;
                         }
                     }
-                    let ready = match resampler.as_mut() {
+                    let converted = match resampler.as_mut() {
                         Some(rs) => {
                             resampled.clear();
                             if let Err(detail) = rs.process(&stereo, &mut resampled) {
@@ -797,40 +872,60 @@ impl Worker {
                         }
                         None => &mut stereo,
                     };
-                    // The end of the track before fades out under this beginning.
-                    if let Some((tail, done)) = mixing.as_mut() {
-                        mix_in(tail, done, ready);
-                        if *done * 2 >= tail.len() {
-                            mixing = None;
+                    // At another speed: through the pacer, and up to the output's
+                    // rate where the pacer works below it.
+                    let ready = match pacer.as_mut() {
+                        Some(pacer) => {
+                            paced.clear();
+                            pacer.process(converted, &mut paced);
+                            match raiser.as_mut() {
+                                Some(raiser) => {
+                                    raised.clear();
+                                    if let Err(detail) = raiser.process(&paced, &mut raised) {
+                                        self.send(fail(PlaybackError {
+                                            kind: PlaybackErrorKind::Corrupt,
+                                            detail,
+                                        }));
+                                        break 'tracks;
+                                    }
+                                    &mut raised
+                                }
+                                None => &mut paced,
+                            }
                         }
-                    }
-                    // The end of this track is held back while the next one is to be
-                    // mixed with it (not that of a DSD track, whose last frames are
-                    // made with the next track's first ones).
-                    let hold_ms = match info.dsd_rate {
-                        None => self.params.next.crossfade_ms(),
-                        Some(_) => 0,
+                        None => converted,
                     };
-                    if hold_ms > 0 {
-                        held.extend(ready.iter());
-                        ready.clear();
-                        let keep = frames_of(hold_ms, out_rate) * 2;
-                        if held.len() > keep {
-                            ready.extend(held.drain(..held.len() - keep));
-                        }
-                    } else if !held.is_empty() {
-                        // Not to be mixed after all: what was held goes on, in its place.
-                        held.extend(ready.iter());
-                        ready.clear();
-                        ready.extend(held.drain(..));
-                    }
-                    if !ready.is_empty() {
-                        stages!(ready);
-                    }
+                    deliver!(ready, info);
                 }
                 if last {
                     break;
                 }
+            }
+            // At another speed, the end of the song: what the rate conversion in
+            // front of the pacer still holds, what the pacer holds, and what the
+            // conversion after it holds.
+            if let Some(mut pacer) = pacer.take() {
+                paced.clear();
+                if let Some(mut old) = resampler.take() {
+                    resampled.clear();
+                    if old.flush(&mut resampled).is_ok() {
+                        pacer.process(&resampled, &mut paced);
+                    }
+                }
+                pacer.finish(&mut paced);
+                let ready = match raiser.take() {
+                    Some(mut raiser) => {
+                        raised.clear();
+                        if raiser.process(&paced, &mut raised).is_err()
+                            || raiser.flush(&mut raised).is_err()
+                        {
+                            raised.clear();
+                        }
+                        &mut raised
+                    }
+                    None => &mut paced,
+                };
+                deliver!(ready, info);
             }
             let next = match followed.take() {
                 Some(next) => next,
@@ -981,6 +1076,7 @@ mod tests {
             eq: EqShared::new(Default::default()),
             crossfeed: Arc::new(AtomicU8::new(0)),
             peq: PeqShared::new(None),
+            speed: 1.0,
             events,
             memory: false,
         }

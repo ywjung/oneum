@@ -2666,6 +2666,16 @@ impl OneumApp {
                         }
                         continue;
                     }
+                    // Playback speed, in percent (as the playback settings set it).
+                    if let Some(percent) = id.strip_prefix("speed ") {
+                        if let Ok(percent) = percent.parse::<u16>() {
+                            self.settings.speed_percent = crate::audio::pace::speed_of(percent);
+                            self.core
+                                .player
+                                .send(Command::SetSpeed(self.settings.speed_percent));
+                        }
+                        continue;
+                    }
                     // Stars for the song that is playing.
                     if let Some(stars) = id.strip_prefix("rate_current ") {
                         if let (Some(current), Ok(stars)) = (self.player.current, stars.parse()) {
@@ -2908,6 +2918,7 @@ impl OneumApp {
         state["graphics_errors"] = serde_json::json!(renderer::errors());
         state["section"] = serde_json::json!(p.section.map(|s| (s.from_ms, s.to_ms)));
         state["crossfade_secs"] = serde_json::json!(p.crossfade_secs);
+        state["speed_percent"] = serde_json::json!(p.speed_percent);
         state["mini"] = serde_json::json!(self.mini.is_some());
         state["correction_editing"] = serde_json::json!(
             self.peq_edit

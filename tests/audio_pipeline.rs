@@ -2907,3 +2907,85 @@ fn a_file_of_long_blocks_plays_through_the_feed() {
     assert_eq!(played.frames(), 44_100 + 183_456);
     assert_eq!(played.started(), vec![(1, 0), (2, 44_100)]);
 }
+
+/// How strongly `hz` is in a signal sampled at `rate` (the amplitude of that one
+/// frequency).
+fn level_at(signal: &[f32], hz: f32, rate: u32) -> f32 {
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (n, s) in signal.iter().enumerate() {
+        let turn = std::f64::consts::TAU * f64::from(hz) * n as f64 / f64::from(rate);
+        re += f64::from(*s) * turn.cos();
+        im += f64::from(*s) * turn.sin();
+    }
+    (2.0 * (re * re + im * im).sqrt() / signal.len().max(1) as f64) as f32
+}
+
+/// At another speed two songs take that much less or more time, the second begins
+/// where the first ends, and the tone they hold stays at its pitch. So it is with a
+/// device that runs above the rate the pacer works at (the sound is brought up to
+/// the device's rate after it).
+#[test]
+fn another_speed_changes_the_length_and_keeps_the_pitch() {
+    for (rate, speed) in [
+        (44_100u32, 1.5f32),
+        (44_100, 0.5),
+        (48_000, 2.0),
+        (96_000, 1.25),
+    ] {
+        let (mut engine, mut renderer) =
+            Engine::new_offline(rate, 1.0, ReplayGainSettings::default());
+        engine.set_speed(speed);
+        let queue: Vec<TrackRequest> = ["gap_a.wav", "gap_b.wav"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| request(i as u64 + 1, n))
+            .collect();
+        let slot = NextSlot::new();
+        slot.set(NextTrack::Track(queue[1].clone()));
+        engine
+            .start_feed(queue[0].clone(), 0, slot.clone())
+            .expect("feed starts");
+        engine.set_playing(true);
+        let played = pump(&mut engine, &mut renderer, &queue, &slot);
+        let what = format!("{rate} Hz at {speed}");
+        assert_eq!(played.underruns, 0, "{what}");
+        // A second of song is this many frames of output.
+        let second = (f64::from(rate) / f64::from(speed)) as usize;
+        let slack = rate as usize / 20;
+        let started = played.started();
+        assert_eq!(started.len(), 2, "{what}");
+        assert_eq!(started[0], (1, 0), "{what}");
+        assert!(
+            (started[1].1 as usize).abs_diff(second) < slack,
+            "{what}: the second song begins at {} of {second}",
+            started[1].1
+        );
+        assert!(
+            played.frames().abs_diff(2 * second) < 2 * slack,
+            "{what}: {} frames for {}",
+            played.frames(),
+            2 * second
+        );
+        // Each song by itself (where one ends and the next begins the tone may
+        // jump in phase: nothing is carried from song to song at another speed).
+        let left = played.left();
+        let boundary = started[1].1 as usize;
+        for (song, part) in [&left[..boundary], &left[boundary..]].iter().enumerate() {
+            let middle = &part[part.len() / 8..part.len() * 7 / 8];
+            let there = level_at(middle, 441.0, rate);
+            assert!(
+                (there - AMP).abs() < 0.05,
+                "{what}, song {song}: the tone's level is {there}"
+            );
+            let moved = level_at(middle, 441.0 * speed, rate);
+            assert!(
+                moved < 0.05,
+                "{what}, song {song}: {moved} of the tone moved in pitch"
+            );
+        }
+        assert!(
+            left.iter().all(|s| s.is_finite() && s.abs() <= 1.0),
+            "{what}"
+        );
+    }
+}

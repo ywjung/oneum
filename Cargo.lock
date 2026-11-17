@@ -2758,6 +2758,7 @@ dependencies = [
  "wgpu",
  "windows",
  "winit",
+ "wsola",
 ]
 
 [[package]]
@@ -4894,6 +4895,15 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wsola"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8149cd82a73bbde439d2b42a40a032de7dc28b1ec01919fcd0bd0456ecea75e6"
+dependencies = [
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "x11-dl"

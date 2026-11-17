@@ -91,6 +91,8 @@ struct PathInputs<'a> {
     crossfeed: Option<&'a str>,
     /// The crossfade between songs in words, while it is on.
     crossfade: Option<String>,
+    /// The playback speed in words, while it is not the song's own.
+    speed: Option<String>,
     peak_protection: bool,
     /// The volume slider, 0..=1.
     volume: f32,
@@ -178,6 +180,9 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
             s.info_proc_crossfade,
             between.clone(),
         );
+    }
+    if let Some(speed) = &input.speed {
+        add(StageKind::Adjustment, s.info_proc_speed, speed.clone());
     }
     if input.peak_protection {
         add(StageKind::Protection, s.info_proc_limiter, String::new());
@@ -1440,6 +1445,8 @@ impl OneumApp {
             },
             crossfade: (self.player.crossfade_secs > 0)
                 .then(|| self.lang.crossfade_detail(self.player.crossfade_secs)),
+            speed: (self.player.speed_percent != 100)
+                .then(|| self.lang.speed_detail(self.player.speed_percent)),
             peak_protection: self.player.peak_limited_frames > 0,
             volume: self.player.volume,
             dither_bits: self.player.dither_bits,
@@ -2491,6 +2498,7 @@ mod tests {
             correction: None,
             crossfeed: None,
             crossfade: None,
+            speed: None,
             peak_protection: false,
             volume: 1.0,
             dither_bits: None,

@@ -3919,7 +3919,12 @@ impl OneumApp {
             .clicked()
         };
         let section = self.section_words();
-        if self.player.stop_after_current || self.player.sleep_at.is_some() || section.is_some() {
+        let paced = self.player.speed_percent != 100;
+        if self.player.stop_after_current
+            || self.player.sleep_at.is_some()
+            || section.is_some()
+            || paced
+        {
             ui.add_space(6.0);
         }
         ui.vertical_centered(|ui| {
@@ -3931,6 +3936,12 @@ impl OneumApp {
             }
             if self.player.stop_after_current && note(ui, s.stop_after_short.to_string()) {
                 self.core.player.send(Command::SetStopAfterCurrent(false));
+            }
+            // Another speed than the songs' own: a tap sets it back.
+            let speed = crate::i18n::Lang::speed_label(self.player.speed_percent);
+            if paced && note(ui, format!("{} {speed}", s.speed)) {
+                self.settings.speed_percent = 100;
+                self.core.player.send(Command::SetSpeed(100));
             }
             if let Some(at) = self.player.sleep_at {
                 let left = at.saturating_duration_since(Instant::now()).as_secs();

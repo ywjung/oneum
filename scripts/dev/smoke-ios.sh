@@ -332,6 +332,10 @@ check n7.json 'd["current_rating"] == 4' "…and the data, taken in again, gives
 ui 'menu crossfade 4' 'wait 400' 'dump n8.json' 'menu crossfade 0' 'wait 400' 'dump n9.json'
 check n8.json 'd["crossfade_secs"] == 4 and d["state"] == "Playing"' "crossfade is set to four seconds while a song plays"
 check n9.json 'd["crossfade_secs"] == 0' "…and switched off again"
+# (A change of speed is a seek to where the song is: for a moment the state says so.)
+ui 'menu speed 150' 'wait 900' 'dump n14.json' 'menu speed 100' 'wait 900' 'dump n15.json'
+check n14.json 'd["speed_percent"] == 150 and d["state"] in ("Playing", "Seeking")' "the playback speed is set to 1.5× while a song plays"
+check n15.json 'd["speed_percent"] == 100 and d["state"] in ("Playing", "Seeking")' "…and back to the song's own"
 ui 'menu shuffle_by_rating' 'wait 300' 'dump n12.json' 'menu shuffle_by_rating' 'wait 300' 'dump n13.json'
 check n12.json 'd["shuffle_by_rating"]' "shuffling by stars is switched on"
 check n13.json 'not d["shuffle_by_rating"]' "…and off again"

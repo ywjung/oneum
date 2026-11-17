@@ -34,6 +34,9 @@ symphonia = { version = "0.6", default-features = false, features = ["opt-simd",
 symphonia-opus = "0.1"
 wavicle = "0.1"
 ape-decoder = "0.3"
+# Playback speed: changes how fast a song goes and leaves its pitch (WSOLA; Rust without
+# unsafe code, src/audio/pace.rs).
+wsola = "0.3"
 # Without "id3v2_compression_support": a compressed ID3v2 frame can unpack to gigabytes
 # (the reader does not limit it), and such frames are next to unknown in real files.
 # 0.25.5 does not build without the feature; see [patch.crates-io] and vendor/lofty.

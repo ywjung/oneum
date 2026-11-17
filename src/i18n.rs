@@ -422,6 +422,12 @@ strings! {
     crossfade_10: "10초", "10 s";
     crossfade_hint: "곡이 스스로 다음 곡으로 넘어갈 때만 겹칩니다. 같은 앨범의 곡 사이는 지금처럼 끊김 없이 이어지고, 직접 고른 곡은 바로 시작합니다. 겹치는 길이는 두 곡 길이의 절반을 넘지 않습니다. 켜면 겹치는 구간의 소리는 원본과 달라집니다. DSD 곡의 끝과, 곡의 샘플레이트로 출력할 때 장치의 샘플레이트가 바뀌는 자리에서는 겹치지 않습니다.", "Songs overlap only where one follows another by itself. Songs of one album go on without a gap as before, and a song you choose starts at once. The overlap is never longer than half of either song. While on, the sound differs from the original where songs overlap. The end of a DSD song is not overlapped, and neither is a place where the device changes its sample rate (output at the song's sample rate).";
     info_proc_crossfade: "크로스페이드", "Crossfade";
+    speed: "재생 속도", "Playback Speed";
+    speed_row: "곡의 빠르기", "Speed of the Songs";
+    speed_desc: "음높이는 그대로 두고 빠르기만 바꿉니다.", "Faster or slower, at the pitch the song has.";
+    speed_hint: "1×가 아닐 때의 소리는 원본을 잘게 나눠 다시 이어 붙인 것입니다(원본 그대로가 아닙니다). 말소리에 잘 맞고, 음악에서는 길게 끄는 음이나 타악기가 조금 다르게 들릴 수 있습니다. 재생 위치와 남은 시간은 곡의 시간 그대로이고, 곡이 그만큼 빨리 또는 천천히 지나갑니다.", "At any speed but 1× the sound is the original cut into short pieces and joined again (not the original as it is). It suits speech well; in music, long notes and drums may sound a little different. Position and time left stay in the song's own time: the song passes that much faster or slower.";
+    info_proc_speed: "재생 속도", "Playback speed";
+    speed_cancel_hint: "재생 속도. 누르면 1×로 돌아갑니다.", "Playback speed. Click for 1× again.";
     info_proc_correction: "헤드폰 보정", "Headphone correction";
     correction: "헤드폰 보정", "Headphone Correction";
     correction_row: "보정 프로필", "Correction Profile";
@@ -1169,6 +1175,20 @@ impl Lang {
         match self {
             Lang::Ko => format!("보정 프로필 \"{name}\"을(를) 저장했습니다."),
             Lang::En => format!("Correction profile \"{name}\" saved."),
+        }
+    }
+
+    /// A playback speed as it is shown ("1.25×").
+    pub fn speed_label(percent: u16) -> String {
+        let text = format!("{:.2}", f32::from(percent) / 100.0);
+        format!("{}×", text.trim_end_matches('0').trim_end_matches('.'))
+    }
+
+    /// The playback speed as the signal path tells of it.
+    pub fn speed_detail(self, percent: u16) -> String {
+        match self {
+            Lang::Ko => format!("{}, 음높이 유지", Lang::speed_label(percent)),
+            Lang::En => format!("{}, pitch kept", Lang::speed_label(percent)),
         }
     }
 

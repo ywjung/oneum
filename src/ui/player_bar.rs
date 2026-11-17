@@ -398,6 +398,19 @@ impl OneumApp {
                 player.send(Command::ClearSection);
             }
         }
+        // Another speed than the songs' own, while it is set: a click sets it back.
+        if self.player.speed_percent != 100 {
+            let text = RichText::new(crate::i18n::Lang::speed_label(self.player.speed_percent))
+                .small()
+                .color(theme::accent(ui.visuals().dark_mode));
+            let label = ui
+                .add(egui::Label::new(text).sense(Sense::click()))
+                .on_hover_text(s.speed_cancel_hint);
+            if label.clicked() {
+                self.settings.speed_percent = 100;
+                player.send(Command::SetSpeed(100));
+            }
+        }
         // "Stop after this song", while it is set: said in words (a mark on the play
         // button read as a drawing fault); a click takes it back.
         if self.player.stop_after_current {
