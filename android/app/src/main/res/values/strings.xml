@@ -6,4 +6,7 @@
     <string name="action_play">Play</string>
     <string name="action_pause">Pause</string>
     <string name="action_next">Next</string>
+    <string name="widget_name">Now Playing</string>
+    <string name="widget_description">The song that is playing, with previous, play and next.</string>
+    <string name="widget_nothing">Nothing playing</string>
 </resources>

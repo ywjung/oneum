@@ -374,6 +374,12 @@ echo "== the graphics device is lost"
 ui "tap 200 $MENU0" 'wait 700' "tap 150 $SONG0" 'wait 2500' 'dump g1.json'
 check g1.json 'd["state"] == "Playing" and d["volume"] == 0' "a song of the library plays"
 check g1.json 'd["graphics_errors"] == 0' "what the screen is drawn with has told of no error in all of this run"
+# The home screen widget: the system knows it, and it is told the song that plays (what
+# a launcher shows of it was looked at by hand: no launcher is driven here).
+widget_known() { $ADB shell dumpsys appwidget </dev/null | grep -q "$PKG/$PKG.NowPlayingWidget"; }
+widget_has_song() { $ADB shell "run-as $PKG cat shared_prefs/widget.xml" </dev/null | grep -q '<string name="title">..*</string>'; }
+holds "the home screen widget is known to the system" widget_known
+holds "and is told the song that plays" widget_has_song
 # A section repeated, stars and the library's data: what the desk's smoke test shows
 # of these in full, by the same commands; here, that they work on a phone.
 ui 'menu repeat_section' 'wait 1500' 'menu repeat_section' 'wait 300' 'dump n1.json' 'wait 3500' 'dump n2.json' \

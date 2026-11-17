@@ -42,9 +42,9 @@ public final class PlaybackService extends Service {
     private static final String TAG = "OnEum";
     private static final String CHANNEL = "playback";
     private static final int NOTIFICATION = 1;
-    private static final String ACTION_PREVIOUS = "app.oneum.android.PREVIOUS";
-    private static final String ACTION_TOGGLE = "app.oneum.android.TOGGLE";
-    private static final String ACTION_NEXT = "app.oneum.android.NEXT";
+    static final String ACTION_PREVIOUS = "app.oneum.android.PREVIOUS";
+    static final String ACTION_TOGGLE = "app.oneum.android.TOGGLE";
+    static final String ACTION_NEXT = "app.oneum.android.NEXT";
     /**
      * How long a paused service stays in the foreground. A service that leaves it at
      * once is stopped by Android about a minute later when the app is off screen ("app
@@ -131,6 +131,7 @@ public final class PlaybackService extends Service {
     /** The app says what plays. The service is started when something first plays. */
     static void update(Context context, State state) {
         latest = state;
+        NowPlayingWidget.show(context, state);
         if (running != null) {
             running.show(state);
         } else if (state.playing) {

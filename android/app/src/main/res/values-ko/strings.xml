@@ -5,4 +5,7 @@
     <string name="action_play">재생</string>
     <string name="action_pause">일시정지</string>
     <string name="action_next">다음</string>
+    <string name="widget_name">재생 중인 곡</string>
+    <string name="widget_description">재생 중인 곡과 이전 · 재생 · 다음 단추.</string>
+    <string name="widget_nothing">재생 중인 곡 없음</string>
 </resources>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The home screen widget: four cells wide and one high to begin with, and as wide as
+     the user makes it. Nothing is drawn by the clock: the app says when a song or its
+     state changes. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_description"
+    android:initialLayout="@layout/widget_now_playing"
+    android:minHeight="56dp"
+    android:minWidth="250dp"
+    android:previewLayout="@layout/widget_now_playing"
+    android:resizeMode="horizontal"
+    android:targetCellHeight="1"
+    android:targetCellWidth="4"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

@@ -72,6 +72,13 @@ public final class MainActivity extends NativeActivity {
         System.loadLibrary("oneum");
     }
 
+    /**
+     * The app is there: its screen was made and has not gone for good. What stays on
+     * the home screen when it is not (the widget) asks this before it tells the app
+     * anything.
+     */
+    static volatile boolean up;
+
     private InputView input;
     /** Which kind of picker was shown under which request code. */
     private final SparseIntArray picking = new SparseIntArray();
@@ -88,6 +95,7 @@ public final class MainActivity extends NativeActivity {
         new Thread(this::recordLastExits, "exits").start();
         tellEnvironment();
         super.onCreate(savedInstanceState);
+        up = true;
         Window window = getWindow();
         // The app draws under the system's bars and keeps clear of them itself.
         window.setDecorFitsSystemWindows(false);
@@ -312,6 +320,8 @@ public final class MainActivity extends NativeActivity {
     protected void onDestroy() {
         // The app cannot start a second time in one process: when its screen goes for
         // good, it saves what it keeps and the process ends (this call does not return).
+        up = false;
+        NowPlayingWidget.appGone(this);
         PlaybackService.end();
         Native.onDestroy();
         super.onDestroy();
