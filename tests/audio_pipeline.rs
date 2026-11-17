@@ -24,6 +24,7 @@ fn request(item_id: u64, name: &str) -> TrackRequest {
         track_id: item_id as i64,
         path: fixture(name),
         replaygain: ReplayGainTags::default(),
+        crossfade_ms: 0,
     }
 }
 
@@ -152,6 +153,7 @@ fn play_at(
         .enumerate()
         .map(|(i, n)| TrackRequest {
             replaygain: tags,
+            crossfade_ms: 0,
             ..request(i as u64 + 1, n)
         })
         .collect();
@@ -885,6 +887,7 @@ fn real_flac_files_decode_and_join_exactly() {
             track_id: i as i64 + 1,
             path: (*path).clone(),
             replaygain: ReplayGainTags::default(),
+            crossfade_ms: 0,
         })
         .collect();
     let slot = NextSlot::new();
@@ -1024,6 +1027,7 @@ fn play_file(path: &std::path::Path, rate: u32) -> Played {
         track_id: 1,
         path: path.to_path_buf(),
         replaygain: ReplayGainTags::default(),
+        crossfade_ms: 0,
     }];
     let slot = NextSlot::new();
     slot.set(NextTrack::End);
@@ -1427,6 +1431,7 @@ fn garbage_in_a_float_file_does_not_poison_what_follows() {
             track_id: 1,
             path: path.clone(),
             replaygain: ReplayGainTags::default(),
+            crossfade_ms: 0,
         }];
         let slot = NextSlot::new();
         slot.set(NextTrack::End);
@@ -2388,4 +2393,129 @@ fn a_damaged_packet_does_not_move_where_a_sheet_track_ends() {
     let second = decode_path(&oneum::library::cue::track_path(&sheet, 2));
     let clean_len = (starts[2] - starts[1]) as usize * 2;
     assert_eq!(second.len(), clean_len);
+}
+
+/// Like [`play`], with every track after the first mixed into the end of the one
+/// before it over `crossfade_ms` (what the player asks for between songs that are not
+/// of one album, with crossfade switched on).
+fn play_crossfaded(names: &[&str], rate: u32, crossfade_ms: u32) -> Played {
+    let (mut engine, mut renderer) = Engine::new_offline(rate, 1.0, ReplayGainSettings::default());
+    let queue: Vec<TrackRequest> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| TrackRequest {
+            crossfade_ms: if i == 0 { 0 } else { crossfade_ms },
+            ..request(i as u64 + 1, name)
+        })
+        .collect();
+    let slot = NextSlot::new();
+    slot.set(
+        queue
+            .get(1)
+            .cloned()
+            .map_or(NextTrack::End, NextTrack::Track),
+    );
+    engine
+        .start_feed(queue[0].clone(), 0, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    pump(&mut engine, &mut renderer, &queue, &slot)
+}
+
+/// What a crossfade of `overlap` frames makes of the end of `a` and the beginning of
+/// `b` (both stereo): the gains of equal power, as the feed has them.
+fn crossfaded(a: &[f32], b: &[f32], overlap: usize) -> Vec<f32> {
+    let head = a.len() - overlap * 2;
+    let mut out = a[..head].to_vec();
+    for i in 0..overlap {
+        let turn = (i as f32 + 0.5) / overlap as f32 * std::f32::consts::FRAC_PI_2;
+        for channel in 0..2 {
+            out.push(b[i * 2 + channel] * turn.sin() + a[head + i * 2 + channel] * turn.cos());
+        }
+    }
+    out.extend_from_slice(&b[overlap * 2..]);
+    out
+}
+
+/// Crossfade: the end of a track is mixed with the beginning of the next one, sample
+/// for sample what the two give, and the next track counts as begun where the mix
+/// begins. Everything outside the mix is the files' own audio.
+#[test]
+fn a_crossfade_mixes_the_end_of_a_track_with_the_beginning_of_the_next() {
+    let (_, _, a) = decode_all("gap_a.wav");
+    let (_, _, b) = decode_all("gap_b.wav");
+    // 200 ms at 44.1 kHz.
+    let overlap = 8_820;
+    let expected = crossfaded(&a, &b, overlap);
+    let played = play_crossfaded(&["gap_a.wav", "gap_b.wav"], 44_100, 200);
+    assert_eq!(played.underruns, 0);
+    assert_eq!(
+        played.frames(),
+        88_200 - overlap,
+        "shorter than the two by what they share"
+    );
+    assert_eq!(
+        played.started(),
+        vec![(1, 0), (2, (44_100 - overlap) as u64)],
+        "the second track begins where the mix begins"
+    );
+    // (The mix of two full-scale signals may be turned down by the peak limiter: then
+    // the comparison holds for all that lies outside its reach only.)
+    let diff = max_abs_diff(&played.pcm[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]);
+    if played.limited == 0 {
+        assert!(diff < 1e-6, "differs from the mix of the two by {diff}");
+    } else {
+        let before = (44_100 - overlap - 4_410) * 2;
+        assert_eq!(
+            max_abs_diff(
+                &played.pcm[FADE_GUARD * 2..before],
+                &expected[FADE_GUARD * 2..before]
+            ),
+            0.0
+        );
+    }
+    // Without a crossfade the same two are joined as they are (the request says 0).
+    assert_eq!(play(&["gap_a.wav", "gap_b.wav"], 44_100).frames(), 88_200);
+}
+
+/// Three tracks, each mixed into the one before it; and through the rate converter,
+/// where each track gets a converter of its own at the mix.
+#[test]
+fn crossfades_follow_each_other_and_pass_the_rate_converter() {
+    let played = play_crossfaded(&["gap_a.wav", "gap_b.wav", "gap_a.wav"], 44_100, 100);
+    assert_eq!(played.underruns, 0);
+    assert_eq!(played.frames(), 3 * 44_100 - 2 * 4_410);
+    assert_eq!(
+        played.started(),
+        vec![(1, 0), (2, 44_100 - 4_410), (3, 2 * (44_100 - 4_410))]
+    );
+
+    let played = play_crossfaded(&["gap_a.wav", "gap_b.wav"], 48_000, 200);
+    assert_eq!(played.underruns, 0);
+    // Two seconds less a fifth, at 48 kHz, give or take what the converters round.
+    let frames = played.frames() as i64;
+    assert!((frames - 86_400).abs() < 64, "{frames} frames");
+    let second = played.started()[1].1 as i64;
+    assert!((second - 38_400).abs() < 64, "second track at {second}");
+    assert!(rms(&played.left()) > 0.01, "there is sound");
+}
+
+/// The track that was to be mixed in cannot be opened: the track before it ends as it
+/// does, all of it, not faded into nothing.
+#[test]
+fn a_track_whose_follower_cannot_be_opened_ends_as_it_does() {
+    let (_, _, a) = decode_all("gap_a.wav");
+    let played = play_crossfaded(&["gap_a.wav", "no_such_file.wav"], 44_100, 300);
+    assert_eq!(played.frames(), 44_100);
+    assert_eq!(
+        max_abs_diff(&played.pcm[FADE_GUARD * 2..], &a[FADE_GUARD * 2..]),
+        0.0
+    );
+    assert!(
+        played
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::TrackFailed { .. })),
+        "and the failure is told"
+    );
 }

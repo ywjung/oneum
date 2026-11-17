@@ -890,6 +890,31 @@ impl OneumApp {
         }
 
         ui.add_space(14.0);
+        // Crossfade between songs that follow each other by themselves.
+        widgets::section_title(ui, s.crossfade);
+        let crossfade_before = self.settings.crossfade_secs;
+        widgets::card(ui, |ui| {
+            widgets::setting_row(ui, s.crossfade_row, Some(s.crossfade_desc), true, |ui| {
+                widgets::segmented(
+                    ui,
+                    "crossfade",
+                    &mut self.settings.crossfade_secs,
+                    &[
+                        (0, s.rg_off),
+                        (2, s.crossfade_2),
+                        (4, s.crossfade_4),
+                        (6, s.crossfade_6),
+                        (10, s.crossfade_10),
+                    ],
+                );
+            });
+        });
+        widgets::section_note(ui, s.crossfade_hint);
+        if self.settings.crossfade_secs != crossfade_before {
+            player.send(Command::SetCrossfade(self.settings.crossfade_secs));
+        }
+
+        ui.add_space(14.0);
         widgets::section_title(ui, s.equalizer);
         let mut open_equalizer = false;
         widgets::card(ui, |ui| {

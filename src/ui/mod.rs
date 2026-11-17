@@ -2503,6 +2503,17 @@ impl OneumApp {
                         dispatch(action);
                         continue;
                     }
+                    // Crossfade between songs, in seconds (as the playback settings set it).
+                    if let Some(secs) = id.strip_prefix("crossfade ") {
+                        if let Ok(secs) = secs.parse::<u8>() {
+                            self.settings.crossfade_secs =
+                                secs.min(app::settings::MAX_CROSSFADE_SECS);
+                            self.core
+                                .player
+                                .send(Command::SetCrossfade(self.settings.crossfade_secs));
+                        }
+                        continue;
+                    }
                     // Stars for the song that is playing.
                     if let Some(stars) = id.strip_prefix("rate_current ") {
                         if let (Some(current), Ok(stars)) = (self.player.current, stars.parse()) {
@@ -2697,6 +2708,7 @@ impl OneumApp {
         state["adapter"] = serde_json::json!(renderer::adapter());
         state["graphics_errors"] = serde_json::json!(renderer::errors());
         state["section"] = serde_json::json!(p.section.map(|s| (s.from_ms, s.to_ms)));
+        state["crossfade_secs"] = serde_json::json!(p.crossfade_secs);
         state["current_rating"] = serde_json::json!(
             p.current
                 .and_then(|c| self.snapshot.get(c.track_id))

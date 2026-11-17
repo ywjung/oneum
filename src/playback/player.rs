@@ -27,6 +27,8 @@ const POSITION_PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// The sleep timer turns the volume down over its last seconds instead of cutting off.
 const SLEEP_FADE: Duration = Duration::from_secs(5);
+/// A crossfade shorter than this is none: the songs are joined as they are.
+const CROSSFADE_MIN_MS: u64 = 500;
 /// A section that is repeated (`Command::MarkSection`) is at least this long.
 const SECTION_MIN_MS: u64 = 500;
 /// It ends at least this long before its song does: at the song's end the next one
@@ -179,6 +181,11 @@ pub enum Command {
     MarkSection,
     /// Gives the section up, however far it was marked.
     ClearSection,
+    /// Crossfade: for how many seconds the end of a song is mixed with the beginning
+    /// of the one that follows it by itself (0: not at all). Songs of one album are
+    /// joined as they are whatever this says, and so is every song the listener
+    /// starts.
+    SetCrossfade(u8),
     /// Sleep timer: pause when this much time has passed (`None` switches it off).
     /// The sound fades out over the last seconds; the volume setting is not changed.
     SetSleepTimer(Option<Duration>),
@@ -318,6 +325,8 @@ pub struct PlayerSnapshot {
     /// The section of the current song that is marked for repeating, if one is (see
     /// `Command::MarkSection`).
     pub section: Option<SectionRepeat>,
+    /// Seconds of crossfade between songs, as it is set (0: none).
+    pub crossfade_secs: u8,
     /// Frames of the current track, as far as it has been decoded, that would have
     /// exceeded full scale and had their gain turned down instead of being clipped.
     pub peak_limited_frames: u64,
@@ -358,6 +367,7 @@ impl PlayerSnapshot {
             stop_after_current: false,
             sleep_at: None,
             section: None,
+            crossfade_secs: 0,
             peak_limited_frames: 0,
             last_start_latency_ms: None,
         }
@@ -382,6 +392,8 @@ pub struct PlayerConfig {
     pub replaygain: ReplayGainSettings,
     pub eq: EqSettings,
     pub crossfeed: Crossfeed,
+    /// Seconds of crossfade between songs (0: none).
+    pub crossfade_secs: u8,
     /// The parametric correction profile to start with.
     pub correction: Option<PeqProfile>,
     pub radio: bool,
@@ -401,6 +413,7 @@ impl Default for PlayerConfig {
             replaygain: ReplayGainSettings::default(),
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
+            crossfade_secs: 0,
             correction: None,
             radio: false,
             shuffle_by_album: false,
@@ -683,6 +696,8 @@ struct Player<H: PlayerHost> {
     sleep_at: Option<Instant>,
     /// The section marked for repeating, with the queue item it belongs to.
     section: Option<(ItemId, SectionRepeat)>,
+    /// Seconds of crossfade between songs (0: none), see `Command::SetCrossfade`.
+    crossfade_secs: u8,
     /// When the volume the sleep timer faded out is to be set back (see
     /// [`SLEEP_RESTORE_AFTER`]).
     sleep_restore_at: Option<Instant>,
@@ -779,6 +794,7 @@ impl<H: PlayerHost> Player<H> {
             stop_after: None,
             sleep_at: None,
             section: None,
+            crossfade_secs: config.crossfade_secs,
             sleep_restore_at: None,
             processed_until: None,
             notice: None,
@@ -922,6 +938,7 @@ impl<H: PlayerHost> Player<H> {
                 track_id: item.track,
                 path: t.path,
                 replaygain: t.replaygain,
+                crossfade_ms: 0,
             }),
             _ => Err(PlaybackErrorKind::FileMissing),
         }
@@ -965,12 +982,44 @@ impl<H: PlayerHost> Player<H> {
             // An unplayable next track ends the feed; it is skipped when we get there.
             // So does one the device should run at another rate for: the feed ends at
             // the boundary and the next track starts a new one on the reconfigured device.
-            Some(next) if self.same_device_rate(chain, next.track) => self
-                .request_for(next)
-                .map_or(NextTrack::End, NextTrack::Track),
+            Some(next) if self.same_device_rate(chain, next.track) => {
+                let after = self
+                    .queue
+                    .items()
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .map(|item| item.track);
+                self.request_for(next)
+                    .map(|mut request| {
+                        request.crossfade_ms =
+                            after.map_or(0, |after| self.crossfade_between(after, next.track));
+                        request
+                    })
+                    .map_or(NextTrack::End, NextTrack::Track)
+            }
             _ => NextTrack::End,
         };
         chain.slot.set(next);
+    }
+
+    /// For how long the end of `ending` is mixed with the beginning of `beginning`
+    /// when the one follows the other by itself, in milliseconds (0: they are joined
+    /// as they are). The songs of one album follow each other as the album has them,
+    /// without a gap and without a fade; a fade never takes more than half of either
+    /// song.
+    fn crossfade_between(&self, ending: TrackId, beginning: TrackId) -> u32 {
+        if self.crossfade_secs == 0 || self.host.album_of(ending) == self.host.album_of(beginning) {
+            return 0;
+        }
+        let length = |track: TrackId| self.host.track(track).map_or(0, |t| t.duration_ms);
+        let fade = (u64::from(self.crossfade_secs) * 1000)
+            .min(length(ending) / 2)
+            .min(length(beginning) / 2);
+        if fade < CROSSFADE_MIN_MS {
+            0
+        } else {
+            fade as u32
+        }
     }
 
     /// Sample rate of a track as the library knows it.
@@ -1007,7 +1056,10 @@ impl<H: PlayerHost> Player<H> {
             _ => false,
         };
         let gain = track.map_or(1.0, |t| replaygain_factor(&t.replaygain, &self.replaygain));
+        // (With crossfade on, where two songs meet is a mix of both: all of it counts
+        // as processed rather than following each meeting to the sample.)
         self.eq.is_active()
+            || self.crossfade_secs > 0
             || self.crossfeed != Crossfeed::Off
             || self.correction.is_some()
             || !integer_pcm
@@ -1476,6 +1528,15 @@ impl<H: PlayerHost> Player<H> {
                 self.crossfeed = setting;
                 self.engine.set_crossfeed(setting);
                 self.review_processed();
+            }
+            Command::SetCrossfade(secs) => {
+                if secs != self.crossfade_secs {
+                    self.crossfade_secs = secs;
+                    self.dirty = true;
+                    // What the feed is told of the song that follows changes with it.
+                    self.sync_next();
+                    self.review_processed();
+                }
             }
             Command::SetCorrection(profile) => {
                 let profile = profile.map(PeqProfile::sanitized);
@@ -2188,6 +2249,7 @@ impl<H: PlayerHost> Player<H> {
             stop_after_current: self.stop_after.is_some(),
             sleep_at: self.sleep_at,
             section: self.section.map(|(_, section)| section),
+            crossfade_secs: self.crossfade_secs,
             peak_limited_frames: self.peak_limited_frames(),
             last_start_latency_ms: self.last_start_latency_ms,
         };

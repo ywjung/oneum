@@ -413,6 +413,15 @@ strings! {
     crossfeed_hint: "악기가 한쪽 귀에만 몰린 옛 녹음을 헤드폰으로 들을 때 피로를 줄여 줍니다. 스피커로 들을 때는 꺼 두세요. 켜면 가운데 소리의 고음이 최대 2dB 낮아집니다.",
         "Eases listening on headphones to older recordings with instruments hard on one side. Leave it off for speakers. While on, the highs of what is in the centre are up to 2 dB lower.";
     info_proc_crossfeed: "크로스피드", "Crossfeed";
+    crossfade: "크로스페이드", "Crossfade";
+    crossfade_row: "곡이 바뀔 때 겹치기", "Overlap Between Songs";
+    crossfade_desc: "앞 곡의 끝과 다음 곡의 처음을 섞어 넘어갑니다.", "Blends the end of a song into the beginning of the next.";
+    crossfade_2: "2초", "2 s";
+    crossfade_4: "4초", "4 s";
+    crossfade_6: "6초", "6 s";
+    crossfade_10: "10초", "10 s";
+    crossfade_hint: "곡이 스스로 다음 곡으로 넘어갈 때만 겹칩니다. 같은 앨범의 곡 사이는 지금처럼 끊김 없이 이어지고, 직접 고른 곡은 바로 시작합니다. 겹치는 길이는 두 곡 길이의 절반을 넘지 않습니다. 켜면 겹치는 구간의 소리는 원본과 달라집니다. DSD 곡의 끝과, 곡의 샘플레이트로 출력할 때 장치의 샘플레이트가 바뀌는 자리에서는 겹치지 않습니다.", "Songs overlap only where one follows another by itself. Songs of one album go on without a gap as before, and a song you choose starts at once. The overlap is never longer than half of either song. While on, the sound differs from the original where songs overlap. The end of a DSD song is not overlapped, and neither is a place where the device changes its sample rate (output at the song's sample rate).";
+    info_proc_crossfade: "크로스페이드", "Crossfade";
     info_proc_correction: "헤드폰 보정", "Headphone correction";
     correction: "헤드폰 보정", "Headphone Correction";
     correction_row: "보정 프로필", "Correction Profile";
@@ -1134,6 +1143,14 @@ impl Lang {
         }
         text.push('.');
         text
+    }
+
+    /// The crossfade as the signal path tells of it.
+    pub fn crossfade_detail(self, secs: u8) -> String {
+        match self {
+            Lang::Ko => format!("곡이 바뀔 때 {secs}초"),
+            Lang::En => format!("{secs} s between songs"),
+        }
     }
 
     /// The section of a song whose beginning is marked (`from`: a time as shown).

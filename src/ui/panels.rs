@@ -89,6 +89,8 @@ struct PathInputs<'a> {
     correction: Option<&'a str>,
     /// Strength of the headphone crossfeed while it is on.
     crossfeed: Option<&'a str>,
+    /// The crossfade between songs in words, while it is on.
+    crossfade: Option<String>,
     peak_protection: bool,
     /// The volume slider, 0..=1.
     volume: f32,
@@ -168,6 +170,13 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
             StageKind::Adjustment,
             s.info_proc_crossfeed,
             strength.to_string(),
+        );
+    }
+    if let Some(between) = &input.crossfade {
+        add(
+            StageKind::Adjustment,
+            s.info_proc_crossfade,
+            between.clone(),
         );
     }
     if input.peak_protection {
@@ -1429,6 +1438,8 @@ impl OneumApp {
                 crate::audio::Crossfeed::Medium => Some(s.crossfeed_medium),
                 crate::audio::Crossfeed::Strong => Some(s.crossfeed_strong),
             },
+            crossfade: (self.player.crossfade_secs > 0)
+                .then(|| self.lang.crossfade_detail(self.player.crossfade_secs)),
             peak_protection: self.player.peak_limited_frames > 0,
             volume: self.player.volume,
             dither_bits: self.player.dither_bits,
@@ -2479,6 +2490,7 @@ mod tests {
             equalizer: None,
             correction: None,
             crossfeed: None,
+            crossfade: None,
             peak_protection: false,
             volume: 1.0,
             dither_bits: None,

@@ -83,6 +83,8 @@ pub struct Settings {
     pub eq: EqSettings,
     /// Headphone crossfeed (off by default).
     pub crossfeed: Crossfeed,
+    /// Crossfade between songs, in seconds (0, the default: none).
+    pub crossfade_secs: u8,
     /// Parametric correction profiles that were imported (headphone corrections), in
     /// the order they were imported.
     #[serde(deserialize_with = "lenient_list")]
@@ -138,6 +140,8 @@ pub enum Pin {
 
 /// How many things can be pinned to the sidebar.
 pub const MAX_PINS: usize = 12;
+/// The longest crossfade between songs that can be set, in seconds.
+pub const MAX_CROSSFADE_SECS: u8 = 12;
 
 /// How many equalizer presets of the user's own are kept (the equalizer sheet offers
 /// no way to save more) and how long a preset's name may be.
@@ -304,6 +308,7 @@ impl Default for Settings {
             output: OutputSettings::default(),
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
+            crossfade_secs: 0,
             corrections: Vec::new(),
             correction: None,
             radio: false,

@@ -135,6 +135,16 @@ ui 'menu song_info' 'wait 800' 'click 973 460' 'wait 600' 'dump rt4.json' 'click
 check rt4.json 'd["right_panel"] == "Info" and d["current_rating"] == 5' "a click on the fifth star of Song Info gives five stars"
 check rt5.json 'd["current_rating"] == 0' "…and a click on the last star that is filled takes them away"
 check rt6.json 'd["right_panel"] != "Info" and d["right_panel"] != "Queue"' "the panel is put away again"
+# Crossfade between songs: the setting reaches the player, and is taken back. (What it
+# does to the sound is the business of the audio tests, which compare samples.)
+ui 'menu crossfade 4' 'wait 400' 'dump cf1.json' 'menu crossfade 0' 'wait 400' 'dump cf2.json'
+check cf1.json 'd["crossfade_secs"] == 4 and d["state"] == "Playing"' "crossfade is set to four seconds while a song plays"
+check cf2.json 'd["crossfade_secs"] == 0 and d["state"] == "Playing"' "…and switched off again"
+# The song is taken back to its beginning: the sections above took a quarter of a
+# minute of it, and what follows was timed for a song that had only just begun (it
+# must not end in the middle of a later check).
+ui "click $PREV" 'wait 700' 'dump cf3.json'
+check cf3.json 'd["queue_index"] == 2 and d["position_ms"] < 3000 and d["state"] == "Playing"' "the song is started over, for the checks that follow"
 
 echo "== modes"
 ui "click $SHUFFLE" 'wait 400' 'dump m1.json' "click $SHUFFLE" 'wait 400' 'dump m2.json' "click $REPEAT" 'wait 300' 'dump m3.json' "click $REPEAT" 'wait 300' 'dump m4.json' "click $REPEAT" 'wait 300' 'dump m5.json'

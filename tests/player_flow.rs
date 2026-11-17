@@ -2494,9 +2494,12 @@ fn a_marked_section_is_played_over_and_over_until_it_is_given_up() {
     // and more of it was heard than lies between the mark and the song's end.
     let heard = rig.total_frames();
     std::thread::sleep(Duration::from_secs(4));
-    let later = rig.player.snapshot();
+    // (Going back to the beginning is a seek: for a moment of every round the state
+    // says so.)
+    let later = rig.wait("playing, between two goings back", |s| {
+        s.state == PlayState::Playing
+    });
     assert_eq!(Rig::track(&later), Some(LONG), "still the same song");
-    assert_eq!(later.state, PlayState::Playing);
     assert!(
         later.position_ms + 100 >= from && later.position_ms <= to + 600,
         "inside the section: {} ({from} to {to})",
@@ -2572,4 +2575,61 @@ fn a_section_marked_backwards_is_the_same_section_and_another_song_ends_it() {
     let next = rig.wait("the next song is current", |s| Rig::track(s) == Some(A));
     let _ = next;
     rig.wait("its section went with the song", |s| s.section.is_none());
+}
+
+/// Crossfade: where a song of another album follows by itself, its beginning is mixed
+/// with the end of the song before it (for half of either song at most); songs of one
+/// album are joined as they are, whatever is set.
+#[test]
+fn songs_of_different_albums_are_crossfaded_and_songs_of_one_album_are_not() {
+    let a = decode_all("gap_a.wav");
+    let b = decode_all("gap_b.wav");
+    let mut host = TestHost::new();
+    host.tracks.get_mut(&B).expect("track").album_key = 7;
+    let rig = Rig::start(host);
+    rig.send(Command::SetCrossfade(4));
+    rig.wait("crossfade is set", |s| s.crossfade_secs == 4);
+    rig.send(play(&[A, B], 0));
+    let ended = rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(
+        Rig::track(&ended),
+        Some(B),
+        "the queue went on to the second song"
+    );
+    let audio = rig.audio.lock().expect("lock").clone();
+    assert_eq!(audio.len(), 1, "one feed: the songs are mixed inside it");
+    // Four seconds are asked for; each song lasts one: half a second is shared.
+    let overlap = 22_050;
+    assert_eq!(audio[0].1.len(), (88_200 - overlap) * 2);
+    let head = a.len() - overlap * 2;
+    let mut expected = a[..head].to_vec();
+    for i in 0..overlap {
+        let turn = (i as f32 + 0.5) / overlap as f32 * std::f32::consts::FRAC_PI_2;
+        for channel in 0..2 {
+            expected.push(b[i * 2 + channel] * turn.sin() + a[head + i * 2 + channel] * turn.cos());
+        }
+    }
+    expected.extend_from_slice(&b[overlap * 2..]);
+    let diff = max_abs_diff(&audio[0].1[FADE_GUARD * 2..], &expected[FADE_GUARD * 2..]);
+    assert!(
+        diff < 1e-6,
+        "differs from the mix of the two songs by {diff}"
+    );
+    assert!(rig.host.plays().contains(&B));
+
+    // The same setting, two songs of one album: not a sample is touched.
+    let rig = Rig::start(TestHost::new());
+    rig.send(Command::SetCrossfade(4));
+    rig.wait("crossfade is set", |s| s.crossfade_secs == 4);
+    rig.send(play(&[A, B], 0));
+    rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    let audio = rig.audio.lock().expect("lock").clone();
+    let uncut: Vec<f32> = a.iter().chain(b.iter()).copied().collect();
+    assert_eq!(audio.len(), 1);
+    assert_eq!(audio[0].1.len(), uncut.len());
+    assert_eq!(
+        max_abs_diff(&audio[0].1[FADE_GUARD * 2..], &uncut[FADE_GUARD * 2..]),
+        0.0
+    );
+    assert_eq!(rig.host.plays(), vec![A, B]);
 }

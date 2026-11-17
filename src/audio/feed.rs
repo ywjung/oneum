@@ -15,6 +15,7 @@ use super::resample::StereoResampler;
 use super::source::{Budget, FileInMemory, LoadCompletion};
 use super::{PlaybackError, PlaybackErrorKind};
 use crate::model::{ReplayGainTags, TrackId};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -49,6 +50,10 @@ pub struct TrackRequest {
     pub track_id: TrackId,
     pub path: PathBuf,
     pub replaygain: ReplayGainTags,
+    /// Crossfade: for how long the beginning of this track is mixed with the end of
+    /// the one before it in the feed, in milliseconds. 0 (the first track of a feed,
+    /// tracks of one album, crossfade switched off): the two are joined as they are.
+    pub crossfade_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +78,15 @@ impl NextSlot {
         }
     }
     /// What is announced right now, without taking it.
+    /// For how long the track that is to follow is mixed with the end of the current
+    /// one (0: not at all, or nothing is known to follow).
+    fn crossfade_ms(&self) -> u32 {
+        match self.0.lock().as_deref() {
+            Ok(NextTrack::Track(next)) => next.crossfade_ms,
+            _ => 0,
+        }
+    }
+
     fn peek(&self) -> NextTrack {
         match self.0.lock() {
             Ok(slot) => slot.clone(),
@@ -589,6 +603,54 @@ impl Worker {
         // The next track's decoder when it was opened early: a DSD track's last frames
         // are computed with the beginning of the one after it.
         let mut opened: Option<Result<TrackDecoder, PlaybackError>> = None;
+        // Crossfade. While the track that follows is to be mixed with the end of the
+        // current one, that end is not known until the track is over: the last so many
+        // milliseconds of what the current track gives (after its gain and the rate
+        // conversion, before the stages that run over the joined stream) are held back
+        // here, and go on as later audio pushes them out.
+        let mut held: VecDeque<f32> = VecDeque::new();
+        // The held end of the track before, while it is mixed into the beginning of
+        // the current one: its samples, and how many of its frames are mixed already.
+        let mut mixing: Option<(Vec<f32>, usize)> = None;
+        let mut released: Vec<f32> = Vec::new();
+        // The stages that run over the joined stream, and into the ring: the settings
+        // may change while playing (the equalizer glides, the others fade over).
+        macro_rules! stages {
+            ($block:expr) => {{
+                let block: &mut Vec<f32> = $block;
+                // (The last use of the stages reads the versions no more.)
+                let version = self.params.eq.version();
+                if version != eq_version {
+                    #[allow(unused_assignments)]
+                    {
+                        eq_version = version;
+                    }
+                    eq.set(self.params.eq.get());
+                }
+                // A sample that the gain or the rate conversion pushed out of the
+                // number range must not get into the filters (it would stay in
+                // them), and what leaves them must be numbers.
+                sanitize(block);
+                eq.process(block);
+                let version = self.params.peq.version();
+                if version != peq_version {
+                    #[allow(unused_assignments)]
+                    {
+                        peq_version = version;
+                    }
+                    corrector.set(self.params.peq.get().as_deref());
+                }
+                corrector.process(block);
+                crossfeed.set(crossfeed_now(&self.params));
+                crossfeed.process(block);
+                sanitize(block);
+                match self.push_limited(&mut limiter, block, &mut limited) {
+                    Some(frames) => written += frames,
+                    None => return false,
+                }
+                self.written.store(written, Ordering::Relaxed);
+            }};
+        }
 
         'tracks: loop {
             self.current = (req.item_id, req.track_id);
@@ -627,15 +689,7 @@ impl Worker {
                 if let Some(mut old) = resampler.take() {
                     resampled.clear();
                     if old.flush(&mut resampled).is_ok() {
-                        eq.process(&mut resampled);
-                        corrector.process(&mut resampled);
-                        crossfeed.process(&mut resampled);
-                        sanitize(&mut resampled);
-                        match self.push_limited(&mut limiter, &resampled, &mut limited) {
-                            Some(frames) => written += frames,
-                            None => return false,
-                        }
-                        self.written.store(written, Ordering::Relaxed);
+                        stages!(&mut resampled);
                     }
                 }
                 if needs_resampling {
@@ -743,31 +797,36 @@ impl Worker {
                         }
                         None => &mut stereo,
                     };
-                    // The settings may change while playing: the equalizer glides.
-                    let version = self.params.eq.version();
-                    if version != eq_version {
-                        eq_version = version;
-                        eq.set(self.params.eq.get());
+                    // The end of the track before fades out under this beginning.
+                    if let Some((tail, done)) = mixing.as_mut() {
+                        mix_in(tail, done, ready);
+                        if *done * 2 >= tail.len() {
+                            mixing = None;
+                        }
                     }
-                    // A sample that the gain or the rate conversion pushed out
-                    // of the number range must not get into the filters (it
-                    // would stay in them), and what leaves them must be numbers.
-                    sanitize(ready);
-                    eq.process(ready);
-                    let version = self.params.peq.version();
-                    if version != peq_version {
-                        peq_version = version;
-                        corrector.set(self.params.peq.get().as_deref());
+                    // The end of this track is held back while the next one is to be
+                    // mixed with it (not that of a DSD track, whose last frames are
+                    // made with the next track's first ones).
+                    let hold_ms = match info.dsd_rate {
+                        None => self.params.next.crossfade_ms(),
+                        Some(_) => 0,
+                    };
+                    if hold_ms > 0 {
+                        held.extend(ready.iter());
+                        ready.clear();
+                        let keep = frames_of(hold_ms, out_rate) * 2;
+                        if held.len() > keep {
+                            ready.extend(held.drain(..held.len() - keep));
+                        }
+                    } else if !held.is_empty() {
+                        // Not to be mixed after all: what was held goes on, in its place.
+                        held.extend(ready.iter());
+                        ready.clear();
+                        ready.extend(held.drain(..));
                     }
-                    corrector.process(ready);
-                    crossfeed.set(crossfeed_now(&self.params));
-                    crossfeed.process(ready);
-                    sanitize(ready);
-                    match self.push_limited(&mut limiter, ready, &mut limited) {
-                        Some(frames) => written += frames,
-                        None => return false,
+                    if !ready.is_empty() {
+                        stages!(ready);
                     }
-                    self.written.store(written, Ordering::Relaxed);
                 }
                 if last {
                     break;
@@ -777,6 +836,37 @@ impl Worker {
                 Some(next) => next,
                 None => self.wait_next(),
             };
+            // A track that ended before the end of the one before it had faded out
+            // under it: the rest of that end follows, fading as it was going to.
+            if let Some((tail, done)) = mixing.take() {
+                released = rest_of(&tail, done);
+                stages!(&mut released);
+            }
+            // What was held back of this track: mixed into the beginning of the next
+            // one, or, where that is not to be mixed in (or nothing follows), played
+            // as it is.
+            let mix_ms = next.as_ref().map_or(0, |next| next.crossfade_ms);
+            if mix_ms > 0 && !held.is_empty() {
+                // The end is complete only with what the rate conversion still holds;
+                // the next track begins with a converter of its own.
+                if let Some(mut old) = resampler.take() {
+                    resampled.clear();
+                    if old.flush(&mut resampled).is_ok() {
+                        held.extend(resampled.iter());
+                    }
+                }
+                let keep = frames_of(mix_ms, out_rate) * 2;
+                if held.len() > keep {
+                    released.clear();
+                    released.extend(held.drain(..held.len() - keep));
+                    stages!(&mut released);
+                }
+                mixing = Some((held.drain(..).collect(), 0));
+            } else if !held.is_empty() {
+                released.clear();
+                released.extend(held.drain(..));
+                stages!(&mut released);
+            }
             match next {
                 Some(next) => {
                     req = next;
@@ -786,17 +876,22 @@ impl Worker {
             }
         }
 
+        // A feed that ends where a track could not be opened or read: the end of the
+        // track before it that was to be mixed with it, and what was held back of the
+        // one that was playing, are played as they are.
+        if let Some((tail, done)) = mixing.take() {
+            released = rest_of(&tail, done);
+            stages!(&mut released);
+        }
+        if !held.is_empty() {
+            released.clear();
+            released.extend(held.drain(..));
+            stages!(&mut released);
+        }
         if let Some(mut rs) = resampler.take() {
             resampled.clear();
             if rs.flush(&mut resampled).is_ok() {
-                eq.process(&mut resampled);
-                corrector.process(&mut resampled);
-                crossfeed.process(&mut resampled);
-                sanitize(&mut resampled);
-                match self.push_limited(&mut limiter, &resampled, &mut limited) {
-                    Some(frames) => written += frames,
-                    None => return false,
-                }
+                stages!(&mut resampled);
             }
         }
         match self.push_limiter_tail(&mut limiter, &mut limited) {
@@ -806,6 +901,51 @@ impl Worker {
         self.written.store(written, Ordering::Relaxed);
         true
     }
+}
+
+/// How many frames `ms` milliseconds are at `rate`.
+fn frames_of(ms: u32, rate: u32) -> usize {
+    (u64::from(ms) * u64::from(rate) / 1000) as usize
+}
+
+/// The gains of a crossfade at frame `at` of `total`: for what ends, and for what
+/// begins. Of equal power: two pieces of music that have nothing to do with each other
+/// are as loud together, all the way through, as either is alone.
+fn crossfade_gains(at: usize, total: usize) -> (f32, f32) {
+    let turn = (at as f32 + 0.5) / total.max(1) as f32 * std::f32::consts::FRAC_PI_2;
+    (turn.cos(), turn.sin())
+}
+
+/// Mixes the end of the track before (`tail`, stereo, of which `done` frames are mixed
+/// already) into the beginning of the track that follows it (`head`, stereo): the one
+/// fades out while the other fades in. `done` moves on by the frames that were mixed.
+fn mix_in(tail: &[f32], done: &mut usize, head: &mut [f32]) {
+    let total = tail.len() / 2;
+    for frame in head.as_chunks_mut::<2>().0 {
+        if *done >= total {
+            break;
+        }
+        let (ending, beginning) = crossfade_gains(*done, total);
+        frame[0] = frame[0] * beginning + tail[*done * 2] * ending;
+        frame[1] = frame[1] * beginning + tail[*done * 2 + 1] * ending;
+        *done += 1;
+    }
+}
+
+/// What is left of the end of a track when nothing more is mixed with it: as it is
+/// where nothing was mixed with it yet (the track that was to follow never came), and
+/// else fading out as it was going to (that track was shorter than the fade).
+fn rest_of(tail: &[f32], done: usize) -> Vec<f32> {
+    let total = tail.len() / 2;
+    let mut rest = tail[(done * 2).min(tail.len())..].to_vec();
+    if done > 0 {
+        for (i, frame) in rest.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let (ending, _) = crossfade_gains(done + i, total);
+            frame[0] *= ending;
+            frame[1] *= ending;
+        }
+    }
+    rest
 }
 
 #[cfg(test)]
@@ -828,6 +968,7 @@ mod tests {
                 track_id: 3,
                 path: fixture("gap_a.wav"),
                 replaygain: ReplayGainTags::default(),
+                crossfade_ms: 0,
             },
             start_ms: 0,
             next: {
@@ -904,6 +1045,7 @@ mod tests {
                 track_id: 4,
                 path: b.clone(),
                 replaygain: ReplayGainTags::default(),
+                crossfade_ms: 0,
             }));
             let next = p.next.clone();
             let mut feed = FeedHandle::spawn(p).expect("spawn");
@@ -986,6 +1128,7 @@ mod tests {
             track_id: 4,
             path: stuck,
             replaygain: ReplayGainTags::default(),
+            crossfade_ms: 0,
         }));
         let next = p.next.clone();
         let mut feed = FeedHandle::spawn(p).expect("spawn");
@@ -1057,5 +1200,56 @@ mod tests {
             .expect("finished event");
         assert_eq!(read, total * 2);
         assert!(total > 0);
+    }
+
+    #[test]
+    fn a_crossfade_keeps_the_power_and_ends_where_each_side_is_alone() {
+        let (ending, beginning) = crossfade_gains(0, 1000);
+        assert!(ending > 0.999 && beginning < 0.002);
+        let (ending, beginning) = crossfade_gains(999, 1000);
+        assert!(ending < 0.002 && beginning > 0.999);
+        for at in [0, 1, 250, 500, 750, 999] {
+            let (ending, beginning) = crossfade_gains(at, 1000);
+            assert!((ending * ending + beginning * beginning - 1.0).abs() < 1e-5);
+        }
+        assert_eq!(frames_of(1500, 48_000), 72_000);
+        assert_eq!(frames_of(0, 48_000), 0);
+    }
+
+    #[test]
+    fn the_end_of_a_track_is_mixed_into_the_beginning_of_the_next_block_by_block() {
+        // Four frames of an end at 1.0 (left) and -1.0 (right) under a beginning at 0.5.
+        let tail = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+        let mut done = 0;
+        let mut first = vec![0.5; 4];
+        mix_in(&tail, &mut done, &mut first);
+        assert_eq!(done, 2);
+        let mut second = vec![0.5; 8];
+        mix_in(&tail, &mut done, &mut second);
+        assert_eq!(done, 4, "no more than the end has");
+        for (at, frame) in first.chunks(2).chain(second.chunks(2)).take(4).enumerate() {
+            let (ending, beginning) = crossfade_gains(at, 4);
+            assert!((frame[0] - (0.5 * beginning + ending)).abs() < 1e-6);
+            assert!((frame[1] - (0.5 * beginning - ending)).abs() < 1e-6);
+        }
+        assert_eq!(
+            &second[4..],
+            [0.5; 4],
+            "past the end, the beginning is itself"
+        );
+    }
+
+    #[test]
+    fn what_is_left_of_an_end_is_itself_or_goes_on_fading() {
+        let tail = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        // Nothing was mixed with it: the track ends as it does.
+        assert_eq!(rest_of(&tail, 0), tail);
+        // Half of it was mixed: the other half fades on to nothing.
+        let rest = rest_of(&tail, 2);
+        assert_eq!(rest.len(), 4);
+        assert!((rest[0] - crossfade_gains(2, 4).0).abs() < 1e-6);
+        assert!((rest[2] - crossfade_gains(3, 4).0).abs() < 1e-6);
+        assert!(rest[2] < rest[0]);
+        assert!(rest_of(&tail, 4).is_empty());
     }
 }

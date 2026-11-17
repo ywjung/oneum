@@ -400,6 +400,9 @@ else echo "  FAIL the library data file is not as expected"; exit 1
 fi
 check n6.json 'd["current_rating"] == 0' "the stars are taken away"
 check n7.json 'd["current_rating"] == 4' "…and the data, taken in again, gives them back: its songs are found here"
+ui 'menu crossfade 4' 'wait 400' 'dump n8.json' 'menu crossfade 0' 'wait 400' 'dump n9.json'
+check n8.json 'd["crossfade_secs"] == 4 and d["state"] == "Playing"' "crossfade is set to four seconds while a song plays"
+check n9.json 'd["crossfade_secs"] == 0' "…and switched off again"
 lose=device
 if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
   # That no error was told means something only if the driver is really asked: OpenGL

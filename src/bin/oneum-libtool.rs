@@ -199,6 +199,7 @@ fn render_offline(
         track_id: 1,
         path: path.to_path_buf(),
         replaygain: values,
+        crossfade_ms: 0,
     };
     engine
         .start_feed(request, 0, slot)
@@ -625,6 +626,7 @@ fn audio_selftest_run(id: &str) -> Result<(), String> {
             track_id: 1,
             path: wav.clone(),
             replaygain: ReplayGainTags::default(),
+            crossfade_ms: 0,
         };
         engine
             .start_feed(request, 0, slot)
