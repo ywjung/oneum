@@ -50,6 +50,8 @@ pub enum Icon {
     Grip,
     /// A device with two below it, joined by lines: the network.
     Network,
+    /// A window with a smaller one in its corner: the mini player.
+    Window,
 }
 
 fn arrow_head(tip: Pos2, dir: Vec2, size: f32, color: Color32) -> Shape {
@@ -290,6 +292,18 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
             painter.line_segment([p(0.5, 0.40), p(0.5, 0.62)], stroke);
             painter.circle_filled(p(0.5, 0.73), w * 0.8, color);
+        }
+        Icon::Window => {
+            painter.add(Shape::closed_line(
+                vec![p(0.1, 0.2), p(0.9, 0.2), p(0.9, 0.8), p(0.1, 0.8)],
+                stroke,
+            ));
+            painter.add(fill(vec![
+                p(0.5, 0.5),
+                p(0.8, 0.5),
+                p(0.8, 0.7),
+                p(0.5, 0.7),
+            ]));
         }
         Icon::Network => {
             let node =

@@ -33,6 +33,7 @@ const ACTIONS: &[(&str, MenuAction)] = &[
     ("toggle_queue", MenuAction::ToggleQueue),
     ("toggle_info", MenuAction::ToggleInfo),
     ("toggle_meter", MenuAction::ToggleMeter),
+    ("mini_player", MenuAction::MiniPlayer),
     ("equalizer", MenuAction::Equalizer),
     ("rescan", MenuAction::Rescan),
     ("main_window", MenuAction::ShowMainWindow),
@@ -243,6 +244,11 @@ impl AppMenu {
                     cmd_shift(Code::KeyU),
                 ),
                 &item(MenuAction::Equalizer, s.menu_equalizer, cmd(Code::KeyE)),
+                &item(
+                    MenuAction::MiniPlayer,
+                    s.menu_mini_player,
+                    cmd_shift(Code::KeyP),
+                ),
                 &sep(),
                 &PredefinedMenuItem::fullscreen(Some(s.menu_fullscreen)),
             ])?;

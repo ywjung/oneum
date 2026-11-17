@@ -39,6 +39,7 @@
 - **Stop After Current Song** (Controls menu, ⌘⇧., or right-click the play button): plays the current song to its end and stops. While it is set, "Stops after song" is shown next to the volume; click it to switch it off. Playback stops with the next song ready, so pressing play goes on from there. It applies to this one song only (moving to another song cancels it).
 - **Repeating a section (A–B)** (**Mark Section to Repeat (A–B)** in the Controls menu, ⌘B, or right-click the play button): plays one section of a song over and over. The first time marks where the section begins (A), the second where it ends (B); from then on playback returns to the beginning whenever it reaches the end. The third time switches it off. While it is on, "Repeating 1:02–1:35" is shown next to the volume (clicking those words switches it off too), and both places are marked on the seek bar. It belongs to that one song: another song ends it, and it is not kept for the next time the app is opened.
 - **Crossfade** (Settings → Playback → Crossfade, off by default): where a song follows another by itself, the end of the one and the beginning of the other overlap for 2, 4, 6 or 10 seconds. Songs of one album go on without a gap as before, and a song you choose, or reach with **Next**, starts at once. The overlap is never longer than half of either song. While two songs overlap, the next one is already shown as the song that is playing. While on, the sound differs from the original where songs overlap (the signal path says "Crossfade"); the end of a DSD song is not overlapped, and neither is a place where the device changes its sample rate.
+- **Mini player** (**Mini Player / Full Window** in the View menu, ⌘⇧P, or the window-shaped button to the right of the volume): the window shrinks to the size of the player bar and stays above other windows. Cover, title, the transport buttons, the seek bar and the volume work as before, and the same button or shortcut brings the full window back (so does a click on the cover or the title, which then shows that album or song). The mini player's size is not remembered; the app opens with the full window.
 - **Sleep Timer** (Controls → Sleep Timer, or right-click the play button): stops playback in 15 minutes, 30 minutes, 45 minutes, 1 hour or 1 hour 30 minutes. The sound fades out over the last few seconds, and your volume setting stays as it was. While it runs, the time left is shown next to the volume; click it to switch the timer off.
 - Set the volume with the slider at the bottom right or with ⌘↑ / ⌘↓. The speaker icon (⌘⇧M) mutes; clicking it again brings back the volume you had.
 - Click the time to the right of the position bar to switch between the total length and the time left.
@@ -210,6 +211,7 @@ Options for listening through a DAC or good headphones (Settings → Playback). 
 | ⌥⌘→ / ⌥⌘← | Skip ahead / back 5 seconds |
 | ⌘⇧. | Stop after current song |
 | ⌘B | Repeat a section (A–B): start → end → off |
+| ⌘⇧P | Mini player / full window |
 | ⌘↑ / ⌘↓ | Volume up / down |
 | ⌘⇧M | Mute / unmute |
 | ⌘S / ⌘⇧R | Shuffle / repeat mode |

@@ -469,6 +469,9 @@ strings! {
     // Equalizer
     equalizer: "이퀄라이저", "Equalizer";
     menu_equalizer: "이퀄라이저…", "Equalizer…";
+    menu_mini_player: "미니 플레이어 / 전체 창", "Mini Player / Full Window";
+    mini_enter: "미니 플레이어 (다른 창 위에 뜨는 작은 창)", "Mini player (a small window that stays above others)";
+    mini_leave: "전체 창으로", "Back to the full window";
     eq_on: "켬", "On";
     eq_off: "끔", "Off";
     eq_preset: "프리셋", "Preset";

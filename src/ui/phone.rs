@@ -820,6 +820,8 @@ impl OneumApp {
             }
             UiRequest::ToggleQueue => self.phone_toggle_player(PlayerView::Queue),
             UiRequest::ToggleMeter => self.phone_toggle_player(PlayerView::Meters),
+            // (A phone has no window to make small.)
+            UiRequest::MiniPlayer => {}
             UiRequest::ToggleInfo | UiRequest::SongInfo => {
                 if let Some(track) = current {
                     let sheet = Sheet::Info(track);

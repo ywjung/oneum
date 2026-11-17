@@ -27,6 +27,8 @@ pub enum MenuAction {
     ToggleQueue,
     ToggleInfo,
     ToggleMeter,
+    /// The window as small as the player bar, and the full window again.
+    MiniPlayer,
     Equalizer,
     Rescan,
     ShowMainWindow,

@@ -1349,6 +1349,7 @@ impl OneumApp {
                     ("⌘ U", s.menu_show_queue),
                     ("⌘ I", s.menu_show_info),
                     ("⇧ ⌘ U", s.menu_show_meter),
+                    ("⇧ ⌘ P", s.menu_mini_player),
                     ("⌘ E", s.equalizer),
                     ("⌘ ,", s.menu_settings),
                     ("⌘ W", s.menu_close_window),

@@ -81,6 +81,8 @@ impl OneumApp {
             track.album.as_str()
         };
         if art_response.on_hover_text(album).clicked() {
+            // (From the mini player: the full window comes back to show it.)
+            self.mini_toggle |= self.mini.is_some();
             self.go(Nav::Album(track.album_key));
         }
         ui.add_space(2.0);
@@ -106,6 +108,7 @@ impl OneumApp {
             widgets::truncated(ui, RichText::new(line).small().color(dim));
         });
         if go_to_track {
+            self.mini_toggle |= self.mini.is_some();
             self.go_to_current();
         }
     }
@@ -336,6 +339,12 @@ impl OneumApp {
     fn volume_controls(&mut self, ui: &mut Ui) {
         let s = self.s();
         let player = self.core.player.clone();
+        // At the very right: the way to the mini player, and from it back.
+        let mini = self.mini.is_some();
+        let label = if mini { s.mini_leave } else { s.mini_enter };
+        if widgets::icon_button(ui, Icon::Window, label, 18.0, mini).clicked() {
+            self.mini_toggle = true;
+        }
         let mut volume = self.player.volume;
         ui.spacing_mut().slider_width = (ui.available_width() - 44.0).clamp(60.0, 120.0);
         let response = ui.add(egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false));

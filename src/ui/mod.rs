@@ -54,6 +54,8 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 ];
 const PLAYLIST_EXTENSIONS: &[&str] = &["m3u8", "m3u"];
 const VOLUME_STEP: f32 = 0.05;
+/// How wide the mini player is (its height is the player bar's).
+const MINI_WIDTH: f32 = 640.0;
 /// How far the "skip ahead/back" commands move within a song.
 const SEEK_STEP_MS: i64 = 5_000;
 /// After a failed attempt to save the settings, how long until the next one.
@@ -289,6 +291,7 @@ enum UiRequest {
     ToggleQueue,
     ToggleInfo,
     ToggleMeter,
+    MiniPlayer,
     Equalizer,
     UserGuide,
     ToggleMute,
@@ -403,6 +406,12 @@ pub struct OneumApp {
     eq_open: bool,
     /// A correction profile that is being made or changed on screen.
     peq_edit: Option<PeqEdit>,
+    /// The mini player is shown (the window is as small as the player bar and stays
+    /// above other windows): the size the full window had, to go back to.
+    mini: Option<egui::Vec2>,
+    /// The mini player was asked for, or the full window again (done in the next
+    /// frame, where the window can be told).
+    mini_toggle: bool,
     /// The name being typed for a preset of the user's own.
     eq_name: String,
     /// Transient message.
@@ -557,6 +566,8 @@ impl OneumApp {
             rediscover: lists::Rediscover::default(),
             eq_open: false,
             peq_edit: None,
+            mini: None,
+            mini_toggle: false,
             eq_name: String::new(),
             toast: None,
             alert: None,
@@ -772,6 +783,7 @@ impl OneumApp {
                 MenuAction::ToggleQueue => UiRequest::ToggleQueue,
                 MenuAction::ToggleInfo => UiRequest::ToggleInfo,
                 MenuAction::ToggleMeter => UiRequest::ToggleMeter,
+                MenuAction::MiniPlayer => UiRequest::MiniPlayer,
                 MenuAction::Equalizer => UiRequest::Equalizer,
                 MenuAction::UserGuide => UiRequest::UserGuide,
                 MenuAction::ToggleMute => UiRequest::ToggleMute,
@@ -1248,6 +1260,7 @@ impl OneumApp {
             UiRequest::ToggleQueue => self.toggle_right_panel(RightPanel::Queue),
             UiRequest::ToggleInfo => self.toggle_right_panel(RightPanel::Info),
             UiRequest::ToggleMeter => self.settings.show_meter = !self.settings.show_meter,
+            UiRequest::MiniPlayer => self.mini_toggle = true,
             UiRequest::UserGuide => self.open_guide(),
             UiRequest::Equalizer => {
                 if self.eq_open {
@@ -1795,6 +1808,32 @@ impl OneumApp {
         ));
     }
 
+    /// Switches between the full window and the mini player: the window made as small
+    /// as the player bar, which is all it shows then, and kept above other windows.
+    fn toggle_mini(&mut self, ctx: &egui::Context) {
+        use egui::ViewportCommand as Tell;
+        match self.mini.take() {
+            None => {
+                let full = ctx
+                    .input(|i| i.viewport().inner_rect)
+                    .map_or(egui::vec2(1180.0, 760.0), |rect| rect.size());
+                self.mini = Some(full);
+                // What only the full window shows is put away.
+                self.settings_open = false;
+                self.eq_open = false;
+                let size = egui::vec2(MINI_WIDTH, theme::PLAYER_BAR_HEIGHT);
+                ctx.send_viewport_cmd(Tell::MinInnerSize(size));
+                ctx.send_viewport_cmd(Tell::InnerSize(size));
+                ctx.send_viewport_cmd(Tell::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+            }
+            Some(full) => {
+                ctx.send_viewport_cmd(Tell::WindowLevel(egui::WindowLevel::Normal));
+                ctx.send_viewport_cmd(Tell::MinInnerSize(egui::vec2(760.0, 480.0)));
+                ctx.send_viewport_cmd(Tell::InnerSize(full));
+            }
+        }
+    }
+
     /// What a rating is called in a menu ("3 Stars"; "No Rating" for 0).
     pub(super) fn rating_words(&self, stars: u8) -> &'static str {
         let s = self.s();
@@ -2313,7 +2352,9 @@ impl OneumApp {
         // every system tells a size at all (Android does not). Whether the settings
         // are saved must not hang on it: with an early return here for "no size",
         // nothing was ever saved on Android.
+        // (Not the mini player's either: the size that is kept is the full window's.)
         if !self.phone_mode
+            && self.mini.is_none()
             && let Some(rect) = ctx.input(|i| i.viewport().inner_rect)
         {
             let size = [rect.width().round(), rect.height().round()];
@@ -2744,6 +2785,7 @@ impl OneumApp {
                         "toggle_queue" => Some(UiRequest::ToggleQueue),
                         "toggle_info" => Some(UiRequest::ToggleInfo),
                         "toggle_meter" => Some(UiRequest::ToggleMeter),
+                        "mini_player" => Some(UiRequest::MiniPlayer),
                         "equalizer" => Some(UiRequest::Equalizer),
                         "go_to_current" => Some(UiRequest::GoToCurrent),
                         "user_guide" => Some(UiRequest::UserGuide),
@@ -2844,6 +2886,7 @@ impl OneumApp {
         state["graphics_errors"] = serde_json::json!(renderer::errors());
         state["section"] = serde_json::json!(p.section.map(|s| (s.from_ms, s.to_ms)));
         state["crossfade_secs"] = serde_json::json!(p.crossfade_secs);
+        state["mini"] = serde_json::json!(self.mini.is_some());
         state["correction_editing"] = serde_json::json!(
             self.peq_edit
                 .as_ref()
@@ -3491,6 +3534,9 @@ impl eframe::App for OneumApp {
             ([width, height], rows as usize)
         });
         memory::note_frame(atlas, rows_used);
+        if !self.phone_mode && std::mem::take(&mut self.mini_toggle) {
+            self.toggle_mini(&ctx);
+        }
         self.sync_frame(&ctx);
         self.global_shortcuts(&ctx);
         if self.phone_mode {
@@ -3498,6 +3544,13 @@ impl eframe::App for OneumApp {
                 self.menu_shortcuts(&ctx);
             }
             self.phone_frame(ui);
+        } else if self.mini.is_some() {
+            // The mini player: the player bar is all there is.
+            if crate::platform::MENU_IN_WINDOW {
+                self.menu_shortcuts(&ctx);
+            }
+            self.player_bar(ui);
+            egui::CentralPanel::default().show(ui, |_| {});
         } else {
             let mut actions: Vec<Action> = Vec::new();
             if crate::platform::MENU_IN_WINDOW {

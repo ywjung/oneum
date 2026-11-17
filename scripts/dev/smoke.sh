@@ -146,6 +146,17 @@ check cf2.json 'd["crossfade_secs"] == 0 and d["state"] == "Playing"' "…and sw
 ui "click $PREV" 'wait 700' 'dump cf3.json'
 check cf3.json 'd["queue_index"] == 2 and d["position_ms"] < 3000 and d["state"] == "Playing"' "the song is started over, for the checks that follow"
 
+echo "== mini player"
+# View ▸ Mini Player: the window becomes as small as the player bar, which goes on
+# working (Space pauses and plays); its button at the right brings the full window
+# back. ('front' again afterwards: the mini player sets the window's level itself.)
+ui 'menu mini_player' 'wait 1200' 'dump mp1.json' 'key Space' 'wait 400' 'dump mp2.json' 'key Space' 'wait 600' 'dump mp3.json' \
+   'click 619 38' 'wait 1200' 'dump mp4.json' 'front' 'wait 300'
+check mp1.json 'd["mini"] and d["window_size"] == [640.0, 76.0] and d["state"] == "Playing"' "the mini player: the window is the player bar, and the song plays on"
+check mp2.json 'd["state"] == "Paused" and d["mini"]' "Space pauses in it"
+check mp3.json 'd["state"] == "Playing"' "…and plays again"
+check mp4.json 'not d["mini"] and d["window_size"] == [1180.0, 760.0] and d["nav"] == "Songs" and d["rows"] == 20' "its button brings the full window back as it was"
+
 echo "== modes"
 ui "click $SHUFFLE" 'wait 400' 'dump m1.json' "click $SHUFFLE" 'wait 400' 'dump m2.json' "click $REPEAT" 'wait 300' 'dump m3.json' "click $REPEAT" 'wait 300' 'dump m4.json' "click $REPEAT" 'wait 300' 'dump m5.json'
 check m1.json 'd["shuffle"] and d["queue_index"] == 0' "shuffle on keeps the current track first"
