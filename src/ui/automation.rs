@@ -142,6 +142,20 @@ fn touch(pos: Pos2, phase: egui::TouchPhase) -> Vec<Event> {
     }
 }
 
+/// What a mouse, a trackpad or a finger sends. The script's own events of these kinds
+/// are added after the real ones have been looked at.
+fn of_a_real_pointer(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::PointerMoved(_)
+            | Event::MouseMoved(_)
+            | Event::PointerButton { .. }
+            | Event::PointerGone
+            | Event::MouseWheel { .. }
+            | Event::Touch { .. }
+    )
+}
+
 /// The verification channel exists only in builds made for verification: debug builds
 /// and release builds with the `automation` feature (what `scripts/dev/run.sh` builds).
 /// A script can do everything the user can and write files where it likes, so the app
@@ -404,6 +418,12 @@ impl Automation {
     /// Called from `raw_input_hook`: performs at most one step per frame.
     pub(super) fn step(&mut self, raw: &mut egui::RawInput) {
         self.read_new_lines();
+        // While a script is under way the real pointer stays out of it: a mouse that
+        // moves over the window between a scripted press and its release would turn
+        // the click into a drag, and a check would fail for no fault of the app.
+        if !self.steps.is_empty() || self.wait_until.is_some() {
+            raw.events.retain(|event| !of_a_real_pointer(event));
+        }
         if let Some(until) = self.wait_until {
             if Instant::now() < until {
                 return;
@@ -438,5 +458,90 @@ impl Automation {
             }
             None => self.gesture_time = None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(steps: Vec<Step>) -> Automation {
+        Automation {
+            path: PathBuf::new(),
+            offset: 0,
+            partial: String::new(),
+            steps: steps.into(),
+            wait_until: None,
+            gesture_time: None,
+            app_steps: Vec::new(),
+        }
+    }
+
+    fn frame(events: Vec<Event>) -> egui::RawInput {
+        egui::RawInput {
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn moves(raw: &egui::RawInput) -> Vec<Pos2> {
+        raw.events
+            .iter()
+            .filter_map(|event| match event {
+                Event::PointerMoved(at) => Some(*at),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_real_pointer_stays_out_of_a_script_that_is_under_way() {
+        let at = pos2(10.0, 10.0);
+        let elsewhere = pos2(300.0, 200.0);
+        let none = Modifiers::NONE;
+        let mut channel = channel(vec![
+            Step::Input(vec![Event::PointerMoved(at)], none),
+            Step::Input(vec![button(at, PointerButton::Primary, true, none)], none),
+            Step::Wait(30),
+            Step::Input(vec![button(at, PointerButton::Primary, false, none)], none),
+        ]);
+        let typed = Event::Text("a".to_owned());
+
+        // The script's own move is there, the mouse's is not; a key that was typed stays.
+        let mut raw = frame(vec![Event::PointerMoved(elsewhere), typed.clone()]);
+        channel.step(&mut raw);
+        assert_eq!(moves(&raw), [at]);
+        assert!(raw.events.contains(&typed));
+
+        // Between the press and its release, and while the script waits, nothing of the
+        // mouse comes through: neither a move nor its leaving the window.
+        let mut raw = frame(vec![Event::PointerMoved(elsewhere)]);
+        channel.step(&mut raw);
+        assert!(moves(&raw).is_empty());
+        assert!(
+            raw.events
+                .iter()
+                .any(|e| matches!(e, Event::PointerButton { pressed: true, .. }))
+        );
+        let mut raw = frame(vec![Event::PointerMoved(elsewhere), Event::PointerGone]);
+        channel.step(&mut raw);
+        assert!(raw.events.is_empty(), "the wait begins: {:?}", raw.events);
+        let mut raw = frame(vec![Event::PointerMoved(elsewhere)]);
+        channel.step(&mut raw);
+        assert!(raw.events.is_empty(), "still waiting: {:?}", raw.events);
+        std::thread::sleep(Duration::from_millis(40));
+        let mut raw = frame(vec![Event::PointerMoved(elsewhere)]);
+        channel.step(&mut raw);
+        assert!(moves(&raw).is_empty());
+        assert!(
+            raw.events
+                .iter()
+                .any(|e| matches!(e, Event::PointerButton { pressed: false, .. }))
+        );
+
+        // With the script done the mouse is the listener's again.
+        let mut raw = frame(vec![Event::PointerMoved(elsewhere)]);
+        channel.step(&mut raw);
+        assert_eq!(moves(&raw), [elsewhere]);
     }
 }

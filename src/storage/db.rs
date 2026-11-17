@@ -1532,6 +1532,13 @@ impl Db {
         )
     }
 
+    /// A transaction for writes that are made one by one through this handle
+    /// (`upsert_remote_track`): they reach the disk together when it is committed,
+    /// and none of them does when it is dropped without.
+    pub fn batch(&self) -> SqlResult<rusqlite::Transaction<'_>> {
+        self.conn.unchecked_transaction()
+    }
+
     /// The cover that was fetched for a server's track (its id in the cover cache).
     pub fn set_remote_art(&self, id: i64, art_id: Option<&str>) -> SqlResult<()> {
         self.conn.execute(

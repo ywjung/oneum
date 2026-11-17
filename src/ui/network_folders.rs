@@ -57,15 +57,33 @@ impl Drop for FolderForm {
 }
 
 /// The address as it is asked for: with `https://` in front where no scheme was
-/// typed, and ending with '/' (it names a folder).
+/// typed, and ending with '/' (it names a folder). What a folder's name may hold and
+/// an address may not is written as its escape: a space, and `#` and `?`, which in a
+/// folder's address are letters of a name (it has no fragment and no query).
 pub(super) fn folder_address(typed: &str) -> String {
     let typed = typed.trim();
-    let mut address = if typed.contains("://") {
+    let address = if typed.contains("://") {
         typed.to_string()
     } else {
         format!("https://{typed}")
     };
-    if !address.split('?').next().unwrap_or("").ends_with('/') {
+    let path_at = address
+        .find("://")
+        .map(|at| at + 3)
+        .and_then(|from| address[from..].find('/').map(|at| from + at))
+        .unwrap_or(address.len());
+    let (server, path) = address.split_at(path_at);
+    let mut address = String::with_capacity(server.len() + path.len() + 8);
+    address.push_str(server);
+    for c in path.chars() {
+        match c {
+            ' ' => address.push_str("%20"),
+            '#' => address.push_str("%23"),
+            '?' => address.push_str("%3F"),
+            c => address.push(c),
+        }
+    }
+    if !address.ends_with('/') {
         address.push('/');
     }
     address
@@ -84,6 +102,7 @@ impl OneumApp {
             url: folder_address(&form.address),
             user: form.user.trim().to_string(),
             pinned: trusted,
+            sign_in: String::new(),
         }
         .sanitized();
         // (A folder that is on the list already is replaced, not added.)
@@ -217,6 +236,18 @@ impl OneumApp {
                         }
                         Why::NoPassword => {
                             ui.label(RichText::new(s.folder_no_password).color(warn));
+                        }
+                        Why::Moved => {
+                            ui.label(RichText::new(s.folder_moved).color(warn));
+                        }
+                        Why::NotFound => {
+                            ui.label(RichText::new(s.folder_not_found).color(warn));
+                        }
+                        Why::NotAFolder => {
+                            ui.label(RichText::new(s.folder_not_webdav).color(warn));
+                        }
+                        Why::NotTls => {
+                            ui.label(RichText::new(s.folder_not_tls).color(warn));
                         }
                         Why::Other(reason) => {
                             ui.label(RichText::new(s.folder_unreachable).color(warn));
@@ -353,7 +384,7 @@ mod tests {
         for (typed, asked) in [
             ("nas.local:5006/music", "https://nas.local:5006/music/"),
             (" http://10.0.0.5/share/ ", "http://10.0.0.5/share/"),
-            ("https://nas.local/a b", "https://nas.local/a b/"),
+            ("https://nas.local/a b", "https://nas.local/a%20b/"),
             ("HTTP://nas/music", "HTTP://nas/music/"),
         ] {
             assert_eq!(folder_address(typed), asked);
@@ -369,8 +400,22 @@ mod tests {
                 .sanitized()
                 .is_some()
         );
+        // A name with a space, a `#` or a `?` in it is a name still.
+        assert_eq!(
+            folder_address("nas.local:5006/music/My Albums"),
+            "https://nas.local:5006/music/My%20Albums/"
+        );
+        assert_eq!(
+            folder_address("https://nas.local/C#/Who?"),
+            "https://nas.local/C%23/Who%3F/"
+        );
         assert!(
             folder(&folder_address("https://nas.local/a b"))
+                .sanitized()
+                .is_some_and(|folder| folder.url == "https://nas.local/a%20b/")
+        );
+        assert!(
+            folder(&folder_address("https://nas local/a"))
                 .sanitized()
                 .is_none()
         );

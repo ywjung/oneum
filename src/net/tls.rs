@@ -18,8 +18,10 @@ use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme,
     StreamOwned,
 };
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 /// A connection that speaks TLS.
 pub(super) type Secure = StreamOwned<ClientConnection, TcpStream>;
@@ -127,6 +129,10 @@ impl ServerCertVerifier for Verifier {
     }
 }
 
+/// What a handshake fails with when what answers is not TLS at all (a port that
+/// speaks plain HTTP, mostly).
+pub const NOT_TLS: &str = "the server does not speak TLS";
+
 fn failed(what: &'static str) -> NetError {
     NetError::BadResponse(what)
 }
@@ -142,10 +148,14 @@ fn about_the_certificate(error: &std::io::Error) -> bool {
 /// Speaks TLS on a connection that was just made to `host`, to the end of the
 /// handshake: what comes back is a server that showed a certificate that is believed.
 /// `pinned`: the fingerprint of a certificate that is trusted as it is.
+/// `within`: how long the whole handshake may take. Each read of it has the
+/// socket's own timeout already, which a server that sends a byte now and then
+/// never runs into.
 pub(super) fn connect(
     host: &str,
     mut stream: TcpStream,
     pinned: Option<&str>,
+    within: Duration,
 ) -> Result<Secure, NetError> {
     let name = ServerName::try_from(host.to_owned()).map_err(|_| NetError::BadAddress)?;
     let shown = Arc::new(Mutex::new(None));
@@ -162,8 +172,13 @@ pub(super) fn connect(
         .with_no_client_auth();
     let mut connection =
         ClientConnection::new(Arc::new(config), name).map_err(|_| NetError::BadAddress)?;
+    let usual_timeout = stream.read_timeout().ok().flatten();
+    let mut timed = Timed {
+        stream: &mut stream,
+        until: Instant::now() + within,
+    };
     while connection.is_handshaking() {
-        if let Err(error) = connection.complete_io(&mut stream) {
+        if let Err(error) = connection.complete_io(&mut timed) {
             let shown = shown.lock().unwrap_or_else(|p| p.into_inner()).take();
             let pinned = pinned.map(str::to_ascii_lowercase);
             return Err(match shown {
@@ -184,13 +199,51 @@ pub(super) fn connect(
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
                         NetError::Timeout
                     }
-                    std::io::ErrorKind::InvalidData => failed("the server does not speak TLS"),
+                    std::io::ErrorKind::InvalidData => failed(NOT_TLS),
                     _ => NetError::Io(error),
                 },
             });
         }
     }
+    // (The reads that follow have the timeout the socket came with.)
+    stream
+        .set_read_timeout(usual_timeout)
+        .map_err(NetError::Io)?;
     Ok(StreamOwned::new(connection, stream))
+}
+
+/// A connection during the handshake: a read gives up when the time for the whole
+/// handshake is over.
+struct Timed<'a> {
+    stream: &'a mut TcpStream,
+    until: Instant,
+}
+
+impl Read for Timed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self
+            .until
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(std::io::ErrorKind::TimedOut)?;
+        // Not longer than the socket's own timeout, where it has one.
+        let timeout = match self.stream.read_timeout()? {
+            Some(usual) => usual.min(left),
+            None => left,
+        };
+        self.stream.set_read_timeout(Some(timeout))?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for Timed<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
 }
 
 #[cfg(test)]

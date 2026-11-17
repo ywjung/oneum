@@ -374,6 +374,13 @@ pub struct Access<'a> {
     pub account: Option<(&'a str, &'a str)>,
     /// The fingerprint of a certificate that is trusted as it is (see `tls`).
     pub pinned: Option<&'a str>,
+    /// How the folder's server asked who is there when the folder was added
+    /// (`auth::how_asked`), when that is known: over a connection that is not TLS
+    /// the password itself is then given only to a server that asks in that way.
+    pub sign_in: Option<&'a str>,
+    /// The listener is trying this name and password now: that the server refused
+    /// them a while ago does not keep them from it.
+    pub fresh: bool,
 }
 
 // Not derived: a password must never be printed with the rest.
@@ -382,6 +389,8 @@ impl std::fmt::Debug for Access<'_> {
         f.debug_struct("Access")
             .field("account", &self.account.map(|(user, _)| user))
             .field("pinned", &self.pinned)
+            .field("sign_in", &self.sign_in)
+            .field("fresh", &self.fresh)
             .finish()
     }
 }
@@ -688,6 +697,17 @@ fn fetch(
             )
         })
     };
+    if access.fresh
+        && let Some((user, _)) = access.account
+    {
+        auth::try_anew(&server, user);
+    }
+    // Over a connection that is not TLS, the password itself goes only to a server
+    // that asks as the folder's server did.
+    let kept = match access.sign_in {
+        Some(way) if !first.secure => auth::Kept::Only(way),
+        _ => auth::Kept::Any,
+    };
     let mut authorization: Option<String> = ahead(&url);
     let mut asked = false;
     loop {
@@ -700,24 +720,41 @@ fn fetch(
             limits,
             pinned,
         )?;
-        // The server asks who is there (or no longer takes the answer to what it
-        // asked before): answered once.
-        if head.status == 401
-            && here
-            && !asked
-            && let Some((user, password)) = access.account
-            && let Some(answer) = auth::answer_asked(
-                &server,
-                &head.challenges,
-                user,
-                password,
-                request.method(),
-                &url.path,
-            )
-        {
-            authorization = Some(answer);
-            asked = true;
-            continue;
+        if here && let Some((user, password)) = access.account {
+            if head.status != 401 {
+                if authorization.is_some() {
+                    auth::note_accepted(&server, user);
+                }
+            } else if asked
+                || (authorization.is_some() && auth::refused_ahead(&server, user, &head.challenges))
+            {
+                // The answer to what it had just asked is not taken either (or the
+                // one given ahead, to a question that still stands).
+                auth::note_refused(&server, &head.challenges, user, password);
+            } else {
+                // The server asks who is there (or no longer takes the answer to
+                // what it asked before): answered once.
+                match auth::answer_asked(
+                    &server,
+                    &head.challenges,
+                    user,
+                    password,
+                    request.method(),
+                    &url.path,
+                    kept,
+                ) {
+                    // (The very words it has just refused are not said twice.)
+                    Some(answer) if authorization.as_deref() == Some(answer.as_str()) => {
+                        auth::note_refused(&server, &head.challenges, user, password);
+                    }
+                    Some(answer) => {
+                        authorization = Some(answer);
+                        asked = true;
+                        continue;
+                    }
+                    None => {}
+                }
+            }
         }
         if !request.follows(head.status) {
             return Ok((head, body));
@@ -781,15 +818,20 @@ fn connect(url: &Url, limits: &Limits, pinned: Option<&str>) -> Result<Socket, N
     let timeout = not_zero(limits.connect);
     let started = Instant::now();
     let mut failure = None;
-    for address in addresses {
+    let count = addresses.len();
+    for (at, address) in addresses.into_iter().enumerate() {
         // The addresses share the time: three seconds for the server, not for each.
+        // Each gets its part of what is left, the last one all of it: a first
+        // address that swallows what is sent to it (IPv6 behind a router that lets
+        // only IPv4 in) must not use up the time of the one that answers.
         let Some(left) = timeout
             .checked_sub(started.elapsed())
             .filter(|left| !left.is_zero())
         else {
             return Err(NetError::Timeout);
         };
-        match TcpStream::connect_timeout(&address, left) {
+        let share = not_zero(left / (count - at) as u32);
+        match TcpStream::connect_timeout(&address, share) {
             Ok(stream) => return Socket::new(stream, not_zero(limits.read), url, pinned),
             Err(error) => failure = Some(error),
         }
@@ -872,7 +914,9 @@ impl Socket {
         // Not every system offers it, and the request leaves without it too.
         let _ = stream.set_nodelay(true);
         let stream = if url.secure {
-            Wire::Secure(Box::new(tls::connect(&url.host, stream, pinned)?))
+            // (The handshake is a few thousand bytes that leave the server at
+            // once, as an answer's head does.)
+            Wire::Secure(Box::new(tls::connect(&url.host, stream, pinned, read)?))
         } else {
             Wire::Plain(stream)
         };

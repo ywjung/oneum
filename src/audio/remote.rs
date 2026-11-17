@@ -64,7 +64,14 @@ impl HttpOrigin {
     /// Connects, and tells the file's length if the server says it.
     fn connect(url: &str) -> io::Result<(Self, Option<u64>)> {
         let credentials = folders::credentials_for(url);
-        let stream = http::open_web(url, 0, &limits(), &credentials.access()).map_err(to_io)?;
+        let open = || http::open_web(url, 0, &limits(), &credentials.access());
+        let stream = match open() {
+            // A server that did not answer in time is asked once more: a NAS whose
+            // disks were asleep takes longer for its first answer than for any other.
+            Err(crate::net::NetError::Timeout) => open(),
+            other => other,
+        }
+        .map_err(to_io)?;
         let len = stream.total_len();
         // The request asked for "everything from 0 on" as a part: a server that
         // answers with the plain file does not give parts.
@@ -112,6 +119,11 @@ impl HttpOrigin {
                 return Ok(cursor);
             }
         }
+        self.new_cursor_at(offset)
+    }
+
+    /// A new connection standing at `offset`.
+    fn new_cursor_at(&self, offset: u64) -> io::Result<Cursor> {
         if offset > 0 && !self.ranges.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -136,11 +148,26 @@ impl Origin for HttpOrigin {
         if buf.is_empty() {
             return Ok(0);
         }
+        fn read_some(stream: &mut Stream, buf: &mut [u8]) -> io::Result<usize> {
+            loop {
+                match stream.read(buf) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    other => break other,
+                }
+            }
+        }
         let mut cursor = self.cursor_at(offset)?;
-        let n = loop {
-            match cursor.stream.read(buf) {
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                other => break other?,
+        let n = match read_some(&mut cursor.stream, buf) {
+            Ok(n) => n,
+            // The connection stalled or was cut (the network away for a moment, a
+            // server that closes what has been open for long): the same place is
+            // asked for once more on a new one before the file counts as
+            // unreadable. A failed read ends the loading into memory for good, and
+            // with it what the loading is for.
+            Err(error) => {
+                tracing::debug!(%error, "a connection to a track's server failed: asking anew");
+                cursor = self.new_cursor_at(offset)?;
+                read_some(&mut cursor.stream, buf)?
             }
         };
         if n > 0 {

@@ -132,15 +132,40 @@ pub fn try_system_store() -> Result<&'static str, String> {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod system {
-    use security_framework::passwords::{
-        delete_generic_password, get_generic_password, set_generic_password,
-    };
+    #[cfg(target_os = "macos")]
+    use security_framework::passwords::set_generic_password;
+    use security_framework::passwords::{delete_generic_password, get_generic_password};
 
     const SERVICE: &str = "OnEum network folders";
 
+    #[cfg(target_os = "macos")]
     pub(super) fn put(id: &str, secret: &str) -> Result<(), String> {
         set_generic_password(SERVICE, id, secret.as_bytes())
             .map_err(|error| format!("the keychain refused: {error}"))
+    }
+
+    /// On the iPhone the item is made so that it can be read while the phone is
+    /// locked (once it has been unlocked since it was switched on): a player mostly
+    /// runs with the screen off, and the keychain's usual item is handed out only
+    /// while the phone is unlocked, so the first song of a network folder that came
+    /// up then would be asked for as nobody and refused. The item stays on this
+    /// device (it is in no backup that is put onto another).
+    #[cfg(target_os = "ios")]
+    pub(super) fn put(id: &str, secret: &str) -> Result<(), String> {
+        use security_framework::access_control::{ProtectionMode, SecAccessControl};
+        use security_framework::passwords::{PasswordOptions, set_generic_password_options};
+        let refused = |error| format!("the keychain refused: {error}");
+        let access = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly),
+            0,
+        )
+        .map_err(refused)?;
+        // (An item's protection is set when it is made: one that is there is
+        // replaced whole.)
+        let _ = delete_generic_password(SERVICE, id);
+        let mut options = PasswordOptions::new_generic_password(SERVICE, id);
+        options.set_access_control(access);
+        set_generic_password_options(secret.as_bytes(), options).map_err(refused)
     }
 
     pub(super) fn get(id: &str) -> Option<String> {

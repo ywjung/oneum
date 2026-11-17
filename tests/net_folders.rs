@@ -32,7 +32,7 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(path).expect("fixture")
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Asks {
     Nobody,
     Basic,
@@ -193,6 +193,7 @@ fn account() -> Access<'static> {
     Access {
         account: Some((USER, WORD)),
         pinned: None,
+        ..Access::default()
     }
 }
 
@@ -214,6 +215,7 @@ fn a_folder_is_listed_and_read_by_who_gives_the_right_name_and_password() {
             Access {
                 account: Some((USER, "wrong")),
                 pinned: None,
+                ..Access::default()
             },
         ] {
             assert!(matches!(
@@ -283,6 +285,58 @@ fn a_folder_is_listed_and_read_by_who_gives_the_right_name_and_password() {
                 "{given:?}"
             );
         }
+    }
+}
+
+/// A name and password the server refuses are given to it once, not with every
+/// request after: a NAS counts failed sign-ins, and a queue of songs is many
+/// requests. The listener trying them anew, or another password, is not held back.
+#[test]
+fn a_refused_password_is_not_given_again_and_again() {
+    for asks in [Asks::Basic, Asks::Digest] {
+        let (server, seen) = serve(asks);
+        let root = server.url("/dav/");
+        let wrong = |fresh: bool| Access {
+            account: Some((USER, "not it")),
+            fresh,
+            ..Access::default()
+        };
+        for _ in 0..5 {
+            assert!(matches!(
+                dav::list(&root, &wrong(false)),
+                Err(NetError::Status(401))
+            ));
+        }
+        let given = || -> Vec<bool> {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.header("authorization").is_some())
+                .collect()
+        };
+        // Asked and answered once; the four requests after it are made as nobody.
+        assert_eq!(
+            given(),
+            [false, true, false, false, false, false],
+            "{asks:?}"
+        );
+        // Typed again in the folder's form: tried once more, and then left again.
+        assert!(matches!(
+            dav::list(&root, &wrong(true)),
+            Err(NetError::Status(401))
+        ));
+        assert!(matches!(
+            dav::list(&root, &wrong(false)),
+            Err(NetError::Status(401))
+        ));
+        let after = given();
+        assert_eq!(
+            after[6..].iter().filter(|given| **given).count(),
+            1,
+            "{asks:?}: {after:?}"
+        );
+        // The right password is another matter.
+        assert!(dav::list(&root, &account()).is_ok(), "{asks:?}");
     }
 }
 
@@ -364,6 +418,7 @@ fn a_server_that_asks_anew_is_answered_anew() {
     let wrong = Access {
         account: Some((USER, "wrong")),
         pinned: None,
+        ..Access::default()
     };
     assert!(matches!(
         dav::list(&root, &wrong),
@@ -530,6 +585,7 @@ fn a_server_with_its_own_certificate_is_trusted_by_its_fingerprint_only() {
     let trusting = Access {
         account: Some((USER, WORD)),
         pinned: Some(&shown),
+        ..Access::default()
     };
     let entries = dav::list(&root, &trusting).expect("listed over TLS");
     assert_eq!(entries.len(), 3);
@@ -549,6 +605,7 @@ fn a_server_with_its_own_certificate_is_trusted_by_its_fingerprint_only() {
     let wrong = Access {
         account: Some((USER, WORD)),
         pinned: Some(&other),
+        ..Access::default()
     };
     assert!(matches!(
         dav::list(&root, &wrong),
@@ -570,6 +627,7 @@ fn an_https_address_does_not_lead_to_an_http_one() {
     let trusting = Access {
         account: Some((USER, WORD)),
         pinned: Some(&shown),
+        ..Access::default()
     };
     let result = http::get_web(&server.url("/dav/x"), &Limits::new(1 << 20), &trusting);
     assert!(matches!(result, Err(NetError::BadAddress)), "{result:?}");
@@ -592,6 +650,7 @@ fn a_song_of_a_folder_plays_with_the_folders_account() {
         url: server.url("/dav/"),
         user: USER.into(),
         pinned: Some(tls::fingerprint(&server.certificate)),
+        ..Folder::default()
     }
     .sanitized()
     .expect("a folder");

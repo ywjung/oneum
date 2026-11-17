@@ -170,11 +170,16 @@ strings! {
     folder_refused: "서버가 이 이름과 비밀번호를 받아들이지 않습니다.", "The server does not accept this name and password.";
     folder_bad_address: "폴더의 주소가 아닙니다. http:// 또는 https:// 로 시작하는 주소를 넣으세요.", "That is no address of a folder. Enter one that begins with http:// or https://.";
     folder_unreachable: "그 주소의 폴더를 읽지 못했습니다.", "The folder at that address could not be read.";
+    folder_moved: "서버가 이 주소를 다른 주소로 넘기는데, 그 주소는 따라가지 않습니다. https:// 로 시작하는 주소(와 그 포트)를 넣어 보세요.", "The server sends this address on to another one, which is not followed. Try the address that begins with https:// (and its port).";
+    folder_not_found: "서버에 그 폴더가 없습니다. 주소의 경로를 확인하세요.", "The server has no folder at that path. Check the path of the address.";
+    folder_not_webdav: "이 주소는 공유 폴더(WebDAV)가 아닙니다. NAS의 WebDAV 주소를 포트와 폴더 경로까지 넣으세요.", "That address is not a shared folder (WebDAV). Enter your NAS's WebDAV address, with its port and the folder's path.";
+    folder_not_tls: "이 포트는 암호화된 연결(https)을 받지 않습니다. 주소를 http:// 로 시작하게 적거나, 서버의 https 포트를 넣으세요.", "This port does not take encrypted connections (https). Begin the address with http://, or use the server's https port.";
     folder_no_password: "이 폴더의 비밀번호를 시스템의 보관소에서 읽지 못했습니다. 기기의 잠금을 풀고 다시 열어 보세요. 계속 안 되면 목록에서 지우고 다시 추가하세요.",
         "The password of this folder could not be read from the system's store. Unlock the device and open the folder again; if that does not help, remove it from the list and add it again.";
     folder_full: "네트워크 폴더는 32개까지 둘 수 있습니다. 쓰지 않는 폴더를 목록에서 지운 뒤 추가하세요.",
         "Up to 32 network folders are kept. Remove one you do not use from the list, then add this one.";
     folder_refused_later: "서버가 저장된 이름과 비밀번호를 받아들이지 않습니다. 목록에서 지우고 다시 추가하세요.", "The server no longer accepts the kept name and password. Remove the folder from the list and add it again.";
+    folder_untrusted_later: "서버의 인증서를 믿을 수 없어 연결하지 않았습니다(기간이 지났거나 다른 이름의 인증서입니다). 목록에서 지우고 다시 추가하면 인증서를 확인할 수 있습니다.", "The server's certificate cannot be trusted, so nothing was sent to it (it has run out, or it is for another name). Remove the folder from the list and add it again to look at the certificate.";
     folder_changed_certificate: "서버가 전에 신뢰한 것과 다른 인증서를 보여 연결하지 않았습니다. 인증서를 바꾼 것이 맞다면 목록에서 지우고 다시 추가하세요.", "The server shows another certificate than the one that was trusted, so nothing was sent to it. If the certificate was replaced on purpose, remove the folder from the list and add it again.";
     network_reload: "다시 읽기", "Reload";
     network_failed: "서버에서 읽지 못했습니다.", "Could not read from the server.";

@@ -85,9 +85,12 @@ fn collect(to: SocketAddr, wait: Duration, found: &mut Vec<Found>) -> io::Result
         // A timeout of zero is refused by the system.
         socket.set_read_timeout(Some(until.max(Duration::from_millis(1))))?;
         match socket.recv_from(&mut datagram) {
-            Ok((len, _)) => {
+            Ok((len, from)) => {
                 errors = 0;
-                let reply = datagram.get(..len).and_then(parse_reply);
+                let reply = datagram
+                    .get(..len)
+                    .and_then(parse_reply)
+                    .filter(|reply| is_at(&reply.location, from.ip()));
                 if let Some(reply) = reply
                     && !found.iter().any(|known| known.location == reply.location)
                 {
@@ -114,6 +117,17 @@ fn collect(to: SocketAddr, wait: Duration, found: &mut Vec<Found>) -> io::Result
         }
     }
     Ok(())
+}
+
+/// Whether `location` is an address of the device that sent the answer. Anyone on
+/// the network can answer a search, and the description is fetched without being
+/// asked for: an answer that names another device's address (this computer's own, the
+/// router's) would have the app make a request there on the sender's behalf.
+fn is_at(location: &str, sender: IpAddr) -> bool {
+    Url::parse(location)
+        .ok()
+        .and_then(|url| url.host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+        .is_some_and(|host| host == sender)
 }
 
 /// Reads an answer to the search: `HTTP/1.1 200` with an `ST` that mentions
@@ -220,5 +234,15 @@ mod tests {
         );
         let found = parse_reply(reply.as_bytes()).unwrap();
         assert_eq!(found.location, "http://nas.local/desc.xml");
+    }
+    #[test]
+    fn an_answer_counts_only_for_its_senders_own_address() {
+        let sender: IpAddr = "192.168.0.10".parse().unwrap();
+        assert!(is_at("http://192.168.0.10:8200/rootDesc.xml", sender));
+        // Another device's address, this computer's own, a name.
+        assert!(!is_at("http://192.168.0.1/apply.cgi?reboot=1", sender));
+        assert!(!is_at("http://127.0.0.1:631/printers", sender));
+        assert!(!is_at("http://nas.local:8200/rootDesc.xml", sender));
+        assert!(!is_at("not an address", sender));
     }
 }

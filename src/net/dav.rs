@@ -11,6 +11,9 @@ use super::http::{self, Access, Limits, Url};
 use super::xml::{self, Event};
 use super::{NetError, capped};
 
+/// What reading an answer fails with when it is not a listing at all (the address
+/// is some other page of the server).
+pub const NOT_A_LISTING: &str = "not the answer to a listing";
 /// The largest answer to a listing that is read…
 const MAX_LISTING_BYTES: u64 = 16 << 20;
 /// …and the most entries taken from it.
@@ -203,9 +206,12 @@ fn read_listing(text: &str, base: &Url) -> Result<Listing, NetError> {
                     let Some(response) = current.take() else {
                         continue;
                     };
+                    // (On the server that was asked, whatever the entry says: name,
+                    // password and a trusted certificate go with what is listed.)
                     let Some(url) = response
                         .href
                         .and_then(|href| base.join(&path_of(&href)).ok())
+                        .filter(|url| url.origin() == base.origin())
                     else {
                         continue;
                     };
@@ -221,7 +227,7 @@ fn read_listing(text: &str, base: &Url) -> Result<Listing, NetError> {
         }
     }
     if !seen_multistatus {
-        return Err(NetError::BadResponse("not the answer to a listing"));
+        return Err(NetError::BadResponse(NOT_A_LISTING));
     }
     // The folder itself is among what is listed. A server that was asked at one
     // address and answered for another (it sent the request on) names the folder as
@@ -293,11 +299,18 @@ fn read_listing(text: &str, base: &Url) -> Result<Listing, NetError> {
 /// server that was asked. A space that was left as it is gets its escape.
 fn path_of(href: &str) -> String {
     let href = href.trim();
+    let after_server =
+        |rest: &'_ str| -> String { rest.find('/').map_or("/", |at| &rest[at..]).to_string() };
     let path = match href.split_once("://") {
         Some((scheme, rest)) if scheme.bytes().all(|b| b.is_ascii_alphabetic()) => {
-            rest.find('/').map_or("/", |at| &rest[at..])
+            after_server(rest)
         }
-        _ => href,
+        // (`//host/path`: a server's name without the scheme, which is as little
+        // taken from an entry as a whole address is.)
+        _ => match href.strip_prefix("//") {
+            Some(rest) => after_server(rest),
+            None => href.to_string(),
+        },
     };
     path.replace(' ', "%20")
 }
@@ -532,5 +545,31 @@ mod tests {
             ]
         );
         assert_eq!(decoded("a%20b%2Fc%zz%4"), "a b/c%zz%4");
+    }
+    /// An entry that names another server (`//host/path`, as a whole address does)
+    /// is read as its path on the server that was asked: neither the folder's place
+    /// nor a song's address leaves that server.
+    #[test]
+    fn an_entry_never_leads_to_another_server() {
+        let text = listing(
+            &[
+                response("//elsewhere.example/music/My%20Albums/", true, None),
+                response(
+                    "//elsewhere.example/music/My%20Albums/a.flac",
+                    false,
+                    Some(7),
+                ),
+            ]
+            .concat(),
+        );
+        let listing = read_listing(&text, &base()).unwrap();
+        assert_eq!(listing.place, "https://nas.local:5006/music/My%20Albums/");
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(
+            listing.entries[0].url,
+            "https://nas.local:5006/music/My%20Albums/a.flac"
+        );
+        assert_eq!(path_of("//elsewhere.example"), "/");
+        assert_eq!(path_of("//elsewhere.example/a b"), "/a%20b");
     }
 }

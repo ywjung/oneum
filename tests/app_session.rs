@@ -1,4 +1,6 @@
 //! The glue between the player and the library: session persistence and track lookup.
+mod net_support;
+
 use oneum::app::host::LibraryHost;
 use oneum::library::{Library, LibraryPaths};
 use oneum::playback::{PlayerHost, QueueItem, QueueState, RepeatMode, Session};
@@ -314,4 +316,61 @@ fn a_queue_with_tracks_of_a_media_server_survives_a_restart() {
     assert_eq!(kept[&remote[1]].title, "둘째 곡");
     assert_eq!(kept[&remote[1]].bit_depth, Some(24));
     assert!(library.track(remote[2]).is_none());
+}
+
+/// A cover is asked for once per address, however often its tracks are added while
+/// it is on its way, and every track that waited for it gets it.
+#[test]
+fn a_servers_cover_is_fetched_once_for_all_who_wait_for_it() {
+    use net_support::{HttpServer, Reply, response};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let library = open(dir.path());
+    let picture = {
+        let image =
+            image::RgbImage::from_fn(32, 32, |x, y| image::Rgb([x as u8 * 8, y as u8 * 8, 90]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("a picture");
+        bytes.into_inner()
+    };
+    let asked = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let asked = asked.clone();
+        HttpServer::start(move |_| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            // (Slow enough for the tracks to be added again meanwhile.)
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            Reply::Bytes(response(
+                200,
+                "OK",
+                &[("Content-Type", "image/png")],
+                &picture,
+            ))
+        })
+    };
+    let track = |n: u32| oneum::library::remote::RemoteTrack {
+        art_url: Some(server.url("/cover.png")),
+        ..server_track(&format!("http://127.0.0.1:9/media/{n}.flac"), "곡")
+    };
+    let first = library.add_remote(&[track(1), track(2)]);
+    let again = library.add_remote(&[track(1), track(2), track(3)]);
+    assert_eq!(first, again[..2]);
+    let started = std::time::Instant::now();
+    let with_cover = || {
+        again
+            .iter()
+            .filter(|id| library.track(**id).is_some_and(|t| t.art_id.is_some()))
+            .count()
+    };
+    while with_cover() < 3 && started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(with_cover(), 3, "every track that waited has the cover");
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "asked for once");
+    // Added once more, with the cover there: nothing is asked for.
+    library.add_remote(&[track(1), track(2), track(3)]);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
 }

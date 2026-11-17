@@ -178,3 +178,54 @@ fn a_server_that_goes_away_mid_file_does_not_hang_the_decoder() {
     assert!(started.elapsed() < Duration::from_secs(15));
     assert!(frames <= from_file("gap_a.wav", None).len());
 }
+
+/// A connection that is cut in the middle of a song (the network away for a moment, a
+/// server that closes what has been open for long) is made anew at the place it
+/// stopped at: the song is whole, in memory and read as it comes.
+#[test]
+fn a_connection_cut_in_the_middle_of_a_song_is_made_anew() {
+    use net_support::{HttpServer, Reply};
+    use std::sync::Mutex;
+    let body = std::fs::read(fixture("gap_a.flac")).expect("fixture");
+    let seen = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let server = {
+        let (body, seen) = (body.clone(), seen.clone());
+        HttpServer::start(move |request| {
+            let from: usize = request
+                .header("range")
+                .and_then(|range| range.strip_prefix("bytes="))
+                .and_then(|range| range.trim_end_matches('-').parse().ok())
+                .unwrap_or(0);
+            seen.lock().unwrap().push(from);
+            let part = &body[from.min(body.len())..];
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/flac\r\n\
+                 Accept-Ranges: bytes\r\nContent-Range: bytes {from}-{}/{}\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len() - 1,
+                body.len(),
+                part.len()
+            );
+            let mut bytes = head.into_bytes();
+            // What is asked for from the start ends after a third of what was
+            // announced; what is asked for from a place in the file arrives whole.
+            bytes.extend_from_slice(if from == 0 {
+                &part[..part.len() / 3]
+            } else {
+                part
+            });
+            Reply::Bytes(bytes)
+        })
+    };
+    let expected = from_file("gap_a.flac", None);
+    for in_memory in [true, false] {
+        seen.lock().unwrap().clear();
+        let heard = from_server(&server.url("/song.flac"), in_memory, None);
+        assert!(heard == expected, "in memory: {in_memory}");
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.contains(&(body.len() / 3)),
+            "asked anew where the first connection ended: {seen:?}"
+        );
+    }
+}

@@ -8,10 +8,20 @@
 //! request to it is answered before it asks: a song read from a share is many
 //! requests, and each would otherwise be made twice. What is remembered is the
 //! server's question, never the password.
+//!
+//! A name and password that a server has refused are not given to it again for a
+//! while ([`note_refused`]): a NAS counts failed sign-ins and shuts out the device
+//! that fails too often, and a queue of songs would otherwise fail twice for each.
+//!
+//! Over a connection that is not TLS nothing tells who answers at an address. A
+//! folder remembers how its server asked when it was added ([`how_asked`]), and
+//! over such a connection the password itself (Basic) is then given only to a
+//! server that asks in that same way ([`Kept`]).
 use md5::{Digest as _, Md5};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 /// The longest challenge that is read, and how many of its fields.
 const MAX_CHALLENGE_BYTES: usize = 4096;
@@ -241,6 +251,7 @@ fn client_nonce() -> String {
 /// `WWW-Authenticate` headers) for `user` and `password`, for the request `method` to
 /// `uri` (path and query). `None` when nothing the server offers is spoken here, or
 /// when name or password cannot be sent in a header.
+#[cfg(test)]
 pub(super) fn answer(
     challenges: &[String],
     user: &str,
@@ -248,7 +259,30 @@ pub(super) fn answer(
     method: &str,
     uri: &str,
 ) -> Option<String> {
-    answer_counted(challenges, user, password, method, uri, 1)
+    answer_counted(challenges, user, password, method, uri, 1, Kept::Any)
+}
+
+/// Which way of asking may be answered with the password itself (Basic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kept<'a> {
+    /// Any: the connection is TLS (the certificate says who answers), or nothing is
+    /// known of how the server asked before.
+    Any,
+    /// The connection is not TLS, and this is how the server asked when the folder
+    /// was added ([`how_asked`]): `digest`, or `basic` and the realm it named. The
+    /// password goes only to a server that asks for Basic with that same realm.
+    Only(&'a str),
+}
+
+impl Kept<'_> {
+    fn allows_basic(self, realm: &str) -> bool {
+        match self {
+            Kept::Any => true,
+            Kept::Only(kept) => kept
+                .strip_prefix("basic ")
+                .is_some_and(|kept_realm| kept_realm == realm),
+        }
+    }
 }
 
 /// The most servers and names whose questions are remembered.
@@ -258,14 +292,170 @@ const MAX_REMEMBERED: usize = 64;
 struct Asked {
     challenges: Vec<String>,
     answers: u32,
+    /// The server has taken an answer to it in this run.
+    accepted: bool,
 }
 
 /// By server and name ("https://host:port" and who is there as).
 static ASKED: LazyLock<Mutex<HashMap<(String, String), Asked>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// [`answer`] to a server that has just asked (`server`: its address up to the
-/// path), which is remembered for [`answer_ahead`].
+/// How long a name and password that were refused are not given again.
+const REFUSED_FOR: Duration = Duration::from_secs(600);
+
+/// A name and password a server has refused: the password by its hash (a new
+/// password is tried at once), and when.
+struct Refused {
+    password: [u8; 32],
+    at: Instant,
+}
+
+static REFUSED: LazyLock<Mutex<HashMap<(String, String), Refused>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn hash_of(password: &str) -> [u8; 32] {
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(ring::digest::digest(&ring::digest::SHA256, password.as_bytes()).as_ref());
+    hash
+}
+
+fn is_refused(server: &str, user: &str, password: &str) -> bool {
+    let mut refused = REFUSED.lock().unwrap_or_else(|p| p.into_inner());
+    let key = (server.to_string(), user.to_string());
+    match refused.get(&key) {
+        Some(found) if found.at.elapsed() < REFUSED_FOR && found.password == hash_of(password) => {
+            true
+        }
+        Some(_) => {
+            refused.remove(&key);
+            false
+        }
+        None => false,
+    }
+}
+
+/// The server answered 401 to an answer made for what it had just asked: name or
+/// password is not right. They are not given to it again for [`REFUSED_FOR`] (the
+/// requests are made as nobody), unless the password changes or the listener tries
+/// them anew ([`try_anew`]).
+///
+/// Not when the server took them earlier in this run: it then refuses this one
+/// address (a folder the name has no right to), and the rest goes on working. And
+/// not when it says its question had grown old (`stale`): the answer was right.
+pub(super) fn note_refused(server: &str, challenges: &[String], user: &str, password: &str) {
+    let key = (server.to_string(), user.to_string());
+    let asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+    if asked.get(&key).is_some_and(|asked| asked.accepted) {
+        return;
+    }
+    let stale = challenges.iter().flat_map(|c| challenges_of(c)).any(|c| {
+        let (name, rest) = scheme(&c);
+        name.eq_ignore_ascii_case("digest")
+            && fields(rest)
+                .iter()
+                .any(|(name, value)| name == "stale" && value.eq_ignore_ascii_case("true"))
+    });
+    if stale {
+        return;
+    }
+    // (What the server asked stays remembered: another password answers it ahead.)
+    drop(asked);
+    let mut refused = REFUSED.lock().unwrap_or_else(|p| p.into_inner());
+    if refused.len() >= MAX_REMEMBERED {
+        refused.clear();
+    }
+    refused.insert(
+        key,
+        Refused {
+            password: hash_of(password),
+            at: Instant::now(),
+        },
+    );
+    tracing::warn!(
+        "a server refused the name and password it was given: not given again for a while"
+    );
+}
+
+/// Whether a 401 to a request that was answered ahead says that name or password
+/// is not right: the server asks the very question that was answered (the same
+/// nonce, not grown old), and it has not taken an answer in this run. Answering it
+/// once more would be one more failed sign-in with the same end.
+pub(super) fn refused_ahead(server: &str, user: &str, challenges: &[String]) -> bool {
+    let asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+    asked
+        .get(&(server.to_string(), user.to_string()))
+        .is_some_and(|before| !before.accepted && before.challenges == challenges)
+}
+
+/// The server took an answer (anything but 401 came back to a request with one).
+pub(super) fn note_accepted(server: &str, user: &str) {
+    let mut asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(asked) = asked.get_mut(&(server.to_string(), user.to_string())) {
+        asked.accepted = true;
+    }
+}
+
+/// The listener is trying a name and password now (a folder's form): an earlier
+/// refusal does not stand in the way.
+pub(super) fn try_anew(server: &str, user: &str) {
+    REFUSED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&(server.to_string(), user.to_string()));
+}
+
+/// How `server` asked `user` the last time, in the words a folder keeps
+/// (`Folder::sign_in`): `digest` when it offered a way that does not send the
+/// password, `basic <realm>` when the password itself is what it takes. `None` when
+/// it has not asked since the app started.
+pub fn how_asked(server: &str, user: &str) -> Option<String> {
+    let asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+    let asked = asked.get(&(server.to_string(), user.to_string()))?;
+    way_of(&asked.challenges)
+}
+
+/// [`how_asked`] for the challenges themselves.
+fn way_of(challenges: &[String]) -> Option<String> {
+    let challenges: Vec<String> = challenges
+        .iter()
+        .filter(|c| c.len() <= MAX_CHALLENGE_BYTES)
+        .flat_map(|c| challenges_of(c))
+        .collect();
+    let usable_digest = challenges.iter().any(|c| {
+        let (name, rest) = scheme(c);
+        name.eq_ignore_ascii_case("digest")
+            && digest_challenge(rest).is_some_and(|challenge| {
+                (!challenge.qop_named || challenge.qop_auth)
+                    && challenge.algorithm.as_deref().is_none_or(|name| {
+                        name.eq_ignore_ascii_case("MD5") || name.eq_ignore_ascii_case("SHA-256")
+                    })
+            })
+    });
+    if usable_digest {
+        return Some("digest".to_string());
+    }
+    basic_realm(&challenges).map(|realm| format!("basic {realm}"))
+}
+
+/// The realm of the Basic challenge among `challenges` (each one challenge), when
+/// there is one.
+fn basic_realm(challenges: &[String]) -> Option<String> {
+    challenges.iter().find_map(|c| {
+        let (name, rest) = scheme(c);
+        name.eq_ignore_ascii_case("basic").then(|| {
+            fields(rest)
+                .into_iter()
+                .find(|(name, _)| name == "realm")
+                .map(|(_, realm)| realm)
+                .unwrap_or_default()
+        })
+    })
+}
+
+/// The answer to a server that has just asked (`server`: its address up to the
+/// path), which is remembered for [`answer_ahead`]. `None` when nothing it offers is
+/// spoken here, when `kept` does not allow what it asks for, or while name and
+/// password count as refused.
 pub(super) fn answer_asked(
     server: &str,
     challenges: &[String],
@@ -273,20 +463,43 @@ pub(super) fn answer_asked(
     password: &str,
     method: &str,
     uri: &str,
+    kept: Kept<'_>,
 ) -> Option<String> {
-    let answer = answer(challenges, user, password, method, uri)?;
+    if is_refused(server, user, password) {
+        return None;
+    }
+    let key = (server.to_string(), user.to_string());
     let mut asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+    // A server that offered a way without the password earlier in this run and now
+    // wants the password itself, over a connection that says nothing of who it is:
+    // not the same server, as far as can be told.
+    let kept = match (kept, asked.get(&key)) {
+        (Kept::Only(_), _) => kept,
+        (Kept::Any, _) if uri_is_secure(server) => kept,
+        (Kept::Any, Some(before)) if way_of(&before.challenges).as_deref() == Some("digest") => {
+            Kept::Only("digest")
+        }
+        (Kept::Any, _) => kept,
+    };
+    let answer = answer_counted(challenges, user, password, method, uri, 1, kept)?;
     if asked.len() >= MAX_REMEMBERED {
         asked.clear();
     }
+    let accepted = asked.get(&key).is_some_and(|before| before.accepted);
     asked.insert(
-        (server.to_string(), user.to_string()),
+        key,
         Asked {
             challenges: challenges.to_vec(),
             answers: 1,
+            accepted,
         },
     );
     Some(answer)
+}
+
+/// Whether a server's address ("https://host:port") is one that is reached over TLS.
+fn uri_is_secure(server: &str) -> bool {
+    server.starts_with("https://")
 }
 
 /// The answer to what `server` asked `user` the last time, for a request that is
@@ -305,10 +518,21 @@ pub(super) fn answer_ahead(
     uri: &str,
     secure: bool,
 ) -> Option<String> {
+    if is_refused(server, user, password) {
+        return None;
+    }
     let mut asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
     let asked = asked.get_mut(&(server.to_string(), user.to_string()))?;
     let answers = asked.answers.checked_add(1)?;
-    let answer = answer_counted(&asked.challenges, user, password, method, uri, answers)?;
+    let answer = answer_counted(
+        &asked.challenges,
+        user,
+        password,
+        method,
+        uri,
+        answers,
+        Kept::Any,
+    )?;
     if !secure && answer.starts_with("Basic ") {
         return None;
     }
@@ -367,6 +591,7 @@ fn answer_counted(
     method: &str,
     uri: &str,
     count: u32,
+    kept: Kept<'_>,
 ) -> Option<String> {
     if !sendable(user) || !sendable(password) {
         return None;
@@ -402,9 +627,7 @@ fn answer_counted(
             return Some(answer);
         }
     }
-    let basic = challenges
-        .iter()
-        .any(|c| scheme(c).0.eq_ignore_ascii_case("basic"));
+    let basic = basic_realm(&challenges).is_some_and(|realm| kept.allows_basic(&realm));
     // A name with a colon in it cannot be told from the password in this scheme.
     (basic && !user.contains(':'))
         .then(|| format!("Basic {}", base64(format!("{user}:{password}").as_bytes())))
@@ -585,18 +808,51 @@ mod tests {
         // Remembered and answered ahead: Digest anywhere, Basic only over TLS.
         let digest = [r#"Digest realm="x", qop="auth", nonce="n2""#.to_string()];
         let basic = [r#"Basic realm="x""#.to_string()];
-        assert!(answer_asked("http://plain.test", &digest, "me", "word", "GET", "/").is_some());
+        assert!(
+            answer_asked(
+                "http://plain.test",
+                &digest,
+                "me",
+                "word",
+                "GET",
+                "/",
+                Kept::Any
+            )
+            .is_some()
+        );
         let ahead = answer_ahead("http://plain.test", "me", "word", "GET", "/a", false).unwrap();
         assert!(
             ahead.contains("nc=00000002") && ahead.contains(r#"uri="/a""#),
             "{ahead}"
         );
-        assert!(answer_asked("http://basic.test", &basic, "me", "word", "GET", "/").is_some());
+        assert!(
+            answer_asked(
+                "http://basic.test",
+                &basic,
+                "me",
+                "word",
+                "GET",
+                "/",
+                Kept::Any
+            )
+            .is_some()
+        );
         assert_eq!(
             answer_ahead("http://basic.test", "me", "word", "GET", "/", false),
             None
         );
-        assert!(answer_asked("https://basic.test", &basic, "me", "word", "GET", "/").is_some());
+        assert!(
+            answer_asked(
+                "https://basic.test",
+                &basic,
+                "me",
+                "word",
+                "GET",
+                "/",
+                Kept::Any
+            )
+            .is_some()
+        );
         assert!(answer_ahead("https://basic.test", "me", "word", "GET", "/", true).is_some());
         // Another name, another server: nothing to answer ahead with.
         assert_eq!(
@@ -607,5 +863,124 @@ mod tests {
             answer_ahead("https://other.test", "me", "word", "GET", "/", true),
             None
         );
+    }
+    fn asked(server: &str, challenge: &str, password: &str, kept: Kept<'_>) -> Option<String> {
+        answer_asked(
+            server,
+            &[challenge.to_string()],
+            "me",
+            password,
+            "GET",
+            "/",
+            kept,
+        )
+    }
+
+    /// A name and password that were refused are kept from the server for a while:
+    /// neither ahead nor when it asks again. A new password, or the listener trying
+    /// anew, is not held back.
+    #[test]
+    fn what_a_server_refused_is_not_given_again() {
+        let server = "https://refusing.test";
+        let digest = r#"Digest realm="x", qop="auth", nonce="n1""#;
+        assert!(asked(server, digest, "wrong", Kept::Any).is_some());
+        note_refused(server, &[digest.to_string()], "me", "wrong");
+        assert_eq!(asked(server, digest, "wrong", Kept::Any), None);
+        assert_eq!(answer_ahead(server, "me", "wrong", "GET", "/", true), None);
+        // Another password is another try; so is another name.
+        assert!(asked(server, digest, "right", Kept::Any).is_some());
+        assert!(
+            answer_asked(
+                server,
+                &[digest.to_string()],
+                "you",
+                "wrong",
+                "GET",
+                "/",
+                Kept::Any
+            )
+            .is_some()
+        );
+        // Refused again with the first one, then tried anew from the form.
+        note_refused(server, &[digest.to_string()], "me", "right");
+        assert_eq!(asked(server, digest, "right", Kept::Any), None);
+        try_anew(server, "me");
+        assert!(asked(server, digest, "right", Kept::Any).is_some());
+    }
+
+    /// A server that has taken the answer in this run refuses one address, not the
+    /// name; and one that says its question had grown old refuses nothing.
+    #[test]
+    fn a_refusal_counts_only_where_it_says_something_of_the_password() {
+        let server = "https://accepting.test";
+        let digest = r#"Digest realm="x", qop="auth", nonce="n1""#;
+        assert!(asked(server, digest, "word", Kept::Any).is_some());
+        note_accepted(server, "me");
+        note_refused(server, &[digest.to_string()], "me", "word");
+        assert!(answer_ahead(server, "me", "word", "GET", "/", true).is_some());
+        // (Asked anew, it is still the server that took the answer.)
+        assert!(asked(server, digest, "word", Kept::Any).is_some());
+        note_refused(server, &[digest.to_string()], "me", "word");
+        assert!(asked(server, digest, "word", Kept::Any).is_some());
+
+        let server = "https://stale.test";
+        let stale = r#"Digest realm="x", qop="auth", nonce="n2", stale=true"#;
+        assert!(asked(server, digest, "word", Kept::Any).is_some());
+        note_refused(server, &[stale.to_string()], "me", "word");
+        assert!(asked(server, stale, "word", Kept::Any).is_some());
+    }
+
+    /// Over a connection that is not TLS the password itself goes only to a server
+    /// that asks as the folder's server did when the folder was added.
+    #[test]
+    fn the_password_itself_goes_only_to_who_asks_as_before() {
+        let digest = r#"Digest realm="nas", qop="auth", nonce="n1""#;
+        let basic = r#"Basic realm="nas""#;
+        let other = r#"Basic realm="camera""#;
+        // How a server asked, in the words a folder keeps.
+        assert!(asked("http://way-a.test", digest, "word", Kept::Any).is_some());
+        assert_eq!(
+            how_asked("http://way-a.test", "me").as_deref(),
+            Some("digest")
+        );
+        assert!(asked("http://way-b.test", basic, "word", Kept::Any).is_some());
+        assert_eq!(
+            how_asked("http://way-b.test", "me").as_deref(),
+            Some("basic nas")
+        );
+        assert_eq!(how_asked("http://way-c.test", "me"), None);
+        // Both offered: the way without the password is the one that counts.
+        let both = format!("{basic}, {digest}");
+        assert!(asked("http://way-d.test", &both, "word", Kept::Any).is_some());
+        assert_eq!(
+            how_asked("http://way-d.test", "me").as_deref(),
+            Some("digest")
+        );
+
+        // A folder of a server that asked for Digest: Basic is not answered.
+        let server = "http://kept-a.test";
+        assert_eq!(asked(server, basic, "word", Kept::Only("digest")), None);
+        assert!(
+            asked(server, digest, "word", Kept::Only("digest"))
+                .is_some_and(|answer| answer.starts_with("Digest "))
+        );
+        // A folder of a server that asked for Basic: the same realm, and no other.
+        let server = "http://kept-b.test";
+        assert!(asked(server, basic, "word", Kept::Only("basic nas")).is_some());
+        assert_eq!(asked(server, other, "word", Kept::Only("basic nas")), None);
+        assert!(
+            asked(server, digest, "word", Kept::Only("basic nas"))
+                .is_some_and(|answer| answer.starts_with("Digest "))
+        );
+
+        // Nothing kept (a folder of an earlier version): a server that offered Digest
+        // in this run is not given the password itself afterwards, over http.
+        let server = "http://run.test";
+        assert!(asked(server, digest, "word", Kept::Any).is_some());
+        assert_eq!(asked(server, basic, "word", Kept::Any), None);
+        // (Over TLS the certificate says who it is.)
+        let server = "https://run.test";
+        assert!(asked(server, digest, "word", Kept::Any).is_some());
+        assert!(asked(server, basic, "word", Kept::Any).is_some());
     }
 }

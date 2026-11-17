@@ -16,6 +16,10 @@ use std::sync::atomic::Ordering;
 
 /// The largest cover taken from a server.
 const MAX_COVER_BYTES: u64 = 16 << 20;
+/// The most covers one adding of tracks sets out to fetch. A folder of thousands,
+/// each track with a cover address of its own, would be thousands of requests for
+/// songs that may never play; the next adding fetches the next ones.
+const MAX_COVERS_AT_ONCE: usize = 500;
 
 /// What browsing a server tells of one of its tracks.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +53,9 @@ pub(crate) struct Catalog {
     by_url: HashMap<String, TrackId>,
     /// The server's name and the cover's address, by track.
     extra: HashMap<TrackId, (String, Option<String>)>,
+    /// The covers that are being fetched, by address, with the tracks that wait for
+    /// each: an address is asked for once, however often its tracks are added.
+    fetching: HashMap<String, Vec<TrackId>>,
 }
 
 impl Catalog {
@@ -127,9 +134,13 @@ impl Library {
     pub fn add_remote(self: &Arc<Self>, tracks: &[RemoteTrack]) -> Vec<TrackId> {
         let now = unix_now();
         let mut ids = Vec::with_capacity(tracks.len());
-        let mut wanted_art: Vec<(TrackId, String)> = Vec::new();
+        let mut wanted_art: Vec<String> = Vec::new();
         {
             let db = lock(&self.inner.db);
+            // One transaction for all of them: a folder is thousands of rows, each
+            // of which would otherwise be written to the disk by itself. (Without
+            // one, should it not begin, they are written one by one as before.)
+            let batch = db.batch();
             let mut catalog = lock(&self.inner.remote);
             let mut all = (*catalog.tracks).clone();
             for track in tracks {
@@ -172,7 +183,14 @@ impl Library {
                 if row.art_id.is_none()
                     && let Some(art) = &row.art_url
                 {
-                    wanted_art.push((id, art.clone()));
+                    match catalog.fetching.get_mut(art) {
+                        Some(waiting) => waiting.push(id),
+                        None if wanted_art.len() < MAX_COVERS_AT_ONCE => {
+                            catalog.fetching.insert(art.clone(), vec![id]);
+                            wanted_art.push(art.clone());
+                        }
+                        None => {}
+                    }
                 }
                 catalog.by_url.insert(row.url.clone(), id);
                 catalog
@@ -182,6 +200,11 @@ impl Library {
                 ids.push(id);
             }
             catalog.tracks = Arc::new(all);
+            if let Ok(batch) = batch
+                && let Err(err) = batch.commit()
+            {
+                tracing::warn!(%err, "could not keep a server's tracks");
+            }
         }
         self.inner.remote_generation.fetch_add(1, Ordering::Release);
         self.inner.notify();
@@ -216,16 +239,19 @@ impl Library {
 
     /// Fetches covers from their server, one per address, and gives them to the
     /// tracks that asked. On a thread of its own: a server may be slow or gone.
-    fn fetch_remote_art(self: &Arc<Self>, wanted: Vec<(TrackId, String)>) {
+    fn fetch_remote_art(self: &Arc<Self>, wanted: Vec<String>) {
         let library = Arc::clone(self);
+        let waiting = |library: &Library, url: &str| -> Vec<TrackId> {
+            lock(&library.inner.remote)
+                .fetching
+                .remove(url)
+                .unwrap_or_default()
+        };
+        let unasked = wanted.clone();
         let spawned = std::thread::Builder::new()
             .name("oneum-remote-art".into())
             .spawn(move || {
-                let mut by_url: HashMap<String, Vec<TrackId>> = HashMap::new();
-                for (id, url) in wanted {
-                    by_url.entry(url).or_default().push(id);
-                }
-                for (url, ids) in by_url {
+                for url in wanted {
                     if library.inner.shutdown.load(Ordering::Relaxed) {
                         return;
                     }
@@ -237,6 +263,8 @@ impl Library {
                             None
                         }
                     };
+                    // (Whoever asked for this cover while it was on its way, too.)
+                    let ids = waiting(&library, &url);
                     if let Some(art_id) = art_id {
                         library.set_remote_art(&ids, &url, &art_id);
                     }
@@ -244,6 +272,9 @@ impl Library {
             });
         if let Err(err) = spawned {
             tracing::warn!(%err, "could not start fetching covers");
+            for url in unasked {
+                waiting(self, &url);
+            }
         }
     }
 

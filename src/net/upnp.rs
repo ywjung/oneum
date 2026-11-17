@@ -46,8 +46,25 @@ pub struct Server {
 /// states no name is called by its host, one without a UDN gets its location as one,
 /// so that it can still be told from the others.
 pub fn describe(location: &str) -> Result<Server, NetError> {
+    describe_within(location, &Limits::new(MAX_DESCRIPTION_BYTES))
+}
+
+/// [`describe`] for a device that answered the search, which nobody has named: it
+/// is on the local network and answers at once or is not worth waiting for, and the
+/// address it gave is asked as it is (not one it sends on to).
+pub fn describe_found(location: &str) -> Result<Server, NetError> {
+    let limits = Limits {
+        connect: std::time::Duration::from_secs(2),
+        read: std::time::Duration::from_secs(3),
+        redirects: 0,
+        ..Limits::new(MAX_DESCRIPTION_BYTES)
+    };
+    describe_within(location, &limits)
+}
+
+fn describe_within(location: &str, limits: &Limits) -> Result<Server, NetError> {
     let base = Url::parse(location)?;
-    let bytes = http::get(location, &Limits::new(MAX_DESCRIPTION_BYTES))?;
+    let bytes = http::get(location, limits)?;
     parse_description(&String::from_utf8_lossy(&bytes), location, &base)
 }
 

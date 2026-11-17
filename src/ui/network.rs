@@ -19,10 +19,12 @@ use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long the network is listened to for servers' answers.
 const SEARCH_WAIT: Duration = Duration::from_secs(3);
+/// How long the devices that answered are given to describe themselves, all at once.
+const DESCRIBE_WAIT: Duration = Duration::from_secs(6);
 /// How long one address is given to answer.
 const ADDRESS_WAIT: Duration = Duration::from_secs(2);
 /// A folder is read this many entries at a time…
@@ -43,6 +45,15 @@ pub(super) enum Why {
     NoPassword,
     /// There are as many folders as are kept.
     Full,
+    /// The server sends the address on to one that is not followed (to `https://`
+    /// from `http://`, mostly).
+    Moved,
+    /// The server has nothing at that path.
+    NotFound,
+    /// What answers at the address is not a folder of a share (a web page, a file).
+    NotAFolder,
+    /// An `https://` address whose port does not speak TLS.
+    NotTls,
     /// Anything else, in the words of what went wrong.
     Other(String),
 }
@@ -51,7 +62,13 @@ fn why_of(error: NetError) -> Why {
     match error {
         NetError::Status(401 | 403) => Why::Refused,
         NetError::Untrusted { fingerprint } => Why::Untrusted(fingerprint),
-        NetError::BadAddress => Why::Address,
+        // (What was typed has been read as an address by now: this is one the
+        // server sent the request on to.)
+        NetError::BadAddress | NetError::Status(301 | 302 | 303 | 307 | 308) => Why::Moved,
+        NetError::Status(404 | 410) => Why::NotFound,
+        NetError::Status(200 | 405 | 501) => Why::NotAFolder,
+        NetError::BadResponse(what) if what == dav::NOT_A_LISTING => Why::NotAFolder,
+        NetError::BadResponse(what) if what == crate::net::tls::NOT_TLS => Why::NotTls,
         other => Why::Other(other.to_string()),
     }
 }
@@ -306,6 +323,9 @@ impl Browser {
                     // server may send a request on to another of its addresses):
                     // what is in the folder lies under that one.
                     folder.url = listing.place;
+                    // And by how its server asked who is there: what it is held to
+                    // from now on where the connection does not tell who answers.
+                    folder.sign_in = crate::net::folders::asked_way(&folder.url, &folder.user);
                 })
                 .map_err(why_of);
             let _ = tx.send(Event::Tried {
@@ -347,14 +367,33 @@ impl Browser {
         }
         self.searched = true;
         self.searching = self.run("oneum-net-search", |tx| {
-            let mut servers: Vec<upnp::Server> = Vec::new();
+            // Every device that answered is asked for its description at the same
+            // time: one that is slow, or cannot be reached from here, does not hold
+            // up the others, and the search as a whole ends when its time is over.
+            let (done, described) = channel();
             for found in ssdp::search(SEARCH_WAIT) {
-                match upnp::describe(&found.location) {
-                    Ok(server) if !servers.iter().any(|s| s.udn == server.udn) => {
+                let done = done.clone();
+                let asked = std::thread::Builder::new()
+                    .name("oneum-net-describe".into())
+                    .spawn(move || {
+                        let _ = done.send(upnp::describe_found(&found.location));
+                    });
+                if let Err(error) = asked {
+                    tracing::debug!(%error, "a found device could not be asked");
+                }
+            }
+            drop(done);
+            let until = Instant::now() + DESCRIBE_WAIT;
+            let mut servers: Vec<upnp::Server> = Vec::new();
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                match described.recv_timeout(left) {
+                    Ok(Ok(server)) if !servers.iter().any(|s| s.udn == server.udn) => {
                         servers.push(server);
                     }
-                    Ok(_) => {}
-                    Err(error) => tracing::debug!(%error, "not a media server after all"),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => tracing::debug!(%error, "not a media server after all"),
+                    // All have answered, or the time is over.
+                    Err(_) => break,
                 }
             }
             servers.sort_by_key(|s| s.name.to_lowercase());
@@ -732,6 +771,13 @@ impl OneumApp {
                 .iter()
                 .any(|s| s.location == server.location);
             if !known {
+                // (As many as are kept: the one added longest ago makes room, or the
+                // new one would be gone at the next start.)
+                let kept = crate::app::settings::MAX_NETWORK_SERVERS;
+                let servers = &mut self.settings.network_servers;
+                if servers.len() >= kept {
+                    servers.drain(..=servers.len() - kept);
+                }
                 self.settings.network_servers.push(SavedServer {
                     name: server.name,
                     location: server.location,
@@ -938,10 +984,17 @@ impl OneumApp {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
                         // A network folder says why.
+                        let pinned = self
+                            .network
+                            .folder
+                            .as_ref()
+                            .is_some_and(|folder| folder.pinned.is_some());
                         let words = match &self.network.why {
                             Some(Why::Refused) => s.folder_refused_later,
-                            Some(Why::Untrusted(_)) => s.folder_changed_certificate,
+                            Some(Why::Untrusted(_)) if pinned => s.folder_changed_certificate,
+                            Some(Why::Untrusted(_)) => s.folder_untrusted_later,
                             Some(Why::NoPassword) => s.folder_no_password,
+                            Some(Why::NotFound) => s.folder_not_found,
                             _ => s.network_failed,
                         };
                         ui.label(RichText::new(words).color(theme::dim(ui)));
@@ -1069,6 +1122,7 @@ impl OneumApp {
                     url: super::network_folders::folder_address(argument),
                     user: user.to_string(),
                     pinned,
+                    sign_in: String::new(),
                 }
                 .sanitized();
                 match folder {
@@ -1166,6 +1220,10 @@ impl OneumApp {
                 Why::Address => "address".to_string(),
                 Why::NoPassword => "no password".to_string(),
                 Why::Full => "full".to_string(),
+                Why::Moved => "moved".to_string(),
+                Why::NotFound => "not found".to_string(),
+                Why::NotAFolder => "not a folder".to_string(),
+                Why::NotTls => "not tls".to_string(),
                 Why::Other(reason) => format!("other: {reason}"),
             }),
             "secret_selftest": network.secret_selftest.clone().map(|r| match r {
@@ -1327,7 +1385,21 @@ mod folder_tests {
             }),
             Why::Untrusted("ab".into())
         );
-        assert_eq!(why_of(NetError::BadAddress), Why::Address);
+        // An address the server sends on to and that is not followed, a path it
+        // does not have, a page that is no folder, a port that does not speak TLS.
+        assert_eq!(why_of(NetError::BadAddress), Why::Moved);
+        assert_eq!(why_of(NetError::Status(301)), Why::Moved);
+        assert_eq!(why_of(NetError::Status(404)), Why::NotFound);
+        assert_eq!(why_of(NetError::Status(200)), Why::NotAFolder);
+        assert_eq!(why_of(NetError::Status(405)), Why::NotAFolder);
+        assert_eq!(
+            why_of(NetError::BadResponse(dav::NOT_A_LISTING)),
+            Why::NotAFolder
+        );
+        assert_eq!(
+            why_of(NetError::BadResponse(crate::net::tls::NOT_TLS)),
+            Why::NotTls
+        );
         assert!(matches!(why_of(NetError::Status(500)), Why::Other(_)));
         assert!(matches!(why_of(NetError::Timeout), Why::Other(_)));
     }
