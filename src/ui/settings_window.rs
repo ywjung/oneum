@@ -119,7 +119,7 @@ impl OneumApp {
         let mut close = false;
         // Dim what is behind and let a click there close the window, like a sheet.
         let screen = ctx.content_rect();
-        let backdrop_clicked = egui::Area::new(egui::Id::unique("settings-backdrop"))
+        let backdrop = egui::Area::new(egui::Id::unique("settings-backdrop"))
             .order(egui::Order::Background)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
@@ -128,11 +128,13 @@ impl OneumApp {
                 ui.painter()
                     .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(alpha));
                 response.clicked()
-            })
-            .inner;
-        if backdrop_clicked && self.dialog.is_none() {
-            close = true;
-        }
+            });
+        // The keyboard stays in the sheet as the pointer does: Tab does not walk on
+        // into the window behind it, where Space and Return would press what is dimmed.
+        ctx.memory_mut(|memory| memory.set_modal_layer(backdrop.response.layer_id));
+        let backdrop_clicked = backdrop.inner;
+        // (A click beside the sheet closes it, as Escape does.)
+        let beside = backdrop_clicked && self.dialog.is_none();
         // The header's height depends on the font size; it is measured as it is laid out
         // and used from the next frame on.
         let header_id = egui::Id::unique("settings-header-height");
@@ -184,6 +186,8 @@ impl OneumApp {
             });
         if close {
             self.settings_open = false;
+        } else if beside {
+            self.close_settings_unless_editing();
         }
     }
 
@@ -477,7 +481,7 @@ impl OneumApp {
             }
             if scan.running {
                 ui.add_space(4.0);
-                ui.add(egui::Spinner::new().size(14.0));
+                widgets::working(ui, 14.0);
                 ui.label(
                     RichText::new(self.lang.scan_progress(scan.files_done))
                         .small()
@@ -504,7 +508,11 @@ impl OneumApp {
                         .clicked()
                     {
                         self.announce_scan = true;
-                        self.core.library.restore_removed();
+                        // Waits for the database: on the edit thread, not in a frame.
+                        self.edit(|library| {
+                            library.restore_removed();
+                            None
+                        });
                     }
                     ui.label(
                         RichText::new(self.lang.song_count(removed))
@@ -586,16 +594,22 @@ impl OneumApp {
         let s = self.s();
         let library = self.core.library.clone();
         let status = library.check_status();
-        let (mut waiting, mut checked, mut damaged) = (0usize, 0usize, 0usize);
-        for track in &self.snapshot.tracks {
-            match track.check {
-                Some(check) => {
-                    checked += 1;
-                    damaged += usize::from(check.verdict == crate::model::CheckVerdict::Damaged);
+        // (Counted over every song: once for a state of the library, not in every
+        // frame the card is on screen.)
+        let [waiting, checked, damaged] = self.counted("check", |snapshot| {
+            let (mut waiting, mut checked, mut damaged) = (0usize, 0usize, 0usize);
+            for track in &snapshot.tracks {
+                match track.check {
+                    Some(check) => {
+                        checked += 1;
+                        damaged +=
+                            usize::from(check.verdict == crate::model::CheckVerdict::Damaged);
+                    }
+                    None => waiting += usize::from(track.available),
                 }
-                None => waiting += usize::from(track.available),
             }
-        }
+            [waiting, checked, damaged]
+        });
         let text = if status.running {
             self.lang.check_progress(
                 true,
@@ -1220,10 +1234,9 @@ impl OneumApp {
         }
         self.correction_editor(ui, rate);
         widgets::section_note(ui, s.correction_hint);
+        // (Asked first: the bands of a profile that was made by hand are in no file.)
         if remove && let Some(name) = &before {
-            self.settings.corrections.retain(|p| &p.name != name);
-            // A built-in profile of the same name stays available; nothing is selected.
-            self.settings.correction = None;
+            self.dialog = Some(super::dialogs::Dialog::DeleteCorrection(name.clone()));
         }
         // (While a profile is edited, what is edited is what is heard.)
         if self.settings.correction != before && self.peq_edit.is_none() {
@@ -1381,11 +1394,14 @@ impl OneumApp {
         let s = self.s();
         let library = self.core.library.clone();
         let status = library.loudness_status();
-        let (mut waiting, mut measured) = (0usize, 0usize);
-        for track in &self.snapshot.tracks {
-            measured += usize::from(track.measured.is_some());
-            waiting += usize::from(track.available && track.wants_measuring());
-        }
+        let [waiting, measured, _] = self.counted("loudness", |snapshot| {
+            let (mut waiting, mut measured) = (0usize, 0usize);
+            for track in &snapshot.tracks {
+                measured += usize::from(track.measured.is_some());
+                waiting += usize::from(track.available && track.wants_measuring());
+            }
+            [waiting, measured, 0]
+        });
         let text = if status.running {
             self.lang
                 .loudness_progress(true, status.done, status.total, status.failed)
@@ -1430,7 +1446,11 @@ impl OneumApp {
                 widgets::setting_row(ui, s.rg_measured, Some(&count), !status.running, |ui| {
                     let button = egui::Button::new(s.rg_forget).min_size(egui::vec2(0.0, 26.0));
                     if ui.add(button).clicked() {
-                        library.forget_loudness();
+                        // Waits for the database: on the edit thread, not in a frame.
+                        self.edit(|library| {
+                            library.forget_loudness();
+                            None
+                        });
                     }
                 });
             }
@@ -1440,6 +1460,22 @@ impl OneumApp {
     /// A reference of the keyboard shortcuts, grouped the way people look for them.
     fn settings_shortcuts(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
+        let mut window = vec![
+            ("⌘ U", s.menu_show_queue),
+            ("⌘ I", s.menu_show_info),
+            ("⇧ ⌘ U", s.menu_show_meter),
+            ("⇧ ⌘ P", s.menu_mini_player),
+            ("⌘ E", s.equalizer),
+            ("⌘ +   ⌘ −   ⌘ 0", s.shortcut_zoom),
+            ("⌘ ,", s.menu_settings),
+            ("⌘ W", s.menu_close_window),
+            ("⌘ Q", s.menu_quit),
+        ];
+        // (On Windows the window is closed by quitting: there is no key for closing
+        // it alone.)
+        if cfg!(windows) {
+            window.retain(|(keys, _)| *keys != "⌘ W");
+        }
         let groups: [(&str, &[(&str, &str)]); 4] = [
             (
                 s.settings_playback,
@@ -1485,19 +1521,7 @@ impl OneumApp {
                     ("⌘ R", s.menu_rescan),
                 ],
             ),
-            (
-                s.shortcuts_group_window,
-                &[
-                    ("⌘ U", s.menu_show_queue),
-                    ("⌘ I", s.menu_show_info),
-                    ("⇧ ⌘ U", s.menu_show_meter),
-                    ("⇧ ⌘ P", s.menu_mini_player),
-                    ("⌘ E", s.equalizer),
-                    ("⌘ ,", s.menu_settings),
-                    ("⌘ W", s.menu_close_window),
-                    ("⌘ Q", s.menu_quit),
-                ],
-            ),
+            (s.shortcuts_group_window, &window),
         ];
         shortcut_table(ui, &groups);
         widgets::section_note(ui, s.shortcuts_note);

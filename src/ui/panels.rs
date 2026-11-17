@@ -7,6 +7,8 @@ use super::{
 use crate::app::settings::{Pin, RightPanel};
 use crate::audio::dsp::replaygain_factor;
 use crate::i18n::{format_time, group_digits};
+use crate::library::Library;
+use crate::model::TrackId;
 use crate::playback::{Command, PlayState};
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
 
@@ -542,6 +544,20 @@ pub(super) fn signal_path_block(ui: &mut Ui, s: &crate::i18n::Strings, path: &Si
 }
 
 const SIDEBAR_ROW: f32 = 28.0;
+
+/// How tall the part of the sidebar above the list of playlists is with `pinned`
+/// pinned things: the pins under their heading, the library's nine rows under
+/// theirs, and the heading of the playlists.
+fn sidebar_fixed_height(pinned: usize) -> f32 {
+    const HEADING: f32 = 34.0;
+    let row = SIDEBAR_ROW + 2.0;
+    let pins = if pinned > 0 {
+        HEADING + pinned as f32 * row + 4.0
+    } else {
+        0.0
+    };
+    pins + HEADING + 9.0 * row + 6.0 + 26.0
+}
 const QUEUE_ROW: f32 = 44.0;
 
 /// A full-width selectable row in the sidebar.
@@ -823,7 +839,7 @@ impl OneumApp {
                                     .small()
                                     .color(theme::dim(ui)),
                             );
-                            ui.add(egui::Spinner::new().size(14.0));
+                            widgets::working(ui, 14.0);
                         }
                     });
                 });
@@ -895,293 +911,333 @@ impl OneumApp {
             .default_size(204.0)
             .size_range(160.0..=320.0)
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                let header = |ui: &mut Ui, text: &str| {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        ui.label(RichText::new(text).small().strong().color(theme::dim(ui)));
-                    });
-                    ui.add_space(2.0);
-                };
-                // Pinned things first, those that still exist.
-                let pins: Vec<(Pin, Icon, String)> = self
+                // The pinned things and the library's rows stand above the list of
+                // playlists, which scrolls by itself. Where the window is too low
+                // for that (or the pins too many), the whole bar scrolls as one: or
+                // the playlists, and then the last rows above them, would lie
+                // below the window's edge, out of reach.
+                let pinned = self
                     .settings
                     .pinned
                     .iter()
-                    .filter_map(|pin| {
-                        let (icon, name) = self.pin_target(pin)?;
-                        Some((pin.clone(), icon, name))
-                    })
-                    .collect();
-                let live_pins: Vec<Pin> = pins.iter().map(|(pin, _, _)| pin.clone()).collect();
-                if !pins.is_empty() {
-                    header(ui, s.pinned);
-                    for (pin, icon, name) in pins {
-                        let nav = super::pin_nav(&pin);
-                        let response = sidebar_row(ui, self.nav == nav, icon, &name, None);
-                        if response.clicked() {
+                    .filter(|pin| self.pin_target(pin).is_some())
+                    .count();
+                let as_one = ui.available_height() < sidebar_fixed_height(pinned) + 3.0 * 30.0;
+                let mut content = |ui: &mut Ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let header = |ui: &mut Ui, text: &str| {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(text).small().strong().color(theme::dim(ui)));
+                        });
+                        ui.add_space(2.0);
+                    };
+                    // Pinned things first, those that still exist.
+                    let pins: Vec<(Pin, Icon, String)> = self
+                        .settings
+                        .pinned
+                        .iter()
+                        .filter_map(|pin| {
+                            let (icon, name) = self.pin_target(pin)?;
+                            Some((pin.clone(), icon, name))
+                        })
+                        .collect();
+                    let live_pins: Vec<Pin> = pins.iter().map(|(pin, _, _)| pin.clone()).collect();
+                    if !pins.is_empty() {
+                        header(ui, s.pinned);
+                        for (pin, icon, name) in pins {
+                            let nav = super::pin_nav(&pin);
+                            let response = sidebar_row(ui, self.nav == nav, icon, &name, None);
+                            if response.clicked() {
+                                actions.push(Action::Go(nav));
+                            }
+                            response.context_menu(|ui| {
+                                if ui.button(s.unpin).clicked() {
+                                    actions.push(Action::TogglePin(pin.clone()));
+                                    ui.close();
+                                }
+                            });
+                        }
+                        ui.add_space(4.0);
+                    }
+                    header(ui, s.library);
+                    let total = self.snapshot.len();
+                    let entries = [
+                        (
+                            Nav::Songs,
+                            Icon::Note,
+                            s.all_songs,
+                            Some(group_digits(total)),
+                        ),
+                        (Nav::Albums, Icon::Album, s.albums, None),
+                        (Nav::Artists, Icon::Person, s.artists, None),
+                        (Nav::Genres, Icon::Tag, s.genres, None),
+                        (Nav::Favorites, Icon::Heart, s.favorites, None),
+                        (Nav::Recent, Icon::Clock, s.recently_played, None),
+                        (
+                            Nav::Folder(std::path::PathBuf::new()),
+                            Icon::Folder,
+                            s.folders,
+                            None,
+                        ),
+                        (Nav::Stats, Icon::Meter, s.stats, None),
+                        (Nav::Network, Icon::Network, s.network, None),
+                    ];
+                    for (nav, icon, label, trailing) in entries {
+                        let selected = self.nav == nav
+                            || matches!(
+                                (&self.nav, &nav),
+                                (Nav::Album(_), Nav::Albums)
+                                    | (Nav::Artist(_), Nav::Artists)
+                                    | (Nav::Genre(_), Nav::Genres)
+                            ) && self.history.first() == Some(&nav)
+                            || matches!(&self.nav, Nav::Folder(_))
+                                && matches!(&nav, Nav::Folder(_));
+                        if sidebar_row(ui, selected, icon, label, trailing.filter(|_| total > 0))
+                            .clicked()
+                        {
                             actions.push(Action::Go(nav));
                         }
-                        response.context_menu(|ui| {
-                            if ui.button(s.unpin).clicked() {
-                                actions.push(Action::TogglePin(pin.clone()));
-                                ui.close();
-                            }
-                        });
                     }
-                    ui.add_space(4.0);
-                }
-                header(ui, s.library);
-                let total = self.snapshot.len();
-                let entries = [
-                    (
-                        Nav::Songs,
-                        Icon::Note,
-                        s.all_songs,
-                        Some(group_digits(total)),
-                    ),
-                    (Nav::Albums, Icon::Album, s.albums, None),
-                    (Nav::Artists, Icon::Person, s.artists, None),
-                    (Nav::Genres, Icon::Tag, s.genres, None),
-                    (Nav::Favorites, Icon::Heart, s.favorites, None),
-                    (Nav::Recent, Icon::Clock, s.recently_played, None),
-                    (
-                        Nav::Folder(std::path::PathBuf::new()),
-                        Icon::Folder,
-                        s.folders,
-                        None,
-                    ),
-                    (Nav::Stats, Icon::Meter, s.stats, None),
-                    (Nav::Network, Icon::Network, s.network, None),
-                ];
-                for (nav, icon, label, trailing) in entries {
-                    let selected = self.nav == nav
-                        || matches!(
-                            (&self.nav, &nav),
-                            (Nav::Album(_), Nav::Albums)
-                                | (Nav::Artist(_), Nav::Artists)
-                                | (Nav::Genre(_), Nav::Genres)
-                        ) && self.history.first() == Some(&nav)
-                        || matches!(&self.nav, Nav::Folder(_)) && matches!(&nav, Nav::Folder(_));
-                    if sidebar_row(ui, selected, icon, label, trailing.filter(|_| total > 0))
-                        .clicked()
-                    {
-                        actions.push(Action::Go(nav));
-                    }
-                }
 
-                ui.add_space(6.0);
-                let header = ui
-                    .horizontal(|ui| {
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(s.playlists)
-                                .small()
-                                .strong()
-                                .color(theme::dim(ui)),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if widgets::icon_button(ui, Icon::Plus, s.new_playlist, 22.0, false)
-                                .clicked()
-                            {
-                                self.dialog =
-                                    Some(Dialog::new_playlist(s.untitled_playlist, Vec::new()));
-                            }
-                        });
-                    })
-                    .response;
-                // Songs dropped on the heading become a new playlist.
-                if header.dnd_hover_payload::<DragTracks>().is_some() {
-                    ui.painter().rect_stroke(
-                        header.rect.expand(2.0),
-                        6.0,
-                        egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode)),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().text(
-                        header.rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "＋",
-                        egui::FontId::proportional(13.0),
-                        theme::accent(ui.visuals().dark_mode),
-                    );
-                }
-                if let Some(payload) = header.dnd_release_payload::<DragTracks>() {
-                    self.dialog = Some(Dialog::new_playlist(
-                        s.untitled_playlist,
-                        payload.tracks.clone(),
-                    ));
-                }
-                egui::ScrollArea::vertical()
-                    .id_salt("playlists")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        // Smart playlists first: searches kept under a name.
-                        let smart: Vec<String> = self
-                            .settings
-                            .smart_playlists
-                            .iter()
-                            .map(|p| p.name.clone())
-                            .collect();
-                        for name in smart {
-                            let response = sidebar_row(
-                                ui,
-                                self.nav == Nav::Smart(name.clone()),
-                                Icon::Search,
-                                &name,
-                                None,
-                            )
-                            .on_hover_text(s.smart_hint);
-                            if response.clicked() {
-                                actions.push(Action::Go(Nav::Smart(name.clone())));
-                            }
-                            response.context_menu(|ui| {
-                                if ui.button(s.play_now).clicked() {
-                                    let query = self
-                                        .settings
-                                        .smart_playlists
-                                        .iter()
-                                        .find(|p| p.name == name)
-                                        .map(|p| p.query.clone())
-                                        .unwrap_or_default();
-                                    let tracks: Vec<crate::model::TrackId> = self
-                                        .snapshot
-                                        .search(&query)
-                                        .into_iter()
-                                        .filter_map(|i| self.snapshot.tracks.get(i as usize))
-                                        .map(|t| t.id)
-                                        .collect();
-                                    if !tracks.is_empty() {
-                                        actions.push(Action::PlayTracks(tracks, 0));
-                                    }
-                                    ui.close();
-                                }
-                                super::pin_menu_item(
-                                    ui,
-                                    s,
-                                    &live_pins,
-                                    Pin::Smart(name.clone()),
-                                    actions,
-                                );
-                                ui.separator();
-                                if ui.button(s.smart_edit).clicked() {
-                                    actions.push(Action::EditSmart(name.clone()));
-                                    ui.close();
-                                }
-                                if ui.button(s.rename).clicked() {
-                                    actions.push(Action::RenameSmart(name.clone()));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button(s.delete).clicked() {
-                                    actions.push(Action::DeleteSmart(name.clone()));
-                                    ui.close();
-                                }
-                            });
-                        }
-                        let playlists: Vec<(i64, String, usize)> = self
-                            .playlists
-                            .iter()
-                            .map(|p| (p.id, p.name.clone(), p.item_count))
-                            .collect();
-                        for (id, name, count) in playlists {
-                            if let Some((rename_id, text, focus)) =
-                                self.renaming.as_mut().filter(|(rid, _, _)| *rid == id)
-                            {
-                                let _ = rename_id;
-                                let response = ui.add(
-                                    egui::TextEdit::singleline(text).desired_width(f32::INFINITY),
-                                );
-                                if *focus {
-                                    *focus = false;
-                                    response.request_focus();
-                                }
-                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                if response.lost_focus() {
-                                    let new_name = text.trim().to_string();
-                                    self.renaming = None;
-                                    if enter && !new_name.is_empty() && new_name != name {
-                                        self.edit(move |library| {
-                                            library
-                                                .rename_playlist(id, &new_name)
-                                                .err()
-                                                .map(super::AppEvent::EditFailed)
-                                        });
-                                    }
-                                }
-                                continue;
-                            }
-                            let response = sidebar_row(
-                                ui,
-                                self.nav == Nav::Playlist(id),
-                                Icon::Playlist,
-                                &name,
-                                Some(count.to_string()),
+                    ui.add_space(6.0);
+                    let header = ui
+                        .horizontal(|ui| {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(s.playlists)
+                                    .small()
+                                    .strong()
+                                    .color(theme::dim(ui)),
                             );
-                            if response.clicked() {
-                                actions.push(Action::Go(Nav::Playlist(id)));
-                            }
-                            if response.double_clicked() {
-                                self.renaming = Some((id, name.clone(), true));
-                            }
-                            // Songs dragged here are added to this playlist (dragging a
-                            // playlist's own rows onto itself does nothing).
-                            let from_other_list = |payload: &DragTracks| {
-                                payload
-                                    .playlist_items
-                                    .as_ref()
-                                    .is_none_or(|(from, _)| *from != id)
-                            };
-                            if response
-                                .dnd_hover_payload::<DragTracks>()
-                                .is_some_and(|p| from_other_list(&p))
-                            {
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    6.0,
-                                    egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode)),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-                            if let Some(payload) = response.dnd_release_payload::<DragTracks>()
-                                && from_other_list(&payload)
-                            {
-                                actions.push(Action::AddToPlaylist(id, payload.tracks.clone()));
-                            }
-                            response.context_menu(|ui| {
-                                if ui
-                                    .add_enabled(count > 0, egui::Button::new(s.play_now))
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if widgets::icon_button(ui, Icon::Plus, s.new_playlist, 22.0, false)
                                     .clicked()
                                 {
-                                    let tracks = self
-                                        .core
-                                        .library
-                                        .playlist_items(id)
-                                        .into_iter()
-                                        .map(|i| i.track_id)
-                                        .collect();
-                                    actions.push(Action::PlayTracks(tracks, 0));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button(s.rename).clicked() {
-                                    self.renaming = Some((id, name.clone(), true));
-                                    ui.close();
-                                }
-                                if ui.button(s.export_m3u8).clicked() {
-                                    self.export_playlist(id, &name);
-                                    ui.close();
-                                }
-                                super::pin_menu_item(ui, s, &live_pins, Pin::Playlist(id), actions);
-                                ui.separator();
-                                if ui.button(s.delete).clicked() {
-                                    self.dialog = Some(Dialog::DeletePlaylist(id, name.clone()));
-                                    ui.close();
+                                    self.dialog =
+                                        Some(Dialog::new_playlist(s.untitled_playlist, Vec::new()));
                                 }
                             });
-                        }
-                    });
+                        })
+                        .response;
+                    // Songs dropped on the heading become a new playlist.
+                    if header.dnd_hover_payload::<DragTracks>().is_some() {
+                        ui.painter().rect_stroke(
+                            header.rect.expand(2.0),
+                            6.0,
+                            egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode)),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.painter().text(
+                            header.rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "＋",
+                            egui::FontId::proportional(13.0),
+                            theme::accent(ui.visuals().dark_mode),
+                        );
+                    }
+                    if let Some(payload) = header.dnd_release_payload::<DragTracks>() {
+                        self.dialog = Some(Dialog::new_playlist(
+                            s.untitled_playlist,
+                            payload.tracks.clone(),
+                        ));
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("playlists")
+                        // (As one: as tall as what is in it, and the bar scrolls.)
+                        .auto_shrink([false, as_one])
+                        .max_height(if as_one {
+                            f32::INFINITY
+                        } else {
+                            ui.available_height()
+                        })
+                        .show(ui, |ui| {
+                            // Smart playlists first: searches kept under a name.
+                            let smart: Vec<String> = self
+                                .settings
+                                .smart_playlists
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .collect();
+                            for name in smart {
+                                let response = sidebar_row(
+                                    ui,
+                                    self.nav == Nav::Smart(name.clone()),
+                                    Icon::Search,
+                                    &name,
+                                    None,
+                                )
+                                .on_hover_text(s.smart_hint);
+                                if response.clicked() {
+                                    actions.push(Action::Go(Nav::Smart(name.clone())));
+                                }
+                                response.context_menu(|ui| {
+                                    if ui.button(s.play_now).clicked() {
+                                        let query = self
+                                            .settings
+                                            .smart_playlists
+                                            .iter()
+                                            .find(|p| p.name == name)
+                                            .map(|p| p.query.clone())
+                                            .unwrap_or_default();
+                                        let tracks: Vec<crate::model::TrackId> = self
+                                            .snapshot
+                                            .search(&query)
+                                            .into_iter()
+                                            .filter_map(|i| self.snapshot.tracks.get(i as usize))
+                                            .map(|t| t.id)
+                                            .collect();
+                                        if !tracks.is_empty() {
+                                            actions.push(Action::PlayTracks(tracks, 0));
+                                        }
+                                        ui.close();
+                                    }
+                                    super::pin_menu_item(
+                                        ui,
+                                        s,
+                                        &live_pins,
+                                        Pin::Smart(name.clone()),
+                                        actions,
+                                    );
+                                    ui.separator();
+                                    if ui.button(s.smart_edit).clicked() {
+                                        actions.push(Action::EditSmart(name.clone()));
+                                        ui.close();
+                                    }
+                                    if ui.button(s.rename).clicked() {
+                                        actions.push(Action::RenameSmart(name.clone()));
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button(s.delete).clicked() {
+                                        actions.push(Action::DeleteSmart(name.clone()));
+                                        ui.close();
+                                    }
+                                });
+                            }
+                            let playlists: Vec<(i64, String, usize)> = self
+                                .playlists
+                                .iter()
+                                .map(|p| (p.id, p.name.clone(), p.item_count))
+                                .collect();
+                            for (id, name, count) in playlists {
+                                if let Some((rename_id, text, focus)) =
+                                    self.renaming.as_mut().filter(|(rid, _, _)| *rid == id)
+                                {
+                                    let _ = rename_id;
+                                    let response = ui.add(
+                                        egui::TextEdit::singleline(text)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    if *focus {
+                                        *focus = false;
+                                        response.request_focus();
+                                    }
+                                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    if response.lost_focus() {
+                                        let new_name = text.trim().to_string();
+                                        self.renaming = None;
+                                        if enter && !new_name.is_empty() && new_name != name {
+                                            self.edit(move |library| {
+                                                library
+                                                    .rename_playlist(id, &new_name)
+                                                    .err()
+                                                    .map(super::AppEvent::EditFailed)
+                                            });
+                                        }
+                                    }
+                                    continue;
+                                }
+                                let response = sidebar_row(
+                                    ui,
+                                    self.nav == Nav::Playlist(id),
+                                    Icon::Playlist,
+                                    &name,
+                                    Some(count.to_string()),
+                                );
+                                if response.clicked() {
+                                    actions.push(Action::Go(Nav::Playlist(id)));
+                                }
+                                if response.double_clicked() {
+                                    self.renaming = Some((id, name.clone(), true));
+                                }
+                                // Songs dragged here are added to this playlist (dragging a
+                                // playlist's own rows onto itself does nothing).
+                                let from_other_list = |payload: &DragTracks| {
+                                    payload
+                                        .playlist_items
+                                        .as_ref()
+                                        .is_none_or(|(from, _)| *from != id)
+                                };
+                                if response
+                                    .dnd_hover_payload::<DragTracks>()
+                                    .is_some_and(|p| from_other_list(&p))
+                                {
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        6.0,
+                                        egui::Stroke::new(
+                                            1.5,
+                                            theme::accent(ui.visuals().dark_mode),
+                                        ),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                if let Some(payload) = response.dnd_release_payload::<DragTracks>()
+                                    && from_other_list(&payload)
+                                {
+                                    actions.push(Action::AddToPlaylist(id, payload.tracks.clone()));
+                                }
+                                response.context_menu(|ui| {
+                                    if ui
+                                        .add_enabled(count > 0, egui::Button::new(s.play_now))
+                                        .clicked()
+                                    {
+                                        let tracks = self
+                                            .core
+                                            .library
+                                            .playlist_items(id)
+                                            .into_iter()
+                                            .map(|i| i.track_id)
+                                            .collect();
+                                        actions.push(Action::PlayTracks(tracks, 0));
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button(s.rename).clicked() {
+                                        self.renaming = Some((id, name.clone(), true));
+                                        ui.close();
+                                    }
+                                    if ui.button(s.export_m3u8).clicked() {
+                                        self.export_playlist(id, &name);
+                                        ui.close();
+                                    }
+                                    super::pin_menu_item(
+                                        ui,
+                                        s,
+                                        &live_pins,
+                                        Pin::Playlist(id),
+                                        actions,
+                                    );
+                                    ui.separator();
+                                    if ui.button(s.delete).clicked() {
+                                        self.dialog =
+                                            Some(Dialog::DeletePlaylist(id, name.clone()));
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        });
+                };
+                if as_one {
+                    egui::ScrollArea::vertical()
+                        .id_salt("sidebar")
+                        .auto_shrink([false, false])
+                        .show(ui, &mut content);
+                } else {
+                    content(ui);
+                }
             });
     }
 
@@ -1872,8 +1928,18 @@ impl OneumApp {
                         .on_hover_text(s.queue_save_hint)
                         .clicked()
                 {
-                    let tracks = queue.iter().map(|item| item.track).collect();
-                    self.dialog = Some(Dialog::new_playlist(s.untitled_playlist, tracks));
+                    // (A playlist holds songs of the library: those of a server
+                    // are left out, and a queue of nothing else is told so.)
+                    let tracks: Vec<TrackId> = queue
+                        .iter()
+                        .map(|item| item.track)
+                        .filter(|id| !Library::is_remote(*id))
+                        .collect();
+                    if tracks.is_empty() {
+                        self.info_toast(s.notice_not_for_network);
+                    } else {
+                        self.dialog = Some(Dialog::new_playlist(s.untitled_playlist, tracks));
+                    }
                 }
             });
         });
@@ -1883,6 +1949,8 @@ impl OneumApp {
             return;
         }
         let snap = self.snapshot.clone();
+        // (A song of a media server or a network folder is not in the library.)
+        let remote = self.remote.clone();
         let current_index = self.player.queue_index;
         let is_playing = self.player.state == PlayState::Playing;
         let accent = theme::accent(ui.visuals().dark_mode);
@@ -1932,7 +2000,11 @@ impl OneumApp {
         let output = area.show_rows(ui, QUEUE_ROW, queue.len(), |ui, range| {
             for index in range {
                 let item = queue[index];
-                let track = snap.get(item.track);
+                let track = if Library::is_remote(item.track) {
+                    remote.get(&item.track)
+                } else {
+                    snap.get(item.track)
+                };
                 let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), QUEUE_ROW),
                     Sense::click_and_drag(),
@@ -2625,7 +2697,8 @@ impl OneumApp {
                         .selectable(true),
                 );
                 ui.add_space(6.0);
-                if ui.button(s.show_in_finder).clicked() {
+                // (A song of a server has no place in the file manager.)
+                if !Library::is_remote(track.id) && ui.button(s.show_in_finder).clicked() {
                     actions.push(Action::Reveal(track.id));
                 }
                 ui.add_space(8.0);

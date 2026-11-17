@@ -307,6 +307,7 @@ strings! {
     shortcut_remove: "플레이리스트·대기열에서 제거", "Remove from the playlist or queue";
     shortcut_reorder_queue: "대기열에서 순서 바꾸기", "Reorder in the queue";
     shortcut_clear_search: "검색어 지우기", "Clear the search";
+    shortcut_zoom: "크게 · 작게 · 원래 크기로 보기", "Larger, Smaller, Actual Size";
     shortcuts_note: "화살표·Return·Delete는 마지막으로 클릭한 목록(곡 목록 또는 대기열)에 적용됩니다.",
         "Arrows, Return and Delete apply to the list you clicked last (songs or queue).";
     settings_section_lists: "곡 목록", "Song Lists";
@@ -375,6 +376,9 @@ strings! {
     confirm_delete_playlist_title: "플레이리스트를 삭제할까요?", "Delete this playlist?";
     confirm_delete_playlist_body: "플레이리스트만 삭제됩니다. 원본 파일은 삭제되지 않습니다.",
         "Only the playlist is deleted. The original files are not deleted.";
+    confirm_delete_correction_title: "보정 프로필을 삭제할까요?", "Delete this correction profile?";
+    confirm_delete_correction_body: "직접 만들었거나 불러온 프로필이 목록에서 지워집니다. 불러온 원본 파일은 삭제되지 않습니다.",
+        "The profile you made or imported is taken off the list. A file it was imported from is not deleted.";
     confirm_remove_tracks_title: "선택한 곡을 라이브러리에서 제거할까요?", "Remove the selected songs from the library?";
     confirm_remove_tracks_body: "라이브러리와 플레이리스트에서만 빠집니다. 원본 파일은 삭제되지 않습니다. 폴더를 다시 스캔해도 돌아오지 않으며, 설정의 \"제거한 곡 되돌리기\"로 다시 넣을 수 있습니다.",
         "They are only removed from the library and playlists. The original files are not deleted. A scan of their folder does not bring them back; \"Bring Back Removed Songs\" in the settings does.";
@@ -596,8 +600,16 @@ strings! {
     notice_folder_contains_existing: "이미 추가한 폴더를 포함하는 폴더입니다. 기존 폴더를 먼저 제거하세요.",
         "This folder contains a folder you already added. Remove that one first.";
     notice_not_a_folder: "폴더가 아닙니다.", "That is not a folder.";
-    notice_folder_permission: "이 폴더를 읽을 권한이 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더에서 OnEum을 허용한 뒤 설정 → 라이브러리에서 다시 스캔하세요.",
-        "OnEum is not allowed to read this folder. Allow it in System Settings → Privacy & Security → Files and Folders, then rescan in Settings → Library.";
+    notice_folder_permission: if cfg!(windows) {
+            "이 폴더를 읽을 권한이 없습니다. 폴더의 속성 → 보안에서 읽기 권한을 확인한 뒤 설정 → 라이브러리에서 다시 스캔하세요."
+        } else {
+            "이 폴더를 읽을 권한이 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더에서 OnEum을 허용한 뒤 설정 → 라이브러리에서 다시 스캔하세요."
+        },
+        if cfg!(windows) {
+            "OnEum is not allowed to read this folder. Check the read permission under the folder's Properties → Security, then rescan in Settings → Library."
+        } else {
+            "OnEum is not allowed to read this folder. Allow it in System Settings → Privacy & Security → Files and Folders, then rescan in Settings → Library."
+        };
     scan_waiting_permission: if cfg!(windows) {
             "폴더를 읽는 데 시간이 걸리고 있습니다. 폴더에 접근할 수 있는지 확인하세요."
         } else {
@@ -661,6 +673,7 @@ strings! {
     info_true_peak: "트루 피크", "True peak";
     unpin: "고정 해제", "Unpin";
     pinned: "고정", "Pinned";
+    notice_correction_editing: "보정을 편집하는 중입니다. 편집기에서 저장하거나 취소한 뒤에 닫으세요.", "A correction is being edited. Save or cancel it in the editor before closing.";
     notice_not_saved: "변경 내용을 저장하지 못했습니다. 디스크의 남은 공간을 확인하세요.", "The change could not be saved. Check that the disk has free space.";
     notice_export_failed: "플레이리스트를 내보내지 못했습니다. 저장 위치를 확인하세요.", "Could not export the playlist. Check the destination.";
     notice_import_failed: "플레이리스트 파일을 읽지 못했습니다.", "Could not read the playlist file.";
@@ -732,7 +745,7 @@ strings! {
     stop_after_cancel_hint: "이 곡이 끝나면 재생을 멈춥니다. 누르면 끕니다.",
         "Playback stops when this song ends. Click to switch it off.";
     search_syntax_hint: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y\n여러 낱말을 하나로: \"let it be\"\n모든 곡에서 검색한 뒤 ＋를 누르면 스마트 플레이리스트로 저장됩니다.",
-        "Narrow it to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac\nBy what you listened to: plays:>=5 · fav:yes · added:30d · played:1y\nKeep words together: \"let it be\"\nSearch All Songs, then press ＋ to keep the search as a smart playlist.";
+        "Narrow it to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac\nBy what you listened to: plays:>=5 · fav:yes · added:30d · played:1y\nKeep words together: \"let it be\"\nSearch in Songs, then press ＋ to keep the search as a smart playlist.";
     menu_go_to_current: "재생 중인 곡으로 이동", "Go to Current Song";
     menu_show_queue: "재생 대기열 보기/가리기", "Show/Hide Up Next";
     menu_show_info: "곡 정보 보기/가리기", "Show/Hide Song Info";
@@ -1020,7 +1033,10 @@ impl Lang {
                     self.song_count(matched)
                 );
                 if playlists > 0 {
-                    text.push_str(&format!(" · {playlists} playlists"));
+                    text.push_str(&format!(
+                        " · {}",
+                        en_count(playlists, "playlist", "playlists")
+                    ));
                 }
                 if unmatched > 0 {
                     text.push_str(&format!(
@@ -1197,8 +1213,9 @@ impl Lang {
                 self.song_count(songs)
             ),
             Lang::En => format!(
-                "Library data exported ({} · {playlists} playlists).",
-                self.song_count(songs)
+                "Library data exported ({} · {}).",
+                self.song_count(songs),
+                en_count(playlists, "playlist", "playlists")
             ),
         }
     }
@@ -1217,13 +1234,16 @@ impl Lang {
         if playlists > 0 {
             text.push_str(&match self {
                 Lang::Ko => format!(" · 플레이리스트 {playlists}개"),
-                Lang::En => format!(" · {playlists} playlists"),
+                Lang::En => format!(" · {}", en_count(playlists, "playlist", "playlists")),
             });
         }
         if searches > 0 {
             text.push_str(&match self {
                 Lang::Ko => format!(" · 저장한 검색 {searches}개"),
-                Lang::En => format!(" · {searches} saved searches"),
+                Lang::En => format!(
+                    " · {}",
+                    en_count(searches, "saved search", "saved searches")
+                ),
             });
         }
         if unmatched > 0 {

@@ -228,6 +228,7 @@ Options for listening through a DAC or good headphones (Settings → Playback). 
 | ⌘U / ⌘I | Up Next / Song Info |
 | ⌘⇧U | VU meter |
 | ⌘E | Equalizer |
+| ⌘+ / ⌘− / ⌘0 | Larger / smaller / actual size (kept for the next start) |
 | Return | Play the selected song |
 | ⌘Return / ⌘⇧Return | Play the selected songs next / add them to the end of the queue |
 | ⌘D | Add to or remove from favorites |

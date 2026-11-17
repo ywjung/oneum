@@ -34,7 +34,7 @@ pub use art::ArtImage;
 pub use check::CheckStatus;
 pub use ident::{album_key, disc_of, fnv1a64};
 pub use loudness::LoudnessStatus;
-pub use search::{PreparedQuery, normalize};
+pub use search::{PreparedQuery, has_hangul, normalize, typed_keys};
 pub use snapshot::{Album, Artist, LibrarySnapshot, SortKey};
 
 use crate::model::{Track, TrackId};

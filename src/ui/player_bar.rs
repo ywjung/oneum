@@ -134,7 +134,7 @@ impl OneumApp {
                 if widgets::icon_button(
                     ui,
                     Icon::Shuffle,
-                    &format!("{shuffle_label} (⌘S)"),
+                    &with_keys(shuffle_label, "⌘S"),
                     28.0,
                     self.player.shuffle,
                 )
@@ -145,7 +145,7 @@ impl OneumApp {
                 if widgets::icon_button(
                     ui,
                     Icon::Previous,
-                    &format!("{} (⌘←)", s.previous_track),
+                    &with_keys(s.previous_track, "⌘←"),
                     30.0,
                     false,
                 )
@@ -222,14 +222,8 @@ impl OneumApp {
                         }
                     });
                 });
-                if widgets::icon_button(
-                    ui,
-                    Icon::Next,
-                    &format!("{} (⌘→)", s.next_track),
-                    30.0,
-                    false,
-                )
-                .clicked()
+                if widgets::icon_button(ui, Icon::Next, &with_keys(s.next_track, "⌘→"), 30.0, false)
+                    .clicked()
                 {
                     player.send(Command::Next);
                 }
@@ -239,7 +233,7 @@ impl OneumApp {
                     RepeatMode::One => (Icon::RepeatOne, s.repeat_one),
                 };
                 let active = self.player.repeat != RepeatMode::Off;
-                if widgets::icon_button(ui, icon, &format!("{label} (⌘⇧R)"), 28.0, active).clicked()
+                if widgets::icon_button(ui, icon, &with_keys(label, "⌘⇧R"), 28.0, active).clicked()
                 {
                     player.send(Command::SetRepeat(next_repeat(self.player.repeat)));
                 }
@@ -359,7 +353,7 @@ impl OneumApp {
         } else {
             (Icon::Volume, s.mute)
         };
-        if widgets::icon_button(ui, icon, &format!("{label} (⌘⇧M)"), 26.0, false).clicked() {
+        if widgets::icon_button(ui, icon, &with_keys(label, "⌘⇧M"), 26.0, false).clicked() {
             self.toggle_mute();
         }
         // The sleep timer, while one is running: the time left; a click switches it off.
@@ -466,4 +460,10 @@ pub(super) fn section_marks(
             accent.gamma_multiply(0.45),
         );
     }
+}
+
+/// A control's name with the keys that do the same, named as this system's keyboard
+/// has them ("Next (⌘→)" on a Mac, "Next (Ctrl+→)" elsewhere).
+fn with_keys(label: &str, keys: &str) -> String {
+    format!("{label} ({})", crate::platform::key_names(keys))
 }

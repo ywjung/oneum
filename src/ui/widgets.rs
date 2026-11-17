@@ -5,6 +5,30 @@ use eframe::egui::{
     self, Align, Color32, Layout, Response, Role, Sense, Ui, UiBuilder, Vec2, WidgetInfo,
 };
 
+/// A mark that something is going on: an arc that goes round, drawn anew twelve
+/// times a second. For work that may take long (a scan of the library): the UI
+/// library's own spinner asks for the next frame at once, in every frame, and the
+/// whole window is then laid out at the display's rate for as long as it shows.
+pub fn working(ui: &mut Ui, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(80));
+        let turn = (ui.input(|i| i.time) * 5.0) as f32;
+        let radius = size * 0.5 - 2.0;
+        let points: Vec<egui::Pos2> = (0..=18)
+            .map(|step| {
+                let angle = turn + step as f32 / 18.0 * std::f32::consts::PI * 1.5;
+                rect.center() + radius * Vec2::new(angle.cos(), angle.sin())
+            })
+            .collect();
+        let color = ui.visuals().strong_text_color().gamma_multiply(0.7);
+        ui.painter()
+            .add(egui::Shape::line(points, egui::Stroke::new(2.0, color)));
+    }
+    response
+}
+
 /// An icon-only button. `label` is used for the tooltip and for VoiceOver.
 pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, size: f32, active: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());

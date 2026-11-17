@@ -142,6 +142,12 @@ impl ArtCache {
             }
         }
         for size in ArtSize::ALL {
+            // (While no more are held than are kept, nothing goes: the usual frame,
+            // in which the keys are not copied out to find that.)
+            let held = self.textures.keys().filter(|k| k.size == size).count();
+            if held <= size.kept() {
+                continue;
+            }
             let used: Vec<(u64, Key)> = self
                 .textures
                 .iter()

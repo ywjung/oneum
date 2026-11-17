@@ -177,7 +177,7 @@ impl OneumApp {
         let mut close = false;
         // Dim what is behind and let a click there close the guide, like Settings.
         let screen = ctx.content_rect();
-        let backdrop_clicked = egui::Area::new(egui::Id::unique("guide-backdrop"))
+        let backdrop = egui::Area::new(egui::Id::unique("guide-backdrop"))
             .order(egui::Order::Background)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
@@ -186,8 +186,11 @@ impl OneumApp {
                 ui.painter()
                     .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(alpha));
                 response.clicked()
-            })
-            .inner;
+            });
+        // The keyboard stays in the sheet as the pointer does: Tab does not walk on
+        // into the window behind it, where Space and Return would press what is dimmed.
+        ctx.memory_mut(|memory| memory.set_modal_layer(backdrop.response.layer_id));
+        let backdrop_clicked = backdrop.inner;
         if backdrop_clicked && self.dialog.is_none() {
             close = true;
         }

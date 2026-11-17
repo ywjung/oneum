@@ -495,6 +495,29 @@ fn click_select(
     }
 }
 
+/// Where the keyboard's cursor is in the rows of `now`, having been at `cursor` in
+/// those of `before`: at its row if that is still there, otherwise at the row that
+/// has taken its place (the last one, if it was beyond the end).
+fn cursor_after<R: RowKey>(before: &[R], now: &[R], cursor: Option<u64>) -> Option<u64> {
+    let cursor = cursor?;
+    if now.iter().any(|row| row.key() == cursor) {
+        return Some(cursor);
+    }
+    let was_at = before.iter().position(|row| row.key() == cursor)?;
+    now.get(was_at).or(now.last()).map(RowKey::key)
+}
+
+/// What a row of a list is told apart by.
+trait RowKey {
+    fn key(&self) -> u64;
+}
+
+impl RowKey for Row {
+    fn key(&self) -> u64 {
+        self.key
+    }
+}
+
 /// A cursor movement in a list.
 #[derive(Clone, Copy)]
 enum Step {
@@ -580,6 +603,11 @@ impl OneumApp {
         if state.anchor.is_some_and(|a| !keys.contains(&a)) {
             state.anchor = None;
         }
+        // The keyboard's place stays where it was when its row has gone (a song
+        // taken out of the playlist, a file that is no more): at the row that is
+        // there now. Left at a row that is no more, the next arrow key began at the
+        // top of the list, or at its end.
+        state.cursor = cursor_after(&state.rows, &rows, state.cursor);
         if state.scroll_to == Some(usize::MAX) {
             state.scroll_to = state
                 .anchor
@@ -924,6 +952,9 @@ impl OneumApp {
                 .iter()
                 .filter_map(|event| match event {
                     egui::Event::Text(text) => Some(text.as_str()),
+                    // (Where the system does put Korean keys together for a window
+                    // that has no field: what it then hands over.)
+                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => Some(text.as_str()),
                     _ => None,
                 })
                 .collect()
@@ -947,8 +978,19 @@ impl OneumApp {
         state.typeahead.push_str(typed);
         state.typeahead_at = Some(now);
         ui.ctx().request_repaint_after(TYPEAHEAD_TIMEOUT);
-        let needle = state.typeahead.to_lowercase();
-        let title_of = |row: &Row| self.snapshot.tracks[row.idx as usize].title.to_lowercase();
+        // Korean letters arrive as the keys that were pressed (nothing puts them
+        // together into syllables where no field is typed into): the titles are
+        // compared in that form then. `ㅎㅏㄴ` finds `한여름`.
+        let korean = crate::library::has_hangul(&state.typeahead);
+        let form = |text: &str| -> String {
+            if korean {
+                crate::library::typed_keys(text)
+            } else {
+                text.to_lowercase()
+            }
+        };
+        let needle = form(&state.typeahead);
+        let title_of = |row: &Row| form(&self.snapshot.tracks[row.idx as usize].title);
         let found = state
             .rows
             .iter()
@@ -2039,7 +2081,7 @@ impl OneumApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rediscover, folder_entries, genre_entries, rediscover};
+    use super::{Rediscover, RowKey, cursor_after, folder_entries, genre_entries, rediscover};
     use crate::model::{Track, test_track};
     use std::sync::Arc;
 
@@ -2174,5 +2216,39 @@ mod tests {
         let top = folder_entries(&tracks, Path::new(""), &[PathBuf::from("/m")]);
         assert_eq!(top.len(), 1);
         assert_eq!((top[0].name.as_str(), top[0].songs), ("m", 7));
+    }
+    /// The keyboard's cursor stays in place when its row goes: the row that follows
+    /// takes it, the last row when there is none.
+    #[test]
+    fn the_cursor_stays_where_its_row_was() {
+        struct Key(u64);
+        impl RowKey for Key {
+            fn key(&self) -> u64 {
+                self.0
+            }
+        }
+        let rows = |keys: &[u64]| keys.iter().map(|k| Key(*k)).collect::<Vec<_>>();
+        let before = rows(&[10, 20, 30, 40]);
+        // Still there: nothing changes, wherever it is now.
+        assert_eq!(
+            cursor_after(&before, &rows(&[40, 30, 20]), Some(20)),
+            Some(20)
+        );
+        // Gone from the middle: the row that came up takes it.
+        assert_eq!(
+            cursor_after(&before, &rows(&[10, 30, 40]), Some(20)),
+            Some(30)
+        );
+        // Gone from the end, and several at once: the last row.
+        assert_eq!(
+            cursor_after(&before, &rows(&[10, 20, 30]), Some(40)),
+            Some(30)
+        );
+        assert_eq!(cursor_after(&before, &rows(&[10]), Some(30)), Some(10));
+        // Nothing left, nothing to be at; no cursor, none made up.
+        assert_eq!(cursor_after(&before, &rows(&[]), Some(20)), None);
+        assert_eq!(cursor_after(&before, &rows(&[10, 30]), None), None);
+        // A cursor that was in no row of the list before (another list's).
+        assert_eq!(cursor_after(&before, &rows(&[10, 30]), Some(99)), None);
     }
 }

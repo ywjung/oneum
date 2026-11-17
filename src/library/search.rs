@@ -87,6 +87,73 @@ pub(crate) fn choseong_form(normalized: &str) -> Option<String> {
     )
 }
 
+/// The vowels of a syllable in block order, each as the keys it is typed with (a
+/// compound vowel is two keys).
+const MEDIAL_KEYS: [&str; 21] = [
+    "ㅏ", "ㅐ", "ㅑ", "ㅒ", "ㅓ", "ㅔ", "ㅕ", "ㅖ", "ㅗ", "ㅗㅏ", "ㅗㅐ", "ㅗㅣ", "ㅛ", "ㅜ",
+    "ㅜㅓ", "ㅜㅔ", "ㅜㅣ", "ㅠ", "ㅡ", "ㅡㅣ", "ㅣ",
+];
+/// The final consonants of a syllable in block order (the first: none), each as the
+/// keys it is typed with.
+const FINAL_KEYS: [&str; 28] = [
+    "", "ㄱ", "ㄲ", "ㄱㅅ", "ㄴ", "ㄴㅈ", "ㄴㅎ", "ㄷ", "ㄹ", "ㄹㄱ", "ㄹㅁ", "ㄹㅂ", "ㄹㅅ",
+    "ㄹㅌ", "ㄹㅍ", "ㄹㅎ", "ㅁ", "ㅂ", "ㅂㅅ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ",
+    "ㅎ",
+];
+
+/// Text as the keys it is typed with on a Korean keyboard, in lower case: every
+/// syllable as its consonants and vowels one after the other, a compound vowel or
+/// final as its two keys. What is typed where nothing puts the keys together into
+/// syllables (a list that is typed into to find a song) arrives like this, and a
+/// title in this form begins with it where the title begins with what was meant:
+/// `ㅎㅏㄴ` is how `한여름` begins, and `하늘`.
+pub fn typed_keys(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    for c in text.chars() {
+        if is_hangul_syllable(c) {
+            let at = c as u32 - SYLLABLE_FIRST;
+            out.push(CHOSEONG[(at / SYLLABLES_PER_INITIAL) as usize]);
+            out.push_str(MEDIAL_KEYS[(at % SYLLABLES_PER_INITIAL / 28) as usize]);
+            out.push_str(FINAL_KEYS[(at % 28) as usize]);
+            continue;
+        }
+        // A compound vowel or final that came as one letter.
+        let alone = match c {
+            'ㅘ' => "ㅗㅏ",
+            'ㅙ' => "ㅗㅐ",
+            'ㅚ' => "ㅗㅣ",
+            'ㅝ' => "ㅜㅓ",
+            'ㅞ' => "ㅜㅔ",
+            'ㅟ' => "ㅜㅣ",
+            'ㅢ' => "ㅡㅣ",
+            'ㄳ' => "ㄱㅅ",
+            'ㄵ' => "ㄴㅈ",
+            'ㄶ' => "ㄴㅎ",
+            'ㄺ' => "ㄹㄱ",
+            'ㄻ' => "ㄹㅁ",
+            'ㄼ' => "ㄹㅂ",
+            'ㄽ' => "ㄹㅅ",
+            'ㄾ' => "ㄹㅌ",
+            'ㄿ' => "ㄹㅍ",
+            'ㅀ' => "ㄹㅎ",
+            'ㅄ' => "ㅂㅅ",
+            _ => "",
+        };
+        if alone.is_empty() {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push_str(alone);
+        }
+    }
+    out
+}
+
+/// Whether `text` holds Korean letters (syllables, or consonants and vowels alone).
+pub fn has_hangul(text: &str) -> bool {
+    text.chars()
+        .any(|c| is_hangul_syllable(c) || matches!(c, '\u{3131}'..='\u{3163}'))
+}
+
 /// One whitespace-separated part of a query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Term {
@@ -722,5 +789,25 @@ mod tests {
             PreparedQuery::new_at("year:123456", NOW).filters,
             [Filter::Never]
         );
+    }
+    #[test]
+    fn text_as_the_keys_it_is_typed_with() {
+        assert_eq!(typed_keys("한여름"), "ㅎㅏㄴㅇㅕㄹㅡㅁ");
+        assert_eq!(typed_keys("하늘"), "ㅎㅏㄴㅡㄹ");
+        // Compound vowels and finals are two keys; doubled consonants are one.
+        assert_eq!(typed_keys("과"), "ㄱㅗㅏ");
+        assert_eq!(typed_keys("값"), "ㄱㅏㅂㅅ");
+        assert_eq!(typed_keys("꽃"), "ㄲㅗㅊ");
+        assert_eq!(typed_keys("있"), "ㅇㅣㅆ");
+        assert_eq!(typed_keys("의"), "ㅇㅡㅣ");
+        assert_eq!(typed_keys("ㅘㄳ"), "ㅗㅏㄱㅅ");
+        // The first and the last syllable there is.
+        assert_eq!(typed_keys("가"), "ㄱㅏ");
+        assert_eq!(typed_keys("힣"), "ㅎㅣㅎ");
+        // Everything else is itself, in lower case.
+        assert_eq!(typed_keys("Abbey Road 2 밤"), "abbey road 2 ㅂㅏㅁ");
+        assert!(typed_keys("한여름밤").starts_with(&typed_keys("ㅎㅏㄴㅇ")));
+        assert!(has_hangul("밤") && has_hangul("ㅂ") && has_hangul("ㅏ"));
+        assert!(!has_hangul("Abbey Road") && !has_hangul("夜"));
     }
 }

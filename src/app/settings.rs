@@ -132,8 +132,13 @@ pub struct Settings {
     pub right_panel: RightPanel,
     /// Show the VU meter deck above the player bar.
     pub show_meter: bool,
-    /// Inner size of the main window in points, restored at the next launch.
+    /// Inner size of the main window in points (at a zoom of 100 %), restored at
+    /// the next launch.
     pub window_size: Option<[f32; 2]>,
+    /// How large everything in the window is drawn, in percent (100, the default:
+    /// as designed; the keys for it are Command/Ctrl with +, − and 0).
+    #[serde(deserialize_with = "lenient_number")]
+    pub zoom_percent: u16,
     /// Volume to return to when un-muting.
     pub volume_before_mute: Option<f32>,
     /// Show the time left instead of the total length next to the seek bar.
@@ -156,6 +161,9 @@ pub enum Pin {
     Smart(String),
 }
 
+/// The smallest and the largest zoom that is kept.
+pub const MIN_ZOOM_PERCENT: u16 = 50;
+pub const MAX_ZOOM_PERCENT: u16 = 300;
 /// How many things can be pinned to the sidebar.
 pub const MAX_PINS: usize = 12;
 /// The longest crossfade between songs that can be set, in seconds.
@@ -273,6 +281,10 @@ impl Settings {
             room.name = tidy_text(&room.name, 120);
         }
         self.crossfade_secs = self.crossfade_secs.min(MAX_CROSSFADE_SECS);
+        self.zoom_percent = match self.zoom_percent {
+            0 => 100,
+            percent => percent.clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT),
+        };
         self.eq_presets.truncate(MAX_EQ_PRESETS);
         for preset in &mut self.eq_presets {
             let values = EqSettings {
@@ -422,6 +434,7 @@ impl Default for Settings {
             right_panel: RightPanel::Hidden,
             show_meter: false,
             window_size: None,
+            zoom_percent: 100,
             volume_before_mute: None,
             show_remaining_time: false,
             pinned: Vec::new(),
@@ -755,5 +768,23 @@ mod tests {
         assert_eq!(read.theme, fresh.theme);
         assert_eq!(read.replaygain, fresh.replaygain);
         assert!(dir.path().join("settings.json.partial").exists());
+    }
+    /// The zoom that is kept is one the window can be used at; a file that says
+    /// nothing of it (one of an earlier version) means 100 %.
+    #[test]
+    fn the_zoom_is_kept_within_what_can_be_used() {
+        let read = |text: &str| serde_json::from_str::<Settings>(text).unwrap().sanitized();
+        assert_eq!(read("{}").zoom_percent, 100);
+        assert_eq!(read(r#"{"zoom_percent":125}"#).zoom_percent, 125);
+        assert_eq!(read(r#"{"zoom_percent":0}"#).zoom_percent, 100);
+        assert_eq!(
+            read(r#"{"zoom_percent":20}"#).zoom_percent,
+            MIN_ZOOM_PERCENT
+        );
+        assert_eq!(
+            read(r#"{"zoom_percent":100000}"#).zoom_percent,
+            MAX_ZOOM_PERCENT
+        );
+        assert_eq!(read(r#"{"zoom_percent":"large"}"#).zoom_percent, 100);
     }
 }

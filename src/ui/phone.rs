@@ -1463,7 +1463,7 @@ impl OneumApp {
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
                         ui.add_space(SIDE);
-                        ui.add(egui::Spinner::new().size(16.0));
+                        widgets::working(ui, 16.0);
                         ui.label(
                             RichText::new(self.lang.scan_progress(scan.files_found))
                                 .font(font(14.0))
@@ -2695,7 +2695,7 @@ impl OneumApp {
                                 true,
                                 |ui| {
                                     if scan.running {
-                                        ui.add(egui::Spinner::new().size(16.0));
+                                        widgets::working(ui, 16.0);
                                     } else if ui.button(s.rescan).clicked() {
                                         rescan = true;
                                     }
@@ -4050,6 +4050,8 @@ impl OneumApp {
         });
         ui.add_space(4.0);
         let snapshot = self.snapshot.clone();
+        // (A song of a media server or a network folder is not in the library.)
+        let remote = self.remote.clone();
         let scroll_to = std::mem::take(&mut self.queue_scroll_forced)
             .then(|| current.and_then(|id| queue.iter().position(|item| item.id == id)))
             .flatten();
@@ -4063,7 +4065,12 @@ impl OneumApp {
             ui.spacing_mut().item_spacing.y = 0.0;
             let all_rows = virtual_rows(ui, "queue", queue.len(), ROW, |ui, index| {
                 let item = queue[index];
-                let Some(track) = snapshot.get(item.track) else {
+                let track = if crate::library::Library::is_remote(item.track) {
+                    remote.get(&item.track)
+                } else {
+                    snapshot.get(item.track)
+                };
+                let Some(track) = track else {
                     return;
                 };
                 let rect = ui.max_rect();
@@ -4479,7 +4486,7 @@ impl OneumApp {
                 playlist,
                 queue_item,
             } => {
-                let Some(track) = self.snapshot.get(*track).cloned() else {
+                let Some(track) = self.track(*track).cloned() else {
                     return true;
                 };
                 Self::sheet_heading(ui, &track.title, artist_line(&track, s.unknown_artist));
@@ -4811,7 +4818,7 @@ impl OneumApp {
                 }
             }
             Sheet::Info(track) => {
-                let Some(track) = self.snapshot.get(*track).cloned() else {
+                let Some(track) = self.track(*track).cloned() else {
                     return true;
                 };
                 Self::sheet_heading(ui, &track.title, artist_line(&track, s.unknown_artist));

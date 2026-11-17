@@ -7,6 +7,8 @@ pub(super) enum Dialog {
     /// Remove a music folder (root id, displayed path).
     RemoveFolder(i64, String),
     DeletePlaylist(i64, String),
+    /// Delete a correction profile of the listener's own (its name).
+    DeleteCorrection(String),
     /// Remove these songs from the library; `own_copies` if copies the app made of some
     /// of them are deleted with them.
     RemoveTracks {
@@ -137,6 +139,11 @@ impl OneumApp {
                 Dialog::DeletePlaylist(_, name) => (
                     s.confirm_delete_playlist_title,
                     format!("“{name}”\n\n{}", s.confirm_delete_playlist_body),
+                    s.delete,
+                ),
+                Dialog::DeleteCorrection(name) => (
+                    s.confirm_delete_correction_title,
+                    format!("“{name}”\n\n{}", s.confirm_delete_correction_body),
                     s.delete,
                 ),
                 Dialog::RemoveTracks { tracks, own_copies } => {
@@ -293,6 +300,10 @@ impl OneumApp {
                 self.edit(move |library| {
                     library.delete_playlist(id).err().map(AppEvent::EditFailed)
                 });
+                Ok(())
+            }
+            Dialog::DeleteCorrection(name) => {
+                self.delete_correction(&name);
                 Ok(())
             }
             Dialog::RemoveTracks { tracks, .. } => {

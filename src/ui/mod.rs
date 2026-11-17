@@ -333,6 +333,9 @@ pub struct OneumApp {
 
     snapshot: Arc<LibrarySnapshot>,
     lib_generation: u64,
+    /// Numbers counted over every song for a card of the settings, by the card's
+    /// name, with the state of the library they were counted for (see `counted`).
+    counts: HashMap<&'static str, (u64, [usize; 3])>,
     /// The tracks of media servers that the play queue names (not in `snapshot`: they
     /// are not part of the library), and the library's count of their changes.
     remote: Arc<HashMap<TrackId, Arc<Track>>>,
@@ -364,6 +367,12 @@ pub struct OneumApp {
     /// (Return, Escape) belong to that field for the whole frame, although the field
     /// gives up focus while handling them.
     typing: bool,
+    /// The settings could not be written the last time it was tried (the listener
+    /// has been told).
+    settings_unsavable: bool,
+    /// A menu of choices (a drop-down) was open in the frame before: Escape closes it,
+    /// and nothing else.
+    popup_was_open: bool,
     /// A button or other control has keyboard focus (Tab navigation): Space, Return and
     /// the arrows are that control's, not the list's.
     widget_focused: bool,
@@ -496,6 +505,10 @@ impl OneumApp {
             || (automation::AVAILABLE && std::env::var_os("ONEUM_PHONE").is_some());
         theme::install(&ctx, phone_mode);
         theme::apply_choice(&ctx, settings.theme);
+        // The zoom the listener left the window at (a desktop's keys for it).
+        if !phone_mode && settings.zoom_percent != 100 {
+            ctx.set_zoom_factor(f32::from(settings.zoom_percent) / 100.0);
+        }
 
         // Nothing is drawn while the app is in the background (a phone); what changed
         // meanwhile is drawn when it comes back.
@@ -554,6 +567,7 @@ impl OneumApp {
             spectrum: spectrum::Spectrum::default(),
             snapshot: core.library.snapshot(),
             lib_generation: core.library.generation(),
+            counts: HashMap::new(),
             remote: core.library.remote_tracks(),
             remote_generation: core.library.remote_generation(),
             network: network::Browser::new(ctx.clone()),
@@ -573,6 +587,8 @@ impl OneumApp {
             focus_search: false,
             search_had_focus: false,
             typing: false,
+            popup_was_open: false,
+            settings_unsavable: false,
             widget_focused: false,
             key_pane: KeyPane::List,
             info_track: None,
@@ -1246,6 +1262,24 @@ impl OneumApp {
 
     /// Runs a library edit on the edit thread (see `background.rs`), after the ones
     /// before it. The event it returns, if any, is handled in a later frame.
+    /// Three numbers that `count` makes of the library's songs, counted anew only
+    /// when the library has changed since they were last counted under `name`.
+    pub(super) fn counted(
+        &mut self,
+        name: &'static str,
+        count: impl FnOnce(&LibrarySnapshot) -> [usize; 3],
+    ) -> [usize; 3] {
+        let generation = self.lib_generation;
+        match self.counts.get(name) {
+            Some((at, numbers)) if *at == generation => *numbers,
+            _ => {
+                let numbers = count(&self.snapshot);
+                self.counts.insert(name, (generation, numbers));
+                numbers
+            }
+        }
+    }
+
     fn edit(&self, job: impl FnOnce(&Library) -> Option<AppEvent> + Send + 'static) {
         let library = self.core.library.clone();
         let core = self.core.clone();
@@ -1449,8 +1483,7 @@ impl OneumApp {
         match notice {
             Notice::TrackSkipped { track_id, kind } => {
                 let title = self
-                    .snapshot
-                    .get(*track_id)
+                    .track(*track_id)
                     .map_or_else(|| "?".to_string(), |t| t.title.clone());
                 let reason = match kind {
                     PlaybackErrorKind::FileMissing => s.skip_missing,
@@ -1906,6 +1939,31 @@ impl OneumApp {
     }
 
     /// Gives up what was edited: the profile that was selected before is heard again.
+    /// Deletes a correction profile of the listener's own. Was it the one applied,
+    /// nothing is applied afterwards (a built-in profile of the same name stays
+    /// available).
+    pub(super) fn delete_correction(&mut self, name: &str) {
+        self.settings.corrections.retain(|p| p.name != name);
+        if self.settings.correction.as_deref() == Some(name) {
+            self.settings.correction = None;
+            if self.peq_edit.is_none() {
+                self.core.player.send(Command::SetCorrection(None));
+            }
+        }
+    }
+
+    /// Closes Settings as Escape or a click beside the sheet do. Not while a
+    /// correction is being made on screen: closing ends that edit without keeping
+    /// it, and a stray key or click must not cost the bands that were set (the
+    /// editor has its own Save and Cancel).
+    pub(super) fn close_settings_unless_editing(&mut self) {
+        if self.peq_edit.is_some() {
+            self.info_toast(self.s().notice_correction_editing);
+        } else {
+            self.settings_open = false;
+        }
+    }
+
     pub(super) fn peq_edit_cancel(&mut self) {
         let Some(edit) = self.peq_edit.take() else {
             return;
@@ -2477,9 +2535,24 @@ impl OneumApp {
             && self.mini.is_none()
             && let Some(rect) = ctx.input(|i| i.viewport().inner_rect)
         {
-            let size = [rect.width().round(), rect.height().round()];
+            // The size is kept as it is at a zoom of 100 %, which is how the window
+            // is opened: the points the window reports are the zoomed ones, and a
+            // window kept by those would come back smaller (or larger) by the zoom
+            // at every start. The zoom itself is kept beside it.
+            let zoom = ctx.zoom_factor();
+            let size = [
+                (rect.width() * zoom).round(),
+                (rect.height() * zoom).round(),
+            ];
             if self.settings.window_size != Some(size) && size[0] >= 100.0 && size[1] >= 100.0 {
                 self.settings.window_size = Some(size);
+            }
+            let percent = ((zoom * 100.0).round() as u16).clamp(
+                app::settings::MIN_ZOOM_PERCENT,
+                app::settings::MAX_ZOOM_PERCENT,
+            );
+            if self.settings.zoom_percent != percent {
+                self.settings.zoom_percent = percent;
             }
         }
         if self.settings == self.saved_settings {
@@ -2501,11 +2574,19 @@ impl OneumApp {
         // way) and not many times a second: every save is a file written and synced.
         const SETTLE: Duration = Duration::from_millis(250);
         let dragging = ctx.input(|i| i.pointer.any_down());
-        if dragging || self.last_settings_save.elapsed() < SETTLE {
+        // How long until the next save may be made. (After one that failed, the time
+        // of the last save lies ahead: the next try is seconds away, and the window
+        // is woken for it then, not four times a second until then.)
+        let now = Instant::now();
+        let until_due = match self.last_settings_save.checked_duration_since(now) {
+            Some(ahead) => ahead + SETTLE,
+            None => SETTLE.saturating_sub(now.duration_since(self.last_settings_save)),
+        };
+        if dragging || !until_due.is_zero() {
             // Not written yet: a phone's app that leaves the screen now writes it
             // then (see `Core::save_unsaved_settings`).
             self.note_unsaved_settings(true);
-            ctx.request_repaint_after(SETTLE);
+            ctx.request_repaint_after(if dragging { SETTLE } else { until_due });
         } else {
             self.note_unsaved_settings(false);
             self.persist_settings();
@@ -2569,12 +2650,21 @@ impl OneumApp {
             return;
         };
         match result {
-            Ok(()) => self.saved_settings = settings,
+            Ok(()) => {
+                self.saved_settings = settings;
+                self.settings_unsavable = false;
+            }
             // Kept as unsaved, and tried again a little later (a full disk, a folder
-            // made read-only): not every frame, and not given up on.
+            // made read-only): not every frame, and not given up on. The listener is
+            // told, once for as long as it lasts: playlists kept as searches,
+            // presets, profiles, folders and pins are in this file, and what cannot
+            // be written is gone when the app is closed.
             Err(e) => {
                 tracing::warn!("could not save settings: {e}");
                 self.last_settings_save = Instant::now() + SETTINGS_RETRY;
+                if !std::mem::replace(&mut self.settings_unsavable, true) {
+                    self.warn_toast(self.s().notice_not_saved);
+                }
             }
         }
     }
@@ -2595,6 +2685,8 @@ impl OneumApp {
         let typing = ctx.text_edit_focused();
         responder::set_text_input_active(typing);
         let was_typing = std::mem::replace(&mut self.typing, typing);
+        let popup_open = ctx.any_popup_open();
+        let popup_was_open = std::mem::replace(&mut self.popup_was_open, popup_open) || popup_open;
         self.widget_focused = !typing && ctx.memory(|m| m.focused()).is_some();
         if self.dialog.is_some() {
             return;
@@ -2628,12 +2720,17 @@ impl OneumApp {
         } else if escape {
             // egui drops keyboard focus on Escape before the frame starts, so "was the
             // search field focused" has to come from the previous frame.
-            if self.guide_open {
+            let sheet_open = self.guide_open || self.eq_open || self.settings_open;
+            if sheet_open && (was_typing || popup_was_open) {
+                // The key was for what is in the sheet: it ended the typing into a
+                // field (a number of the equalizer, say) or closed a menu of
+                // choices. The sheet stays.
+            } else if self.guide_open {
                 self.guide_open = false;
             } else if self.eq_open {
                 self.eq_open = false;
             } else if self.settings_open {
-                self.settings_open = false;
+                self.close_settings_unless_editing();
             } else if self.search_had_focus
                 && let Some(state) = self.views.get_mut(&self.nav)
             {
