@@ -95,6 +95,8 @@ pub struct Settings {
     pub radio: bool,
     /// Shuffle whole albums instead of single tracks (off by default).
     pub shuffle_by_album: bool,
+    /// Shuffle with the listener's stars in mind (off by default).
+    pub shuffle_by_rating: bool,
     /// Tracks of 20 minutes or more start where they were left off (on by default).
     pub resume_long_tracks: bool,
     /// The equalizer presets the user has saved, in the order they were saved.
@@ -313,6 +315,7 @@ impl Default for Settings {
             correction: None,
             radio: false,
             shuffle_by_album: false,
+            shuffle_by_rating: false,
             resume_long_tracks: true,
             eq_presets: Vec::new(),
             show_format_column: false,

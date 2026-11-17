@@ -62,10 +62,22 @@ pub struct Queue {
     by_album: bool,
     /// The album a track belongs to, for shuffling by album.
     album_of: Option<AlbumOf>,
+    /// Shuffle with the listener's stars in mind (with `rating_of` set): songs that
+    /// have more of them are more likely to come early.
+    by_rating: bool,
+    /// The stars a track has, 0 to 5.
+    rating_of: Option<RatingOf>,
 }
 
 /// Tells which album a track belongs to.
 pub type AlbumOf = Box<dyn Fn(TrackId) -> u64 + Send>;
+
+/// Tells how many stars a track has (0: none).
+pub type RatingOf = Box<dyn Fn(TrackId) -> u8 + Send>;
+
+/// How much a song weighs in a shuffle that goes by stars, by its stars: each star
+/// more doubles it. A song without stars weighs what one with three does.
+const RATING_WEIGHTS: [f64; 6] = [1.0, 0.25, 0.5, 1.0, 2.0, 4.0];
 
 impl Default for Queue {
     fn default() -> Self {
@@ -94,6 +106,8 @@ impl Queue {
             rng,
             revision: 0,
             by_album: false,
+            by_rating: false,
+            rating_of: None,
             album_of: None,
         }
     }
@@ -176,6 +190,30 @@ impl Queue {
         self.by_album = on;
     }
 
+    pub fn set_rating_lookup(&mut self, rating_of: RatingOf) {
+        self.rating_of = Some(rating_of);
+    }
+
+    /// Shuffle by stars: every song still comes once, but one with more stars is more
+    /// likely to come early (not in album mode, which mixes albums, not songs).
+    /// Changing it while shuffled mixes the queue again; the current track stays
+    /// current.
+    pub fn set_shuffle_by_rating(&mut self, on: bool) {
+        if self.by_rating == on {
+            return;
+        }
+        self.by_rating = on;
+        if self.shuffle {
+            self.set_shuffle(false);
+            self.set_shuffle(true);
+        }
+    }
+
+    /// Sets the star mode without mixing anything (for a queue restored as it was).
+    pub fn restore_shuffle_by_rating(&mut self, on: bool) {
+        self.by_rating = on;
+    }
+
     fn albums_shuffled(&self) -> bool {
         self.by_album && self.album_of.is_some()
     }
@@ -245,7 +283,30 @@ impl Queue {
                 self.rng.shuffle(&mut groups);
                 self.items.extend(groups.into_iter().flatten());
             }
-            _ => self.rng.shuffle(&mut self.items[from..]),
+            _ => match &self.rating_of {
+                Some(rating_of) if self.by_rating => {
+                    // Each song draws a number between 0 and 1 and raises it to one
+                    // over its weight; the highest come first. (A heavier song's
+                    // number is the likelier to be high: a draw without putting back
+                    // in which each song's chance is in proportion to its weight.)
+                    let weights: Vec<f64> = self.items[from..]
+                        .iter()
+                        .map(|item| RATING_WEIGHTS[usize::from(rating_of(item.track).min(5))])
+                        .collect();
+                    let tail = self.items.split_off(from);
+                    let mut drawn: Vec<(f64, QueueItem)> = tail
+                        .into_iter()
+                        .zip(weights)
+                        .map(|(item, weight)| {
+                            let number = (1.0 - self.rng.f64()).max(f64::MIN_POSITIVE);
+                            (number.powf(1.0 / weight), item)
+                        })
+                        .collect();
+                    drawn.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    self.items.extend(drawn.into_iter().map(|(_, item)| item));
+                }
+                _ => self.rng.shuffle(&mut self.items[from..]),
+            },
         }
     }
 
@@ -580,6 +641,70 @@ mod tests {
         order
             .chunks(4)
             .all(|album| album.windows(2).all(|w| w[1] == w[0] + 1) && album[0] % 10 == 1)
+    }
+
+    /// Shuffled by stars, every song still comes once, and over many shuffles the
+    /// songs with five stars stand earlier than those without, and those earlier than
+    /// the ones with a single star.
+    #[test]
+    fn shuffling_by_stars_brings_the_songs_with_more_of_them_forward() {
+        let stars = |track: TrackId| match track {
+            1..=10 => 5,
+            11..=20 => 1,
+            _ => 0,
+        };
+        let all: Vec<TrackId> = (1..=40).collect();
+        let (mut five, mut one, mut none) = (0usize, 0usize, 0usize);
+        for seed in 0..200 {
+            let mut q = Queue::with_seed(seed);
+            q.set_rating_lookup(Box::new(stars));
+            q.set_shuffle_by_rating(true);
+            q.replace(&all, 0);
+            q.set_shuffle(true);
+            let order = tracks(&q);
+            let mut sorted = order.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, all, "every song once");
+            assert_eq!(order[0], 1, "the song that was on stays first");
+            for (place, track) in order.iter().enumerate().skip(1) {
+                match stars(*track) {
+                    5 => five += place,
+                    1 => one += place,
+                    _ => none += place,
+                }
+            }
+        }
+        // Mean places (of 39 that are shuffled): nine songs with five stars, ten with
+        // one, twenty without.
+        let (five, one, none) = (
+            five as f64 / (200.0 * 9.0),
+            one as f64 / (200.0 * 10.0),
+            none as f64 / (200.0 * 20.0),
+        );
+        assert!(five < 12.0, "five stars: mean place {five}");
+        assert!(
+            none > five + 6.0,
+            "no stars: {none} after five stars: {five}"
+        );
+        assert!(one > none + 6.0, "one star: {one} after no stars: {none}");
+
+        // Switched off, the stars make no difference worth the name.
+        let (mut five, mut one) = (0usize, 0usize);
+        for seed in 0..200 {
+            let mut q = Queue::with_seed(seed);
+            q.set_rating_lookup(Box::new(stars));
+            q.replace(&all, 0);
+            q.set_shuffle(true);
+            for (place, track) in tracks(&q).iter().enumerate().skip(1) {
+                match stars(*track) {
+                    5 => five += place,
+                    1 => one += place,
+                    _ => {}
+                }
+            }
+        }
+        let (five, one) = (five as f64 / 1800.0, one as f64 / 2000.0);
+        assert!((five - one).abs() < 3.0, "{five} and {one}");
     }
 
     #[test]

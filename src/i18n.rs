@@ -459,6 +459,8 @@ strings! {
     radio_row: "대기열이 끝나면 이어서 재생", "Keep Playing When the Queue Ends";
     play_order: "재생 순서", "Playing Order";
     shuffle_by_album_row: "앨범 단위로 셔플", "Shuffle by Album";
+    shuffle_by_rating_row: "별점 높은 곡을 앞에 (셔플)", "Favor Higher Ratings When Shuffling";
+    shuffle_by_rating_desc: "셔플할 때 별이 많은 곡일수록 앞쪽에 올 가능성이 커집니다. 모든 곡이 한 번씩 나오는 것은 같습니다.", "When shuffling, a song with more stars is more likely to come early. Every song still comes once.";
     shuffle_by_album_desc: "앨범의 순서만 섞고, 앨범 안의 곡은 순서대로 이어 재생합니다.", "Mixes the order of albums; each album plays through in order.";
     resume_long_row: "긴 곡은 이어 듣기", "Resume Long Tracks";
     resume_long_desc: "20분이 넘는 곡은 멈춘 곳에서 다시 시작합니다.", "Tracks over 20 minutes start where you left off.";

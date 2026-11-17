@@ -949,6 +949,23 @@ fn ratings_are_kept_found_and_carried() {
         .collect();
     assert_eq!(stars, [5, 5, 3, 0, 0]);
 
+    // A search may say the order of what it finds, and how many it wants: what a
+    // smart playlist such as "my three best" is made of.
+    let stars_of = |query: &str| -> Vec<u8> {
+        snapshot
+            .search(query)
+            .into_iter()
+            .map(|i| snapshot.tracks[i as usize].rating)
+            .collect()
+    };
+    assert_eq!(stars_of("sort:rating limit:3"), [5, 5, 3]);
+    assert_eq!(stars_of("rating:>=1 sort:-rating"), [3, 5, 5]);
+    assert_eq!(stars_of("limit:2").len(), 2);
+    assert!(
+        stars_of("sort:colour").is_empty(),
+        "an order that is none finds nothing"
+    );
+
     // A rescan and a new start leave them as they are; none is a rating too.
     rescan(&library);
     library.set_rating(&[ids[2]], 0).unwrap();

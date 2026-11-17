@@ -98,6 +98,10 @@ pub trait PlayerHost: Send + Sync + 'static {
     fn album_of(&self, id: TrackId) -> Option<u64> {
         self.track(id).map(|t| t.album_key)
     }
+    /// The stars the listener gave a track (0: none), for a shuffle that goes by them.
+    fn rating_of(&self, _id: TrackId) -> u8 {
+        0
+    }
     /// A track was listened to (see `PLAY_CREDIT_MS`).
     fn record_play(&self, id: TrackId);
     /// Radio: up to `count` tracks to follow `seed` when the queue has run out, none of
@@ -167,6 +171,9 @@ pub enum Command {
     SetRadio(bool),
     /// Shuffle whole albums instead of single tracks.
     SetShuffleByAlbum(bool),
+    /// Shuffle with the listener's stars in mind: songs with more of them are more
+    /// likely to come early (see `Queue::set_shuffle_by_rating`).
+    SetShuffleByRating(bool),
     /// Start long tracks where they were left off.
     SetResumeLongTracks(bool),
     /// Stop when the song that is on now has ended, with the next one ready to play.
@@ -398,6 +405,8 @@ pub struct PlayerConfig {
     pub correction: Option<PeqProfile>,
     pub radio: bool,
     pub shuffle_by_album: bool,
+    /// Shuffle by stars (see `Command::SetShuffleByRating`).
+    pub shuffle_by_rating: bool,
     pub resume_long_tracks: bool,
     pub device_pref: Option<String>,
     pub output: OutputSettings,
@@ -417,6 +426,7 @@ impl Default for PlayerConfig {
             correction: None,
             radio: false,
             shuffle_by_album: false,
+            shuffle_by_rating: false,
             resume_long_tracks: false,
             device_pref: None,
             output: OutputSettings::default(),
@@ -757,8 +767,11 @@ impl<H: PlayerHost> Player<H> {
                 .album_of(track)
                 .unwrap_or(u64::MAX ^ track.cast_unsigned())
         }));
+        let stars = host.clone();
+        queue.set_rating_lookup(Box::new(move |track| stars.rating_of(track)));
         // As it was: a restored shuffled queue keeps its order.
         queue.restore_shuffle_by_album(config.shuffle_by_album);
+        queue.restore_shuffle_by_rating(config.shuffle_by_rating);
         let state = if queue.current().is_some() {
             PlayState::Paused
         } else {
@@ -1549,6 +1562,11 @@ impl<H: PlayerHost> Player<H> {
             }
             Command::SetShuffleByAlbum(on) => {
                 self.queue.set_shuffle_by_album(on);
+                self.mark_queue_changed();
+                self.sync_next();
+            }
+            Command::SetShuffleByRating(on) => {
+                self.queue.set_shuffle_by_rating(on);
                 self.mark_queue_changed();
                 self.sync_next();
             }

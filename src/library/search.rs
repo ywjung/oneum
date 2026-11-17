@@ -5,6 +5,7 @@
 //! split on whitespace and every term must occur as a substring. A term made only of
 //! Hangul initial consonants (ㄱ…ㅎ) is matched against the "choseong" form of the
 //! text, where every Hangul syllable is replaced by its initial consonant.
+use super::snapshot::SortKey;
 use unicode_normalization::UnicodeNormalization;
 
 /// Separator between the fields (and records) of the search blobs. Normalised text never
@@ -147,6 +148,10 @@ enum Subject {
     Played,
     Check,
     Dr,
+    /// Not a condition: the order the songs that match are given in (`sort:plays`).
+    Sort,
+    /// Not a condition: how many of them, at most (`limit:50`).
+    Limit,
 }
 
 /// A `check:` condition.
@@ -172,7 +177,7 @@ fn check_wanted(value: &str) -> Option<CheckWanted> {
 }
 
 /// The names a field can be asked for by, in normalised form.
-const FIELD_NAMES: [(&str, Subject); 33] = [
+const FIELD_NAMES: [(&str, Subject); 39] = [
     ("title", Subject::Text(Field::Title)),
     ("제목", Subject::Text(Field::Title)),
     ("artist", Subject::Text(Field::Artist)),
@@ -206,7 +211,42 @@ const FIELD_NAMES: [(&str, Subject); 33] = [
     ("check", Subject::Check),
     ("검사", Subject::Check),
     ("dr", Subject::Dr),
+    ("sort", Subject::Sort),
+    ("order", Subject::Sort),
+    ("정렬", Subject::Sort),
+    ("limit", Subject::Limit),
+    ("개수", Subject::Limit),
+    ("제한", Subject::Limit),
 ];
+
+/// The order a `sort:` term asks for: a name the lists know a column by, with `-` in
+/// front of it for the other way round. Without that, what one looks for first comes
+/// first: the songs played most, added or heard last, rated highest; names and
+/// numbers from their beginning.
+fn sort_order(value: &str) -> Option<(SortKey, bool)> {
+    let (name, turned) = match value.strip_prefix('-') {
+        Some(name) => (name, true),
+        None => (value, false),
+    };
+    let key = match name {
+        "title" | "제목" => SortKey::Title,
+        "artist" | "아티스트" | "가수" => SortKey::Artist,
+        "album" | "앨범" => SortKey::Album,
+        "year" | "연도" | "년도" => SortKey::Year,
+        "length" | "duration" | "길이" => SortKey::Duration,
+        "plays" | "재생" | "재생횟수" => SortKey::PlayCount,
+        "added" | "추가" => SortKey::DateAdded,
+        "played" | "들은" | "최근재생" => SortKey::LastPlayed,
+        "rating" | "stars" | "별점" => SortKey::Rating,
+        "format" | "형식" => SortKey::Format,
+        _ => return None,
+    };
+    let ascending = !matches!(
+        key,
+        SortKey::PlayCount | SortKey::DateAdded | SortKey::LastPlayed | SortKey::Rating
+    );
+    Some((key, ascending != turned))
+}
 
 /// Splits a normalised query at whitespace; double quotes keep words together
 /// (`"let it be"`, `artist:"the beatles"`) and are not part of the result.
@@ -307,6 +347,11 @@ fn term(text: &str) -> Term {
 pub struct PreparedQuery {
     pub(crate) terms: Vec<Term>,
     pub(crate) filters: Vec<Filter>,
+    /// The order the query asks for (`sort:plays`): a column, and whether ascending.
+    /// A list that the user has put in an order of their own keeps that.
+    pub(crate) order: Option<(SortKey, bool)>,
+    /// How many songs the query wants at most (`limit:50`), counted in its order.
+    pub(crate) limit: Option<usize>,
 }
 
 impl PreparedQuery {
@@ -324,6 +369,7 @@ impl PreparedQuery {
         let normalized = normalize(query);
         let mut terms: Vec<Term> = Vec::new();
         let mut filters: Vec<Filter> = Vec::new();
+        let (mut order, mut limit) = (None, None);
         for token in tokens(&normalized) {
             let named = token.split_once(':').and_then(|(name, value)| {
                 FIELD_NAMES
@@ -356,6 +402,22 @@ impl PreparedQuery {
                             .map(|span| Filter::PlayedSince(now.saturating_sub(span))),
                         Subject::Check => check_wanted(value).map(Filter::Check),
                         Subject::Dr => year_range(value).map(|(from, to)| Filter::Dr(from, to)),
+                        // An order and a number are no conditions; one that cannot
+                        // be understood finds nothing, like any other.
+                        Subject::Sort => match sort_order(value) {
+                            Some(asked) => {
+                                order = Some(asked);
+                                continue;
+                            }
+                            None => None,
+                        },
+                        Subject::Limit => match value.parse::<usize>() {
+                            Ok(most) if most > 0 => {
+                                limit = Some(most);
+                                continue;
+                            }
+                            _ => None,
+                        },
                         Subject::Text(_) => None,
                     };
                     filters.push(filter.unwrap_or(Filter::Never));
@@ -365,12 +427,21 @@ impl PreparedQuery {
         }
         terms.dedup();
         filters.dedup();
-        PreparedQuery { terms, filters }
+        PreparedQuery {
+            terms,
+            filters,
+            order,
+            limit,
+        }
     }
 
-    /// True when the query asks for nothing (it then matches every track).
+    /// True when the query asks for nothing (it then matches every track, in the
+    /// library's own order).
     pub fn is_empty(&self) -> bool {
-        self.terms.is_empty() && self.filters.is_empty()
+        self.terms.is_empty()
+            && self.filters.is_empty()
+            && self.order.is_none()
+            && self.limit.is_none()
     }
 }
 
@@ -552,6 +623,49 @@ mod tests {
             [Filter::Check(CheckWanted::Unchecked)]
         );
         assert_eq!(PreparedQuery::new("check:maybe").filters, [Filter::Never]);
+    }
+
+    #[test]
+    fn an_order_and_a_number_are_asked_for_beside_the_conditions() {
+        let q = PreparedQuery::new_at("rating:>=3 sort:plays limit:25", 0);
+        assert_eq!(q.filters, [Filter::Rating(3, i32::MAX)]);
+        assert_eq!(
+            q.order,
+            Some((SortKey::PlayCount, false)),
+            "most played first"
+        );
+        assert_eq!(q.limit, Some(25));
+        // The other way round, and in Korean.
+        assert_eq!(
+            PreparedQuery::new_at("sort:-plays", 0).order,
+            Some((SortKey::PlayCount, true))
+        );
+        assert_eq!(
+            PreparedQuery::new_at("정렬:제목 개수:10", 0),
+            PreparedQuery {
+                order: Some((SortKey::Title, true)),
+                limit: Some(10),
+                ..PreparedQuery::default()
+            }
+        );
+        assert_eq!(
+            PreparedQuery::new_at("sort:-year", 0).order,
+            Some((SortKey::Year, false))
+        );
+        // An order alone asks for something: every song, in that order.
+        assert!(!PreparedQuery::new_at("sort:title", 0).is_empty());
+        assert!(
+            PreparedQuery::new_at("sort:", 0).is_empty(),
+            "still being typed"
+        );
+        // What cannot be understood finds nothing.
+        for bad in ["sort:colour", "limit:0", "limit:many", "limit:-3"] {
+            assert_eq!(
+                PreparedQuery::new_at(bad, 0).filters,
+                [Filter::Never],
+                "{bad}"
+            );
+        }
     }
 
     #[test]

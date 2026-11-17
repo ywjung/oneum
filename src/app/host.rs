@@ -50,6 +50,10 @@ impl PlayerHost for LibraryHost {
         self.library.track(id).is_some()
     }
 
+    fn rating_of(&self, id: TrackId) -> u8 {
+        self.library.track(id).map_or(0, |track| track.rating)
+    }
+
     fn album_of(&self, id: TrackId) -> Option<u64> {
         // As the library shows albums: shuffling by album keeps a merged one whole.
         let key = self.library.track(id)?.album_key;

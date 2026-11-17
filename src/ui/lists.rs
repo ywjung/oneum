@@ -161,6 +161,14 @@ fn build_rows(
         idx,
     };
     let matches = |idx: u32| q.is_empty() || snap.matches(idx, &q);
+    // The saved search of a smart playlist: it may say its own order and number.
+    let smart_query = match nav {
+        Nav::Smart(name) => smart
+            .iter()
+            .find(|p| &p.name == name)
+            .map(|p| PreparedQuery::new(&p.query)),
+        _ => None,
+    };
     let mut rows: Vec<Row> = match nav {
         Nav::Songs => {
             if q.is_empty() {
@@ -227,11 +235,10 @@ fn build_rows(
             });
             indices.into_iter().map(track_row).collect()
         }
-        Nav::Smart(name) => smart
-            .iter()
-            .find(|p| &p.name == name)
-            .map(|p| {
-                snap.search_prepared(&PreparedQuery::new(&p.query))
+        Nav::Smart(_) => smart_query
+            .as_ref()
+            .map(|saved| {
+                snap.search_prepared(saved)
                     .into_iter()
                     .filter(|&i| matches(i))
                     .map(track_row)
@@ -322,7 +329,18 @@ fn build_rows(
             | Nav::Folder(_)
     );
     let effective_sort = match (sort, nav) {
+        // The order the user put the list in comes before any other.
         (Some(s), _) => Some(s),
+        // Then the one the search that was typed asks for (`sort:plays`), then the
+        // one a smart playlist's saved search gave its songs.
+        (None, _) if q.order.is_some() => q.order,
+        (None, Nav::Smart(_))
+            if smart_query
+                .as_ref()
+                .is_some_and(|saved| saved.order.is_some()) =>
+        {
+            None
+        }
         (None, Nav::Songs | Nav::Favorites | Nav::Genre(_) | Nav::Smart(_)) => {
             Some((SortKey::Default, true))
         }
@@ -340,6 +358,10 @@ fn build_rows(
             .map(|(r, i)| (i, r))
             .collect();
         rows.sort_by_key(|r| rank.get(&r.idx).copied().unwrap_or(usize::MAX));
+    }
+    // No more songs than the search that was typed wants.
+    if is_track_list && let Some(most) = q.limit {
+        rows.truncate(most);
     }
     rows
 }

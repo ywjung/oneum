@@ -129,6 +129,13 @@ ui 'menu rate_current 4' 'wait 500' 'dump rt1.json' 'click 200 20' 'text rating:
 check rt1.json 'd["current_rating"] == 4' "the song that is playing is given four stars"
 check rt2.json 'd["rows"] == 1 and d["first_rows"] == [d["current"]]' "…and is found by them (rating:>=4)"
 check rt3.json 'd["current_rating"] == 0 and d["rows"] == 20 and d["query"] == ""' "the stars are taken away again"
+# A search may say its own order and number; and the shuffle that goes by stars is
+# switched on and off.
+ui 'click 200 20' 'text sort:-title limit:3' 'wait 500' 'dump so1.json' 'key Escape' 'wait 300' \
+   'menu shuffle_by_rating' 'wait 300' 'dump so2.json' 'menu shuffle_by_rating' 'wait 300' 'dump so3.json'
+check so1.json 'd["rows"] == 3 and d["first_rows"] == sorted(d["first_rows"], reverse=True)' "a search that says \"sort:-title limit:3\" gives three songs, the last titles first"
+check so2.json 'd["shuffle_by_rating"] and d["rows"] == 20' "shuffling by stars is switched on"
+check so3.json 'not d["shuffle_by_rating"]' "…and off again"
 # The stars of Song Info are pressed: the fifth gives five, the same one again none.
 # (The panel is put away through the queue button: it opens the queue in its place,
 # and closes that.)

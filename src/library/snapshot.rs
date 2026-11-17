@@ -466,6 +466,13 @@ impl LibrarySnapshot {
         if !q.filters.is_empty() {
             hits.retain(|&i| q.filters.iter().all(|f| self.filter_matches(i, f)));
         }
+        // The order the query asks for, and no more songs than it wants.
+        if let Some((key, ascending)) = q.order {
+            self.sort(&mut hits, key, ascending);
+        }
+        if let Some(most) = q.limit {
+            hits.truncate(most);
+        }
         hits
     }
 

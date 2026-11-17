@@ -854,6 +854,7 @@ impl OneumApp {
             self.settings.shuffle_by_album,
             self.settings.resume_long_tracks,
         );
+        let by_rating_before = self.settings.shuffle_by_rating;
         widgets::card(ui, |ui| {
             widgets::setting_row(
                 ui,
@@ -878,8 +879,25 @@ impl OneumApp {
                     widgets::toggle(ui, &mut self.settings.resume_long_tracks, s.resume_long_row);
                 },
             );
+            widgets::row_divider(ui);
+            widgets::setting_row(
+                ui,
+                s.shuffle_by_rating_row,
+                Some(s.shuffle_by_rating_desc),
+                true,
+                |ui| {
+                    widgets::toggle(
+                        ui,
+                        &mut self.settings.shuffle_by_rating,
+                        s.shuffle_by_rating_row,
+                    );
+                },
+            );
         });
         widgets::section_note(ui, s.play_order_hint);
+        if self.settings.shuffle_by_rating != by_rating_before {
+            player.send(Command::SetShuffleByRating(self.settings.shuffle_by_rating));
+        }
         if self.settings.shuffle_by_album != order_before.0 {
             player.send(Command::SetShuffleByAlbum(self.settings.shuffle_by_album));
         }

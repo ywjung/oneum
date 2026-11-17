@@ -53,6 +53,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - The **Search** tab finds by title, artist and album.
 - Below the field, choose what to look for: **Songs · Albums · Artists**. Moving the results up or down puts the keyboard away.
 - A search can be narrowed to a field: `artist:beatles` · `album:…` · `genre:jazz` · `year:1990-1999` · `format:flac` · `fav:yes` · `plays:>=5` · `added:30d` · `check:damaged` · `dr:<8`.
+- A search can also say the order and the number of what it finds: `sort:plays` (most played first) · `sort:added` · `sort:rating` · `sort:-title` (`-` turns the order round) · `limit:50`. Kept as a smart playlist it makes a list such as "the 25 most played of four stars and more" (`rating:>=4 sort:plays limit:25`).
 - **Keeping a search**: search for songs, press **＋** in the search field and give it a name: the search becomes a smart playlist.
 
 ## Playlists
@@ -73,7 +74,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - **Library**: Rescan, Open Music Files, importing a playlist, the music folders (adding, removing, and **Show** in the Files app), and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.
 - **Importing an Apple Music library** (Settings → Library): save an XML file on the Mac with **File → Library → Export Library** in Apple Music, move it to the phone and choose it: play counts, last played, date added, loved songs and playlists are brought over. Songs are found by the folder they are in and their file name, so this fits songs whose folders were copied from the Mac as they are. Music files are not changed.
 - **Exporting and importing your history** (**Library Data** under Settings → Library): **Export to a File** saves play counts, the plays themselves, dates added, favorites, playlists and smart playlists as one file, and **Import from a File** merges a file exported by OnEum on another device. Songs are found by their folder and file name, and play counts are not added up: the higher one is kept. Settings and what is pinned are not part of it, and music files are not changed.
-- **Playback**: volume leveling (ReplayGain) and the analysis of songs without tags, shuffle by album, resuming long tracks, crossfade (songs that follow each other by themselves overlap for 2 to 10 seconds; songs of one album go on without a gap as before), crossfeed, headphone correction (35 built-in profiles, correction files, and profiles made on screen band by band), radio, memory playback.
+- **Playback**: volume leveling (ReplayGain) and the analysis of songs without tags, shuffle by album, resuming long tracks, a shuffle that favors higher ratings, crossfade (songs that follow each other by themselves overlap for 2 to 10 seconds; songs of one album go on without a gap as before), crossfeed, headphone correction (35 built-in profiles, correction files, and profiles made on screen band by band), radio, memory playback.
 - **Equalizer**: ten bands and presets. Double-tap a slider to return it to 0 dB.
 - **General**: language and appearance (light · dark · system).
 - **Shortcuts**: the list of the shortcuts of a keyboard (see "Keyboard").

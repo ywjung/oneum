@@ -2647,6 +2647,14 @@ impl OneumApp {
                         dispatch(action);
                         continue;
                     }
+                    // Shuffling by stars, switched as the playback settings switch it.
+                    if id == "shuffle_by_rating" {
+                        self.settings.shuffle_by_rating = !self.settings.shuffle_by_rating;
+                        self.core
+                            .player
+                            .send(Command::SetShuffleByRating(self.settings.shuffle_by_rating));
+                        continue;
+                    }
                     // Crossfade between songs, in seconds (as the playback settings set it).
                     if let Some(secs) = id.strip_prefix("crossfade ") {
                         if let Ok(secs) = secs.parse::<u8>() {
@@ -3023,6 +3031,7 @@ impl OneumApp {
                 .map_or(0, |(_, _, entries)| entries.len())
         );
         state["shuffle_by_album"] = serde_json::json!(self.settings.shuffle_by_album);
+        state["shuffle_by_rating"] = serde_json::json!(self.settings.shuffle_by_rating);
         let (textures, pending, uploads) = self.art.counts();
         state["art"] = serde_json::json!({
             "textures": textures,

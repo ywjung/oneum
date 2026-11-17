@@ -464,6 +464,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         correction: settings.active_correction().cloned(),
         radio: settings.radio,
         shuffle_by_album: settings.shuffle_by_album,
+        shuffle_by_rating: settings.shuffle_by_rating,
         resume_long_tracks: settings.resume_long_tracks,
         device_pref: settings.output_device.clone(),
         output: settings.output,

@@ -69,6 +69,7 @@
 - Years can be ranges: `year:1994`, `year:1990-1999`, `year:>=2000`, `year:<1980`.
 - There are also `format:lossless` (FLAC, ALAC, WAV, AIFF) and `format:lossy`. Genres are only searched with `genre:`.
 - You can search by what you listened to: `plays:>=5` (play count, with ranges and comparisons as for years — songs never played are `plays:0`), `fav:yes` / `fav:no` (favorites), `added:30d` (added in the last 30 days) and `played:1y` (heard in the last year). Write periods with `d` (days), `w` (weeks), `m` (months) or `y` (years).
+- A search can also say the order and the number of what it finds: `sort:plays` (most played first), `sort:added` (latest additions first), `sort:rating`, `sort:title` and so on (title, artist, album, year, length, plays, added, played, rating, format; a `-` in front turns the order round), and `limit:50` (the first 50 in that order). For example: `rating:>=4 sort:plays limit:25`. An order you chose by clicking a column title comes first.
 - You can also search by what the file check found: `check:damaged`, `check:ok`, `check:none` (not checked), `dr:<8` (dynamic range — ranges and comparisons work as for years).
 - **Saving a search**: when you type a search in Songs, a **＋** appears at the right of the search field. Click it and give the search a name, and it becomes a smart playlist (see "Playlists").
 - Point at the search field to see a short summary of this.
@@ -261,7 +262,7 @@ Under **Library Data** in Settings → Library, **Export…** saves one file; in
 The gear button at the top right opens them too. Close them with Esc, the close (×) button, or a click outside. Changes apply and are saved at once.
 - **General**: language (Follow System / 한국어 / English), appearance (Follow System / Light / Dark), and the Format column.
 - **Library**: each music folder with its number of songs and when it was last scanned. The magnifier button opens the folder in Finder, and the trash button removes the folder from the library (you are asked first, and the original files stay where they are). **Add Music Folder**, **Rescan**. Below them, the file check and moving over from Apple Music.
-- **Playback**, from the top: output device (with the device and sample rate in use), output quality, volume leveling and the analysis of songs without tags, playing order (shuffle by album, resume long tracks), crossfade, equalizer, headphone crossfeed, headphone correction and radio.
+- **Playback**, from the top: output device (with the device and sample rate in use), output quality, volume leveling and the analysis of songs without tags, playing order (shuffle by album, resume long tracks, a shuffle that favors higher ratings), crossfade, equalizer, headphone crossfeed, headphone correction and radio.
 - **Shortcuts**: the keyboard shortcuts.
 - **About**: version, opening this guide, showing the log and data folders, and the open source licenses. Click **Show** next to the licenses to unfold the list of components as a table below it; click a source address to open it in the browser.
 
