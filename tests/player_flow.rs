@@ -2524,8 +2524,36 @@ fn a_marked_section_is_played_over_and_over_until_it_is_given_up() {
     rig.wait("the next song", |s| Rig::track(s) == Some(A));
 }
 
-/// The marks of a section may be set from its end backwards, and the section belongs
-/// to its song: another song being current ends it.
+/// A mark set near the end of a song, when the next song is being decoded already,
+/// leaves what follows as it is: the next song is played once. (What follows is told
+/// anew after the song the decode thread is at. Told after the current one, it was
+/// put right again when the next song began, so this held before as well; it pins
+/// down that it stays so.)
+#[test]
+fn a_mark_set_while_the_next_song_is_decoded_does_not_play_it_twice() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rig = Rig::start(long_host(&dir));
+    rig.send(play(&[LONG, LONG], 0));
+    rig.send(Command::Pause);
+    rig.wait("paused", |s| s.state == PlayState::Paused);
+    // Six tenths of a second before the end of the song: while it stands there,
+    // what is decoded ahead (a second of sound) goes on into the next song, and
+    // stops in the middle of it.
+    rig.send(Command::SeekTo(11_400));
+    rig.wait("near the end", |s| s.position_ms == 11_400);
+    std::thread::sleep(Duration::from_millis(600));
+    rig.send(Command::MarkSection);
+    rig.wait("a mark", |s| s.section.is_some());
+    rig.send(Command::Play);
+    let ended = rig.wait("end of queue", |s| s.state == PlayState::Ended);
+    assert_eq!(ended.queue_index, Some(1));
+    // What was played after the seek: the rest of the song and the next one, once
+    // (12.6 seconds; the next one a second time would be twelve more).
+    let audio = rig.audio.lock().expect("lock").clone();
+    let frames = audio.last().map_or(0, |(_, pcm)| pcm.len() / 2);
+    assert!((553_000..=558_000).contains(&frames), "{frames} frames");
+}
+
 #[test]
 fn a_section_marked_backwards_is_the_same_section_and_another_song_ends_it() {
     let dir = tempfile::tempdir().expect("tempdir");

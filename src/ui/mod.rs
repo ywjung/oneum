@@ -257,9 +257,6 @@ pub(super) struct PeqEdit {
     pub(super) selected_before: Option<String>,
     /// What the player was last sent, so that it is sent again only when it changed.
     pub(super) heard: Option<crate::audio::PeqProfile>,
-    /// The editor has been on screen with it. (One that a verification script makes
-    /// without the screen never is.)
-    pub(super) shown: bool,
 }
 
 /// What a file dialog was shown for.
@@ -412,9 +409,8 @@ pub struct OneumApp {
     info_extras: Option<panels::Extras>,
     /// A lookup of lyrics on the internet is out (one at a time).
     lyrics_busy: Arc<std::sync::atomic::AtomicBool>,
-    /// How far the room correction that is applied is turned down, as a factor
-    /// (known once it was read here: after an import, or when it was switched on).
-    room_trim: Option<f32>,
+    /// Settings (where a correction is made on screen) was there in the frame before.
+    editor_was_there: bool,
     /// Where lyrics are looked for on the internet, for a listener who switched that
     /// on, and where what was found is kept.
     lyrics_source: Arc<crate::library::online_lyrics::Source>,
@@ -490,6 +486,7 @@ impl OneumApp {
         let app::Startup {
             core,
             settings,
+            room_lost,
             open_report,
             lang,
             system_prefers_korean,
@@ -596,7 +593,7 @@ impl OneumApp {
             extras: None,
             info_extras: None,
             lyrics_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            room_trim: None,
+            editor_was_there: false,
             lyrics_source,
             rediscover: lists::Rediscover::default(),
             eq_open: false,
@@ -643,14 +640,16 @@ impl OneumApp {
             system_prefers_korean,
             core,
         };
-        // A room correction that is on from the start: how far it is turned down is
-        // shown in the signal path.
-        if this.settings.room.as_ref().is_some_and(|room| room.enabled) {
-            this.room_trim = crate::audio::room::Impulse::open(&this.core.paths.room_file())
-                .map(|impulse| impulse.turned_down());
-        }
         this.install_menu(&ctx);
         report_open_problems(&mut this, &open_report);
+        if room_lost {
+            this.alert = Some(Toast {
+                text: this.s().room_lost.into(),
+                warning: true,
+                action: None,
+                expires: None,
+            });
+        }
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             renderer::watch(state);
         }
@@ -1682,7 +1681,6 @@ impl OneumApp {
             name: impulse.name.clone(),
             enabled: true,
         });
-        self.room_trim = Some(impulse.turned_down());
         self.core
             .player
             .send(Command::SetRoom(Some(Arc::new(impulse))));
@@ -1700,10 +1698,8 @@ impl OneumApp {
         if on && impulse.is_none() {
             // What was kept is gone or is no longer what was written: nothing to apply.
             self.settings.room = None;
-            self.room_trim = None;
-            return self.warn_toast(self.s().room_err_read);
+            return self.warn_toast(self.s().room_lost);
         }
-        self.room_trim = impulse.as_ref().map(|impulse| impulse.turned_down());
         self.core
             .player
             .send(Command::SetRoom(impulse.map(Arc::new)));
@@ -1712,7 +1708,6 @@ impl OneumApp {
     /// Takes the room correction away, with the file it is kept in.
     pub(super) fn remove_room(&mut self) {
         if self.settings.room.take().is_some() {
-            self.room_trim = None;
             let _ = std::fs::remove_file(self.core.paths.room_file());
             self.core.player.send(Command::SetRoom(None));
         }
@@ -1872,7 +1867,6 @@ impl OneumApp {
             profile,
             selected_before: self.settings.correction.clone(),
             heard: None,
-            shown: false,
         });
         self.peq_edit_listen();
     }
@@ -3315,7 +3309,7 @@ impl OneumApp {
         state["room"] = serde_json::json!({
             "kept": self.settings.room.as_ref().map(|room| room.name.clone()),
             "enabled": self.settings.room.as_ref().is_some_and(|room| room.enabled),
-            "applied": p.room,
+            "applied": p.room.as_ref().map(|(name, _)| name.clone()),
             "kept_in_file": self.core.paths.room_file().exists(),
         });
         state["output_options"] = serde_json::json!({
@@ -3785,7 +3779,12 @@ impl eframe::App for OneumApp {
             ([width, height], rows as usize)
         });
         memory::note_frame(atlas, rows_used);
-        if !self.phone_mode && std::mem::take(&mut self.mini_toggle) {
+        // (While a message with something to say is up, the window stays as it is:
+        // the mini player has no room for it, and would give way to it at once.)
+        if !self.phone_mode
+            && std::mem::take(&mut self.mini_toggle)
+            && (self.mini.is_some() || self.alert.is_none())
+        {
             self.toggle_mini(&ctx);
         }
         // The mini player shows the player bar and nothing else. What needs the whole
@@ -3802,13 +3801,14 @@ impl eframe::App for OneumApp {
         {
             self.toggle_mini(&ctx);
         }
-        // A correction that is being made on screen is heard while it is made. Where
-        // its editor is gone (Settings was closed), so is what was not saved of it.
+        // A correction that is being made on screen is heard while it is made. When
+        // the place of its editor goes away (Settings is closed), so does what was
+        // not saved of it: it would be heard on, with nothing on screen to say so.
         let editor_there = match self.phone_mode {
             true => self.phone.holds_settings(),
             false => self.settings_open,
         };
-        if self.peq_edit.as_ref().is_some_and(|edit| edit.shown) && !editor_there {
+        if std::mem::replace(&mut self.editor_was_there, editor_there) && !editor_there {
             self.peq_edit_cancel();
         }
         self.sync_frame(&ctx);

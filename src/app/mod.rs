@@ -244,6 +244,9 @@ pub fn remove_media_session() {
 pub struct Startup {
     pub core: Arc<Core>,
     pub settings: Settings,
+    /// The room correction was switched on, and what was kept of it could not be
+    /// read: it is off now, and the listener is to be told.
+    pub room_lost: bool,
     pub open_report: OpenReport,
     pub lang: Lang,
     pub system_prefers_korean: bool,
@@ -407,8 +410,21 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     let paths = AppPaths::resolve()?;
     logging::init(&paths.log_dir);
     tracing::info!(version = VERSION, "starting OnEum");
-    let settings: Settings =
+    let mut settings: Settings =
         crate::storage::settings::load_json::<Settings>(&paths.settings_file()).sanitized();
+    // The room correction, where it is switched on. One whose file cannot be read
+    // (gone, damaged) is not applied, and must not be shown as if it were.
+    let room = settings
+        .room
+        .as_ref()
+        .filter(|room| room.enabled)
+        .map(|_| crate::audio::room::Impulse::open(&paths.room_file()).map(Arc::new));
+    let room_lost = matches!(room, Some(None));
+    if room_lost {
+        tracing::warn!("the room correction that was kept cannot be read: switched off");
+        settings.room = None;
+    }
+    let room = room.flatten();
     // A verification run keeps the passwords of network folders in memory: nothing
     // of such a run gets into the keychain of the person at the machine.
     if std::env::var_os("ONEUM_SCRIPT").is_some() {
@@ -474,13 +490,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
             .min(crate::app::settings::MAX_CROSSFADE_SECS),
         speed_percent: settings.speed_percent,
         correction: settings.active_correction().cloned(),
-        // The room correction that was imported, where it is switched on.
-        room: settings
-            .room
-            .as_ref()
-            .filter(|room| room.enabled)
-            .and_then(|_| crate::audio::room::Impulse::open(&paths.room_file()))
-            .map(Arc::new),
+        room,
         radio: settings.radio,
         shuffle_by_album: settings.shuffle_by_album,
         shuffle_by_rating: settings.shuffle_by_rating,
@@ -562,6 +572,7 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     Ok(Startup {
         core,
         settings,
+        room_lost,
         open_report,
         lang,
         system_prefers_korean,

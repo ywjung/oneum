@@ -234,10 +234,12 @@ fn read_listing(text: &str, base: &Url) -> Result<Listing, NetError> {
             && path[..with.len()].eq_ignore_ascii_case(with)
     };
     let asked = decoded(trimmed(&base.path));
-    let own = if found
-        .iter()
-        .any(|(_, path, ..)| path.eq_ignore_ascii_case(&asked))
-    {
+    // (Named itself, or with something in it: the folder that was asked. A server
+    // may leave the folder's own entry out; what it lists is in the folder still.)
+    let is_asked = found.iter().any(|(_, path, ..)| {
+        begins(path, &asked) && matches!(path.as_bytes().get(asked.len()), None | Some(b'/'))
+    });
+    let own = if is_asked {
         asked
     } else {
         found
@@ -441,6 +443,13 @@ mod tests {
         let found = read_listing(&empty, &base()).unwrap();
         assert_eq!(found.place, "https://nas.local:5006/music/My%20Albums/");
         assert!(found.entries.is_empty());
+        // A server that leaves the folder's own entry out: what it lists is in the
+        // folder that was asked, also where that is a single folder.
+        let child = listing(&response("/music/My%20Albums/Only/", true, None));
+        let found = read_listing(&child, &base()).unwrap();
+        assert_eq!(found.place, "https://nas.local:5006/music/My%20Albums/");
+        assert_eq!(found.entries.len(), 1);
+        assert_eq!(found.entries[0].name, "Only");
         // Entries that have no folder in common are not made into one.
         let apart = listing(
             &[

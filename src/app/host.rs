@@ -60,12 +60,6 @@ impl PlayerHost for LibraryHost {
         Some(self.library.snapshot().shown_album_key(key))
     }
 
-    fn names_an_album(&self, id: TrackId) -> bool {
-        self.library
-            .track(id)
-            .is_some_and(|track| !track.album.trim().is_empty())
-    }
-
     fn record_play(&self, id: TrackId) {
         self.library.record_play(id);
     }

@@ -398,6 +398,11 @@ pub fn get_web(url: &str, limits: &Limits, access: &Access<'_>) -> Result<Vec<u8
 
 fn get_from(url: Url, limits: &Limits, access: &Access<'_>) -> Result<Vec<u8>, NetError> {
     let (head, mut body) = fetch(url, &Request::Get { range_from: None }, limits, access)?;
+    if head.status == 429 {
+        return Err(NetError::TooMany {
+            wait_secs: head.retry_after,
+        });
+    }
     if !(200..300).contains(&head.status) {
         return Err(NetError::Status(head.status));
     }
@@ -953,6 +958,9 @@ struct Head {
     location: Option<String>,
     content_type: Option<String>,
     content_range: Option<String>,
+    /// For how many seconds the server wants to be left alone (`Retry-After`, where
+    /// it is a number of seconds).
+    retry_after: Option<u64>,
     /// What the server offers for telling it who is there (`WWW-Authenticate`).
     challenges: Vec<String>,
 }
@@ -1013,6 +1021,8 @@ impl Head {
                 .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"));
         } else if name.eq_ignore_ascii_case(b"location") {
             self.location.get_or_insert_with(|| value.to_string());
+        } else if name.eq_ignore_ascii_case(b"retry-after") {
+            self.retry_after = self.retry_after.or_else(|| value.trim().parse().ok());
         } else if name.eq_ignore_ascii_case(b"content-type") {
             self.content_type.get_or_insert_with(|| value.to_string());
         } else if name.eq_ignore_ascii_case(b"content-range") {
@@ -1092,6 +1102,7 @@ fn read_head<R: BufRead>(reader: &mut R) -> Result<Head, NetError> {
             location: None,
             content_type: None,
             content_range: None,
+            retry_after: None,
             challenges: Vec::new(),
         };
         loop {

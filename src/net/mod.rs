@@ -32,6 +32,11 @@ pub enum NetError {
     TooLarge,
     /// The server answered with this status.
     Status(u16),
+    /// The server says it is asked too much (status 429), and for how many seconds
+    /// it wants to be left alone, where it says so.
+    TooMany {
+        wait_secs: Option<u64>,
+    },
     /// The answer is not what the protocol says (what was wrong).
     BadResponse(&'static str),
     /// A UPnP error the server reported (its description).
@@ -51,6 +56,7 @@ impl std::fmt::Display for NetError {
             NetError::Connect(error) => write!(f, "could not connect: {error}"),
             NetError::Io(error) => write!(f, "the connection failed: {error}"),
             NetError::Timeout => write!(f, "the server did not answer in time"),
+            NetError::TooMany { .. } => write!(f, "the server is asked too much"),
             NetError::TooLarge => write!(f, "the answer is larger than allowed"),
             NetError::Status(status) => write!(f, "the server answered with status {status}"),
             NetError::BadResponse(what) => write!(f, "unexpected answer: {what}"),

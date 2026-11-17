@@ -367,7 +367,11 @@ fn build_rows(
         put_in_order(&mut rows, key, ascending);
         rows.truncate(most);
     }
-    if is_track_list && let Some((key, ascending)) = effective_sort {
+    // (Already in it, where the order shown is the search's own.)
+    if is_track_list
+        && let Some((key, ascending)) = effective_sort
+        && !(counted_first && q.order == Some((key, ascending)))
+    {
         put_in_order(&mut rows, key, ascending);
     }
     if is_track_list

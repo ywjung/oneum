@@ -164,6 +164,9 @@ pub struct Credentials {
     user: String,
     password: Secret,
     pinned: Option<String>,
+    /// The folder has a name to sign in with, and the system's store did not hand
+    /// its password out: the request is made as nobody.
+    lacks_password: bool,
 }
 
 impl Credentials {
@@ -173,7 +176,15 @@ impl Credentials {
             user: user.to_string(),
             password: password.clone(),
             pinned: pinned.map(str::to_string),
+            lacks_password: false,
         }
+    }
+
+    /// Whether the request is made as nobody because the password of the folder's
+    /// name could not be read (see [`credentials_for`]). A refusal then says nothing
+    /// about the name and the password.
+    pub fn lacks_password(&self) -> bool {
+        self.lacks_password
     }
 
     pub fn access(&self) -> Access<'_> {
@@ -199,6 +210,7 @@ pub fn credentials_for(url: &str) -> Credentials {
             user: folder.user,
             password,
             pinned: folder.pinned,
+            lacks_password: false,
         },
         // The system's store does not hand the password out (locked, or the person
         // said no): the server is asked as nobody. A name with a password that is
@@ -212,16 +224,10 @@ pub fn credentials_for(url: &str) -> Credentials {
                 user: String::new(),
                 password: Secret::default(),
                 pinned: folder.pinned,
+                lacks_password: true,
             }
         }
     }
-}
-
-/// Whether the address lies in a folder that has a name to sign in with, the password
-/// of which the system's store does not hand out right now.
-pub fn password_unreadable(url: &str) -> bool {
-    folder_of(url)
-        .is_some_and(|folder| !folder.user.is_empty() && password_of(&folder.id).is_none())
 }
 
 #[cfg(test)]
@@ -303,13 +309,14 @@ mod tests {
         set_known(&[locked, open]);
         let found = credentials_for("https://locked.example/share/a.flac");
         assert!(found.access().account.is_none());
-        assert!(password_unreadable("https://locked.example/share/a.flac"));
-        // A folder without a name has no password to miss.
-        assert!(!password_unreadable("https://open.example/share/a.flac"));
-        assert!(!password_unreadable("https://elsewhere.example/a.flac"));
+        assert!(found.lacks_password());
+        // A folder without a name has no password to miss, nor has an address that
+        // lies in no folder.
+        assert!(!credentials_for("https://open.example/share/a.flac").lacks_password());
+        assert!(!credentials_for("https://elsewhere.example/a.flac").lacks_password());
         keep_password("folder-locked", &Secret::new("word")).unwrap();
-        assert!(!password_unreadable("https://locked.example/share/a.flac"));
         let found = credentials_for("https://locked.example/share/a.flac");
+        assert!(!found.lacks_password());
         assert_eq!(found.access().account, Some(("me", "word")));
         forget_password("folder-locked");
     }

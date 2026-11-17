@@ -77,6 +77,12 @@ pub struct PlayableTrack {
     pub album_key: u64,
 }
 
+/// A room correction as the snapshot tells of it: its name, and how far it is turned
+/// down (worked out here, on the player's thread, once for a response).
+fn room_in_words(impulse: &crate::audio::room::Impulse) -> (String, f32) {
+    (impulse.name.clone(), impulse.turned_down())
+}
+
 /// Persisted across restarts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -97,12 +103,6 @@ pub trait PlayerHost: Send + Sync + 'static {
     /// tagged inconsistently as one gives that one's key.
     fn album_of(&self, id: TrackId) -> Option<u64> {
         self.track(id).map(|t| t.album_key)
-    }
-    /// Whether the track's file names an album. Songs without one that lie in one
-    /// folder count as an album where albums are shown or shuffled; they are loose
-    /// songs all the same, and follow each other as songs of different albums do.
-    fn names_an_album(&self, _id: TrackId) -> bool {
-        true
     }
     /// The stars the listener gave a track (0: none), for a shuffle that goes by them.
     fn rating_of(&self, _id: TrackId) -> u8 {
@@ -336,8 +336,10 @@ pub struct PlayerSnapshot {
     pub crossfeed: Crossfeed,
     /// Name of the parametric correction profile that is applied, if one is.
     pub correction: Option<String>,
-    /// Name of the room correction that is applied, if one is.
-    pub room: Option<String>,
+    /// Name of the room correction that is applied, if one is, and how far it is
+    /// turned down so that it makes nothing louder than it was (a factor; 1.0: not
+    /// at all).
+    pub room: Option<(String, f32)>,
     /// Radio is on (see `Command::SetRadio`).
     pub radio: bool,
     /// Playback stops when the current song ends (see `Command::SetStopAfterCurrent`).
@@ -740,8 +742,9 @@ struct Player<H: PlayerHost> {
     /// Name of the correction profile that is applied (one that changes nothing is
     /// not applied).
     correction: Option<String>,
-    /// Name of the room correction that is applied, if one is.
-    room: Option<String>,
+    /// The room correction that is applied, if one is: its name, and how far it is
+    /// turned down.
+    room: Option<(String, f32)>,
     radio: bool,
     /// Start long tracks where they were left off (see `start_fresh`).
     resume_long_tracks: bool,
@@ -851,7 +854,7 @@ impl<H: PlayerHost> Player<H> {
                 .as_ref()
                 .filter(|p| !p.is_flat())
                 .map(|p| p.name.clone()),
-            room: config.room.as_ref().map(|impulse| impulse.name.clone()),
+            room: config.room.as_deref().map(room_in_words),
             radio: config.radio,
             resume_long_tracks: config.resume_long_tracks,
             stop_after: None,
@@ -1077,10 +1080,10 @@ impl<H: PlayerHost> Player<H> {
     /// without a gap and without a fade; a fade never takes more than half of either
     /// song.
     fn crossfade_between(&self, ending: TrackId, beginning: TrackId) -> u32 {
-        let one_album = self.host.album_of(ending) == self.host.album_of(beginning)
-            && self.host.names_an_album(ending)
-            && self.host.names_an_album(beginning);
-        if self.crossfade_secs == 0 || one_album {
+        // (An album is what the library shows as one: songs without an album in
+        // their tags count as the album of their folder, as a rip without tags or
+        // the songs of a network folder are. They are not mixed either.)
+        if self.crossfade_secs == 0 || self.host.album_of(ending) == self.host.album_of(beginning) {
             return 0;
         }
         let length = |track: TrackId| self.host.track(track).map_or(0, |t| t.duration_ms);
@@ -1632,7 +1635,7 @@ impl<H: PlayerHost> Player<H> {
             }
             Command::SetRoom(impulse) => {
                 let position = self.position_ms();
-                self.room = impulse.as_ref().map(|impulse| impulse.name.clone());
+                self.room = impulse.as_deref().map(room_in_words);
                 self.engine.set_room(impulse);
                 self.dirty = true;
                 if self.chain.is_some() {
@@ -1872,8 +1875,10 @@ impl<H: PlayerHost> Player<H> {
         }
         .map(|section| (item, section));
         self.dirty = true;
-        // (Whether the next song is mixed in goes by whether a section is repeated.)
-        self.announce_next_after(item);
+        // Whether the next song is mixed in goes by whether a section is repeated:
+        // what follows is told anew. (After whatever the decode thread is at by now,
+        // which may be the next song already: not after the song that is current.)
+        self.sync_next();
     }
 
     /// The section that is repeated belongs to one song: another one being current

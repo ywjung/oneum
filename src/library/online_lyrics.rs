@@ -14,9 +14,26 @@ const ASK_AGAIN_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// After the service could not be reached it is left alone for this long: without the
 /// internet, every song looked at would otherwise wait for an answer that cannot come.
 const LEFT_ALONE_FOR: Duration = Duration::from_secs(60);
-/// And for this long after it said that it is asked too much (status 429). (It also
-/// says how long to wait, which is minutes at most for who asks as rarely as this.)
+/// And for this long after it said that it is asked too much, where it does not say
+/// for how long. Where it does: for that long and up to a third more (not everyone
+/// who was told the same should come back in the same second), a day at most.
 const LEFT_ALONE_WHEN_ASKED_TOO_MUCH: Duration = Duration::from_secs(15 * 60);
+const LEFT_ALONE_AT_MOST: Duration = Duration::from_secs(24 * 3600);
+
+/// For how long the service is left alone after `error`.
+fn pause_after(error: &crate::net::NetError) -> Duration {
+    match error {
+        crate::net::NetError::TooMany {
+            wait_secs: Some(secs),
+        } => {
+            let told = Duration::from_secs(*secs).min(LEFT_ALONE_AT_MOST);
+            let more = told.mul_f32(fastrand::f32() * 0.3);
+            (told + more).clamp(LEFT_ALONE_FOR, LEFT_ALONE_AT_MOST)
+        }
+        crate::net::NetError::TooMany { wait_secs: None } => LEFT_ALONE_WHEN_ASKED_TOO_MUCH,
+        _ => LEFT_ALONE_FOR,
+    }
+}
 /// The largest file of the cache that is read.
 const MAX_KEPT_BYTES: u64 = 1 << 20;
 
@@ -132,12 +149,8 @@ impl Source {
                 // (The error, never what was asked for: a log is not where the songs
                 // a person listens to belong.)
                 tracing::info!(%error, "the lyrics service did not answer");
-                let pause = match error {
-                    crate::net::NetError::Status(429) => LEFT_ALONE_WHEN_ASKED_TOO_MUCH,
-                    _ => LEFT_ALONE_FOR,
-                };
                 *self.out_of_reach.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Instant::now().checked_add(pause);
+                    Instant::now().checked_add(pause_after(&error));
                 None
             }
         }
@@ -225,5 +238,30 @@ mod tests {
         assert!(source.find(&other).is_none());
         assert!(source.out_of_reach.lock().unwrap().is_some());
         assert!(!kept_at(dir.path(), &other).exists());
+    }
+
+    /// A service that says for how long it wants to be left alone is left alone for
+    /// that long and a little more; one that does not say, for a quarter of an hour;
+    /// one that could not be reached, for a minute.
+    #[test]
+    fn the_service_is_left_alone_for_as_long_as_it_says() {
+        use crate::net::NetError;
+        let told = |secs| NetError::TooMany {
+            wait_secs: Some(secs),
+        };
+        for _ in 0..50 {
+            let pause = pause_after(&told(3_600)).as_secs_f32();
+            assert!((3_600.0..=4_680.5).contains(&pause), "{pause}");
+        }
+        // Never less than after a failure of the connection, never more than a day.
+        assert_eq!(pause_after(&told(0)), LEFT_ALONE_FOR);
+        assert_eq!(pause_after(&told(5)), LEFT_ALONE_FOR);
+        assert_eq!(pause_after(&told(u64::MAX)), LEFT_ALONE_AT_MOST);
+        assert_eq!(
+            pause_after(&NetError::TooMany { wait_secs: None }),
+            LEFT_ALONE_WHEN_ASKED_TOO_MUCH
+        );
+        assert_eq!(pause_after(&NetError::Timeout), LEFT_ALONE_FOR);
+        assert_eq!(pause_after(&NetError::Status(500)), LEFT_ALONE_FOR);
     }
 }

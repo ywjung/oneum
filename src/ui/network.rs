@@ -463,7 +463,7 @@ impl Browser {
                     .map_err(|error| match why_of(error) {
                         // Refused, and the name and password were not even given:
                         // the system's store did not hand the password out.
-                        Why::Refused if folders::password_unreadable(&url) => Why::NoPassword,
+                        Why::Refused if credentials.lacks_password() => Why::NoPassword,
                         why => why,
                     });
                 let _ = tx.send(Event::FolderPage { ticket, result });

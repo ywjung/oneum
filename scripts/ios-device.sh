@@ -61,6 +61,7 @@ build() { # build [more settings for xcodebuild…]
 # song until the group is there (once, in Xcode: the OnEum target ▸ Signing &
 # Capabilities ▸ App Groups ▸ +, with the team and identifier used here).
 LOG=$(mktemp)
+trap 'rm -f "$LOG"' EXIT
 if ! build 2>&1 | tee "$LOG"; then
   if grep -q "application-groups entitlement" "$LOG"; then
     echo >&2
@@ -69,13 +70,11 @@ if ! build 2>&1 | tee "$LOG"; then
     echo "(Xcode ▸ the OnEum target ▸ Signing & Capabilities ▸ App Groups ▸ +)." >&2
     echo >&2
     WITHOUT_GROUP=1
-    build CODE_SIGN_ENTITLEMENTS= || { rm -f "$LOG"; exit 1; }
+    build CODE_SIGN_ENTITLEMENTS= || exit 1
   else
-    rm -f "$LOG"
     exit 1
   fi
 fi
-rm -f "$LOG"
 APP=target/xcode/Build/Products/$CONFIG-iphoneos/OnEum.app
 # An iPhone refuses an app whose signature is missing or not of what is in it, with a
 # message that does not say so plainly: better to find out here.

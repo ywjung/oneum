@@ -686,6 +686,17 @@ impl Worker {
             }};
         }
 
+        // What was held back of a track (see `deliver!`) goes on to the stages as it is.
+        macro_rules! release_held {
+            () => {{
+                if !held.is_empty() {
+                    released.clear();
+                    released.extend(held.drain(..));
+                    stages!(&mut released);
+                }
+            }};
+        }
+
         // What a track gives at the output's rate, on its way to the stages above: the
         // end of the track before fades out under its beginning, and its own end is
         // held back while the next one is to be mixed with it.
@@ -953,11 +964,7 @@ impl Worker {
             // that end, fading as it was going to. Nothing of so short a track is
             // left to be mixed with the next one.
             if let Some((tail, done)) = mixing.take() {
-                if !held.is_empty() {
-                    released.clear();
-                    released.extend(held.drain(..));
-                    stages!(&mut released);
-                }
+                release_held!();
                 released = rest_of(&tail, done);
                 // (Frames that did not come through the rate conversion: where the
                 // next track begins is counted from behind them.)
@@ -984,10 +991,8 @@ impl Worker {
                     stages!(&mut released);
                 }
                 mixing = Some((held.drain(..).collect(), 0));
-            } else if !held.is_empty() {
-                released.clear();
-                released.extend(held.drain(..));
-                stages!(&mut released);
+            } else {
+                release_held!();
             }
             match next {
                 Some(next) => {
@@ -1003,11 +1008,7 @@ impl Worker {
         // one that was playing, are played as they are.
         // (In the order they are in time: what was held back was mixed with the
         // beginning of that end.)
-        if !held.is_empty() {
-            released.clear();
-            released.extend(held.drain(..));
-            stages!(&mut released);
-        }
+        release_held!();
         if let Some((tail, done)) = mixing.take() {
             released = rest_of(&tail, done);
             stages!(&mut released);

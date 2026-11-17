@@ -1376,7 +1376,15 @@ impl OneumApp {
         );
         let source = self.lyrics_source.clone();
         let core = self.core.clone();
-        let busy = self.lyrics_busy.clone();
+        // Given back when the lookup is over, however it ends: a lookup that broke
+        // off must not be the last one of the run.
+        struct Turn(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Turn {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let turn = Turn(self.lyrics_busy.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         let started = std::thread::Builder::new()
             .name("oneum-lyrics".into())
@@ -1392,14 +1400,13 @@ impl OneumApp {
                     &source,
                     &song,
                 );
-                busy.store(false, Ordering::Release);
+                drop(turn);
                 let _ = tx.send(details);
                 core.request_repaint();
             })
             .is_ok();
-        if !started {
-            self.lyrics_busy.store(false, Ordering::Release);
-        }
+        // (A thread that could not be started never took the closure: the turn was
+        // dropped with it, and is free again.)
         extras.lookup = started.then_some(rx);
     }
 
@@ -1601,12 +1608,12 @@ impl OneumApp {
                         Filter::Minimum => s.filter_minimum,
                     })
             },
-            room: self.player.room.as_ref().map(|name| {
+            room: self.player.room.as_ref().map(|(name, trim)| {
                 // (How far it is turned down so that nothing gets louder than it
-                // was, where that is known and more than nothing.)
-                match self.room_trim.filter(|trim| *trim < 0.999) {
-                    Some(trim) => format!("{name} · {}", decibels(trim)),
-                    None => name.clone(),
+                // was, where that is more than nothing.)
+                match *trim < 0.999 {
+                    true => format!("{name} · {}", decibels(*trim)),
+                    false => name.clone(),
                 }
             }),
             peak_protection: self.player.peak_limited_frames > 0,

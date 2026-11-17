@@ -509,6 +509,8 @@ strings! {
     room_err_read: "보정 필터로 쓸 수 없는 파일입니다.", "This file cannot be used as a correction filter.";
     room_err_long: "보정 필터가 너무 깁니다(6초까지).", "The correction filter is too long (up to 6 seconds).";
     room_err_keep: "보정 필터를 저장하지 못했습니다.", "The correction filter could not be kept.";
+    room_lost: "보관해 둔 룸 보정 필터를 읽을 수 없어 룸 보정을 껐습니다. 설정 → 재생 → 룸 보정에서 다시 불러오세요.",
+        "The room correction filter that was kept cannot be read, so room correction is off. Import it again in Settings → Playback → Room Correction.";
     room_hint: "필터는 곡의 샘플레이트가 달라도 맞게 변환해 쓰고, 어떤 주파수도 원래보다 커지지 않게 전체를 낮춥니다(낮춘 양은 곡 정보의 신호 경로에 나옵니다). 지연은 없습니다. 헤드폰으로 들을 때는 꺼 두세요.",
         "The filter is converted to fit whatever sample rate plays, and turned down as a whole so that no frequency gets louder than it was (by how much is shown in the signal path of Song Info). It adds no delay. Switch it off for headphones.";
     info_proc_room: "룸 보정", "Room correction";

@@ -1245,7 +1245,6 @@ impl OneumApp {
         let Some(mut edit) = self.peq_edit.take() else {
             return;
         };
-        edit.shown = true;
         let touch = super::theme::touch(ui.ctx());
         let (mut save, mut cancel) = (false, false);
         ui.add_space(10.0);

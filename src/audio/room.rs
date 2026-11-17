@@ -13,11 +13,16 @@
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// The longest response that is used, in seconds, and in frames at any rate.
+/// The longest response that is taken in, in seconds, and in frames at any rate.
 const MAX_SECONDS: u64 = 6;
 const MAX_FRAMES: usize = 1 << 21;
+/// The most taps a filter is made of. A response that is longer than this at the
+/// rate it is used at (seconds of it at 352.8 or 384 kHz) is used up to here: what
+/// is kept of a filter while it plays grows with its length (one spectrum per 32,768
+/// taps, for the response and for the music), and a phone has only so much.
+const MAX_TAPS: usize = 1 << 20;
 /// Frames of silence put in front of and behind a response that is converted to
 /// another rate (see `Impulse::at_rate`).
 const LEAD_FRAMES: usize = 256;
@@ -56,6 +61,66 @@ pub struct Impulse {
     /// Left and right, of one length. (A response with one channel is both.)
     pub left: Vec<f32>,
     pub right: Vec<f32>,
+    /// What was worked out of it (see [`Kept`]).
+    kept: Kept,
+}
+
+/// What was worked out of a response, kept with it: how far it is turned down at its
+/// own rate, and the filter as it was last made ready for a rate. Every feed needs
+/// the filter (each seek begins one), and making it ready is a rate conversion and
+/// Fourier transforms over the whole response: done once for a rate, not once a feed.
+/// It is no part of what a response is: two that hold the same samples are the same.
+#[derive(Default)]
+struct Kept {
+    trim: OnceLock<f32>,
+    ready: Mutex<Option<Arc<Ready>>>,
+}
+
+impl Clone for Kept {
+    fn clone(&self) -> Self {
+        Kept::default()
+    }
+}
+
+impl PartialEq for Kept {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Kept")
+    }
+}
+
+/// A response made ready for audio at one rate.
+struct Ready {
+    rate: u32,
+    /// How far it is turned down (1.0: not at all).
+    trim: f32,
+    left: Arc<Taps>,
+    /// The same as `left` (not a second one like it) where both channels have one
+    /// response.
+    right: Arc<Taps>,
+}
+
+/// One channel's filter, as every convolver for it uses it.
+struct Taps {
+    /// The first taps, newest sample last (so they meet the samples in the order
+    /// those are held in).
+    head: Vec<f32>,
+    /// The rest, by the sizes of the blocks they are worked in.
+    plans: Vec<Arc<Plan>>,
+}
+
+/// One size of block: the taps from `block` on (up to where the next size begins),
+/// in pieces of `block` taps, each as its spectrum (padded to two blocks).
+struct Plan {
+    block: usize,
+    forward: Arc<dyn Fft<f32>>,
+    inverse: Arc<dyn Fft<f32>>,
+    pieces: Vec<Vec<Complex<f32>>>,
 }
 
 impl Impulse {
@@ -80,6 +145,7 @@ impl Impulse {
             rate,
             left: pairs[..length].iter().map(|pair| clean(&pair[0])).collect(),
             right: pairs[..length].iter().map(|pair| clean(&pair[1])).collect(),
+            kept: Kept::default(),
         })
     }
 
@@ -88,8 +154,16 @@ impl Impulse {
     pub fn load(path: &Path) -> Result<Self, Unusable> {
         let unreadable = |e: super::PlaybackError| Unusable::Unreadable(e.detail);
         let mut decoder = super::decoder::TrackDecoder::open(path).map_err(unreadable)?;
-        let rate = decoder.info().sample_rate;
-        let most = (u64::from(rate) * MAX_SECONDS).min(MAX_FRAMES as u64) as usize * 2;
+        let (rate, channels) = (decoder.info().sample_rate, decoder.info().channels);
+        // One channel for both sides, or one for each. (A response of more channels
+        // mixes the sides into each other, which is not done here.)
+        if !(1..=2).contains(&channels) {
+            return Err(Unusable::Unreadable(format!(
+                "{channels} channels (a response has one or two)"
+            )));
+        }
+        let most = (u64::from(rate) * MAX_SECONDS).min(MAX_FRAMES as u64) as usize * channels;
+        // (The decoder gives the samples of the file's own channels, in turn.)
         let (mut all, mut piece) = (Vec::new(), Vec::new());
         while decoder.next(&mut piece).map_err(unreadable)? {
             all.extend_from_slice(&piece);
@@ -98,11 +172,15 @@ impl Impulse {
                 return Err(Unusable::TooLong);
             }
         }
+        let frames: Vec<f32> = match channels {
+            1 => all.iter().flat_map(|sample| [*sample, *sample]).collect(),
+            _ => all,
+        };
         let name = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        Impulse::from_frames(&name, rate, &all)
+        Impulse::from_frames(&name, rate, &frames)
     }
 
     /// The response as it is used at `rate`: converted where it was made at another
@@ -130,13 +208,17 @@ impl Impulse {
                     let pairs = out.as_chunks::<2>().0;
                     left = pairs.iter().map(|pair| pair[0] * scale).collect();
                     right = pairs.iter().map(|pair| pair[1] * scale).collect();
-                    left.truncate(MAX_FRAMES);
-                    right.truncate(MAX_FRAMES);
                 }
             }
         }
-        let peak = loudest(&left).max(loudest(&right));
-        let trim = if peak > 1.0 { 1.0 / peak } else { 1.0 };
+        left.truncate(MAX_TAPS);
+        right.truncate(MAX_TAPS);
+        // (At its own rate, and whole, how far it is turned down is known already.)
+        let whole = rate == self.rate && self.left.len() <= MAX_TAPS;
+        let trim = match whole {
+            true => self.turned_down(),
+            false => trim_of(&left, &right),
+        };
         if trim != 1.0 {
             left.iter_mut().for_each(|tap| *tap *= trim);
             right.iter_mut().for_each(|tap| *tap *= trim);
@@ -150,10 +232,36 @@ const MAGIC: &[u8; 8] = b"ONEUMIR1";
 
 impl Impulse {
     /// How far the response is turned down where it is used, as a factor (1.0: not
-    /// at all), at the rate it was made at.
+    /// at all), at the rate it was made at. Worked out once.
     pub fn turned_down(&self) -> f32 {
-        let peak = loudest(&self.left).max(loudest(&self.right));
-        if peak > 1.0 { 1.0 / peak } else { 1.0 }
+        *self
+            .kept
+            .trim
+            .get_or_init(|| trim_of(&self.left, &self.right))
+    }
+
+    /// The response made ready for audio at `rate`: what was made ready last, where
+    /// that was for this rate.
+    fn ready(&self, rate: u32) -> Arc<Ready> {
+        let mut kept = self.kept.ready.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ready) = kept.as_ref().filter(|ready| ready.rate == rate) {
+            return Arc::clone(ready);
+        }
+        let (left, right, trim) = self.at_rate(rate);
+        let mut planner = FftPlanner::<f32>::new();
+        let left_taps = Arc::new(Taps::new(&left, &mut planner));
+        let right_taps = match left == right {
+            true => Arc::clone(&left_taps),
+            false => Arc::new(Taps::new(&right, &mut planner)),
+        };
+        let ready = Arc::new(Ready {
+            rate,
+            trim,
+            left: left_taps,
+            right: right_taps,
+        });
+        *kept = Some(Arc::clone(&ready));
+        ready
     }
 
     /// Writes the response to a file of the app's own (beside it first, then in its
@@ -208,6 +316,17 @@ impl Impulse {
     }
 }
 
+/// How far a filter of these taps is turned down so that it makes no frequency louder
+/// than it was, as a factor (1.0: not at all).
+fn trim_of(left: &[f32], right: &[f32]) -> f32 {
+    // (One response for both sides is looked at once.)
+    let peak = match left == right {
+        true => loudest(left),
+        false => loudest(left).max(loudest(right)),
+    };
+    if peak > 1.0 { 1.0 / peak } else { 1.0 }
+}
+
 /// How much the filter with these taps raises the frequency it raises most (1.0:
 /// nothing is louder than it was).
 fn loudest(taps: &[f32]) -> f32 {
@@ -230,25 +349,7 @@ fn loudest(taps: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// One size of block: the taps from `block` on (up to where the next size begins),
-/// in pieces of `block` taps.
-struct Stage {
-    block: usize,
-    forward: Arc<dyn Fft<f32>>,
-    inverse: Arc<dyn Fft<f32>>,
-    /// The spectrum of each piece of the response (padded to two blocks).
-    pieces: Vec<Vec<Complex<f32>>>,
-    /// The spectra of the last blocks of input, newest first (as many as pieces).
-    heard: std::collections::VecDeque<Vec<Complex<f32>>>,
-    /// The block before the one being filled, and the one being filled.
-    input: Vec<f32>,
-    filled: usize,
-    /// This stage's part of the output for the block being filled.
-    ready: Vec<f32>,
-    work: Vec<Complex<f32>>,
-}
-
-impl Stage {
+impl Plan {
     /// For `taps`: those of the response from `block` on (to the next size, or to
     /// the end).
     fn new(block: usize, taps: &[f32], planner: &mut FftPlanner<f32>) -> Self {
@@ -268,23 +369,66 @@ impl Stage {
                 bins
             })
             .collect();
-        let silence = vec![Complex::new(0.0, 0.0); size];
-        Stage {
+        Plan {
             block,
             forward,
             inverse,
-            heard: std::iter::repeat_n(silence.clone(), pieces.len()).collect(),
             pieces,
+        }
+    }
+}
+
+impl Taps {
+    fn new(taps: &[f32], planner: &mut FftPlanner<f32>) -> Self {
+        let first = taps.len().min(BLOCKS[0]);
+        let head: Vec<f32> = taps[..first].iter().rev().copied().collect();
+        let mut plans = Vec::new();
+        for (n, block) in BLOCKS.iter().enumerate() {
+            let until = BLOCKS
+                .get(n + 1)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .min(taps.len());
+            if taps.len() > *block {
+                plans.push(Arc::new(Plan::new(*block, &taps[*block..until], planner)));
+            }
+        }
+        Taps { head, plans }
+    }
+}
+
+/// One size of block at work: its part of the filter, and what it holds of the
+/// music that goes by.
+struct Stage {
+    plan: Arc<Plan>,
+    /// The spectra of the last blocks of input, newest first (as many as the plan
+    /// has pieces).
+    heard: std::collections::VecDeque<Vec<Complex<f32>>>,
+    /// The block before the one being filled, and the one being filled.
+    input: Vec<f32>,
+    filled: usize,
+    /// This stage's part of the output for the block being filled.
+    ready: Vec<f32>,
+    work: Vec<Complex<f32>>,
+}
+
+impl Stage {
+    fn new(plan: &Arc<Plan>) -> Self {
+        let size = plan.block * 2;
+        let silence = vec![Complex::new(0.0, 0.0); size];
+        Stage {
+            plan: Arc::clone(plan),
+            heard: std::iter::repeat_n(silence.clone(), plan.pieces.len()).collect(),
             input: vec![0.0; size],
             filled: 0,
-            ready: vec![0.0; block],
+            ready: vec![0.0; plan.block],
             work: silence,
         }
     }
 
     /// Takes `input` in and adds this stage's part to `out` (of the same length).
     fn run(&mut self, input: &[f32], out: &mut [f32]) {
-        let block = self.block;
+        let block = self.plan.block;
         let mut at = 0;
         while at < input.len() {
             let take = (block - self.filled).min(input.len() - at);
@@ -307,23 +451,23 @@ impl Stage {
     /// A block is full: its spectrum joins the ones that were heard, and what the
     /// pieces of the response make of them is the part for the block that begins.
     fn turn(&mut self) {
-        let block = self.block;
+        let block = self.plan.block;
         for (bin, sample) in self.work.iter_mut().zip(&self.input) {
             *bin = Complex::new(*sample, 0.0);
         }
-        self.forward.process(&mut self.work);
+        self.plan.forward.process(&mut self.work);
         // (The oldest spectrum's place is taken by the newest.)
         if let Some(mut oldest) = self.heard.pop_back() {
             oldest.copy_from_slice(&self.work);
             self.heard.push_front(oldest);
         }
         self.work.fill(Complex::new(0.0, 0.0));
-        for (piece, heard) in self.pieces.iter().zip(&self.heard) {
+        for (piece, heard) in self.plan.pieces.iter().zip(&self.heard) {
             for ((sum, a), b) in self.work.iter_mut().zip(piece).zip(heard) {
                 *sum += a * b;
             }
         }
-        self.inverse.process(&mut self.work);
+        self.plan.inverse.process(&mut self.work);
         let scale = 1.0 / (block * 2) as f32;
         for (ready, bin) in self.ready.iter_mut().zip(&self.work[block..]) {
             *ready = bin.re * scale;
@@ -333,11 +477,9 @@ impl Stage {
     }
 }
 
-/// One channel's filter.
+/// One channel's filter at work.
 struct Channel {
-    /// The first taps, newest sample last (so they meet the samples in the order
-    /// those are held in).
-    head: Vec<f32>,
+    taps: Arc<Taps>,
     /// The last samples that went by (one fewer than the head has taps), then those
     /// being worked on.
     held: Vec<f32>,
@@ -346,32 +488,19 @@ struct Channel {
 }
 
 impl Channel {
-    fn new(taps: &[f32], planner: &mut FftPlanner<f32>) -> Self {
-        let first = taps.len().min(BLOCKS[0]);
-        let head: Vec<f32> = taps[..first].iter().rev().copied().collect();
-        let mut stages = Vec::new();
-        for (n, block) in BLOCKS.iter().enumerate() {
-            let until = BLOCKS
-                .get(n + 1)
-                .copied()
-                .unwrap_or(usize::MAX)
-                .min(taps.len());
-            if taps.len() > *block {
-                stages.push(Stage::new(*block, &taps[*block..until], planner));
-            }
-        }
+    fn new(taps: &Arc<Taps>) -> Self {
         Channel {
-            held: vec![0.0; head.len().saturating_sub(1)],
-            head,
-            stages,
+            held: vec![0.0; taps.head.len().saturating_sub(1)],
+            stages: taps.plans.iter().map(Stage::new).collect(),
+            taps: Arc::clone(taps),
             out: Vec::new(),
         }
     }
 
     /// Filters `samples` (one channel) in place.
     fn process(&mut self, samples: &mut [f32]) {
-        let taps = self.head.len();
-        if taps == 0 {
+        let head = &self.taps.head;
+        if head.is_empty() {
             samples.fill(0.0);
             return;
         }
@@ -380,8 +509,8 @@ impl Channel {
         // The first taps, one sample at a time.
         self.held.extend_from_slice(samples);
         for (n, out) in self.out.iter_mut().enumerate() {
-            let window = &self.held[n..n + taps];
-            *out = window.iter().zip(&self.head).map(|(s, tap)| s * tap).sum();
+            let window = &self.held[n..n + head.len()];
+            *out = window.iter().zip(head).map(|(s, tap)| s * tap).sum();
         }
         self.held.drain(..samples.len());
         // The rest, block by block.
@@ -402,14 +531,14 @@ pub struct Convolver {
 }
 
 impl Convolver {
-    /// For audio at `rate`.
+    /// For audio at `rate`. (What the response has to be turned into for that rate
+    /// is made once and kept with it: the next convolver for the rate begins at once.)
     pub fn new(impulse: &Impulse, rate: u32) -> Self {
-        let (left, right, trim) = impulse.at_rate(rate);
-        let mut planner = FftPlanner::<f32>::new();
+        let ready = impulse.ready(rate);
         Convolver {
-            left: Channel::new(&left, &mut planner),
-            right: Channel::new(&right, &mut planner),
-            trim,
+            left: Channel::new(&ready.left),
+            right: Channel::new(&ready.right),
+            trim: ready.trim,
             one: Vec::new(),
             other: Vec::new(),
         }
@@ -480,6 +609,7 @@ mod tests {
             rate: 44_100,
             left: left.to_vec(),
             right: right.to_vec(),
+            kept: Kept::default(),
         }
     }
 
@@ -656,6 +786,43 @@ mod tests {
         }
     }
 
+    /// What a response has to be turned into for a rate is made once: the convolvers
+    /// of one rate share it, another rate has it made anew, and one response for
+    /// both sides is one filter, not two.
+    #[test]
+    fn a_response_is_made_ready_once_for_a_rate() {
+        let taps: Vec<f32> = noise(5_000, 4).iter().map(|t| t * 0.01).collect();
+        let both = impulse(&taps, &taps);
+        let first = both.ready(44_100);
+        assert!(Arc::ptr_eq(&first, &both.ready(44_100)));
+        assert!(Arc::ptr_eq(&first.left, &first.right));
+        let other = both.ready(48_000);
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(Arc::ptr_eq(&other, &both.ready(48_000)));
+        // Two convolvers from it do not hear each other's music.
+        let signal = noise(3_000, 6);
+        let mut once: Vec<f32> = signal.iter().flat_map(|s| [*s, *s]).collect();
+        let mut again = once.clone();
+        let (mut a, mut b) = (Convolver::new(&both, 44_100), Convolver::new(&both, 44_100));
+        a.process(&mut once);
+        b.process(&mut vec![0.5; 2_000]);
+        b = Convolver::new(&both, 44_100);
+        b.process(&mut again);
+        assert_eq!(once, again);
+        // Each side its own response: two filters.
+        let sides = impulse(&taps, &noise(5_000, 5));
+        let ready = sides.ready(44_100);
+        assert!(!Arc::ptr_eq(&ready.left, &ready.right));
+        // A copy of a response is the same response, and has nothing made ready yet.
+        let copy = both.clone();
+        assert_eq!(copy, both);
+        assert!(copy.kept.ready.lock().unwrap().is_none());
+        // A response longer than a filter may be is used up to there.
+        let long = impulse(&vec![1e-6; MAX_TAPS + 10], &vec![1e-6; MAX_TAPS + 10]);
+        let (left, right, _) = long.at_rate(44_100);
+        assert_eq!((left.len(), right.len()), (MAX_TAPS, MAX_TAPS));
+    }
+
     #[test]
     fn what_is_no_response_is_refused() {
         assert_eq!(
@@ -713,6 +880,15 @@ mod tests {
         // A file that is no sound.
         let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
         assert!(matches!(Impulse::load(path), Err(Unusable::Unreadable(_))));
+        // A file with one channel (what measuring programs mostly write) is the
+        // response of both sides, sample for sample: not every other sample each.
+        let mono = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tone_mono.wav"
+        ));
+        let one = Impulse::load(mono).unwrap();
+        assert_eq!(one.left, one.right);
+        assert_eq!((one.rate, one.left.len()), (44_100, 44_100));
         // A sound file is read with its rate and its name.
         let sound = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
