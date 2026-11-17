@@ -648,6 +648,12 @@ mod tests {
         assert!(kept.get(&path).is_some());
         kept.clear();
         assert!(kept.get(&path).is_none());
+        // (The thread that loaded the file lets go of it a moment after its last
+        // byte.)
+        let started = std::time::Instant::now();
+        while budget.used() != 0 && started.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(budget.used(), 0);
     }
 }
