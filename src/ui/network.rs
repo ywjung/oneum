@@ -378,7 +378,9 @@ fn server_at(text: &str) -> Option<upnp::Server> {
 
 /// The file's kind as the app names kinds, from what the server calls it.
 fn container_of(mime: &str, url: &str) -> &'static str {
-    const KINDS: [&str; 8] = ["flac", "wav", "aiff", "m4a", "mp3", "ogg", "dsf", "dff"];
+    const KINDS: [&str; 11] = [
+        "flac", "wav", "aiff", "m4a", "mp3", "ogg", "opus", "wv", "ape", "dsf", "dff",
+    ];
     let by_mime = match mime {
         "audio/flac" | "audio/x-flac" => "flac",
         "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
@@ -386,6 +388,9 @@ fn container_of(mime: &str, url: &str) -> &'static str {
         "audio/mp4" | "audio/x-m4a" | "audio/m4a" => "m4a",
         "audio/mpeg" | "audio/mp3" => "mp3",
         "audio/ogg" | "audio/x-ogg" | "application/ogg" => "ogg",
+        "audio/opus" | "audio/x-opus" => "opus",
+        "audio/x-wavpack" | "audio/wavpack" => "wv",
+        "audio/x-ape" | "audio/ape" | "audio/x-monkeys-audio" => "ape",
         "audio/x-dsf" | "audio/dsf" => "dsf",
         "audio/x-dff" | "audio/dff" | "audio/x-dsd" | "audio/dsd" => "dff",
         _ => "",

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The formats of the fixtures and what a server calls them.
-const KINDS: [(&str, &str); 7] = [
+const KINDS: [(&str, &str); 10] = [
     ("gap_a.flac", "audio/flac"),
     ("gap_a.wav", "audio/wav"),
     ("gap_a.aiff", "audio/aiff"),
@@ -21,6 +21,9 @@ const KINDS: [(&str, &str); 7] = [
     ("gap_a.aac.m4a", "audio/mp4"),
     ("gap_a.mp3", "audio/mpeg"),
     ("gap_a.ogg", "audio/ogg"),
+    ("gap_a.opus", "audio/opus"),
+    ("gap_a.wv", "audio/x-wavpack"),
+    ("silence.ape", "audio/x-ape"),
 ];
 
 fn fixture(name: &str) -> PathBuf {

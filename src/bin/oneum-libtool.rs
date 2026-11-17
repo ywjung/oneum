@@ -57,7 +57,7 @@ fn loudness(paths: &[&str]) -> Result<(), String> {
             let e = e.to_ascii_lowercase();
             [
                 "flac", "mp3", "m4a", "wav", "aiff", "aif", "ogg", "mp2", "dsf", "dff", "mka",
-                "webm",
+                "webm", "opus", "wv", "ape",
             ]
             .contains(&e.as_str())
         }) {

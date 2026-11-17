@@ -638,12 +638,15 @@ fn codec_order(codec: &str) -> u8 {
         "AAC" => 0,
         "ADPCM" => 1,
         "ALAC" => 2,
-        c if c.starts_with("DSD") => 3,
-        "FLAC" => 4,
-        "MP3" => 5,
-        "PCM" => 6,
-        "Vorbis" => 7,
-        _ => 8,
+        "APE" => 3,
+        c if c.starts_with("DSD") => 4,
+        "FLAC" => 5,
+        "MP3" => 6,
+        "Opus" => 7,
+        "PCM" => 8,
+        "Vorbis" => 9,
+        "WavPack" => 10,
+        _ => 11,
     }
 }
 

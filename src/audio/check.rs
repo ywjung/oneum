@@ -27,7 +27,7 @@ const DR_LOUDEST_SHARE: f64 = 0.2;
 const TP_TAPS_PER_PHASE: usize = 12;
 /// Formats whose files state their length exactly: audio missing at the end is damage.
 fn exact_length(codec: &str) -> bool {
-    codec == "flac" || codec == "alac" || codec == "dsd" || codec.starts_with("pcm")
+    matches!(codec, "flac" | "alac" | "dsd" | "wavpack" | "ape") || codec.starts_with("pcm")
 }
 
 /// Measures the DR value of interleaved audio pushed to it piece by piece.

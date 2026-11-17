@@ -28,6 +28,12 @@ eframe = { version = "0.37", default-features = false, features = ["clipboard", 
 egui_extras = { version = "0.37", default-features = false }
 cpal = "0.18"
 symphonia = { version = "0.6", default-features = false, features = ["opt-simd", "all-meta", "flac", "mp1", "mp2", "mp3", "wav", "aiff", "pcm", "aac", "alac", "isomp4", "caf", "ogg", "vorbis", "mkv", "adpcm"] }
+# Decoders the main decoding library does not bring: Opus as a codec of it (its Ogg,
+# Matroska and MP4 readers hand the packets over), WavPack and Monkey's Audio as
+# decoders of their own (src/audio/blocks.rs). All three are Rust without unsafe code.
+symphonia-opus = "0.1"
+wavicle = "0.1"
+ape-decoder = "0.3"
 # Without "id3v2_compression_support": a compressed ID3v2 frame can unpack to gigabytes
 # (the reader does not limit it), and such frames are next to unknown in real files.
 # 0.25.5 does not build without the feature; see [patch.crates-io] and vendor/lofty.

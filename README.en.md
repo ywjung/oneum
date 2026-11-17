@@ -9,7 +9,7 @@ The name is the Korean word **온음** ("on-eum"): a whole, unaltered sound, and
 
 - Add a music folder and play at once, while it is still being scanned.
 - Searching, sorting and scrolling answer immediately in a library of 50,000 songs (partial words, Korean initial consonants, and fields such as `artist:`, `genre:`, `year:1990-1999`, `plays:>=5`, `added:30d`).
-- FLAC, WAV, AIFF, ALAC, MP3, AAC and DSD play gapless. Mono and 5.1/7.1 files are mixed to stereo.
+- FLAC, WAV, AIFF, ALAC, WavPack, MP3, AAC, Opus and DSD play gapless. Monkey's Audio (APE) plays too. Mono and 5.1/7.1 files are mixed to stereo.
 - DSD (.dsf, .dff, DSD64 to DSD512) is converted to PCM (88.2/96 kHz); Matroska/WebM audio (.mka, .webm) and ADPCM WAV play too.
 - An album that is one file is split into its songs by the CUE sheet beside it, and those songs follow each other without a gap.
 - Queue, playlists (M3U8 import and export), smart playlists (saved searches), favourites, recently played, shuffle and repeat, stop after the current song, sleep timer.

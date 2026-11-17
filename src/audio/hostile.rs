@@ -16,7 +16,8 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 /// One file of every format that is played, damaged 150 different ways each: opened,
-/// decoded, sought in and measured. The good files hold 44,100 frames.
+/// decoded, sought in and measured. The good files hold 44,100 frames (the one at
+/// 96 kHz 96,000, the Monkey's Audio file 183,456).
 #[test]
 fn damaged_music_files_are_decoded_or_refused_and_give_numbers_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -31,6 +32,10 @@ fn damaged_music_files_are_decoded_or_refused_and_give_numbers_only() {
         "gap_a.wav",
         "gap_a.aiff",
         "gap_a.mp2",
+        "gap_a.opus",
+        "gap_a.wv",
+        "tone_96k_24bit.wv",
+        "silence.ape",
     ] {
         let good = fixture(name);
         for round in 0..150 {

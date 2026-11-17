@@ -2,13 +2,14 @@
 //!
 //! Files are selected by extension and then verified by content: the container/codec
 //! reported here is what the file really is, and anything the audio engine cannot play
-//! (DRM-protected MP4, Opus-in-Ogg, compressed WAV/AIFF the decoder does not know …) is
+//! (DRM-protected MP4, Speex-in-Ogg, compressed WAV/AIFF the decoder does not know …) is
 //! reported as unsupported instead of being added to the library.
 //!
 //! Two kinds of file are read without lofty's audio parsing: DSD (DSF and DSDIFF), whose
 //! headers are read by `audio::dsd` and whose ID3v2 tag is handed to lofty on its own,
 //! and Matroska/WebM, whose properties come from the decoder and tags from Symphonia.
 use crate::model::ReplayGainTags;
+use lofty::ape::ApeFile;
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
 use lofty::flac::FlacFile;
@@ -16,19 +17,20 @@ use lofty::iff::aiff::{AiffCompressionType, AiffFile};
 use lofty::iff::wav::{WavFile, WavFormat};
 use lofty::mp4::{Mp4Codec, Mp4File};
 use lofty::mpeg::{Layer, MpegFile};
-use lofty::ogg::VorbisFile;
+use lofty::ogg::{OpusFile, VorbisFile};
 use lofty::picture::PictureType;
 use lofty::probe::Probe;
 use lofty::tag::{ItemKey, Tag};
+use lofty::wavpack::WavPackFile;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Extensions the scanner looks at. `m4p` is listed only so that protected purchases are
 /// counted as unsupported rather than silently ignored.
-const AUDIO_EXTENSIONS: [&str; 17] = [
+const AUDIO_EXTENSIONS: [&str; 20] = [
     "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "m4p", "ogg", "oga",
-    "dsf", "dff", "mka", "webm",
+    "opus", "wv", "ape", "dsf", "dff", "mka", "webm",
 ];
 
 /// What reading one file's tags and properties may cost: bytes read from the file and
@@ -156,6 +158,9 @@ fn type_from_extension(path: &Path) -> Option<FileType> {
         "aif" | "aiff" => Some(FileType::Aiff),
         "m4a" | "mp4" | "m4b" | "m4p" => Some(FileType::Mp4),
         "ogg" | "oga" => Some(FileType::Vorbis),
+        "opus" => Some(FileType::Opus),
+        "wv" => Some(FileType::WavPack),
+        "ape" => Some(FileType::Ape),
         _ => None,
     }
 }
@@ -303,7 +308,7 @@ fn dsd_codec_name(dsd_rate: u32) -> &'static str {
 
 /// A file whose audio lofty does not parse (Matroska, WebM, a WAV it refuses): what the
 /// decoder says about it, and the tags Symphonia finds. Refused as unsupported when the
-/// decoder cannot play it (Opus in WebM, say).
+/// decoder cannot play it (a video codec's sound track, say).
 fn read_by_decoder(
     path: &Path,
     container: &'static str,
@@ -326,6 +331,7 @@ fn read_by_decoder(
         "mp2" => "MP2",
         "mp1" => "MP1",
         "vorbis" => "Vorbis",
+        "opus" => "Opus",
         c if c.starts_with("pcm") => "PCM",
         c if c.starts_with("adpcm") => "ADPCM",
         other => return Err(ReadError::Unsupported(format!("{container} with {other}"))),
@@ -377,6 +383,20 @@ fn read_by_decoder(
     })
 }
 
+/// Whether the decoder plays the file: `Err` with its reason when the file is of a
+/// kind it does not (a file it cannot read at all fails later, when it is played).
+fn playable(path: &Path, format: &str) -> Result<(), ReadError> {
+    match crate::audio::decoder::can_play(path) {
+        Err(error) if error.kind == crate::audio::PlaybackErrorKind::Unsupported => {
+            Err(ReadError::Unsupported(format!(
+                "{format} the decoder does not play: {}",
+                error.detail
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The title of a file without tags: its name.
 fn file_title(path: &Path) -> String {
     path.file_stem()
@@ -418,7 +438,10 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
             | FileType::Wav
             | FileType::Aiff
             | FileType::Mp4
-            | FileType::Vorbis),
+            | FileType::Vorbis
+            | FileType::Opus
+            | FileType::WavPack
+            | FileType::Ape),
         ) => known,
         Some(other) => return Err(ReadError::Unsupported(format!("{other:?} audio"))),
         None => {
@@ -427,7 +450,7 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
             let is_ogg = reader.read_exact(&mut magic).is_ok() && &magic == b"OggS";
             if is_ogg {
                 return Err(ReadError::Unsupported(
-                    "Ogg stream with a codec other than Vorbis".into(),
+                    "Ogg stream with a codec other than Vorbis and Opus".into(),
                 ));
             }
             type_from_extension(path)
@@ -439,6 +462,9 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
     let options = ParseOptions::new()
         .read_cover_art(want_picture)
         .read_tags(want_tags);
+    // What an APE tag holds under names the tag library does not carry over (see
+    // `ApeExtras`).
+    let mut extras = ApeExtras::default();
     let (tagged, codec, container): (TaggedFile, &'static str, &'static str) = match file_type {
         FileType::Mpeg => {
             let file = MpegFile::read_from(&mut reader, options).map_err(failed)?;
@@ -540,11 +566,36 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
             let file = VorbisFile::read_from(&mut reader, options).map_err(failed)?;
             (file.into(), "Vorbis", "Ogg")
         }
+        FileType::Opus => {
+            let file = OpusFile::read_from(&mut reader, options).map_err(failed)?;
+            playable(path, "Opus")?;
+            (file.into(), "Opus", "Ogg")
+        }
+        // These two have kinds the decoder does not play (WavPack's lossy mode and
+        // its DSD, more than two channels; Monkey's Audio in floating point): the
+        // decoder is asked.
+        FileType::WavPack => {
+            let file = WavPackFile::read_from(&mut reader, options).map_err(failed)?;
+            playable(path, "WavPack")?;
+            extras = ApeExtras::of(file.ape());
+            (file.into(), "WavPack", "WavPack")
+        }
+        FileType::Ape => {
+            let file = ApeFile::read_from(&mut reader, options).map_err(failed)?;
+            playable(path, "Monkey's Audio")?;
+            extras = ApeExtras::of(file.ape());
+            (file.into(), "APE", "APE")
+        }
         other => return Err(ReadError::Unsupported(format!("{other:?} audio"))),
     };
 
     let properties = tagged.properties();
-    let sample_rate = properties.sample_rate().unwrap_or(0);
+    // Opus is decoded at 48 kHz whatever the rate of what was encoded (which is what
+    // its header names).
+    let sample_rate = match file_type {
+        FileType::Opus => 48_000,
+        _ => properties.sample_rate().unwrap_or(0),
+    };
     let channels = properties.channels().unwrap_or(0);
     if sample_rate == 0 || channels == 0 {
         return Err(ReadError::Failed("no audio stream found".into()));
@@ -571,14 +622,43 @@ fn read_file(path: &Path, want_picture: bool, want_tags: bool) -> Result<FileTag
         }
     }
 
-    Ok(file_tags(
-        path,
-        &tags,
-        audio,
-        codec,
-        container,
-        want_picture,
-    ))
+    let mut read = file_tags(path, &tags, audio, codec, container, want_picture);
+    if read.year.is_none() {
+        read.year = extras.date.as_deref().and_then(parse_year);
+    }
+    if read.album_artist.is_empty() {
+        read.album_artist = extras
+            .album_artist
+            .as_deref()
+            .map(clean)
+            .unwrap_or_default();
+    }
+    Ok(read)
+}
+
+/// APE tags (WavPack and Monkey's Audio carry them) name the date "Year" and the album
+/// artist "Album Artist"; files converted with ffmpeg have them as "date" and
+/// "album_artist", names the tag library drops. Those two are looked up by name.
+#[derive(Default)]
+struct ApeExtras {
+    date: Option<String>,
+    album_artist: Option<String>,
+}
+
+impl ApeExtras {
+    fn of(tag: Option<&lofty::ape::ApeTag>) -> Self {
+        let text = |name: &str| {
+            let item = tag?.get(name)?;
+            match item.value() {
+                lofty::tag::ItemValue::Text(text) => Some(text.clone()),
+                _ => None,
+            }
+        };
+        ApeExtras {
+            date: text("date"),
+            album_artist: text("album_artist"),
+        }
+    }
 }
 
 /// The song as the library keeps it: what its tags say and what its audio is.
@@ -599,10 +679,13 @@ fn file_tags(
         tag.get_string(ItemKey::FlagCompilation)
             .is_some_and(|flag| matches!(flag.trim(), "1" | "true" | "True" | "TRUE"))
     });
+    // Opus files are leveled with R128 tags, more often than with ReplayGain's.
     let replaygain = ReplayGainTags {
-        track_gain_db: first_parsed(&tags, ItemKey::ReplayGainTrackGain, parse_gain_db),
+        track_gain_db: first_parsed(&tags, ItemKey::ReplayGainTrackGain, parse_gain_db)
+            .or_else(|| first_parsed(&tags, ItemKey::R128TrackGain, parse_r128_gain)),
         track_peak: first_parsed(&tags, ItemKey::ReplayGainTrackPeak, parse_peak),
-        album_gain_db: first_parsed(&tags, ItemKey::ReplayGainAlbumGain, parse_gain_db),
+        album_gain_db: first_parsed(&tags, ItemKey::ReplayGainAlbumGain, parse_gain_db)
+            .or_else(|| first_parsed(&tags, ItemKey::R128AlbumGain, parse_r128_gain)),
         album_peak: first_parsed(&tags, ItemKey::ReplayGainAlbumPeak, parse_peak),
     };
     let picture = if want_picture {
@@ -769,6 +852,17 @@ pub(crate) fn parse_gain_db(text: &str) -> Option<f32> {
     (value.is_finite() && value.abs() <= 100.0).then_some(value)
 }
 
+/// Parses an R128 gain tag (as Opus files carry them): a whole number of 1/256 dB that
+/// brings the song to −23 LUFS. Given as the ReplayGain it amounts to, whose reference
+/// is 5 dB louder.
+pub(crate) fn parse_r128_gain(text: &str) -> Option<f32> {
+    let steps: i32 = text.trim().parse().ok()?;
+    // The tag is a 16-bit number: anything else is not one.
+    i16::try_from(steps)
+        .ok()
+        .map(|steps| f32::from(steps) / 256.0 + 5.0)
+}
+
 /// Parses a ReplayGain peak (linear, 1.0 = full scale).
 pub(crate) fn parse_peak(text: &str) -> Option<f32> {
     let value: f32 = text.trim().replace(',', ".").parse().ok()?;
@@ -879,6 +973,12 @@ mod tests {
         assert_eq!(parse_gain_db("dB"), None);
         assert_eq!(parse_gain_db("loud"), None);
         assert_eq!(parse_gain_db("NaN dB"), None);
+        // R128: 1/256 dB steps toward −23 LUFS, told as ReplayGain (5 dB above).
+        assert_eq!(parse_r128_gain("0"), Some(5.0));
+        assert_eq!(parse_r128_gain("-1280"), Some(0.0));
+        assert_eq!(parse_r128_gain(" 256 "), Some(6.0));
+        assert_eq!(parse_r128_gain("-6.5 dB"), None);
+        assert_eq!(parse_r128_gain("99999"), None);
         assert_eq!(parse_gain_db("inf"), None);
         assert_eq!(parse_gain_db("-900 dB"), None);
     }
@@ -915,19 +1015,11 @@ mod tests {
     fn extensions() {
         for name in [
             "a.mp3", "a.MP3", "a.flac", "a.wav", "a.aif", "a.AIFF", "a.m4a", "a.mp4", "a.m4b",
-            "a.m4p", "a.ogg", "a.oga",
+            "a.m4p", "a.ogg", "a.oga", "a.opus", "a.wv", "a.APE",
         ] {
             assert!(has_audio_extension(Path::new(name)), "{name}");
         }
-        for name in [
-            "a.txt",
-            "a.jpg",
-            "a.opus",
-            "a.wma",
-            "mp3",
-            "a.mp3.part",
-            "a",
-        ] {
+        for name in ["a.txt", "a.jpg", "a.tta", "a.wma", "mp3", "a.mp3.part", "a"] {
             assert!(!has_audio_extension(Path::new(name)), "{name}");
         }
     }

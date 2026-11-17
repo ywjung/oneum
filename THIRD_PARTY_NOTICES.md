@@ -6,15 +6,15 @@ own license. The full license texts come with the app in the file
 `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
 next to the program; on Android inside the APK, under assets).
 
-Crates: 313
+Crates: 322
 
 ## License summary
 
-- `MIT OR Apache-2.0` — 138
-- `MIT` — 53
+- `MIT OR Apache-2.0` — 145
+- `MIT` — 54
 - `Zlib OR Apache-2.0 OR MIT` — 26
 - `Apache-2.0 OR MIT` — 21
-- `MPL-2.0` — 16
+- `MPL-2.0` — 17
 - `MIT/Apache-2.0` — 11
 - `Apache-2.0` — 9
 - `MIT OR Apache-2.0 OR Zlib` — 5
@@ -59,6 +59,7 @@ Notes:
 | android-activity | 0.6.1 | MIT OR Apache-2.0 | https://github.com/rust-mobile/android-activity |
 | android-properties | 0.2.2 | MIT | https://github.com/miklelappo/android-properties |
 | android_system_properties | 0.1.6 | MIT OR Apache-2.0 | https://github.com/nical/android_system_properties |
+| ape-decoder | 0.3.2 | MIT OR Apache-2.0 | https://github.com/OMBS-IO/ape-decoder |
 | arboard | 3.7.0 | MIT OR Apache-2.0 | https://github.com/1Password/arboard |
 | arrayvec | 0.7.8 | MIT OR Apache-2.0 | https://github.com/bluss/arrayvec |
 | as-raw-xcb-connection | 1.0.1 | MIT OR Apache-2.0 | https://github.com/psychon/as-raw-xcb-connection |
@@ -71,6 +72,7 @@ Notes:
 | bit-vec | 0.9.1 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
 | bitflags | 1.3.2 | MIT/Apache-2.0 | https://github.com/bitflags/bitflags |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags |
+| block-buffer | 0.10.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | block2 | 0.5.1 | MIT | https://github.com/madsmtm/objc2 |
 | block2 | 0.6.2 | MIT | https://github.com/madsmtm/objc2 |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/bytemuck |
@@ -92,9 +94,11 @@ Notes:
 | crc32fast | 1.5.5 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
 | crossbeam-channel | 0.5.17 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
+| crypto-common | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | cursor-icon | 1.2.0 | MIT OR Apache-2.0 OR Zlib | https://github.com/rust-windowing/cursor-icon |
 | dasp_sample | 0.11.0 | MIT OR Apache-2.0 | https://github.com/rustaudio/sample.git |
 | data-encoding | 2.11.1 | MIT | https://github.com/ia0/data-encoding |
+| digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | dispatch | 0.2.0 | MIT | http://github.com/SSheldon/rust-dispatch |
 | dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | dlib | 0.5.3 | MIT | https://github.com/elinorbgr/dlib |
@@ -131,6 +135,7 @@ Notes:
 | foreign-types | 0.5.0 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
 | foreign-types-macros | 0.2.4 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
 | foreign-types-shared | 0.3.1 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
+| generic-array | 0.14.7 | MIT | https://github.com/fizyk20/generic-array.git |
 | gethostname | 1.1.0 | Apache-2.0 | https://codeberg.org/swsnr/gethostname.rs.git |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | glifo | 0.3.0 | Apache-2.0 OR MIT | https://github.com/linebender/vello |
@@ -173,6 +178,7 @@ Notes:
 | lofty_attr | 0.13.0 | MIT OR Apache-2.0 | https://github.com/Serial-ATA/lofty-rs |
 | log | 0.4.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | mach2 | 0.6.0 | BSD-2-Clause OR MIT OR Apache-2.0 | https://github.com/JohnTitor/mach2 |
+| md-5 | 0.10.6 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | memmap2 | 0.9.12 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/memmap2-rs |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
@@ -307,6 +313,7 @@ Notes:
 | symphonia-format-ogg | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-format-riff | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-metadata | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-opus | 0.1.3 | MPL-2.0 | https://github.com/jiztastamablastamarang/symphonia-opus |
 | syn | 2.0.119 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | syn | 3.0.10 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | sys-locale | 0.3.2 | MIT OR Apache-2.0 | https://github.com/1Password/sys-locale |
@@ -328,6 +335,7 @@ Notes:
 | tracing-subscriber | 0.3.23 | MIT | https://github.com/tokio-rs/tracing |
 | transpose | 0.2.3 | MIT OR Apache-2.0 | https://github.com/ejmahler/transpose |
 | type-map | 0.5.1 | MIT/Apache-2.0 | https://github.com/kardeiz/type-map |
+| typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | unicode-general-category | 1.1.0 | Apache-2.0 | https://github.com/yeslogic/unicode-general-category |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
 | unicode-normalization | 0.1.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/unicode-rs/unicode-normalization |
@@ -340,6 +348,7 @@ Notes:
 | vello_cpu | 0.2.0 | Apache-2.0 OR MIT | https://github.com/linebender/vello |
 | visibility | 0.1.1 | Zlib OR MIT OR Apache-2.0 | https://github.com/danielhenrymantilla/visibility.rs |
 | walkdir | 2.5.0 | Unlicense/MIT | https://github.com/BurntSushi/walkdir |
+| wavicle | 0.1.0 | MIT OR Apache-2.0 | https://github.com/mark-ik/wavicle |
 | wayland-sys | 0.31.11 | MIT | https://github.com/smithay/wayland-rs |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
 | weezl | 0.1.12 | MIT OR Apache-2.0 | https://github.com/image-rs/weezl |

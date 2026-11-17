@@ -49,8 +49,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "ogg", "oga", "dsf",
-    "dff", "mka", "webm",
+    "mp3", "mp2", "mp1", "flac", "wav", "aif", "aiff", "m4a", "mp4", "m4b", "ogg", "oga", "opus",
+    "wv", "ape", "dsf", "dff", "mka", "webm",
 ];
 const PLAYLIST_EXTENSIONS: &[&str] = &["m3u8", "m3u"];
 const VOLUME_STEP: f32 = 0.05;

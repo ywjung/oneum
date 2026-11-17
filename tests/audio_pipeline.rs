@@ -245,6 +245,122 @@ fn lossless_formats_decode_to_identical_samples() {
     }
 }
 
+/// WavPack is lossless: what it decodes to is what was packed, sample for sample
+/// (16 bits in stereo and in mono, 24 bits at 96 kHz).
+#[test]
+fn wavpack_decodes_to_the_samples_that_were_packed() {
+    for (packed, original) in [
+        ("gap_a.wv", "gap_a.wav"),
+        ("gap_b.wv", "gap_b.wav"),
+        ("tone_mono.wv", "tone_mono.wav"),
+        ("tone_96k_24bit.wv", "tone_96k_24bit.flac"),
+    ] {
+        let (rate, channels, pcm) = decode_all(packed);
+        let (r, c, expected) = decode_all(original);
+        assert_eq!((rate, channels), (r, c), "{packed}");
+        assert_eq!(pcm.len(), expected.len(), "{packed} frame count");
+        assert_eq!(
+            max_abs_diff(&pcm, &expected),
+            0.0,
+            "{packed} must be sample-identical to {original}"
+        );
+        let dec = TrackDecoder::open(&fixture(packed)).expect("opens");
+        assert_eq!(dec.info().codec, "wavpack");
+        assert_eq!(
+            dec.info().total_frames,
+            Some((expected.len() / channels) as u64),
+            "{packed} states its length"
+        );
+    }
+}
+
+/// A position in a WavPack file is found exactly: what comes after a seek is the
+/// file from that frame on.
+#[test]
+fn wavpack_seeks_to_the_frame() {
+    let (_, _, whole) = decode_all("gap_a.wv");
+    let mut dec = TrackDecoder::open(&fixture("gap_a.wv")).expect("opens");
+    let mut buf = Vec::new();
+    for frame in [30_000u64, 0, 44_099, 22_050, 1] {
+        dec.seek(frame).expect("seeks");
+        let mut rest = Vec::new();
+        while dec.next(&mut buf).expect("decodes") {
+            rest.extend_from_slice(&buf);
+        }
+        assert_eq!(rest, whole[frame as usize * 2..], "from frame {frame}");
+    }
+    // Past the end there is nothing.
+    dec.seek(50_000).expect("seeks");
+    assert!(!dec.next(&mut buf).expect("decodes"));
+}
+
+/// Opus is always 48 kHz. What the file says about its start (the pre-skip) and its
+/// end is taken out: a second of tone is a second of tone, close to the original.
+#[test]
+fn opus_decodes_to_the_length_that_was_encoded() {
+    let (rate, channels, pcm) = decode_all("gap_a.opus");
+    assert_eq!((rate, channels), (48_000, 2));
+    assert_eq!(
+        pcm.len() / 2,
+        48_000,
+        "exactly the frames that were encoded"
+    );
+    let dec = TrackDecoder::open(&fixture("gap_a.opus")).expect("opens");
+    assert_eq!(dec.info().codec, "opus");
+    assert_eq!(dec.info().total_frames, Some(48_000));
+    let left: Vec<f32> = pcm.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
+    let reference: Vec<f32> = (0..48_000)
+        .map(|n| AMP * (std::f32::consts::TAU * 480.0 * n as f32 / 48_000.0).sin())
+        .collect();
+    // After the first milliseconds (the codec starts from silence).
+    let err = max_abs_diff(&left[2_400..], &reference[2_400..]);
+    assert!(
+        err < 0.02,
+        "deviation from the tone that was encoded: {err}"
+    );
+    println!("REPORT gap_a.opus: frames=48000, max_error_vs_tone={err:.4}");
+}
+
+/// Two halves of a continuous tone as Opus files, played one after the other: no
+/// frame added or lost, no step and no dip where they meet.
+#[test]
+fn gapless_opus_has_no_added_silence_or_discontinuity() {
+    let played = play(&["gap_a.opus", "gap_b.opus"], 48_000);
+    assert_eq!(played.underruns, 0);
+    assert_eq!(
+        played.frames(),
+        96_000,
+        "exactly the original number of frames"
+    );
+    assert_eq!(played.started(), vec![(1, 0), (2, 48_000)]);
+    let left = played.left();
+    let reference: Vec<f32> = (0..96_000)
+        .map(|n| AMP * (std::f32::consts::TAU * 480.0 * n as f32 / 48_000.0).sin())
+        .collect();
+    let window = 47_000..49_000;
+    let err = max_abs_diff(&left[window.clone()], &reference[window.clone()]);
+    assert!(
+        err < 0.05,
+        "deviation from the continuous tone near the boundary: {err}"
+    );
+    // The tone's own slope allows AMP·2π·480/48000 ≈ 0.022 from sample to sample.
+    let max_step = left[window]
+        .windows(2)
+        .fold(0f32, |m, w| m.max((w[1] - w[0]).abs()));
+    assert!(
+        max_step < 0.03,
+        "largest step near the boundary: {max_step}"
+    );
+    let boundary_rms = rms(&left[47_900..48_100]);
+    assert!(
+        (boundary_rms - TONE_RMS).abs() < 0.01,
+        "RMS across the boundary: {boundary_rms}"
+    );
+    println!(
+        "REPORT gap_a.opus+gap_b.opus: total_frames=96000, max_error_vs_tone={err:.4}, max_step={max_step:.4}, boundary_rms={boundary_rms:.4}"
+    );
+}
+
 #[test]
 fn gapless_lossless_pairs_reproduce_the_continuous_signal() {
     let (_, _, a) = decode_all("gap_a.wav");
@@ -255,6 +371,7 @@ fn gapless_lossless_pairs_reproduce_the_continuous_signal() {
         ("gap_a.flac", "gap_b.flac"),
         ("gap_a.alac.m4a", "gap_b.alac.m4a"),
         ("gap_a.aiff", "gap_b.aiff"),
+        ("gap_a.wv", "gap_b.wv"),
         ("gap_a.flac", "gap_b.wav"),
     ] {
         let played = play(&[first, second], 44_100);
@@ -2518,4 +2635,275 @@ fn a_track_whose_follower_cannot_be_opened_ends_as_it_does() {
             .any(|event| matches!(event, EngineEvent::TrackFailed { .. })),
         "and the failure is told"
     );
+}
+
+/// Opus and WavPack against another decoder: files made here with ffmpeg from noise, a
+/// sweep and speech-like bursts (so that every mode of Opus is used: the music coder,
+/// the speech coder and both together) are decoded by this app and by ffmpeg. WavPack
+/// must be the same sample for sample; Opus, which a decoder may round differently,
+/// within a small part of full scale.
+///
+/// Run with: `cargo test --test audio_pipeline -- against_ffmpeg --ignored --nocapture`.
+#[test]
+#[ignore = "needs ffmpeg with libopus"]
+fn opus_and_wavpack_decode_as_ffmpeg_decodes_them() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let at = |name: &str| dir.path().join(name);
+    let ffmpeg = |args: &[&str]| {
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("ffmpeg runs");
+        assert!(
+            out.status.success(),
+            "ffmpeg {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    // Twenty seconds: pink noise under a sweep, loud and quiet stretches.
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "anoisesrc=color=pink:sample_rate=48000:duration=20:amplitude=0.3:seed=7",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=0.4*sin(2*PI*(200+900*t)*t)*(0.55+0.45*sin(2*PI*0.7*t)):s=48000:d=20",
+        "-filter_complex",
+        "[0][1]amix=inputs=2:normalize=0,aformat=channel_layouts=stereo",
+        "-c:a",
+        "pcm_s16le",
+        "source48.wav",
+    ]);
+    ffmpeg(&[
+        "-i",
+        "source48.wav",
+        "-ar",
+        "44100",
+        "-c:a",
+        "pcm_s24le",
+        "source44_24.wav",
+    ]);
+    let ours = |name: &str| -> (u32, usize, Vec<f32>) {
+        let mut dec = TrackDecoder::open(&at(name)).expect("file opens");
+        let info = dec.info().clone();
+        let (mut all, mut buf) = (Vec::new(), Vec::new());
+        while dec.next(&mut buf).expect("file decodes") {
+            all.extend_from_slice(&buf);
+        }
+        assert_eq!(dec.skipped_packets(), 0, "{name}: nothing damaged");
+        (info.sample_rate, info.channels, all)
+    };
+    let theirs = |args: &[&str]| -> Vec<f32> {
+        let mut all = vec!["-i"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(&["-f", "f32le", "-c:a", "pcm_f32le", "-"]);
+        ffmpeg(&all)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect()
+    };
+
+    for (name, encode) in [
+        ("music_128k.opus", vec!["-c:a", "libopus", "-b:a", "128k"]),
+        ("music_48k.opus", vec!["-c:a", "libopus", "-b:a", "48k"]),
+        (
+            "voice_16k.opus",
+            vec![
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "16k",
+                "-application",
+                "voip",
+                "-ac",
+                "1",
+            ],
+        ),
+        (
+            "voice_32k.opus",
+            vec!["-c:a", "libopus", "-b:a", "32k", "-application", "voip"],
+        ),
+        (
+            "short_frames.opus",
+            vec!["-c:a", "libopus", "-b:a", "96k", "-frame_duration", "5"],
+        ),
+        (
+            "long_frames.opus",
+            vec!["-c:a", "libopus", "-b:a", "64k", "-frame_duration", "60"],
+        ),
+    ] {
+        let mut args = vec!["-i", "source48.wav"];
+        args.extend(encode);
+        args.push(name);
+        ffmpeg(&args);
+        let (rate, channels, pcm) = ours(name);
+        // The other decoder: libopus itself, as ffmpeg runs it.
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-c:a", "libopus", "-i", name])
+            .args(["-f", "f32le", "-c:a", "pcm_f32le", "-"])
+            .current_dir(dir.path())
+            .output()
+            .expect("ffmpeg runs");
+        assert!(out.status.success());
+        let reference: Vec<f32> = out
+            .stdout
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        assert_eq!(rate, 48_000, "{name}");
+        assert_eq!(
+            pcm.len(),
+            reference.len(),
+            "{name}: as many samples as ffmpeg gives"
+        );
+        assert_eq!(
+            pcm.len() / channels,
+            48_000 * 20,
+            "{name}: twenty seconds exactly"
+        );
+        let worst = max_abs_diff(&pcm, &reference);
+        let error = rms(&pcm
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>());
+        println!(
+            "REPORT {name}: {channels} ch, {} frames, largest difference from libopus {worst:.6}, RMS of the difference {error:.7}",
+            pcm.len() / channels
+        );
+        assert!(worst < 2e-3, "{name}: differs from libopus by {worst}");
+        assert!(error < 1e-4, "{name}: RMS difference from libopus {error}");
+    }
+
+    for (name, source, encode) in [
+        ("s16.wv", "source48.wav", vec!["-c:a", "wavpack"]),
+        ("s24.wv", "source44_24.wav", vec!["-c:a", "wavpack"]),
+        (
+            "s16_high.wv",
+            "source48.wav",
+            vec!["-c:a", "wavpack", "-compression_level", "8"],
+        ),
+        (
+            "mono.wv",
+            "source48.wav",
+            vec!["-ac", "1", "-c:a", "wavpack"],
+        ),
+        (
+            "float.wv",
+            "source48.wav",
+            vec![
+                "-af",
+                "volume=0.5",
+                "-sample_fmt",
+                "fltp",
+                "-c:a",
+                "wavpack",
+            ],
+        ),
+    ] {
+        let mut args = vec!["-i", source];
+        args.extend(encode);
+        args.push(name);
+        ffmpeg(&args);
+        let (_, channels, pcm) = ours(name);
+        let reference = theirs(&[name]);
+        assert_eq!(
+            pcm.len(),
+            reference.len(),
+            "{name}: as many samples as ffmpeg gives"
+        );
+        let worst = max_abs_diff(&pcm, &reference);
+        println!(
+            "REPORT {name}: {channels} ch, {} frames, largest difference from ffmpeg {worst}",
+            pcm.len() / channels
+        );
+        assert_eq!(
+            worst, 0.0,
+            "{name} must be what ffmpeg decodes, sample for sample"
+        );
+        // And a place in the middle is found exactly.
+        let mut dec = TrackDecoder::open(&at(name)).expect("opens");
+        let frame = (pcm.len() / channels) as u64 * 2 / 3 + 12_345;
+        dec.seek(frame).expect("seeks");
+        let mut buf = Vec::new();
+        assert!(dec.next(&mut buf).expect("decodes"));
+        let from = frame as usize * channels;
+        assert_eq!(buf[..], pcm[from..from + buf.len()], "{name}: after a seek");
+    }
+}
+
+/// Monkey's Audio, with a file put together by hand of frames marked silent (see
+/// scripts/gen-fixtures.sh: there is no encoder to make one of music with): the file
+/// is read, its length is known, and a position is found in it.
+#[test]
+fn monkeys_audio_is_read_and_sought_in() {
+    let mut dec = TrackDecoder::open(&fixture("silence.ape")).expect("opens");
+    let info = dec.info().clone();
+    assert_eq!(
+        (info.codec.as_str(), info.sample_rate, info.channels),
+        ("ape", 44_100, 2)
+    );
+    assert_eq!(info.total_frames, Some(183_456));
+    let mut buf = Vec::new();
+    let mut count = |dec: &mut TrackDecoder| {
+        let mut frames = 0;
+        while dec.next(&mut buf).expect("decodes") {
+            assert!(buf.iter().all(|s| *s == 0.0), "silence");
+            frames += buf.len() / 2;
+        }
+        frames
+    };
+    assert_eq!(count(&mut dec), 183_456, "every frame of the file");
+    assert_eq!(dec.skipped_packets(), 0);
+    for (frame, left) in [
+        (100_000u64, 83_456),
+        (0, 183_456),
+        (183_455, 1),
+        (73_728, 109_728),
+    ] {
+        dec.seek(frame).expect("seeks");
+        assert_eq!(count(&mut dec), left, "from frame {frame}");
+    }
+    dec.seek(200_000).expect("seeks");
+    assert_eq!(count(&mut dec), 0, "nothing past the end");
+}
+
+/// A frame of Monkey's Audio is longer than the buffer between the decoder and the
+/// output: the file plays through all the same (it is given in pieces), at the rate
+/// of the file and through the resampler.
+#[test]
+fn a_file_of_long_blocks_plays_through_the_feed() {
+    for rate in [44_100u32, 48_000] {
+        let played = play(&["silence.ape"], rate);
+        assert_eq!(played.underruns, 0, "at {rate} Hz");
+        let expected = 183_456u64 * u64::from(rate) / 44_100;
+        assert!(
+            (played.frames() as u64).abs_diff(expected) <= 2,
+            "at {rate} Hz: {} frames for {expected}",
+            played.frames()
+        );
+        assert_eq!(played.started(), vec![(1, 0)]);
+    }
+    // FLAC with the largest blocks the format has (65,535 frames, a second and a
+    // half): through to the end, sample for sample.
+    let played = play(&["tone_big_blocks.flac"], 44_100);
+    assert_eq!(played.frames(), 132_300);
+    let (_, _, whole) = decode_all("tone_big_blocks.flac");
+    assert_eq!(
+        max_abs_diff(&played.pcm[FADE_GUARD * 2..], &whole[FADE_GUARD * 2..]),
+        0.0
+    );
+    // And after a WavPack song without a gap between them.
+    let played = play(&["gap_a.wv", "silence.ape"], 44_100);
+    assert_eq!(played.frames(), 44_100 + 183_456);
+    assert_eq!(played.started(), vec![(1, 0), (2, 44_100)]);
 }

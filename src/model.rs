@@ -143,9 +143,14 @@ impl Track {
         }
     }
 
-    /// True for formats that keep the recording as it was made: FLAC, ALAC, PCM, DSD.
+    /// True for formats that keep the recording as it was made: FLAC, ALAC, PCM,
+    /// WavPack, Monkey's Audio, DSD. (WavPack's lossy mode is not played, so a WavPack
+    /// song in the library is a lossless one.)
     pub fn is_lossless(&self) -> bool {
-        matches!(self.codec.as_str(), "FLAC" | "ALAC" | "PCM") || self.codec.starts_with("DSD")
+        matches!(
+            self.codec.as_str(),
+            "FLAC" | "ALAC" | "PCM" | "WavPack" | "APE"
+        ) || self.codec.starts_with("DSD")
     }
 
     /// The values volume leveling works with: the file's tags, and where a gain is

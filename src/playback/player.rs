@@ -1058,8 +1058,9 @@ impl<H: PlayerHost> Player<H> {
     /// audio is dithered when the device takes integers (see `Renderer`).
     fn source_is_processed(&self, info: &SourceInfo, track_id: TrackId) -> bool {
         let track = self.host.track(track_id);
-        let integer_pcm = info.codec == "flac"
-            || info.codec == "alac"
+        // (WavPack may hold floats: those are 32 bits wide, wider than any device
+        // takes, and count as processed by their width.)
+        let integer_pcm = matches!(info.codec.as_str(), "flac" | "alac" | "wavpack" | "ape")
             || info.codec.starts_with("pcm_s")
             || info.codec.starts_with("pcm_u");
         let device_bits = self.engine.hardware_bits().map(|(bits, _)| bits);

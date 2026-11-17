@@ -54,7 +54,7 @@ fn scan_then_incremental_rescan() {
     write_wav(&music.join("a/._one.wav"), 100, &[]);
     write_wav(&music.join(".hidden-dir/x.wav"), 100, &[]);
     fs::write(music.join("notes.txt"), b"not audio").unwrap();
-    fs::write(music.join("a/track.opus"), b"not scanned by extension").unwrap();
+    fs::write(music.join("a/track.wma"), b"not scanned by extension").unwrap();
 
     let notified = Arc::new(AtomicUsize::new(0));
     let library = env.open();
@@ -223,6 +223,77 @@ fn corrupt_database_is_replaced_and_reported() {
     assert_eq!(library.snapshot().len(), 1);
 }
 
+/// Opus, WavPack and Monkey's Audio come into the library with what they are: the
+/// codec, whether they are lossless, the length, and for Opus the rate it is decoded
+/// at. (Files of the repository: no ffmpeg needed.)
+#[test]
+fn opus_wavpack_and_monkeys_audio_are_scanned() {
+    let env = TestEnv::new();
+    let music = env.music();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for name in ["gap_a.opus", "gap_a.wv", "tone_96k_24bit.wv", "silence.ape"] {
+        std::fs::copy(fixtures.join(name), music.join(name)).unwrap();
+    }
+    // A file that only looks like WavPack by its name is not added.
+    std::fs::write(music.join("not.wv"), b"wvpk and nothing else").unwrap();
+
+    let (library, _) = env.open_scanned();
+    let snapshot = library.snapshot();
+    let track = |name: &str| {
+        snapshot
+            .tracks
+            .iter()
+            .find(|t| t.path == music.join(name))
+            .unwrap_or_else(|| panic!("{name} not in the library"))
+            .clone()
+    };
+    assert_eq!(snapshot.len(), 4);
+
+    let opus = track("gap_a.opus");
+    assert_eq!(
+        (opus.codec.as_str(), opus.container.as_str()),
+        ("Opus", "Ogg")
+    );
+    assert_eq!((opus.sample_rate, opus.channels), (48_000, 2));
+    assert!(!opus.is_lossless());
+    assert!(
+        (990..=1010).contains(&opus.duration_ms),
+        "{}",
+        opus.duration_ms
+    );
+
+    let wv = track("gap_a.wv");
+    assert_eq!(
+        (wv.codec.as_str(), wv.container.as_str()),
+        ("WavPack", "WavPack")
+    );
+    assert_eq!(
+        (wv.sample_rate, wv.channels, wv.bit_depth),
+        (44_100, 2, Some(16))
+    );
+    assert!(wv.is_lossless());
+    assert_eq!(wv.duration_ms, 1_000);
+
+    let wide = track("tone_96k_24bit.wv");
+    assert_eq!(wide.sample_rate, 96_000);
+    assert!(wide.is_lossless());
+
+    let ape = track("silence.ape");
+    assert_eq!((ape.codec.as_str(), ape.container.as_str()), ("APE", "APE"));
+    assert_eq!(
+        (ape.sample_rate, ape.channels, ape.bit_depth),
+        (44_100, 2, Some(16))
+    );
+    assert!(ape.is_lossless());
+    assert_eq!(ape.duration_ms, 4_160);
+
+    // The new kinds are found by their names in a search.
+    assert_eq!(snapshot.search("format:lossless").len(), 3);
+    assert_eq!(snapshot.search("format:opus").len(), 1);
+    assert_eq!(snapshot.search("format:wavpack").len(), 2);
+    assert_eq!(snapshot.search("format:ape").len(), 1);
+}
+
 #[test]
 fn formats_and_korean_metadata_round_trip() {
     if !ffmpeg_or_skip("formats_and_korean_metadata_round_trip") {
@@ -307,6 +378,30 @@ fn formats_and_korean_metadata_round_trip() {
         Some(args) => cases.push(case("k.ogg", &args, "Vorbis", "Ogg", None, true)),
         None => eprintln!("note: Ogg Vorbis case skipped: ffmpeg has no Vorbis encoder"),
     }
+    if has_encoder("libopus") {
+        cases.push(case(
+            "k.opus",
+            &["-c:a", "libopus", "-b:a", "96k"],
+            "Opus",
+            "Ogg",
+            None,
+            true,
+        ));
+    } else {
+        eprintln!("note: Opus case skipped: ffmpeg has no libopus encoder");
+    }
+    if has_encoder("wavpack") {
+        cases.push(case(
+            "k.wv",
+            &["-c:a", "wavpack"],
+            "WavPack",
+            "WavPack",
+            Some(16),
+            true,
+        ));
+    } else {
+        eprintln!("note: WavPack case skipped: ffmpeg has no WavPack encoder");
+    }
     for case in &cases {
         ffmpeg_audio(&music.join(case.file), &case.args, &meta, None);
     }
@@ -345,7 +440,14 @@ fn formats_and_korean_metadata_round_trip() {
         assert_eq!(track.codec, *codec, "{file}");
         assert_eq!(track.container, *container, "{file}");
         assert_eq!(track.bit_depth, *bit_depth, "{file}");
-        assert_eq!(track.sample_rate, 44_100, "{file}");
+        // Opus is decoded at 48 kHz whatever was encoded.
+        let rate = if *codec == "Opus" { 48_000 } else { 44_100 };
+        assert_eq!(track.sample_rate, rate, "{file}");
+        assert_eq!(
+            track.is_lossless(),
+            bit_depth.is_some(),
+            "{file}: lossless or not"
+        );
         assert!(
             matches!(track.channels, 1 | 2),
             "{file}: {}",
@@ -507,22 +609,31 @@ fn unsupported_codecs_are_counted_not_added() {
     let music = env.music();
     write_wav(&music.join("ok.wav"), 200, &[]);
     let mut expected_unsupported = 0;
+    let mut expected_titles = vec!["ok"];
     if has_encoder("libopus") {
-        // Opus in an Ogg container named .ogg.
+        // Opus plays, in an Ogg file named .ogg as well as in WebM.
         ffmpeg_audio(
             &music.join("opus.ogg"),
             &["-c:a", "libopus", "-ar", "48000", "-f", "ogg"],
-            &[("title", "Opus")],
+            &[("title", "Opus in Ogg")],
             None,
         );
-        expected_unsupported += 1;
-    }
-    if has_encoder("libopus") {
-        // Opus in WebM: the container is read, the codec is not played.
+        // (ffmpeg puts a WebM file's title in the segment header, not in its tags:
+        // the song goes by the file's name.)
         ffmpeg_audio(
-            &music.join("opus.webm"),
+            &music.join("Opus in WebM.webm"),
             &["-c:a", "libopus", "-ar", "48000"],
-            &[("title", "Opus")],
+            &[],
+            None,
+        );
+        expected_titles = vec!["Opus in Ogg", "Opus in WebM", "ok"];
+    }
+    if has_encoder("speex") || has_encoder("libspeex") {
+        // Another codec in an Ogg file: read as Ogg, not played.
+        ffmpeg_audio(
+            &music.join("speex.ogg"),
+            &["-c:a", "libspeex", "-ar", "16000", "-f", "ogg"],
+            &[("title", "Speex")],
             None,
         );
         expected_unsupported += 1;
@@ -558,10 +669,19 @@ fn unsupported_codecs_are_counted_not_added() {
     }
     let (library, _) = env.open_scanned();
     let status = library.scan_status();
-    assert_eq!(titles(&library), ["ok"]);
+    assert_eq!(titles(&library), expected_titles);
     assert_eq!(status.unsupported, expected_unsupported);
     assert_eq!(status.errors, 0);
-    assert_eq!(status.files_found, expected_unsupported + 1);
+    assert_eq!(
+        status.files_found,
+        expected_unsupported + expected_titles.len() as u64
+    );
+    for track in library.snapshot().tracks.iter() {
+        if track.title.starts_with("Opus") {
+            assert_eq!(track.codec, "Opus", "{}", track.title);
+            assert_eq!(track.sample_rate, 48_000, "{}", track.title);
+        }
+    }
     assert_eq!(status.files_done, status.files_found);
 }
 

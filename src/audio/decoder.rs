@@ -1,5 +1,6 @@
-//! Demuxing and decoding of one audio file: with Symphonia, or for DSD with
-//! [`super::dsd`].
+//! Demuxing and decoding of one audio file: with Symphonia, for DSD with
+//! [`super::dsd`], for WavPack and Monkey's Audio with [`super::blocks`].
+use super::blocks::{self, Blocks};
 use super::dsd::DsdDecoder;
 use super::mp4_edit::{self, Trim};
 use super::source::FileInMemory;
@@ -13,6 +14,24 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Tr
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, TimeBase};
+
+/// The codecs a file's audio may be in: those of the decoding library, and Opus from a
+/// crate of its own (the library reads Opus out of Ogg, Matroska and MP4 files but
+/// does not decode it).
+fn codecs() -> &'static symphonia::core::codecs::registry::CodecRegistry {
+    use symphonia::core::codecs::registry::CodecRegistry;
+    static CODECS: std::sync::LazyLock<CodecRegistry> = std::sync::LazyLock::new(|| {
+        let mut codecs = CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut codecs);
+        // Below the library's own tier: should it bring an Opus decoder one day, that
+        // one is used.
+        codecs.register_audio_decoder_at_tier::<symphonia_opus::OpusDecoder>(
+            symphonia::core::common::Tier::Fallback,
+        );
+        codecs
+    });
+    &CODECS
+}
 
 /// Give up on a stream after this many undecodable packets in a row.
 const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 64;
@@ -41,6 +60,10 @@ pub struct SourceInfo {
 pub struct TrackDecoder {
     inner: Inner,
     range: Option<Range>,
+    /// What was decoded last, and how much of it `next` has given: no more than
+    /// [`TrackDecoder::piece`] at a time.
+    held: Vec<f32>,
+    given: usize,
 }
 
 /// A track of a CUE sheet: the frames of the file it is, as positions in the file.
@@ -56,6 +79,25 @@ struct Range {
 enum Inner {
     Media(Box<MediaDecoder>),
     Dsd(Box<DsdDecoder>, SourceInfo),
+    Blocks(Box<dyn Blocks>),
+}
+
+/// What a file is decoded with, by its first bytes.
+enum Sort {
+    Dsd,
+    Blocks(blocks::Kind),
+    Media,
+}
+
+/// Looks at the start of `reader` and leaves it there.
+fn sort_of<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Result<Sort, PlaybackError> {
+    if starts_as_dsd(reader)? {
+        return Ok(Sort::Dsd);
+    }
+    Ok(match blocks::kind_of(reader)? {
+        Some(kind) => Sort::Blocks(kind),
+        None => Sort::Media,
+    })
 }
 
 /// What Symphonia decodes.
@@ -310,6 +352,25 @@ fn dsd_info(decoder: &DsdDecoder, in_memory: bool) -> SourceInfo {
 }
 
 impl TrackDecoder {
+    fn of(inner: Inner) -> Self {
+        TrackDecoder {
+            inner,
+            range: None,
+            held: Vec::new(),
+            given: 0,
+        }
+    }
+
+    /// The most samples `next` gives at a time: a quarter of a second, and at most
+    /// 4,096 frames. What a file's blocks hold differs widely (a FLAC file's up to
+    /// 65,535 frames, a WavPack block three seconds, a frame of Monkey's Audio
+    /// twenty-seven), and the buffer between the decoder and the output holds one
+    /// second: playback does not begin before a first piece is in it whole.
+    fn piece(&self) -> usize {
+        let info = self.info();
+        (info.sample_rate as usize / 4).clamp(1, 4_096) * info.channels.max(1)
+    }
+
     /// Opens `path`, reading from the file as decoding goes. A track of a CUE sheet
     /// (see `library::cue`) opens its stretch of the sheet's audio file.
     pub fn open(path: &Path) -> Result<Self, PlaybackError> {
@@ -330,20 +391,22 @@ impl TrackDecoder {
 
     fn open_file(path: &Path) -> Result<Self, PlaybackError> {
         let mut file = std::fs::File::open(path).map_err(|e| map_file_error(&e))?;
-        let inner = if starts_as_dsd(&mut file)? {
-            let decoder = DsdDecoder::new(Box::new(file))?;
-            let info = dsd_info(&decoder, false);
-            Inner::Dsd(Box::new(decoder), info)
-        } else {
-            Inner::Media(Box::new(MediaDecoder::from_source(
+        let inner = match sort_of(&mut file)? {
+            Sort::Dsd => {
+                let decoder = DsdDecoder::new(Box::new(file))?;
+                let info = dsd_info(&decoder, false);
+                Inner::Dsd(Box::new(decoder), info)
+            }
+            Sort::Blocks(kind) => Inner::Blocks(blocks::open(kind, Box::new(file), false)?),
+            Sort::Media => Inner::Media(Box::new(MediaDecoder::from_source(
                 path,
                 Box::new(file),
                 None,
                 false,
                 false,
-            )?))
+            )?)),
         };
-        Ok(TrackDecoder { inner, range: None })
+        Ok(Self::of(inner))
     }
 
     /// Opens `path` for checking it: like [`TrackDecoder::open`], with the decoder
@@ -360,20 +423,24 @@ impl TrackDecoder {
             return Self::open_file(&segment.audio)?.limited_to(segment);
         }
         let mut file = std::fs::File::open(path).map_err(|e| map_file_error(&e))?;
-        let inner = if starts_as_dsd(&mut file)? {
-            let decoder = DsdDecoder::new(Box::new(file))?;
-            let info = dsd_info(&decoder, false);
-            Inner::Dsd(Box::new(decoder), info)
-        } else {
-            Inner::Media(Box::new(MediaDecoder::from_source(
+        let inner = match sort_of(&mut file)? {
+            Sort::Dsd => {
+                let decoder = DsdDecoder::new(Box::new(file))?;
+                let info = dsd_info(&decoder, false);
+                Inner::Dsd(Box::new(decoder), info)
+            }
+            // These check every block against its checksum as they decode: a block
+            // that fails is counted as damage (`skipped_packets`).
+            Sort::Blocks(kind) => Inner::Blocks(blocks::open(kind, Box::new(file), false)?),
+            Sort::Media => Inner::Media(Box::new(MediaDecoder::from_source(
                 path,
                 Box::new(file),
                 None,
                 false,
                 true,
-            )?))
+            )?)),
         };
-        Ok(TrackDecoder { inner, range: None })
+        Ok(Self::of(inner))
     }
 
     /// After decoding a file opened with [`TrackDecoder::open_verifying`] to its end:
@@ -385,7 +452,7 @@ impl TrackDecoder {
         }
         match &mut self.inner {
             Inner::Media(m) => m.decoder.finalize().verify_ok,
-            Inner::Dsd(..) => None,
+            Inner::Dsd(..) | Inner::Blocks(_) => None,
         }
     }
 
@@ -396,20 +463,22 @@ impl TrackDecoder {
         // `second_look`): from memory, not from where the file came from.
         let again = file.share().into_source();
         let mut source = file.into_source();
-        let inner = if starts_as_dsd(&mut source)? {
-            let decoder = DsdDecoder::from_memory(source)?;
-            let info = dsd_info(&decoder, true);
-            Inner::Dsd(Box::new(decoder), info)
-        } else {
-            Inner::Media(Box::new(MediaDecoder::from_source(
+        let inner = match sort_of(&mut source)? {
+            Sort::Dsd => {
+                let decoder = DsdDecoder::from_memory(source)?;
+                let info = dsd_info(&decoder, true);
+                Inner::Dsd(Box::new(decoder), info)
+            }
+            Sort::Blocks(kind) => Inner::Blocks(blocks::open(kind, Box::new(source), true)?),
+            Sort::Media => Inner::Media(Box::new(MediaDecoder::from_source(
                 &path,
                 Box::new(source),
                 Some(Box::new(again)),
                 true,
                 false,
-            )?))
+            )?)),
         };
-        Ok(TrackDecoder { inner, range: None })
+        Ok(Self::of(inner))
     }
 
     /// Opens a track of a media server on the network (see `remote.rs`): read into
@@ -434,20 +503,24 @@ impl TrackDecoder {
             Err(file) => {
                 let name = file.name();
                 let mut source = file.into_source();
-                let inner = if starts_as_dsd(&mut source)? {
-                    let decoder = DsdDecoder::new(Box::new(source))?;
-                    let info = dsd_info(&decoder, false);
-                    Inner::Dsd(Box::new(decoder), info)
-                } else {
-                    Inner::Media(Box::new(MediaDecoder::from_source(
+                let inner = match sort_of(&mut source)? {
+                    Sort::Dsd => {
+                        let decoder = DsdDecoder::new(Box::new(source))?;
+                        let info = dsd_info(&decoder, false);
+                        Inner::Dsd(Box::new(decoder), info)
+                    }
+                    Sort::Blocks(kind) => {
+                        Inner::Blocks(blocks::open(kind, Box::new(source), false)?)
+                    }
+                    Sort::Media => Inner::Media(Box::new(MediaDecoder::from_source(
                         &name,
                         Box::new(source),
                         None,
                         false,
                         false,
-                    )?))
+                    )?)),
                 };
-                Ok((TrackDecoder { inner, range: None }, None))
+                Ok((Self::of(inner), None))
             }
         }
     }
@@ -496,6 +569,7 @@ impl TrackDecoder {
         match &self.inner {
             Inner::Media(m) => &m.info,
             Inner::Dsd(_, info) => info,
+            Inner::Blocks(b) => b.info(),
         }
     }
 
@@ -515,15 +589,37 @@ impl TrackDecoder {
     }
 
     fn seek_file(&mut self, frame: u64) -> Result<(), PlaybackError> {
+        self.held.clear();
+        self.given = 0;
         match &mut self.inner {
             Inner::Media(m) => m.seek(frame),
             Inner::Dsd(d, _) => d.seek(frame),
+            Inner::Blocks(b) => b.seek(frame),
         }
     }
 
     /// Decodes the next stretch into `out` (cleared first) as interleaved f32 at the
     /// source channel count. Returns `Ok(false)` at end of stream.
     pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool, PlaybackError> {
+        out.clear();
+        if self.given >= self.held.len() {
+            self.given = 0;
+            let mut held = std::mem::take(&mut self.held);
+            let more = self.next_whole(&mut held);
+            self.held = held;
+            if !more? {
+                self.held.clear();
+                return Ok(false);
+            }
+        }
+        let end = (self.given + self.piece()).min(self.held.len());
+        out.extend_from_slice(&self.held[self.given..end]);
+        self.given = end;
+        Ok(true)
+    }
+
+    /// What the file gives next, however much that is.
+    fn next_whole(&mut self, out: &mut Vec<f32>) -> Result<bool, PlaybackError> {
         if let Some(range) = &self.range
             && range.end.is_some_and(|end| range.next >= end)
         {
@@ -533,6 +629,7 @@ impl TrackDecoder {
         let more = match &mut self.inner {
             Inner::Media(m) => m.next(out)?,
             Inner::Dsd(d, _) => d.next(out)?,
+            Inner::Blocks(b) => b.next(out)?,
         };
         let Some(range) = &mut self.range else {
             return Ok(more);
@@ -543,10 +640,11 @@ impl TrackDecoder {
         let channels = range.info.channels.max(1);
         // Where this audio is in the file: from the packet timestamps (a damaged packet
         // that was skipped leaves a hole a count would not see); DSD has no packets to
-        // skip and is counted.
+        // skip and is counted, and so are the formats decoded block by block (a
+        // damaged block of theirs is given as silence of its length).
         let at = match &self.inner {
             Inner::Media(m) => m.position,
-            Inner::Dsd(..) => range.next,
+            Inner::Dsd(..) | Inner::Blocks(_) => range.next,
         };
         if let Some(end) = range.end {
             let left = end.saturating_sub(at) as usize;
@@ -561,6 +659,7 @@ impl TrackDecoder {
         match &self.inner {
             Inner::Media(m) => m.skipped_packets,
             Inner::Dsd(..) => 0,
+            Inner::Blocks(b) => b.damaged(),
         }
     }
 
@@ -593,7 +692,7 @@ impl TrackDecoder {
         };
         let next = following.and_then(|f| match &mut f.inner {
             Inner::Dsd(next, _) => Some(next.as_mut()),
-            Inner::Media(_) => None,
+            Inner::Media(_) | Inner::Blocks(_) => None,
         });
         d.finish(next, out)
     }
@@ -639,11 +738,12 @@ impl MediaDecoder {
         let track_id = track.id;
         let time_base = track.time_base;
         let total_frames = track.num_frames;
+        let stated_delay = track.delay;
         let has_gapless_info = track.delay.is_some() || track.padding.is_some();
         let Some(CodecParameters::Audio(params)) = track.codec_params.clone() else {
             return Err(err(PlaybackErrorKind::Unsupported, "not an audio stream"));
         };
-        let decoder = symphonia::default::get_codecs()
+        let decoder = codecs()
             .make_audio_decoder(
                 &params,
                 &AudioDecoderOptions::default().gapless(true).verify(verify),
@@ -689,6 +789,16 @@ impl MediaDecoder {
                     _ => trim,
                 },
             );
+        // Opus in an Ogg file: the reader names the frames in front of the music (the
+        // pre-skip) and counts them in the track's length, and the decoder gives them
+        // as audio like the rest; so does it the frames after the music in the last
+        // packet. (Matroska's reader names neither: there a few milliseconds stay at
+        // both ends.)
+        let trim = trim.or_else(|| {
+            let delay = u64::from(stated_delay.filter(|_| codec == "opus")?);
+            let valid = total_frames?.checked_sub(delay).filter(|n| *n > 0)?;
+            Some(Trim { delay, valid })
+        });
         let (total_frames, has_gapless_info) = match trim {
             Some(trim) => (Some(trim.valid), true),
             None => (total_frames, has_gapless_info),

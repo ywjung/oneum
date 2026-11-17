@@ -68,7 +68,7 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - If the server does not appear, give its address in **Add by Address…** (a numeric address like `192.168.0.10`). Asking the whole network needs a permission of its own, so a server may not be found by itself. An added server is remembered; press and hold it to remove it from the list.
 - Press a server for the folders it presents. Pressing a song puts the songs of that folder into the queue and plays from that one; press and hold for **Play Next** and **Add to Queue**. **Play** and **Add to Queue** above apply to the whole folder.
 - A server's songs do not become part of the library. They are not in the song lists, the search or the statistics, and cannot be made favorites or put into playlists. They stay in the queue, so listening can go on the next time OnEum is opened.
-- What plays is what the server gives as the original file: FLAC · WAV · AIFF · ALAC · AAC (MP4) · MP3 · Ogg Vorbis · DSD. A song is taken into memory as it arrives, and volume leveling (ReplayGain) is not applied to a server's songs.
+- What plays is what the server gives as the original file: FLAC · WAV · AIFF · ALAC · AAC (MP4) · MP3 · Ogg Vorbis · Opus · WavPack · Monkey's Audio (APE) · DSD. A song is taken into memory as it arrives, and volume leveling (ReplayGain) is not applied to a server's songs.
 
 ## Settings
 - **Library**: where the music is, Rescan, importing files, folders and playlists, linking folders, and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.

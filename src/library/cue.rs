@@ -643,24 +643,36 @@ FILE \"Abbey Road.wav\" WAVE\r
         );
         // An original that is not played, beside its conversion: the conversion.
         std::fs::remove_file(dir.path().join("Abbey Road.wav")).unwrap();
-        std::fs::write(dir.path().join("Abbey Road.ape"), b"x").unwrap();
+        std::fs::write(dir.path().join("Abbey Road.ac3"), b"x").unwrap();
         assert_eq!(
             audio_of(&sheet_path, &sheet),
             Some(dir.path().join("Abbey Road.flac")),
-            "not the .ape, which comes first by name"
+            "not the .ac3, which comes first by name"
         );
-        let mut named_ape = sheet.clone();
-        named_ape.files = vec!["Abbey Road.ape".into()];
+        let mut named_other = sheet.clone();
+        named_other.files = vec!["Abbey Road.ac3".into()];
         assert_eq!(
-            audio_of(&sheet_path, &named_ape),
+            audio_of(&sheet_path, &named_other),
             Some(dir.path().join("Abbey Road.flac"))
         );
         std::fs::remove_file(dir.path().join("Abbey Road.flac")).unwrap();
         assert_eq!(
             audio_of(&sheet_path, &sheet),
             None,
-            "only the .ape: nothing to play"
+            "only the .ac3: nothing to play"
         );
+        // A sheet beside a Monkey's Audio image, as such albums are often kept: that
+        // file, whether the sheet names it or the .wav it was made from.
+        std::fs::write(dir.path().join("Abbey Road.ape"), b"x").unwrap();
+        let mut named_ape = sheet.clone();
+        named_ape.files = vec!["Abbey Road.ape".into()];
+        for of in [&named_ape, &sheet] {
+            assert_eq!(
+                audio_of(&sheet_path, of),
+                Some(dir.path().join("Abbey Road.ape"))
+            );
+        }
+        std::fs::remove_file(dir.path().join("Abbey Road.ape")).unwrap();
         std::fs::write(dir.path().join("Abbey Road.wav"), b"x").unwrap();
         // A sheet for several files is not an image's.
         let mut several = sheet.clone();

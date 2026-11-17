@@ -75,6 +75,7 @@
         <string>com.apple.m4a-audio</string>
         <string>public.mpeg-4-audio</string>
         <string>org.xiph.ogg-audio</string>
+        <string>org.xiph.opus</string>
       </array>
     </dict>
     <dict>

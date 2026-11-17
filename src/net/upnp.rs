@@ -568,6 +568,9 @@ enum Format {
     Mp4,
     Mp3,
     Ogg,
+    Opus,
+    WavPack,
+    Ape,
 }
 
 impl Format {
@@ -576,7 +579,13 @@ impl Format {
     fn lossless(self) -> bool {
         matches!(
             self,
-            Format::Flac | Format::Wav | Format::Aiff | Format::Dsf | Format::Dff
+            Format::Flac
+                | Format::Wav
+                | Format::Aiff
+                | Format::Dsf
+                | Format::Dff
+                | Format::WavPack
+                | Format::Ape
         )
     }
 
@@ -592,6 +601,9 @@ impl Format {
             "audio/mp4" | "audio/x-m4a" | "audio/m4a" => Format::Mp4,
             "audio/mpeg" | "audio/mp3" => Format::Mp3,
             "audio/ogg" | "audio/x-ogg" | "application/ogg" => Format::Ogg,
+            "audio/opus" | "audio/x-opus" => Format::Opus,
+            "audio/x-wavpack" | "audio/wavpack" => Format::WavPack,
+            "audio/x-ape" | "audio/ape" | "audio/x-monkeys-audio" => Format::Ape,
             _ => return None,
         })
     }
@@ -606,6 +618,9 @@ impl Format {
             "m4a" | "mp4" => Format::Mp4,
             "mp3" => Format::Mp3,
             "ogg" | "oga" => Format::Ogg,
+            "opus" => Format::Opus,
+            "wv" => Format::WavPack,
+            "ape" => Format::Ape,
             _ => return None,
         })
     }
@@ -864,6 +879,9 @@ mod tests {
             "audio/dff",
             "audio/x-dsd",
             "audio/dsd",
+            "audio/opus",
+            "audio/x-wavpack",
+            "audio/x-ape",
         ] {
             let item = item(true, vec![resource(mime, "http://h/x")]);
             assert!(best_resource(&item).is_some(), "{mime}");
@@ -874,7 +892,7 @@ mod tests {
             "audio/l16;rate=44100;channels=2",
             "audio/l24",
             "audio/x-ms-wma",
-            "audio/opus",
+            "audio/x-tta",
             "video/mp4",
             "image/jpeg",
             "text/plain",

@@ -2,6 +2,7 @@
 //! → output callback.
 //!
 //! See `docs/ARCHITECTURE.md` ("오디오 경로") for the design and threading rules.
+mod blocks;
 pub mod check;
 pub mod crossfeed;
 pub mod decoder;
