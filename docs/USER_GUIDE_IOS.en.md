@@ -22,6 +22,7 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - **The bar above the tabs**: the song that is playing. Press it to open the player on the whole screen.
 - **Searching inside a list**: the magnifier at the top right of a list (songs, albums, artists, a playlist and so on) searches in that list only. Press the magnifier again to end the search.
 - **Landscape**: turn the iPhone on its side and the screen turns with it. The player has the cover at the left and the buttons at the right, and the bar of the song that is playing moves beside the tabs.
+- **Widgets**: an OnEum widget on the Home Screen or the Lock Screen shows the song that is playing (or, when none is, the one that was on last): cover, title and artist. Press and hold an empty place on the Home Screen, choose **Edit → Add Widget** and pick OnEum (there is a small and a medium one; those of the Lock Screen show words only). Pressing a widget opens OnEum. Play, pause, next and previous are on the Lock Screen and in Control Center.
 
 ## Listening
 - Pressing a song in a list puts the whole list into the queue and plays from that song. **Play** and **Shuffle** above a list start from the top or in a shuffled order.

@@ -3,6 +3,8 @@
 # for (an iPhone or the Simulator, Debug or Release) and puts it in the place of the
 # app's executable. Xcode signs the app after this.
 set -eu
+# (For the Simulator the entitlements go into the program itself, where the Simulator
+# reads them: Xcode has written them to a file for that, which build.rs is told of.)
 cd "$SRCROOT/.."
 case "$PLATFORM_NAME" in
   iphonesimulator) TARGET=aarch64-apple-ios-sim ;;
@@ -22,6 +24,7 @@ env -i HOME="$HOME" USER="${USER:-}" \
   PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} \
   IPHONEOS_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \
+  ONEUM_IOS_SIM_ENTITLEMENTS="$TARGET_TEMP_DIR/$PRODUCT_NAME.app-Simulated.xcent" \
   cargo build --locked --bin oneum --target "$TARGET" $MODE
 cp "target/$TARGET/$DIR/oneum" "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
 # The signature Xcode made in an earlier build is of the executable that was just

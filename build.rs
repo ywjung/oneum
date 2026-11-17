@@ -24,6 +24,10 @@ fn main() {
     println!("cargo:rerun-if-changed=docs");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rustc-env=ONEUM_BUILT={}", built_at());
+    println!("cargo:rustc-check-cfg=cfg(oneum_widget_bridge)");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
+        swift_bridge();
+    }
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -175,4 +179,100 @@ fn with_rc(script: &Path, out: &Path, version: &str, numbers: &str) -> Result<Pa
         }
     }
     Err(last)
+}
+
+/// iPhone: the one Swift function of the app (ios/Bridge/WidgetBridge.swift, which
+/// tells the system that the widgets are out of date) is compiled with the Swift
+/// compiler of Xcode and linked in. Where that cannot be done the app is built without
+/// it and a warning says so: the widgets then show a song only when the system asks
+/// them again by itself.
+fn swift_bridge() {
+    println!("cargo:rerun-if-changed=ios/Bridge/WidgetBridge.swift");
+    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
+    let out = PathBuf::from(env::var("OUT_DIR").expect("set by cargo"));
+    let simulator = env::var("TARGET").is_ok_and(|target| target.ends_with("-sim"));
+    let sdk = if simulator {
+        "iphonesimulator"
+    } else {
+        "iphoneos"
+    };
+    let least = env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "16.0".into());
+    let triple = format!(
+        "arm64-apple-ios{least}{}",
+        if simulator { "-simulator" } else { "" }
+    );
+    let xcrun = |arguments: &[&str]| -> Option<String> {
+        let told = Command::new("xcrun").args(arguments).output().ok()?;
+        told.status
+            .success()
+            .then(|| String::from_utf8_lossy(&told.stdout).trim().to_string())
+            .filter(|path| !path.is_empty())
+    };
+    // The Simulator does not read an app's entitlements from its signature but from a
+    // section of the program itself (Xcode puts them there for it): the script that
+    // builds for the Simulator names the file (scripts/ios-sim.sh, ios/build-rust.sh).
+    // Without them the app has no folder to share with its widgets there.
+    println!("cargo:rerun-if-env-changed=ONEUM_IOS_SIM_ENTITLEMENTS");
+    if simulator
+        && let Ok(file) = env::var("ONEUM_IOS_SIM_ENTITLEMENTS")
+        && Path::new(&file).is_file()
+    {
+        println!("cargo:rerun-if-changed={file}");
+        println!("cargo:rustc-link-arg=-Wl,-sectcreate,__TEXT,__entitlements,{file}");
+    }
+    let (Some(sdk_path), Some(swiftc)) = (
+        xcrun(&["--sdk", sdk, "--show-sdk-path"]),
+        xcrun(&["--sdk", sdk, "--find", "swiftc"]),
+    ) else {
+        println!(
+            "cargo:warning=no Swift compiler found: the app is built without the widgets' bridge"
+        );
+        return;
+    };
+    let object = out.join("oneum_bridge.o");
+    let library = out.join("liboneum_bridge.a");
+    let compiled = Command::new(&swiftc)
+        .args([
+            "-parse-as-library",
+            "-emit-object",
+            "-O",
+            "-module-name",
+            "OneumBridge",
+        ])
+        .args(["-target", &triple, "-sdk", &sdk_path])
+        .arg(root.join("ios/Bridge/WidgetBridge.swift"))
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .is_ok_and(|status| status.success());
+    let _ = std::fs::remove_file(&library);
+    let archived = compiled
+        && Command::new("xcrun")
+            .args(["ar", "rcs"])
+            .arg(&library)
+            .arg(&object)
+            .status()
+            .is_ok_and(|status| status.success());
+    if !archived {
+        println!(
+            "cargo:warning=the widgets' bridge could not be compiled: the app is built without it"
+        );
+        return;
+    }
+    println!("cargo:rustc-cfg=oneum_widget_bridge");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=oneum_bridge");
+    // Swift's own libraries are part of the system; the linker finds their stubs in
+    // the SDK, and what a deployment target older than the compiler needs in the
+    // toolchain.
+    println!("cargo:rustc-link-search=native={sdk_path}/usr/lib/swift");
+    if let Some(toolchain) = Path::new(&swiftc).parent().and_then(Path::parent) {
+        println!(
+            "cargo:rustc-link-search=native={}",
+            toolchain.join("lib/swift").join(sdk).display()
+        );
+    }
+    println!("cargo:rustc-link-lib=framework=WidgetKit");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }

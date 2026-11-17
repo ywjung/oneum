@@ -25,6 +25,13 @@ done
 DEVICE=${ONEUM_IOS_DEVICE:-booted}
 
 export IPHONEOS_DEPLOYMENT_TARGET=$MIN_IOS
+# The group through which the app and its widgets share a folder. The Simulator reads
+# an app's entitlements from a section of the program, not from its signature: the
+# build puts this file there (build.rs).
+mkdir -p dist/ios-sim
+ENTITLEMENTS=$(pwd)/dist/ios-sim/OnEum.entitlements
+sed -e "s/\$(ONEUM_BUNDLE_ID)/$BUNDLE_ID/" ios/OnEum.entitlements > "$ENTITLEMENTS"
+export ONEUM_IOS_SIM_ENTITLEMENTS="$ENTITLEMENTS"
 # shellcheck disable=SC2086
 cargo build --locked --bin oneum --target $TARGET $CARGO_MODE
 
@@ -48,7 +55,17 @@ plutil -insert CFBundleIcons -json \
 # An iPhone app (Xcode writes this from TARGETED_DEVICE_FAMILY).
 plutil -insert UIDeviceFamily -json '[1]' "$APP/Info.plist"
 plutil -lint "$APP/Info.plist" >/dev/null
-codesign --force --sign - "$APP" >/dev/null 2>&1
+# The widgets (ios/Widget) are an extension of their own, which Xcode builds from the
+# same project as for a phone; it goes inside the app. The app is then signed with the
+# group that the two share a folder through (the song the widgets show).
+xcodebuild -project ios/OnEum.xcodeproj -scheme OnEumWidget -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath target/xcode-sim \
+  ONEUM_BUNDLE_ID="$BUNDLE_ID" MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" \
+  build >target/xcode-sim.log 2>&1 \
+  || { echo "the widget extension could not be built: see target/xcode-sim.log" >&2; exit 1; }
+mkdir -p "$APP/PlugIns"
+cp -R target/xcode-sim/Build/Products/Debug-iphonesimulator/OnEumWidget.appex "$APP/PlugIns/"
+codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP" >/dev/null 2>&1
 
 xcrun simctl terminate "$DEVICE" "$BUNDLE_ID" >/dev/null 2>&1 || true
 xcrun simctl install "$DEVICE" "$APP"

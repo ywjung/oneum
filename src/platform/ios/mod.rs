@@ -17,6 +17,7 @@ pub mod files;
 pub mod lifecycle;
 mod scene;
 pub mod sound;
+pub mod widget;
 
 pub use super::apple::{decode_cp949, locale, nowplaying, pump_main_loop, run_on_main, system};
 pub mod device;

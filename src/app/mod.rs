@@ -196,6 +196,10 @@ fn refresh_now_playing(core: &Arc<Core>) {
     if !ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
+    // The home and lock screen widgets of an iPhone show the song too (Android's are
+    // told by the Java side, where its media session is).
+    #[cfg(target_os = "ios")]
+    platform::ios::widget::update(info.as_ref());
     update_media(info);
 }
 

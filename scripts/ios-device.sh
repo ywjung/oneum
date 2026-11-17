@@ -47,7 +47,7 @@ BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 xcodebuild -project ios/OnEum.xcodeproj -scheme OnEum -configuration "$CONFIG" \
   -destination 'generic/platform=iOS' -derivedDataPath target/xcode \
   -allowProvisioningUpdates \
-  DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+  DEVELOPMENT_TEAM="$TEAM" ONEUM_BUNDLE_ID="$BUNDLE_ID" \
   MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" build
 APP=target/xcode/Build/Products/$CONFIG-iphoneos/OnEum.app
 # An iPhone refuses an app whose signature is missing or not of what is in it, with a

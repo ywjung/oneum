@@ -23,6 +23,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - **The bar above the tabs**: the song that is playing. Press it to open the player on the whole screen.
 - **Searching inside a list**: the magnifier at the top right of a list (songs, albums, artists, a playlist and so on) searches in that list only. Press the magnifier again to end the search.
 - **Landscape**: turn the phone on its side and the screen turns with it (while auto-rotate is on). The player has the cover at the left and the buttons at the right, and the bar of the song that is playing moves beside the tabs.
+- **Widget**: the "Now Playing" widget on the home screen shows cover, title and artist with previous · play/pause · next. Press and hold an empty place on the home screen, choose **Widgets** and pick OnEum. While OnEum is running the buttons act at once and the app does not come to the front. After OnEum was swiped away in the list of recent apps the last song stays, and a press opens OnEum. A press on the cover or the title opens OnEum too.
 
 ## Listening
 - Pressing a song in a list puts the whole list into the queue and plays from that song. **Play** and **Shuffle** above a list start from the top or in a shuffled order.
