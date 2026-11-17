@@ -62,22 +62,26 @@ fn allowed(request: &Request, asks: Asks) -> bool {
         Asks::Nobody => true,
         // base64("listener:open sesame 열려라")
         Asks::Basic => given == "Basic bGlzdGVuZXI6b3BlbiBzZXNhbWUg7Je066Ck6528",
-        Asks::Digest => {
-            let get = |name: &str| field(given, name).unwrap_or("");
-            let ha1 = md5(&format!("{USER}:{REALM}:{WORD}"));
-            let ha2 = md5(&format!("{}:{}", request.method, get("uri")));
-            let expected = md5(&format!(
-                "{ha1}:{NONCE}:{}:{}:auth:{ha2}",
-                get("nc"),
-                get("cnonce")
-            ));
-            given.starts_with("Digest ")
-                && get("username") == USER
-                && get("nonce") == NONCE
-                && get("uri") == request.path
-                && get("response") == expected
-        }
+        Asks::Digest => answers(request, NONCE),
     }
+}
+
+/// Whether the request answers a Digest challenge that gave `nonce`.
+fn answers(request: &Request, nonce: &str) -> bool {
+    let given = request.header("authorization").unwrap_or("");
+    let get = |name: &str| field(given, name).unwrap_or("");
+    let ha1 = md5(&format!("{USER}:{REALM}:{WORD}"));
+    let ha2 = md5(&format!("{}:{}", request.method, get("uri")));
+    let expected = md5(&format!(
+        "{ha1}:{nonce}:{}:{}:auth:{ha2}",
+        get("nc"),
+        get("cnonce")
+    ));
+    given.starts_with("Digest ")
+        && get("username") == USER
+        && get("nonce") == nonce
+        && get("uri") == request.path
+        && get("response") == expected
 }
 
 fn refusal(asks: Asks) -> Vec<u8> {
@@ -253,7 +257,75 @@ fn a_folder_is_listed_and_read_by_who_gives_the_right_name_and_password() {
                 );
             }
         }
+        // Once the server has asked, it is answered with the request: the two
+        // listings and the file took one request each, not two. (Before them: one
+        // request as nobody, and two with the wrong password, the second of which
+        // was the answer to the server's question.)
+        let given: Vec<Option<&str>> = seen.iter().map(|r| r.header("authorization")).collect();
+        assert_eq!(given.len(), 6, "{given:?}");
+        assert!(given[..2].iter().all(Option::is_none) && given[2..].iter().all(Option::is_some));
+        if asks == Asks::Digest {
+            // Each answer to the same question is counted, as a server may demand.
+            let counts: Vec<&str> = given[2..]
+                .iter()
+                .map(|given| field(given.unwrap(), "nc").unwrap())
+                .collect();
+            assert_eq!(counts, ["00000001", "00000002", "00000003", "00000004"]);
+        }
     }
+}
+
+/// A server whose question changes after every answer it took (as servers do after a
+/// while): the answer to the old question is refused, the new one is answered, and
+/// the request goes through all the same.
+#[test]
+fn a_server_that_asks_anew_is_answered_anew() {
+    let turn = Arc::new(Mutex::new(0u32));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut server = {
+        let (turn, seen) = (turn.clone(), seen.clone());
+        HttpServer::start(move |request| {
+            let mut turn = turn.lock().unwrap();
+            let nonce = format!("nonce-{}", *turn);
+            let taken = answers(request, &nonce);
+            seen.lock().unwrap().push(taken);
+            if !taken {
+                let challenge = format!(
+                    "Digest realm=\"{REALM}\", qop=\"auth\", nonce=\"{nonce}\", algorithm=MD5, stale=true"
+                );
+                let refusal = response(
+                    401,
+                    "Unauthorized",
+                    &[("WWW-Authenticate", &challenge)],
+                    b"",
+                );
+                return Reply::Bytes(refusal);
+            }
+            *turn += 1;
+            Reply::Bytes(share(request, Asks::Nobody))
+        })
+    };
+    let root = server.url("/dav/");
+    for _ in 0..3 {
+        let entries = dav::list(&root, &account()).expect("the folder is listed");
+        assert_eq!(entries.len(), 3);
+    }
+    // Asked and answered, three times over; never more than one question a request.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [false, true, false, true, false, true]
+    );
+    // The wrong password is still the wrong password: one question, one answer, no.
+    let wrong = Access {
+        account: Some((USER, "wrong")),
+        pinned: None,
+    };
+    assert!(matches!(
+        dav::list(&root, &wrong),
+        Err(NetError::Status(401))
+    ));
+    assert_eq!(seen.lock().unwrap().len(), 8);
+    server.stop();
 }
 
 /// A server that sends the request on to another one: that one gets neither the name

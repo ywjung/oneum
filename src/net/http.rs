@@ -103,6 +103,12 @@ impl Url {
         (self.secure, &self.host, self.port)
     }
 
+    /// The address up to the path: "https://host:port".
+    pub fn server(&self) -> String {
+        let scheme = if self.secure { "https" } else { "http" };
+        format!("{scheme}://{}", self.authority())
+    }
+
     /// The address `reference` means when it is found in a document at this address:
     /// a whole `http://` address, a path from the root (`/a/b`) or a path relative to
     /// this one (`b`, `../b`, `?query`), merged as RFC 3986 says.
@@ -626,8 +632,15 @@ fn fetch(
     // Name, password and a trusted certificate are for the server the request is
     // made to: an address that server sends on to gets none of them.
     let first = url.clone();
+    let server = first.server();
     let mut redirects = 0;
-    let mut authorization: Option<String> = None;
+    // A server that has asked who is there before (since the app started) is told
+    // with the request: asked for every piece of a song, it would be asked twice for
+    // each. Only that server, and only in the way it asked.
+    let mut authorization: Option<String> = access.account.and_then(|(user, password)| {
+        auth::answer_ahead(&server, user, password, request.method(), &url.path)
+    });
+    let mut asked = false;
     loop {
         let here = url.origin() == first.origin();
         let pinned = access.pinned.filter(|_| here);
@@ -638,12 +651,14 @@ fn fetch(
             limits,
             pinned,
         )?;
-        // The server asks who is there: answered once.
+        // The server asks who is there (or no longer takes the answer to what it
+        // asked before): answered once.
         if head.status == 401
             && here
-            && authorization.is_none()
+            && !asked
             && let Some((user, password)) = access.account
-            && let Some(answer) = auth::answer(
+            && let Some(answer) = auth::answer_asked(
+                &server,
                 &head.challenges,
                 user,
                 password,
@@ -652,6 +667,7 @@ fn fetch(
             )
         {
             authorization = Some(answer);
+            asked = true;
             continue;
         }
         if !request.follows(head.status) {

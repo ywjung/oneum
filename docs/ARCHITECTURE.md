@@ -498,6 +498,7 @@ Windows판은 `x86_64-pc-windows-gnu`로 Mac에서 크로스 컴파일한다(`sc
 - **폴더와 계정** (`net::folders`): 설정에는 `Folder { id, name, url, user, pinned }`만 있다(비밀번호 없음). 주소가 어느 폴더 안에 있는지(같은 origin, 폴더 경로 아래; 겹치면 더 깊은 폴더)로 계정을 정한다. 곡의 주소에는 이름도 비밀번호도 없고, 재생할 때 `audio::remote`가 여기에 묻는다.
 - **비밀번호** (`platform::secrets`): macOS · iOS는 키체인(`security-framework`, 서비스 "OnEum network folders"), Windows는 자격 증명 관리자(`CredWriteW`), Android는 `Secrets.java`(AndroidKeyStore의 AES-256-GCM 열쇠로 암호화해 앱의 SharedPreferences에). 메모리에서는 `Secret`(drop 때 0으로, Debug에 안 찍힘). 테스트와 검증 실행(`ONEUM_SCRIPT`)은 메모리 보관소를 쓴다: 검증 실행이 사용자의 키체인을 건드리지 않는다. 실제 보관소는 `net secret-selftest` 명령으로 따로 확인한다.
 - **하지 않는 것**: 쓰기(읽기 전용), 폴더를 보관함으로 스캔하기, 태그 · 표지 읽기(제목은 파일 이름), 하위 폴더까지 한꺼번에 재생, SMB(확인할 서버가 없어 넣지 않음: `smb2` 크레이트를 후보로 봐 둠), 클라이언트 인증서.
+- **먼저 답하기** (`net::auth`의 `answer_asked` · `answer_ahead`): 서버가 한 번 누구냐고 물으면 그 질문(도전)을 서버 · 사용자별로 앱이 떠 있는 동안 기억하고, 다음 요청부터는 요청과 함께 답을 보낸다. 공유 폴더의 곡 하나는 요청 여러 번이고, 기억하지 않으면 요청마다 "401 → 다시"로 두 번씩 연결했다. Digest는 같은 질문에 답할 때마다 횟수(`nc`)를 올리고, 서버가 옛 답을 받지 않으면(401) 새 질문에 한 번 답한다. 기억하는 것은 서버의 질문이지 비밀번호가 아니고, 답은 그 서버(스킴 · 호스트 · 포트)에만 간다.
 
 ## 추상화 원칙
 trait은 테스트 경계에만 둔다: 플레이어가 바깥을 보는 창구 `PlayerHost`(곡 조회, 재생 기록, 세션 저장) 하나다.

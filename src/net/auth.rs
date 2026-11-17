@@ -3,8 +3,15 @@
 //! otherwise, which sends it (over `https://` inside the encrypted connection; over
 //! `http://` as good as in the open, which the listener is told when such a folder is
 //! added).
+//!
+//! What a server asked is remembered for as long as the app runs, and the next
+//! request to it is answered before it asks: a song read from a share is many
+//! requests, and each would otherwise be made twice. What is remembered is the
+//! server's question, never the password.
 use md5::{Digest as _, Md5};
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::{LazyLock, Mutex};
 
 /// The longest challenge that is read, and how many of its fields.
 const MAX_CHALLENGE_BYTES: usize = 4096;
@@ -144,6 +151,16 @@ fn sendable(value: &str) -> bool {
     !value.chars().any(|c| c.is_control())
 }
 
+/// What makes one answer to a challenge differ from the next.
+#[derive(Clone, Copy)]
+struct Turn<'a> {
+    /// A random value of the client's.
+    cnonce: &'a str,
+    /// The how-manieth answer to this challenge this is (a server may refuse a count
+    /// it has seen: an answer that was overheard cannot be sent again).
+    count: u32,
+}
+
 fn digest_answer(
     challenge: &Challenge,
     hash: Hash,
@@ -151,8 +168,9 @@ fn digest_answer(
     password: &str,
     method: &str,
     uri: &str,
-    cnonce: &str,
+    turn: Turn<'_>,
 ) -> Option<String> {
+    let Turn { cnonce, count } = turn;
     if challenge.qop_named && !challenge.qop_auth {
         // Only "auth-int" (the body is hashed too) is offered: not spoken here.
         return None;
@@ -168,7 +186,7 @@ fn digest_answer(
         hash.name(),
     );
     let response = if challenge.qop_auth {
-        let nc = "00000001";
+        let nc = format!("{count:08x}");
         let _ = write!(header, ", qop=auth, nc={nc}, cnonce={}", quoted(cnonce));
         hash.of(&format!(
             "{ha1}:{}:{nc}:{cnonce}:auth:{ha2}",
@@ -230,6 +248,78 @@ pub(super) fn answer(
     method: &str,
     uri: &str,
 ) -> Option<String> {
+    answer_counted(challenges, user, password, method, uri, 1)
+}
+
+/// The most servers and names whose questions are remembered.
+const MAX_REMEMBERED: usize = 64;
+
+/// What a server asked the last time, and how often it has been answered.
+struct Asked {
+    challenges: Vec<String>,
+    answers: u32,
+}
+
+/// By server and name ("https://host:port" and who is there as).
+static ASKED: LazyLock<Mutex<HashMap<(String, String), Asked>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// [`answer`] to a server that has just asked (`server`: its address up to the
+/// path), which is remembered for [`answer_ahead`].
+pub(super) fn answer_asked(
+    server: &str,
+    challenges: &[String],
+    user: &str,
+    password: &str,
+    method: &str,
+    uri: &str,
+) -> Option<String> {
+    let answer = answer(challenges, user, password, method, uri)?;
+    let mut asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+    if asked.len() >= MAX_REMEMBERED {
+        asked.clear();
+    }
+    asked.insert(
+        (server.to_string(), user.to_string()),
+        Asked {
+            challenges: challenges.to_vec(),
+            answers: 1,
+        },
+    );
+    Some(answer)
+}
+
+/// The answer to what `server` asked `user` the last time, for a request that is
+/// about to be made: `None` when it has not asked since the app started. A server
+/// that no longer takes the answer asks again, and is answered anew.
+pub(super) fn answer_ahead(
+    server: &str,
+    user: &str,
+    password: &str,
+    method: &str,
+    uri: &str,
+) -> Option<String> {
+    let mut asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+    let asked = asked.get_mut(&(server.to_string(), user.to_string()))?;
+    asked.answers = asked.answers.checked_add(1)?;
+    answer_counted(
+        &asked.challenges,
+        user,
+        password,
+        method,
+        uri,
+        asked.answers,
+    )
+}
+
+fn answer_counted(
+    challenges: &[String],
+    user: &str,
+    password: &str,
+    method: &str,
+    uri: &str,
+    count: u32,
+) -> Option<String> {
     if !sendable(user) || !sendable(password) {
         return None;
     }
@@ -249,11 +339,14 @@ pub(super) fn answer(
             None => hash == Hash::Md5,
             Some(name) => name.eq_ignore_ascii_case(hash.name()),
         };
-        if let Some(answer) = digests
-            .iter()
-            .find(fits)
-            .and_then(|c| digest_answer(c, hash, user, password, method, uri, &client_nonce()))
-        {
+        if let Some(answer) = digests.iter().find(fits).and_then(|c| {
+            let cnonce = client_nonce();
+            let turn = Turn {
+                cnonce: &cnonce,
+                count,
+            };
+            digest_answer(c, hash, user, password, method, uri, turn)
+        }) {
             return Some(answer);
         }
     }
@@ -305,7 +398,7 @@ mod tests {
                 "Circle of Life",
                 "GET",
                 "/dir/index.html",
-                cnonce,
+                Turn { cnonce, count: 1 },
             )
             .expect("an answer")
         };
@@ -343,7 +436,10 @@ mod tests {
             "CircleOfLife",
             "GET",
             "/dir/index.html",
-            "unused",
+            Turn {
+                cnonce: "unused",
+                count: 1,
+            },
         )
         .expect("an answer");
         assert!(
