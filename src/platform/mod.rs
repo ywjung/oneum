@@ -11,8 +11,8 @@
 //!   app's life in the background; `apple` holds what it shares with macOS.
 //! - Android (`android`): what Java offers, reached through JNI: the on-screen
 //!   keyboard, audio focus, the playback notification, pickers and storage access.
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod clock;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod dialogs;
 mod menu_action;
 #[cfg(not(target_os = "macos"))]

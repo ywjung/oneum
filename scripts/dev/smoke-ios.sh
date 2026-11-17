@@ -332,6 +332,9 @@ check n7.json 'd["current_rating"] == 4' "…and the data, taken in again, gives
 ui 'menu crossfade 4' 'wait 400' 'dump n8.json' 'menu crossfade 0' 'wait 400' 'dump n9.json'
 check n8.json 'd["crossfade_secs"] == 4 and d["state"] == "Playing"' "crossfade is set to four seconds while a song plays"
 check n9.json 'd["crossfade_secs"] == 0' "…and switched off again"
+ui 'menu shuffle_by_rating' 'wait 300' 'dump n12.json' 'menu shuffle_by_rating' 'wait 300' 'dump n13.json'
+check n12.json 'd["shuffle_by_rating"]' "shuffling by stars is switched on"
+check n13.json 'not d["shuffle_by_rating"]' "…and off again"
 ui 'menu correction_edit_new' 'wait 300' 'menu correction_edit_band 3200 5 2.5' 'wait 400' 'dump n10.json' \
    'menu correction_edit_save' 'wait 400' 'dump n11.json' 'menu correction_off' 'wait 300'
 check n10.json 'd["correction_editing"][1] == 2 and d["correction"]["applied"] == d["correction_editing"][0]' "a correction profile is made band by band, and heard while it is edited"
