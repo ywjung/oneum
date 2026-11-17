@@ -2696,6 +2696,24 @@ impl OneumApp {
                 == Some(egui::Id::unique(network_folders::PASSWORD_FIELD));
         responder::set_text_input_secret(secret);
         responder::set_text_input_active(typing);
+        // (A phone: the windowing library puts the keyboard away as soon as the UI
+        // library names no field for it, and it names none for a field that is not
+        // seen: one that lies outside what a form shows, if only for the frame in
+        // which the form is laid out anew for the keyboard that comes up. The field
+        // would lose the keyboard it was just given (on Android for good: the app
+        // takes a keyboard that went for one the listener sent away). While a field
+        // is typed into, one is always named. A field that is seen names itself
+        // after this.)
+        if typing && crate::platform::PHONE {
+            ctx.output_mut(|output| {
+                output.ime.get_or_insert(egui::output::IMEOutput {
+                    purpose: egui::IMEPurpose::Normal,
+                    rect: egui::Rect::ZERO,
+                    cursor_rect: egui::Rect::ZERO,
+                    should_interrupt_composition: false,
+                });
+            });
+        }
         let was_typing = std::mem::replace(&mut self.typing, typing);
         // (As the UI library remembers it from the frame before: what this frame
         // itself shows is not known yet.)
@@ -3527,6 +3545,13 @@ pub fn lost_after_drawing(data_dir: &Path, lang: Lang, error: &dyn std::fmt::Dis
     tracing::error!(playing, "graphics: the device is lost: {error}");
     start_anew_after_loss(data_dir, playing, lang.strings());
     true
+}
+
+/// Whether this run has drawn nothing yet (Android: an event loop that ended before
+/// the window was there, see `android_main`).
+#[cfg(target_os = "android")]
+pub fn nothing_drawn() -> bool {
+    memory::frames() == 0
 }
 
 /// Of the system's list of how earlier runs ended (newest first, as `MainActivity`

@@ -65,6 +65,30 @@ enum Outcome {
     Confirm,
 }
 
+/// How far below the top of the screen's content a dialog stands on a phone: a little
+/// way down, or right at the top where the keyboard leaves so little of the screen
+/// (a phone on its side) that a dialog lower down would lie under it.
+pub(super) fn phone_dialog_gap(ctx: &egui::Context) -> f32 {
+    if phone_dialog_room(ctx, 72.0) < 200.0 {
+        8.0
+    } else {
+        72.0
+    }
+}
+
+/// How much height a phone's dialog has from `gap` below the top of the content down
+/// to the keyboard (or to the end of the content, where no keyboard is up).
+pub(super) fn phone_dialog_room(ctx: &egui::Context, gap: f32) -> f32 {
+    let keyboard = crate::platform::window::keyboard_height();
+    let content = ctx.content_rect();
+    let bottom = if keyboard > 0.0 {
+        (ctx.viewport_rect().bottom() - keyboard).min(content.bottom())
+    } else {
+        content.bottom()
+    };
+    bottom - content.top() - gap
+}
+
 impl OneumApp {
     /// The shell of a dialog: on a phone in the upper part of the screen, with the
     /// strips around the content dimmed like the rest.
@@ -72,7 +96,7 @@ impl OneumApp {
         let mut modal = egui::Modal::new(id);
         if self.phone_mode {
             // In the upper part of the screen: the keyboard comes up over the lower.
-            let top = ctx.content_rect().top() + 72.0 - ctx.viewport_rect().top();
+            let top = ctx.content_rect().top() + phone_dialog_gap(ctx) - ctx.viewport_rect().top();
             modal = modal
                 .area(egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, [0.0, top]));
             // The modal dims what the system leaves to the app's content; the strips

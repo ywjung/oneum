@@ -333,9 +333,16 @@ public final class MainActivity extends NativeActivity {
         up = false;
         NowPlayingWidget.appGone(this);
         PlaybackService.end();
-        // (Not finishing: the system makes the screen anew for a change it does not
-        // leave to the app, and opens the app again at once. The music that was
-        // playing goes on then.)
+        // Not finishing, for a change of the configuration: the system makes the
+        // screen anew for a change it does not leave to the app (an overlay, a font),
+        // and means to show the app again at once. It does not, once the process has
+        // ended: the app is opened again as after a lost graphics device, and the
+        // music that was playing goes on in it.
+        if (!isFinishing() && isChangingConfigurations()) {
+            startActivity(new Intent(this, RelaunchActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .putExtra(RelaunchActivity.PID, android.os.Process.myPid()));
+        }
         Native.onDestroy(isFinishing() ? 1 : 0);
         super.onDestroy();
     }

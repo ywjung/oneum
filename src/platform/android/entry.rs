@@ -45,20 +45,37 @@ fn android_main(app: AndroidApp) {
         options,
         Box::new(move |cc| Ok(Box::new(crate::ui::OneumApp::new(cc, startup)))),
     );
-    if let Err(error) = result {
-        tracing::error!("event loop failed: {error}");
-        // Under the framework's OpenGL renderer this is how a run ends whose driver
-        // gives up while a frame is shown (a wgpu device says that it is lost instead,
-        // and the app acts on that before the frame). Once the window had been drawn
-        // that is a lost device: the app opens again, as it does for the other.
-        let lost = prefer == crate::ui::renderer::Prefer::Glow
-            && crate::ui::lost_after_drawing(&core.paths.data_dir, lang, &error);
-        if !lost {
-            super::fatal_alert(
-                "OnEum",
-                &format!("{error}\n\n{}", crate::app::log_dir_hint()),
-            );
+    match result {
+        Err(error) => {
+            tracing::error!("event loop failed: {error}");
+            // Under the framework's OpenGL renderer this is how a run ends whose
+            // driver gives up while a frame is shown (a wgpu device says that it is
+            // lost instead, and the app acts on that before the frame). Once the
+            // window had been drawn that is a lost device: the app opens again, as it
+            // does for the other.
+            let lost = prefer == crate::ui::renderer::Prefer::Glow
+                && crate::ui::lost_after_drawing(&core.paths.data_dir, lang, &error);
+            if !lost {
+                super::fatal_alert(
+                    "OnEum",
+                    &format!("{error}\n\n{}", crate::app::log_dir_hint()),
+                );
+            }
         }
+        // The framework ends its loop, and says nothing, when something about the
+        // window is told before the window is there: the screen turns, or a split
+        // screen is resized, while the app starts. Nothing was drawn and nothing is
+        // wrong, but the loop cannot be entered again in this process: the app is
+        // opened once more, as after a lost device.
+        Ok(()) if crate::ui::nothing_drawn() => {
+            let dir = &core.paths.data_dir;
+            // No failure of an interface that was on trial either.
+            crate::app::relaunch::end_trial(dir);
+            let again = crate::app::relaunch::note_early_end(dir, crate::app::relaunch::now())
+                && super::open_again_after_exit();
+            tracing::warn!(again, "the window's loop ended before the window was there");
+        }
+        Ok(()) => {}
     }
     core.shutdown();
     // The process must not outlive its one window: a later start in the same process
@@ -108,8 +125,9 @@ fn graphics_preference(startup: &crate::app::Startup) -> crate::ui::renderer::Pr
 
 /// The activity is gone: the session is saved and the process ends. `finishing`: for
 /// good. Otherwise the system is making the screen anew, for a change it does not
-/// leave to the app (the colours of a new wallpaper, an overlay), and opens the app
-/// again at once: music that was playing is noted, and goes on in the run that
+/// leave to the app (the colours of a new wallpaper, an overlay, a font), and the
+/// app's shell has it opened again once this process is gone (`MainActivity`'s
+/// `onDestroy`): music that was playing is noted, and goes on in the run that
 /// follows.
 pub(super) fn end(finishing: bool) {
     tracing::info!(finishing, "the activity is gone: ending");

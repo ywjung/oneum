@@ -10,9 +10,11 @@ import java.io.File;
 /**
  * Starts OnEum anew after its process ended itself because it could not go on: its
  * graphics device was lost, and a process gets no second one (see `graphics_lost` in
- * src/ui/mod.rs). This activity runs in a process of its own (see the manifest), so
- * that it outlives the app's. It waits for that process to be gone (it saves what it
- * keeps first), then opens the app as the launcher does.
+ * src/ui/mod.rs); the system made its screen anew (`MainActivity.onDestroy`); or its
+ * start ended before the window was there (`android_main`). This activity runs in a
+ * process of its own (see the manifest), so that it outlives the app's. It waits for
+ * that process to be gone (it saves what it keeps first), then opens the app as the
+ * launcher does.
  */
 public final class RelaunchActivity extends Activity {
     static final String PID = "app.oneum.android.pid";

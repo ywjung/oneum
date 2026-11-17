@@ -127,8 +127,9 @@ const REMADE_FILE: &str = "remade.txt";
 
 /// A run ends because the system makes the app's screen anew (Android, for a change
 /// it does not leave to the app), which this app answers by ending its process. The
-/// system opens the app again at once: music that was `playing` goes on there
-/// ([`take_remade`]). Nothing went wrong, and nothing is said about it.
+/// app is opened again right after (by its shell; the system does not do it once the
+/// process has ended): music that was `playing` goes on there ([`take_remade`]).
+/// Nothing went wrong, and nothing is said about it.
 pub fn note_remade(data_dir: &Path, playing: bool, now: u64) {
     let file = data_dir.join(REMADE_FILE);
     if playing {
@@ -149,6 +150,38 @@ pub fn take_remade(data_dir: &Path, now: u64) -> bool {
     text.trim()
         .parse::<u64>()
         .is_ok_and(|at| now.saturating_sub(at) < NOT_AGAIN_WITHIN_SECS)
+}
+
+/// Kept while starts end before the app's window was there (see [`note_early_end`]):
+/// when the first of them ended, and how many there were.
+const EARLY_FILE: &str = "ended-early.txt";
+/// How many starts in a row may be made again for having ended early.
+const EARLY_ENDS_MAX: u32 = 3;
+
+/// A start ended before the app's window was there, with nothing wrong (Android: the
+/// UI library ends its loop when something about the window is told before the
+/// window is made, as when the screen turns while the app starts). Starting once
+/// more costs nothing, and this says whether to: not a fourth time within a minute,
+/// where something else must be the matter.
+pub fn note_early_end(data_dir: &Path, now: u64) -> bool {
+    let file = data_dir.join(EARLY_FILE);
+    let before = std::fs::read_to_string(&file).ok().and_then(|text| {
+        let mut words = text.split_whitespace();
+        let first: u64 = words.next()?.parse().ok()?;
+        let count: u32 = words.next()?.parse().ok()?;
+        Some((first, count))
+    });
+    let (first, count) = match before {
+        Some((first, count)) if now.saturating_sub(first) < NOT_AGAIN_WITHIN_SECS => {
+            (first, count.saturating_add(1))
+        }
+        _ => (now, 1),
+    };
+    if count > EARLY_ENDS_MAX {
+        let _ = std::fs::remove_file(file);
+        return false;
+    }
+    std::fs::write(file, format!("{first} {count}\n")).is_ok()
 }
 
 /// Seconds since 1970.
@@ -372,5 +405,24 @@ mod tests {
         note_remade(dir.path(), true, 3_000);
         assert!(!take_remade(dir.path(), 3_000 + NOT_AGAIN_WITHIN_SECS));
         assert!(!take_remade(dir.path(), 3_001), "and the note is gone");
+    }
+    /// A start that ended before its window is made again, but not without end.
+    #[test]
+    fn a_start_that_ended_early_is_made_again_three_times() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(note_early_end(dir.path(), 1_000));
+        assert!(note_early_end(dir.path(), 1_001));
+        assert!(note_early_end(dir.path(), 1_002));
+        assert!(!note_early_end(dir.path(), 1_003), "the fourth in a row");
+        // The count begins anew after that, and after a while without one.
+        assert!(note_early_end(dir.path(), 1_004));
+        assert!(note_early_end(dir.path(), 1_005));
+        assert!(note_early_end(dir.path(), 1_004 + NOT_AGAIN_WITHIN_SECS));
+        assert!(note_early_end(dir.path(), 1_005 + NOT_AGAIN_WITHIN_SECS));
+        assert!(note_early_end(dir.path(), 1_006 + NOT_AGAIN_WITHIN_SECS));
+        assert!(!note_early_end(dir.path(), 1_007 + NOT_AGAIN_WITHIN_SECS));
+        // What cannot be read counts for nothing.
+        std::fs::write(dir.path().join(EARLY_FILE), "not a note").expect("write");
+        assert!(note_early_end(dir.path(), 5_000));
     }
 }

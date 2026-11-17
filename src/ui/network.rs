@@ -807,7 +807,10 @@ impl OneumApp {
 
     fn network_servers(&mut self, ui: &mut Ui) {
         let s = self.s();
-        ui.horizontal(|ui| {
+        // (Wrapped: on a phone the three buttons are wider than the screen in some
+        // languages. Run off its edge, the last one could not be read, and the page
+        // below was laid out as wide as the row, its text off the edge too.)
+        ui.horizontal_wrapped(|ui| {
             ui.add_space(4.0);
             let touch = theme::touch(ui.ctx());
             let button = |label: &str| {

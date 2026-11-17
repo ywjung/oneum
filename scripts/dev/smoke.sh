@@ -387,6 +387,12 @@ check he1.json 'd["correction_editing"][1] == 3 and d["correction"]["applied"] =
 check he2.json 'd["correction_editing"] is None and d["correction"]["profiles"][-1][1] == 3 and d["correction"]["selected"] == d["correction"]["profiles"][-1][0] == d["correction"]["applied"]' "saved, it is one of the user's own profiles, selected and applied"
 check he3.json 'd["correction_editing"][1] == 1 and len(d["correction"]["profiles"]) == 2' "another is begun…"
 check he4.json 'd["correction_editing"] is None and len(d["correction"]["profiles"]) == 2 and d["correction"]["profiles"][-1][1] == 3 and d["correction"]["selected"] == d["correction"]["profiles"][-1][0]' "…and given up: the saved one is as it was, and selected again"
+# Settings does not close under an edit that is not saved (Escape, a click beside the
+# sheet): closing ends the edit, and a stray key must not cost the bands that were set.
+ui 'menu settings' 'wait 500' 'menu correction_edit_new' 'wait 300' 'key Escape' 'wait 300' 'click 100 600' 'wait 300' 'dump hx1.json' \
+   'menu correction_edit_cancel' 'wait 300' 'key Escape' 'wait 400' 'dump hx2.json'
+check hx1.json 'd["settings_open"] and d["correction_editing"] is not None' "Escape and a click outside leave Settings open while a correction is being made"
+check hx2.json 'not d["settings_open"] and d["correction_editing"] is None' "…and Escape closes it once the edit is given up"
 
 echo "== loudness of untagged songs"
 # 18 of the 20 songs have no ReplayGain tags. Measured values are forgotten again right

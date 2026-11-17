@@ -145,188 +145,221 @@ impl OneumApp {
         // fields and its buttons would lie under the keyboard, the password typed
         // without being seen.
         let room = if touch {
-            let keyboard = crate::platform::window::keyboard_height();
-            (ctx.content_rect().height() - keyboard - 72.0 - 48.0).max(120.0)
+            // (What the dialog's own frame and a little air below it take is left
+            // out; never less than one field.)
+            let gap = super::dialogs::phone_dialog_gap(ctx);
+            (super::dialogs::phone_dialog_room(ctx, gap) - 44.0).max(52.0)
         } else {
             f32::INFINITY
         };
+        // (It scrolls only where it does not fit: as tall as it was the last time it
+        // was laid out, which is known from the frame before. A scrolling part takes
+        // the height it is given and no more, also once there is more again.)
+        let height_id = egui::Id::unique("oneum-folder-form-height");
+        let needed: f32 = ctx.data(|d| d.get_temp(height_id)).unwrap_or(0.0);
+        let scrolls = needed > room;
+        // The field that is typed into is brought into what is seen of a form that
+        // scrolls: when it is chosen, and when the room changes (the keyboard comes
+        // or goes, the phone is turned). Not while a finger is down: the field would
+        // be moved from under it, and the finger's lifting would be a tap elsewhere,
+        // which takes the field's attention away again.
+        let reveal_id = egui::Id::unique("oneum-folder-form-reveal");
+        let room_id = egui::Id::unique("oneum-folder-form-room");
+        let room_before: f32 = ctx.data(|d| d.get_temp(room_id)).unwrap_or(room);
+        ctx.data_mut(|d| d.insert_temp(room_id, room));
+        if (room - room_before).abs() > 1.0 {
+            ctx.data_mut(|d| d.insert_temp(reveal_id, true));
+        }
         let shown = modal.show(ctx, |ui| {
             ui.set_width(width);
-            egui::ScrollArea::vertical()
-                .max_height(room)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(s.folder_add_title)
-                            .font(theme::semibold(if touch { 18.0 } else { 16.0 }))
-                            .strong(),
-                    );
-                    ui.add_space(8.0);
-                    let field = |ui: &mut egui::Ui, text: &mut String, hint: &str, secret: bool| {
-                        let mut edit = egui::TextEdit::singleline(text)
-                            .hint_text(hint)
-                            .password(secret)
-                            .desired_width(f32::INFINITY);
-                        if secret {
-                            edit = edit.id(egui::Id::unique(PASSWORD_FIELD));
-                        }
-                        if touch {
-                            edit = edit
-                                .font(egui::FontId::proportional(17.0))
-                                .margin(egui::Margin::symmetric(10, 9));
-                        }
-                        let response = ui.add_enabled(!trying, edit);
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, hint)
-                        });
-                        ui.add_space(6.0);
-                        response
-                    };
-                    let address = field(ui, &mut form.address, s.folder_address_hint, false);
-                    if form.focus {
-                        form.focus = false;
-                        address.request_focus();
+            let mut body = |ui: &mut egui::Ui| {
+                ui.label(
+                    RichText::new(s.folder_add_title)
+                        .font(theme::semibold(if touch { 18.0 } else { 16.0 }))
+                        .strong(),
+                );
+                ui.add_space(8.0);
+                let field = |ui: &mut egui::Ui, text: &mut String, hint: &str, secret: bool| {
+                    let mut edit = egui::TextEdit::singleline(text)
+                        .hint_text(hint)
+                        .password(secret)
+                        .desired_width(f32::INFINITY);
+                    if secret {
+                        edit = edit.id(egui::Id::unique(PASSWORD_FIELD));
                     }
-                    field(ui, &mut form.name, s.folder_name_hint, false);
-                    let user = field(ui, &mut form.user, s.folder_user_hint, false);
-                    let password = field(ui, &mut form.password, s.folder_password_hint, true);
-                    // egui keeps what was typed into a field to take typing back: not of a
-                    // password (it would outlive the form, and come back with "undo").
-                    let field_id = egui::Id::unique(PASSWORD_FIELD);
-                    if let Some(mut state) =
-                        egui::text_edit::TextEditState::load(ui.ctx(), field_id)
-                    {
-                        state.clear_undoer();
-                        state.store(ui.ctx(), field_id);
+                    if touch {
+                        edit = edit
+                            .font(egui::FontId::proportional(17.0))
+                            .margin(egui::Margin::symmetric(10, 9));
                     }
-                    // What the server said was said of what was typed then: of another
-                    // address, name or password nothing is known yet. (A certificate that
-                    // was shown is one server's: it is not to be trusted for another.)
-                    if (address.changed() || user.changed() || password.changed())
-                        && matches!(form.status, Status::Failed(_))
-                    {
-                        form.status = Status::Editing;
-                    }
-                    let dim = theme::dim(ui);
-                    ui.label(RichText::new(s.folder_password_note).small().color(dim));
-                    // A name and a password over a connection that is not encrypted.
-                    let plain = form
-                        .address
-                        .trim()
-                        .get(..7)
-                        .is_some_and(|start| start.eq_ignore_ascii_case("http://"));
-                    if plain && !form.user.trim().is_empty() {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(s.folder_plain_warning)
-                                .small()
-                                .color(ui.visuals().warn_fg_color),
-                        );
-                    }
-                    match &form.status {
-                        Status::Editing => {}
-                        Status::Trying => {
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(RichText::new(s.folder_trying).color(dim));
-                            });
-                        }
-                        Status::Failed(why) => {
-                            ui.add_space(6.0);
-                            let warn = ui.visuals().warn_fg_color;
-                            match why {
-                                Why::Untrusted(fingerprint) => {
-                                    ui.label(RichText::new(s.folder_untrusted).color(warn));
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(tls::spelled(fingerprint))
-                                            .monospace()
-                                            .small(),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(s.folder_untrusted_how).small().color(dim),
-                                    );
-                                }
-                                Why::Refused => {
-                                    ui.label(RichText::new(s.folder_refused).color(warn));
-                                }
-                                Why::Address => {
-                                    ui.label(RichText::new(s.folder_bad_address).color(warn));
-                                }
-                                Why::Full => {
-                                    ui.label(RichText::new(s.folder_full).color(warn));
-                                }
-                                Why::NoPassword => {
-                                    ui.label(RichText::new(s.folder_no_password).color(warn));
-                                }
-                                Why::Moved => {
-                                    ui.label(RichText::new(s.folder_moved).color(warn));
-                                }
-                                Why::NotFound => {
-                                    ui.label(RichText::new(s.folder_not_found).color(warn));
-                                }
-                                Why::NotAFolder => {
-                                    ui.label(RichText::new(s.folder_not_webdav).color(warn));
-                                }
-                                Why::NotTls => {
-                                    ui.label(RichText::new(s.folder_not_tls).color(warn));
-                                }
-                                Why::Other(reason) => {
-                                    ui.label(RichText::new(s.folder_unreachable).color(warn));
-                                    ui.label(RichText::new(reason).small().color(dim));
-                                }
-                            }
-                        }
-                    }
-                    let can_connect = !trying && !form.address.trim().is_empty();
-                    if password.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && can_connect
-                    {
-                        connect = true;
-                    }
-                    ui.add_space(12.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let dark = ui.visuals().dark_mode;
-                        let ink = if dark {
-                            egui::Color32::from_rgb(0x14, 0x14, 0x18)
-                        } else {
-                            egui::Color32::WHITE
-                        };
-                        let size = if touch {
-                            egui::vec2((ui.available_width() - 8.0) / 2.0, 46.0)
-                        } else {
-                            egui::vec2(76.0, 28.0)
-                        };
-                        // The server showed a certificate nobody vouches for: the button that
-                        // goes on says what going on means.
-                        let untrusted = match &form.status {
-                            Status::Failed(Why::Untrusted(fingerprint)) => {
-                                Some(fingerprint.clone())
-                            }
-                            _ => None,
-                        };
-                        let label = if untrusted.is_some() {
-                            s.folder_trust
-                        } else {
-                            s.folder_connect
-                        };
-                        let go = egui::Button::new(RichText::new(label).strong().color(ink))
-                            .fill(theme::accent(dark))
-                            .min_size(size);
-                        if ui.add_enabled(can_connect, go).clicked() {
-                            match untrusted {
-                                Some(fingerprint) => trust = Some(fingerprint),
-                                None => connect = true,
-                            }
-                        }
-                        if ui.add(egui::Button::new(s.cancel).min_size(size)).clicked() {
-                            cancel = true;
-                        }
+                    let response = ui.add_enabled(!trying, edit);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, hint)
                     });
+                    if response.gained_focus() {
+                        ui.data_mut(|d| d.insert_temp(reveal_id, true));
+                    }
+                    if response.has_focus()
+                        && !ui.input(|i| i.pointer.any_down())
+                        && ui.data(|d| d.get_temp(reveal_id)).unwrap_or(false)
+                    {
+                        ui.data_mut(|d| d.insert_temp(reveal_id, false));
+                        response.scroll_to_me(Some(egui::Align::Center));
+                    }
+                    ui.add_space(6.0);
+                    response
+                };
+                let address = field(ui, &mut form.address, s.folder_address_hint, false);
+                if form.focus {
+                    form.focus = false;
+                    address.request_focus();
+                }
+                field(ui, &mut form.name, s.folder_name_hint, false);
+                let user = field(ui, &mut form.user, s.folder_user_hint, false);
+                let password = field(ui, &mut form.password, s.folder_password_hint, true);
+                // egui keeps what was typed into a field to take typing back: not of a
+                // password (it would outlive the form, and come back with "undo").
+                let field_id = egui::Id::unique(PASSWORD_FIELD);
+                if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), field_id) {
+                    state.clear_undoer();
+                    state.store(ui.ctx(), field_id);
+                }
+                // What the server said was said of what was typed then: of another
+                // address, name or password nothing is known yet. (A certificate that
+                // was shown is one server's: it is not to be trusted for another.)
+                if (address.changed() || user.changed() || password.changed())
+                    && matches!(form.status, Status::Failed(_))
+                {
+                    form.status = Status::Editing;
+                }
+                let dim = theme::dim(ui);
+                ui.label(RichText::new(s.folder_password_note).small().color(dim));
+                // A name and a password over a connection that is not encrypted.
+                let plain = form
+                    .address
+                    .trim()
+                    .get(..7)
+                    .is_some_and(|start| start.eq_ignore_ascii_case("http://"));
+                if plain && !form.user.trim().is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(s.folder_plain_warning)
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                match &form.status {
+                    Status::Editing => {}
+                    Status::Trying => {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new(s.folder_trying).color(dim));
+                        });
+                    }
+                    Status::Failed(why) => {
+                        ui.add_space(6.0);
+                        let warn = ui.visuals().warn_fg_color;
+                        match why {
+                            Why::Untrusted(fingerprint) => {
+                                ui.label(RichText::new(s.folder_untrusted).color(warn));
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(tls::spelled(fingerprint)).monospace().small(),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(s.folder_untrusted_how).small().color(dim));
+                            }
+                            Why::Refused => {
+                                ui.label(RichText::new(s.folder_refused).color(warn));
+                            }
+                            Why::Address => {
+                                ui.label(RichText::new(s.folder_bad_address).color(warn));
+                            }
+                            Why::Full => {
+                                ui.label(RichText::new(s.folder_full).color(warn));
+                            }
+                            Why::NoPassword => {
+                                ui.label(RichText::new(s.folder_no_password).color(warn));
+                            }
+                            Why::Moved => {
+                                ui.label(RichText::new(s.folder_moved).color(warn));
+                            }
+                            Why::NotFound => {
+                                ui.label(RichText::new(s.folder_not_found).color(warn));
+                            }
+                            Why::NotAFolder => {
+                                ui.label(RichText::new(s.folder_not_webdav).color(warn));
+                            }
+                            Why::NotTls => {
+                                ui.label(RichText::new(s.folder_not_tls).color(warn));
+                            }
+                            Why::Other(reason) => {
+                                ui.label(RichText::new(s.folder_unreachable).color(warn));
+                                ui.label(RichText::new(reason).small().color(dim));
+                            }
+                        }
+                    }
+                }
+                let can_connect = !trying && !form.address.trim().is_empty();
+                if password.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && can_connect
+                {
+                    connect = true;
+                }
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let dark = ui.visuals().dark_mode;
+                    let ink = if dark {
+                        egui::Color32::from_rgb(0x14, 0x14, 0x18)
+                    } else {
+                        egui::Color32::WHITE
+                    };
+                    let size = if touch {
+                        egui::vec2((ui.available_width() - 8.0) / 2.0, 46.0)
+                    } else {
+                        egui::vec2(76.0, 28.0)
+                    };
+                    // The server showed a certificate nobody vouches for: the button that
+                    // goes on says what going on means.
+                    let untrusted = match &form.status {
+                        Status::Failed(Why::Untrusted(fingerprint)) => Some(fingerprint.clone()),
+                        _ => None,
+                    };
+                    let label = if untrusted.is_some() {
+                        s.folder_trust
+                    } else {
+                        s.folder_connect
+                    };
+                    let go = egui::Button::new(RichText::new(label).strong().color(ink))
+                        .fill(theme::accent(dark))
+                        .min_size(size);
+                    if ui.add_enabled(can_connect, go).clicked() {
+                        match untrusted {
+                            Some(fingerprint) => trust = Some(fingerprint),
+                            None => connect = true,
+                        }
+                    }
+                    if ui.add(egui::Button::new(s.cancel).min_size(size)).clicked() {
+                        cancel = true;
+                    }
                 });
+            };
+            let height = if scrolls {
+                ui.set_min_height(room);
+                egui::ScrollArea::vertical()
+                    .max_height(room)
+                    .auto_shrink([false, false])
+                    .show(ui, &mut body)
+                    .content_size
+                    .y
+            } else {
+                let top = ui.cursor().top();
+                body(ui);
+                ui.min_rect().bottom() - top
+            };
+            ui.ctx().data_mut(|d| d.insert_temp(height_id, height));
         });
         if cancel || shown.should_close() {
             // (A try that is under way comes back to no form, and is dropped.)
