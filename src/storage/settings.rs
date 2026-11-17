@@ -58,8 +58,8 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
             }
         }
     };
-    let parsed: Result<T, String> = match bytes {
-        Some(bytes) => serde_json::from_slice(&bytes).map_err(|err| err.to_string()),
+    let parsed: Result<T, String> = match &bytes {
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|err| err.to_string()),
         None => Err(format!(
             "larger than {MAX_BYTES} bytes, or not a regular file"
         )),
@@ -67,6 +67,21 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
     match parsed {
         Ok(value) => value,
         Err(err) => {
+            // A file that is what the app wrote but for a member or two (a word that
+            // a later version knows, a value of another kind) is read without those:
+            // one of them does not cost all the others. What the file held is kept
+            // beside it, since the next save writes it without them.
+            if let Some((value, left_out)) = bytes.as_deref().and_then(member_by_member::<T>) {
+                let aside = free_aside_name(path, "partial");
+                let copied = fs::copy(path, &aside).is_ok();
+                tracing::warn!(
+                    error = %err,
+                    left_out = ?left_out,
+                    copied,
+                    "parts of the settings file could not be read; they have their defaults"
+                );
+                return value;
+            }
             let aside = free_aside_name(path, "corrupt");
             match fs::rename(path, &aside) {
                 Ok(()) => tracing::warn!(
@@ -82,6 +97,33 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
             T::default()
         }
     }
+}
+
+/// Reads a JSON object one member at a time: every member that can be read by itself
+/// is kept, and one that cannot is left out (it then has the default of `T`). Gives
+/// what was read and the names of what was left out; `None` when the bytes are no
+/// object, when nothing had to be left out, or when `T` cannot be read from a part
+/// of its members at all.
+fn member_by_member<T: DeserializeOwned>(bytes: &[u8]) -> Option<(T, Vec<String>)> {
+    let serde_json::Value::Object(read) = serde_json::from_slice(bytes).ok()? else {
+        return None;
+    };
+    let mut kept = serde_json::Map::new();
+    let mut left_out = Vec::new();
+    for (name, member) in read {
+        let alone: serde_json::Map<String, serde_json::Value> =
+            std::iter::once((name.clone(), member.clone())).collect();
+        if serde_json::from_value::<T>(serde_json::Value::Object(alone)).is_ok() {
+            kept.insert(name, member);
+        } else {
+            left_out.push(name);
+        }
+    }
+    if left_out.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_value(serde_json::Value::Object(kept)).ok()?;
+    Some((value, left_out))
 }
 
 /// Serialises `value` as pretty JSON and atomically replaces `path` with it. It is the
@@ -256,6 +298,50 @@ mod tests {
         assert!(!path.exists());
         let aside = dir.path().join("settings.json.corrupt");
         assert_eq!(fs::read(aside).unwrap(), b"{ not json");
+    }
+
+    /// A file of which one member cannot be read keeps all its other members; the
+    /// one has its default, and the file as it was is kept beside it.
+    #[test]
+    fn one_member_that_cannot_be_read_does_not_cost_the_others() {
+        #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+        #[serde(default)]
+        struct Kinds {
+            volume: f32,
+            name: String,
+            kind: Option<Kind>,
+            list: Vec<u32>,
+        }
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        enum Kind {
+            Old,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let written = br#"{"volume":0.5,"name":"mine","kind":"Newer","list":[1,2],"later":true}"#;
+        fs::write(&path, written).unwrap();
+        let loaded: Kinds = load_json(&path);
+        assert_eq!(
+            loaded,
+            Kinds {
+                volume: 0.5,
+                name: "mine".into(),
+                kind: None,
+                list: vec![1, 2],
+            }
+        );
+        // The file stays in its place, and what it held is beside it.
+        assert_eq!(fs::read(&path).unwrap(), written);
+        let aside = dir.path().join("settings.json.partial");
+        assert_eq!(fs::read(aside).unwrap(), written);
+
+        // A kind of file that cannot be read from a part of its members (it has no
+        // defaults) is moved aside whole, as before.
+        fs::write(&path, br#"{"volume":"loud","name":"mine"}"#).unwrap();
+        let loaded: Sample = load_json(&path);
+        assert_eq!(loaded, Sample::default());
+        assert!(!path.exists());
+        assert!(dir.path().join("settings.json.corrupt").exists());
     }
 
     /// A settings file that is there but cannot be read is moved aside before the

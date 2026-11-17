@@ -457,6 +457,14 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
         None => Library::open(library_paths)?,
     };
 
+    // Albums that are pinned by a key that has just become another (see the report).
+    if settings.follow_album_keys(&open_report.album_keys_changed)
+        && let Err(error) =
+            crate::storage::settings::save_json_atomic(&paths.settings_file(), &settings)
+    {
+        tracing::warn!("could not save the pins of albums whose keys changed: {error}");
+    }
+
     if platform::PHONE {
         add_phone_music_folder(&library, &paths.data_dir.join("music-folder-added"));
     }

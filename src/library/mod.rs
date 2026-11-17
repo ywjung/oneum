@@ -32,7 +32,7 @@ mod watch;
 
 pub use art::ArtImage;
 pub use check::CheckStatus;
-pub use ident::{album_key, fnv1a64};
+pub use ident::{album_key, disc_of, fnv1a64};
 pub use loudness::LoudnessStatus;
 pub use search::{PreparedQuery, normalize};
 pub use snapshot::{Album, Artist, LibrarySnapshot, SortKey};
@@ -100,6 +100,10 @@ pub struct OpenReport {
     pub recovered_corrupt_db: Option<PathBuf>,
     /// The database was upgraded from this schema version.
     pub migrated_from: Option<u32>,
+    /// Albums that have another key than they had (old, new): those that are told
+    /// apart by their folder, after the folder got another path. What is kept
+    /// elsewhere under an album's key (a pin) follows by this.
+    pub album_keys_changed: Vec<(u64, u64)>,
 }
 
 #[derive(Debug)]
@@ -499,6 +503,72 @@ pub(crate) fn unix_now() -> i64 {
 /// cannot be resolved (e.g. the folder is offline).
 pub(crate) fn resolve_dir(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Gives every track that names no album artist the album key of the path it has now
+/// (see `ident::album_key`), and tells which keys became which.
+fn rekey_albums(db: &mut Db) -> rusqlite::Result<Vec<(u64, u64)>> {
+    let mut changed: Vec<(TrackId, u64)> = Vec::new();
+    let mut keys: Vec<(u64, u64)> = Vec::new();
+    for (id, path, album, compilation, before) in db.tracks_without_album_artist()? {
+        let now = album_key(&album, "", compilation, &path);
+        if now != before {
+            changed.push((id, now));
+            keys.push((before, now));
+        }
+    }
+    if !changed.is_empty() {
+        db.set_album_keys(&changed)?;
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    Ok(keys)
+}
+
+/// How long the music folders are given, all together, to say whether they are there
+/// when the library is opened. A disk answers in no time, one that was asleep in a
+/// few seconds.
+const FOLDERS_ANSWER_WITHIN: Duration = Duration::from_secs(5);
+
+/// Asks `ask` about each of `paths`, all at the same time and on threads of their own,
+/// and gives the answers that came within `wait` (`None` for the others).
+///
+/// The library is opened before there is a window. A music folder on a share whose
+/// server is gone (the laptop on another network, the NAS switched off) answers a
+/// question about it after a minute or more, or never: asked one after the other on
+/// the thread that opens the window, such a folder kept the app from appearing at
+/// all. A folder that does not answer in time is treated as one that is not there;
+/// the scan that follows the opening looks again, on its own thread.
+fn asked_together<T: Send + 'static>(
+    paths: &[PathBuf],
+    wait: Duration,
+    ask: impl Fn(&Path) -> T + Send + Sync + 'static,
+) -> Vec<Option<T>> {
+    let ask = Arc::new(ask);
+    let (answered, answers) = std::sync::mpsc::channel();
+    for (at, path) in paths.iter().enumerate() {
+        let (asking, telling, asked) = (Arc::clone(&ask), answered.clone(), path.clone());
+        let on_its_own = std::thread::Builder::new()
+            .name("oneum-folder-probe".into())
+            .spawn(move || {
+                let _ = telling.send((at, asking(&asked)));
+            });
+        if on_its_own.is_err() {
+            // (No thread to be had: asked here, as it always was.)
+            let _ = answered.send((at, ask(path)));
+        }
+    }
+    drop(answered);
+    let until = std::time::Instant::now() + wait;
+    let mut given: Vec<Option<T>> = paths.iter().map(|_| None).collect();
+    while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+        match answers.recv_timeout(left) {
+            Ok((at, answer)) => given[at] = Some(answer),
+            // Everyone has answered, or the time is over.
+            Err(_) => break,
+        }
+    }
+    given
 }
 
 /// Reads a playlist file, refusing files that are implausibly large (and what is not a
@@ -1343,9 +1413,11 @@ impl Library {
         }
         let opened = Db::open(&paths.data_dir.join(DB_FILE_NAME))?;
         let mut db = opened.db;
+        let mut paths_moved = false;
         if let Some(home) = home {
             let moved = db.follow_home(home, SHEETS_READ_KEY)?;
             if moved > 0 {
+                paths_moved = true;
                 tracing::info!(
                     moved,
                     "the library's folder has moved: its paths were brought along"
@@ -1356,6 +1428,7 @@ impl Library {
             match db.follow_folder(before, now, SHEETS_READ_KEY) {
                 Ok(0) => {}
                 Ok(moved) => {
+                    paths_moved = true;
                     tracing::info!(
                         moved,
                         "a music folder was moved: its paths were brought along"
@@ -1366,15 +1439,39 @@ impl Library {
                 }
             }
         }
+        // An album without an album artist is told apart by its folder, and its key
+        // is made of the folder's path. The paths have just become others: the keys
+        // follow, all of them, or a song read after this (added to such a folder,
+        // or its tags changed) would have the key of the new path and stand apart
+        // from the album it belongs to.
+        let album_keys_changed = if paths_moved {
+            rekey_albums(&mut db).unwrap_or_else(|error| {
+                tracing::warn!("the albums' keys could not follow the moved paths: {error}");
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
         let report = OpenReport {
             recovered_corrupt_db: opened.recovered_corrupt_db,
             migrated_from: opened.migrated_from,
+            album_keys_changed,
         };
 
         let mut state = State::default();
-        for root in db.roots()? {
-            let online = root.path.is_dir();
-            let canonical = resolve_dir(&root.path);
+        let roots = db.roots()?;
+        let folders: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
+        let answers = asked_together(&folders, FOLDERS_ANSWER_WITHIN, |path| {
+            (path.is_dir(), resolve_dir(path))
+        });
+        for (root, answer) in roots.into_iter().zip(answers) {
+            let (online, canonical) = answer.unwrap_or_else(|| {
+                tracing::warn!(
+                    root_id = root.id,
+                    "a music folder did not answer in time; it counts as not there for now"
+                );
+                (false, root.path.clone())
+            });
             state.roots.push(RootState {
                 id: root.id,
                 path: root.path,
@@ -1596,6 +1693,7 @@ impl Library {
             (at, root, links)
         };
         self.inner.scan.cancel_root(root_id);
+        self.hand_to_twins(root_id);
 
         if let Err(error) = self.delete_folder_rows(root_id) {
             // The folder is still in the database with all of its tracks (the database
@@ -1627,6 +1725,61 @@ impl Library {
         self.poke_watcher();
         self.inner.publish();
         Ok(())
+    }
+
+    /// Before a music folder goes: what the listener did with its songs (favourites,
+    /// ratings, plays, places in playlists and in the queue) is handed to the same
+    /// files in the other music folders, where a file there is plainly the same one
+    /// (as a moved file is told, see `scan::match_relinks`). A collection that was
+    /// copied to a new place, the new folder added and the old one taken away,
+    /// would otherwise be the copies with nothing attached. The song keeps its row
+    /// and takes the other file; songs nothing was done with go with their folder.
+    fn hand_to_twins(&self, root_id: i64) {
+        let marked = match lock(&self.inner.db).marked_tracks_of_root(root_id) {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(%err, "could not look for the songs to hand over");
+                return;
+            }
+        };
+        if marked.is_empty() {
+            return;
+        }
+        let (leaving, staying) = {
+            let state = lock(&self.inner.state);
+            let leaving: Vec<Arc<Track>> = marked
+                .iter()
+                .filter_map(|id| state.tracks.get(id).map(|entry| Arc::clone(&entry.track)))
+                .collect();
+            let staying: Vec<Arc<Track>> = state
+                .tracks
+                .values()
+                .map(|entry| &entry.track)
+                .filter(|track| track.available && track.root_id != Some(root_id))
+                .cloned()
+                .collect();
+            (leaving, staying)
+        };
+        let mut handed = 0;
+        for (keep, take) in scan::match_relinks(&leaving, &staying) {
+            let mut db = lock(&self.inner.db);
+            match db.relink_track(keep, take) {
+                Ok(Some(row)) => {
+                    let mut state = lock(&self.inner.state);
+                    state.remove(take);
+                    state.insert(row.track, row.art_from_folder);
+                    handed += 1;
+                }
+                Ok(None) => {}
+                Err(err) => tracing::warn!(%err, "could not hand a song over to its copy"),
+            }
+        }
+        if handed > 0 {
+            tracing::info!(
+                handed,
+                "songs of a folder that goes live on in their copies"
+            );
+        }
     }
 
     /// Deletes a music folder and its tracks from the database, all of it or nothing,
@@ -2837,6 +2990,13 @@ impl Library {
         }
     }
 
+    /// Forgets which files were added in the last minutes (lets tests stand where the
+    /// library stands a long time after files were added).
+    #[doc(hidden)]
+    pub fn debug_forget_recently_added(&self) {
+        lock(&self.inner.recently_added).clear();
+    }
+
     /// Number of files whose tags were read since the library was opened (lets tests
     /// verify that unchanged files are not read again).
     #[doc(hidden)]
@@ -3107,5 +3267,34 @@ mod tests {
             "{waited:?}"
         );
         drop(release);
+    }
+    /// The music folders are asked at the same time, and one that does not answer is
+    /// not waited for beyond the time they have together.
+    #[test]
+    fn a_folder_that_does_not_answer_does_not_hold_up_the_others() {
+        let paths: Vec<PathBuf> = ["a", "slow", "b"].iter().map(PathBuf::from).collect();
+        let started = std::time::Instant::now();
+        let answers = asked_together(&paths, Duration::from_millis(300), |path| {
+            if path == Path::new("slow") {
+                std::thread::sleep(Duration::from_secs(5));
+            }
+            path.to_string_lossy().to_uppercase()
+        });
+        assert_eq!(
+            answers,
+            [Some("A".to_string()), None, Some("B".to_string())]
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // All of them answer: nothing is waited for.
+        let started = std::time::Instant::now();
+        let answers = asked_together(&paths, Duration::from_secs(30), Path::to_path_buf);
+        assert_eq!(answers.len(), 3);
+        assert!(answers.iter().all(Option::is_some));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(asked_together(&[], Duration::from_secs(30), |_| ()).is_empty());
     }
 }

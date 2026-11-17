@@ -415,6 +415,10 @@ pub struct Db {
 
 type SqlResult<T> = rusqlite::Result<T>;
 
+/// A track whose album key is made of its path: its id, its path, the album's title,
+/// whether it is of a compilation, and the key it has.
+pub type FolderKeyed = (TrackId, PathBuf, String, bool, u64);
+
 impl Db {
     /// Opens (creating or upgrading as needed) the database at `path`.
     pub fn open(path: &Path) -> Result<Opened, DbError> {
@@ -515,6 +519,11 @@ impl Db {
             }
         }
 
+        // (Not when the database had to be replaced: its copies are then all there
+        // is of the library.)
+        if recovered_corrupt_db.is_none() {
+            prune_backups(path);
+        }
         Ok(Opened {
             db: Db { conn },
             recovered_corrupt_db,
@@ -807,6 +816,16 @@ impl Db {
             }
         }
         tx.commit()
+    }
+
+    /// The tracks of a music folder that hold something of the listener's: a
+    /// favourite, a rating, plays, a place in a playlist or in the queue.
+    pub fn marked_tracks_of_root(&self, root_id: i64) -> SqlResult<Vec<TrackId>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM tracks WHERE root_id = ?1 AND (favorite != 0 OR rating != 0                  OR play_count > 0                  OR EXISTS (SELECT 1 FROM playlist_items WHERE track_id = tracks.id)                  OR EXISTS (SELECT 1 FROM queue WHERE track_id = tracks.id))",
+        )?;
+        let ids = stmt.query_map(params![root_id], |row| row.get(0))?;
+        ids.collect()
     }
 
     /// Makes row `keep` point at the file described by row `take` (path and every
@@ -1336,6 +1355,38 @@ impl Db {
         Ok(moved)
     }
 
+    /// The tracks that name no album artist: their album is told apart by the folder
+    /// they lie in, so their key is made of their path. With what the key is made of
+    /// (path, album title, compilation flag) and the key they have.
+    pub fn tracks_without_album_artist(&self) -> SqlResult<Vec<FolderKeyed>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, album, compilation, album_key FROM tracks \
+             WHERE TRIM(album_artist) = ''",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                blob_to_path(row.get(1)?),
+                row.get(2)?,
+                row.get(3)?,
+                row.get::<_, i64>(4)?.cast_unsigned(),
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Gives tracks other album keys, all of them or none.
+    pub fn set_album_keys(&mut self, keys: &[(TrackId, u64)]) -> SqlResult<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("UPDATE tracks SET album_key = ?2 WHERE id = ?1")?;
+            for (id, key) in keys {
+                stmt.execute(params![id, key.cast_signed()])?;
+            }
+        }
+        tx.commit()
+    }
+
     /// Follows a music folder that was moved or renamed: every path at or below
     /// `before` is rewritten to lie at or below `now`, as [`Db::follow_home`] does for
     /// the folder the library lives in. For a folder the system can still tell after it
@@ -1591,6 +1642,12 @@ fn open_checked(path: &Path) -> SqlResult<Connection> {
     }
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // On Apple's systems a file that is "synced" may still sit in the drive's own
+    // cache; only the full sync puts it on the disk. A power cut while the log is
+    // written back into the database (a checkpoint) could otherwise leave the file
+    // damaged, and a damaged database is replaced by an empty one. Costs at
+    // checkpoints only; elsewhere it changes nothing.
+    conn.pragma_update(None, "checkpoint_fullfsync", true)?;
     conn.pragma_update(None, "foreign_keys", true)?;
     Ok(conn)
 }
@@ -1704,6 +1761,39 @@ fn move_aside(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// `path` with `suffix` appended to its file name.
+/// The copies made before upgrades (`<name>.bak-v<N>`) are kept one deep: that of the
+/// last upgrade stays, those before it go. Each is a whole copy of the library, and
+/// nothing else ever removes them.
+fn prune_backups(path: &Path) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{name}.bak-v");
+    let mut backups: Vec<(u32, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name().into_string().ok()?;
+            let version = file.strip_prefix(&prefix)?.parse().ok()?;
+            Some((version, entry.path()))
+        })
+        .collect();
+    backups.sort_by_key(|(version, _)| *version);
+    backups.pop();
+    for (version, old) in backups {
+        match fs::remove_file(&old) {
+            Ok(()) => tracing::info!(version, "an older copy of the library database was removed"),
+            Err(error) => tracing::debug!(version, %error, "an older copy of the database stays"),
+        }
+    }
+}
+
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -2818,5 +2908,28 @@ mod tests {
         assert_eq!(db.get_track(id).unwrap().unwrap().track.title, nasty);
         assert_eq!(db.playlists().unwrap(), vec![(playlist, nasty.to_string())]);
         assert_eq!(db.kv_get(nasty).unwrap().as_deref(), Some(nasty));
+    }
+    /// Of the copies made before upgrades the newest is kept; the older ones go when
+    /// the database is opened. What is no such copy stays.
+    #[test]
+    fn older_copies_from_before_upgrades_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        drop(Db::open(&path).unwrap());
+        for name in [
+            ".bak-v1",
+            ".bak-v3",
+            ".bak-v5",
+            ".bak-v5.partial",
+            ".bak-vx",
+            ".corrupt-1",
+        ] {
+            fs::write(sibling(&path, name), b"copy").unwrap();
+        }
+        drop(Db::open(&path).unwrap());
+        let there = |name: &str| sibling(&path, name).exists();
+        assert!(!there(".bak-v1") && !there(".bak-v3"));
+        assert!(there(".bak-v5"), "the newest stays");
+        assert!(there(".bak-v5.partial") && there(".bak-vx") && there(".corrupt-1"));
     }
 }

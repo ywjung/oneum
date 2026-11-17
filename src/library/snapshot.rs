@@ -258,7 +258,7 @@ impl LibrarySnapshot {
                 sort_artist_rank[i],
                 album_rank[i],
                 track.album_key,
-                track.disc_no.unwrap_or(1),
+                super::ident::disc_of(track),
                 track.track_no.unwrap_or(u32::MAX),
                 title_rank[i],
                 track.id,
@@ -498,7 +498,7 @@ impl LibrarySnapshot {
             }
             SortKey::TrackNo => sort_keyed(indices, ascending, |i| {
                 self.field(i, |t| {
-                    (t.disc_no.unwrap_or(1), t.track_no.unwrap_or(u32::MAX))
+                    (super::ident::disc_of(t), t.track_no.unwrap_or(u32::MAX))
                 })
             }),
             SortKey::Year => sort_keyed(indices, ascending, |i| {
@@ -728,7 +728,7 @@ fn build_albums(
             album.tracks.sort_by_key(|&i| {
                 let t = &tracks[i as usize];
                 (
-                    t.disc_no.unwrap_or(1),
+                    super::ident::disc_of(t),
                     t.track_no.unwrap_or(u32::MAX),
                     title_rank[i as usize],
                     i,

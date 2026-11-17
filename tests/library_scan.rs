@@ -908,6 +908,189 @@ fn moved_file_is_relinked() {
     assert!(library.track(a.id).unwrap().favorite);
 }
 
+/// A folder renamed only in the case of its letters, on a disk that does not tell the
+/// cases apart: the files answer to both spellings, the walk meets them under the new
+/// one. Each stays one song, with what the listener did with it. (Where the disk does
+/// tell the cases apart, the rename is a move like any other.)
+#[test]
+fn a_folder_renamed_only_in_its_letters_case_does_not_double_its_songs() {
+    let env = TestEnv::new();
+    let music = env.music();
+    write_tagged_wav(&music.join("iu/song a.wav"), 300, "Song A", "IU", "Album");
+    write_tagged_wav(&music.join("iu/song b.wav"), 400, "Song B", "IU", "Album");
+    let (library, _) = env.open_scanned();
+    let a = by_title(&library, "Song A");
+    library.set_favorite(&[a.id], true).unwrap();
+    library.record_play(a.id);
+    let playlist = library.create_playlist("mix").unwrap();
+    library.add_to_playlist(playlist, &[a.id]).unwrap();
+
+    fs::rename(music.join("iu"), music.join("IU")).unwrap();
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 2, "no song is there twice");
+    let after = library.track(a.id).expect("the row is the one it was");
+    assert_eq!(after.path, music.join("IU/song a.wav"));
+    assert!(after.available && after.favorite);
+    assert_eq!(after.play_count, 1);
+    assert_eq!(library.playlist_items(playlist).len(), 1);
+    // And it stays so.
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 2);
+    assert_eq!(
+        library.track(a.id).unwrap().path,
+        music.join("IU/song a.wav")
+    );
+}
+
+/// A collection brought to another music folder the careful way: copied, the new
+/// folder added and scanned, and only then the old files taken away. The songs are in
+/// the library twice in between; when the old files go, what the listener did with
+/// them goes over to the copies (which are plainly the same files), not away.
+#[test]
+fn files_copied_to_another_folder_take_over_when_the_old_ones_go() {
+    let env = TestEnv::new();
+    let old = env.music();
+    let new = env.dir.path().join("new music");
+    write_tagged_wav(&old.join("album/one.wav"), 300, "One", "Artist", "Album");
+    write_tagged_wav(&old.join("album/two.wav"), 400, "Two", "Artist", "Album");
+    let (library, _) = env.open_scanned();
+    let one = by_title(&library, "One");
+    library.set_favorite(&[one.id], true).unwrap();
+    library.set_rating(&[one.id], 4).unwrap();
+    library.record_play(one.id);
+    let playlist = library.create_playlist("mix").unwrap();
+    library.add_to_playlist(playlist, &[one.id]).unwrap();
+
+    // The copy, long before the old files go (not within the minutes a move takes).
+    fs::create_dir_all(new.join("album")).unwrap();
+    for name in ["one.wav", "two.wav"] {
+        fs::copy(old.join("album").join(name), new.join("album").join(name)).unwrap();
+    }
+    let new_root = library.add_folder(&new).unwrap();
+    wait_scan(&library);
+    assert_eq!(library.snapshot().len(), 4);
+    library.debug_forget_recently_added();
+
+    fs::remove_dir_all(old.join("album")).unwrap();
+    rescan(&library);
+    assert_eq!(library.snapshot().len(), 2, "one of each again");
+    let after = library.track(one.id).expect("the old row lives on");
+    assert_eq!(after.path, new.join("album/one.wav"));
+    assert_eq!(after.root_id, Some(new_root));
+    assert!(after.available && after.favorite);
+    assert_eq!((after.rating, after.play_count), (4, 1));
+    let items: Vec<i64> = library
+        .playlist_items(playlist)
+        .iter()
+        .map(|item| item.track_id)
+        .collect();
+    assert_eq!(items, [one.id]);
+}
+
+/// The same, with the old folder taken out of the library instead of its files being
+/// deleted: the copies in the folder that stays take over what was done with the
+/// songs; a song nothing was done with simply goes with its folder.
+#[test]
+fn removing_a_folder_hands_its_songs_marks_to_their_copies_elsewhere() {
+    let env = TestEnv::new();
+    let old = env.music();
+    let new = env.dir.path().join("new music");
+    write_tagged_wav(&old.join("album/one.wav"), 300, "One", "Artist", "Album");
+    write_tagged_wav(&old.join("album/two.wav"), 400, "Two", "Artist", "Album");
+    write_tagged_wav(
+        &old.join("album/only here.wav"),
+        500,
+        "Only",
+        "Artist",
+        "Album",
+    );
+    fs::create_dir_all(new.join("album")).unwrap();
+    for name in ["one.wav", "two.wav"] {
+        fs::copy(old.join("album").join(name), new.join("album").join(name)).unwrap();
+    }
+    let library = env.open();
+    let old_root = library.add_folder(&old).unwrap();
+    wait_scan(&library);
+    let one = by_title(&library, "One");
+    let only = by_title(&library, "Only");
+    library.set_favorite(&[one.id, only.id], true).unwrap();
+    library.record_play(one.id);
+    let playlist = library.create_playlist("mix").unwrap();
+    library
+        .add_to_playlist(playlist, &[one.id, only.id])
+        .unwrap();
+    let new_root = library.add_folder(&new).unwrap();
+    wait_scan(&library);
+    assert_eq!(library.snapshot().len(), 5);
+
+    library.remove_folder(old_root).unwrap();
+    let snapshot = library.snapshot();
+    assert_eq!(snapshot.len(), 2, "the folder that stays has two songs");
+    let after = library.track(one.id).expect("the marked song lives on");
+    assert_eq!(after.path, new.join("album/one.wav"));
+    assert_eq!(after.root_id, Some(new_root));
+    assert!(after.favorite);
+    assert_eq!(after.play_count, 1);
+    // The song that has no copy went with its folder, and its place in the playlist.
+    assert!(library.track(only.id).is_none());
+    let items: Vec<i64> = library
+        .playlist_items(playlist)
+        .iter()
+        .map(|item| item.track_id)
+        .collect();
+    assert_eq!(items, [one.id]);
+    // It holds after a restart.
+    drop(library);
+    let library = env.open();
+    assert_eq!(library.snapshot().len(), 2);
+    assert!(library.track(one.id).unwrap().favorite);
+}
+
+/// Discs kept in folders of their own (`CD1`, `CD2`) are one album. Where the files
+/// carry no disc number, the folder's number is the disc: the album plays disc after
+/// disc, not track 1 of each, then track 2 of each.
+#[test]
+fn discs_in_folders_of_their_own_play_one_after_the_other() {
+    let env = TestEnv::new();
+    let music = env.music();
+    for (disc, base) in [("CD1", 300), ("CD2", 400)] {
+        for n in 1..=3u32 {
+            write_wav(
+                &music.join(format!("The Set/{disc}/{n:02}.wav")),
+                base + n * 10,
+                &[
+                    ("INAM", &format!("{disc} song {n}")),
+                    ("IART", "Artist"),
+                    ("IPRD", "The Set"),
+                    ("ITRK", &n.to_string()),
+                ],
+            );
+        }
+    }
+    let (library, _) = env.open_scanned();
+    let snapshot = library.snapshot();
+    assert_eq!(snapshot.albums().len(), 1, "one album");
+    let titles: Vec<&str> = snapshot.albums()[0]
+        .tracks
+        .iter()
+        .map(|&i| snapshot.tracks[i as usize].title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "CD1 song 1",
+            "CD1 song 2",
+            "CD1 song 3",
+            "CD2 song 1",
+            "CD2 song 2",
+            "CD2 song 3"
+        ]
+    );
+    let second = by_title(&library, "CD2 song 1");
+    assert_eq!(second.disc_no, None, "the files say nothing of discs");
+    assert_eq!(oneum::library::disc_of(&second), 2);
+}
+
 #[test]
 fn missing_files_follow_the_keep_or_remove_policy() {
     let env = TestEnv::new();
@@ -2694,6 +2877,71 @@ fn a_removed_song_stays_out_until_its_file_is_opened_again() {
     let library = env.open();
     rescan(&library);
     assert_eq!(titles(&library), ["Other", "Same", "Same"]);
+}
+
+/// An album whose songs name no album artist is told apart by its folder. When the
+/// app's container gets another path (an iPhone app that is updated), the album stays
+/// one album: also with a song that is put into its folder afterwards. What was kept
+/// under the album's key (a pin) is told which key it has now.
+#[test]
+fn an_album_told_by_its_folder_stays_one_when_the_container_moves() {
+    use oneum::library::LibraryPaths;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = |home: &Path| LibraryPaths {
+        data_dir: home.join("Library/data"),
+        cache_dir: home.join("Library/cache"),
+    };
+    let before = dir.path().join("Application/A");
+    let music = before.join("Documents");
+    write_tagged_wav(&music.join("Album/one.wav"), 1000, "One", "Band", "Album");
+    write_tagged_wav(&music.join("Album/two.wav"), 1100, "Two", "Band", "Album");
+    let key_before = {
+        let (library, _) = Library::open_in_home(paths(&before), &before).unwrap();
+        library.add_folder(&music).unwrap();
+        wait_scan(&library);
+        assert_eq!(library.snapshot().albums().len(), 1);
+        let key = by_title(&library, "One").album_key;
+        library.shutdown();
+        key
+    };
+
+    let after = dir.path().join("Application/B");
+    fs::rename(&before, &after).unwrap();
+    let (library, report) = Library::open_in_home(paths(&after), &after).unwrap();
+    let key_after = by_title(&library, "One").album_key;
+    assert_ne!(key_after, key_before, "the folder's path is in the key");
+    assert_eq!(report.album_keys_changed, [(key_before, key_after)]);
+    assert_eq!(by_title(&library, "Two").album_key, key_after);
+    // A pin of the album follows.
+    let mut settings = oneum::app::settings::Settings {
+        pinned: vec![oneum::app::settings::Pin::Album(key_before)],
+        ..Default::default()
+    };
+    assert!(settings.follow_album_keys(&report.album_keys_changed));
+    assert_eq!(
+        settings.pinned,
+        [oneum::app::settings::Pin::Album(key_after)]
+    );
+
+    // A song that comes into the folder now belongs to the same album.
+    write_tagged_wav(
+        &after.join("Documents/Album/three.wav"),
+        1200,
+        "Three",
+        "Band",
+        "Album",
+    );
+    rescan(&library);
+    let snapshot = library.snapshot();
+    assert_eq!(snapshot.len(), 3);
+    assert_eq!(snapshot.albums().len(), 1, "one album still");
+    assert_eq!(by_title(&library, "Three").album_key, key_after);
+    library.shutdown();
+
+    // Opened again where it is: nothing changes any more.
+    let (library, report) = Library::open_in_home(paths(&after), &after).unwrap();
+    assert!(report.album_keys_changed.is_empty());
+    assert_eq!(library.snapshot().albums().len(), 1);
 }
 
 /// An iPhone app's container moves when the app is updated: what was removed from the

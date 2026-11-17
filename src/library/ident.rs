@@ -94,15 +94,37 @@ fn album_folder(path: &Path) -> Option<&Path> {
 
 /// True for folder names such as `CD1`, `cd 02`, `Disc 2`, `disk3`, `Disc-1`.
 fn is_disc_folder(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    let Some(rest) = ["disc", "disk", "cd"]
-        .iter()
-        .find_map(|prefix| lower.strip_prefix(prefix))
-    else {
-        return false;
-    };
+    disc_folder_number(name).is_some()
+}
+
+/// The number of a folder named like `CD1`, `cd 02`, `Disc 2`, `disk3`, `Disc-1`.
+fn disc_folder_number(name: &str) -> Option<u32> {
+    let name = name.trim();
+    let rest = ["disc", "disk", "cd"].iter().find_map(|prefix| {
+        // (An ASCII prefix: the cut is between two characters.)
+        name.as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
+            .then(|| &name[prefix.len()..])
+    })?;
     let digits = rest.trim_start_matches([' ', '-', '_', '.']);
-    !digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit())
+    (!digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// The disc a track is of: what its tags say, and where they say nothing, the number
+/// of the folder it lies in when that is a disc's folder (`CD2`, `Disc 2`). Such
+/// folders are one album (see [`album_key`]), and a set whose files carry no disc
+/// number would otherwise play as 1, 1, 2, 2, … by the track numbers alone.
+pub fn disc_of(track: &crate::model::Track) -> u32 {
+    track
+        .disc_no
+        .or_else(|| {
+            let folder = super::cue::backing_file(&track.path).parent()?;
+            disc_folder_number(folder.file_name()?.to_str()?)
+        })
+        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -272,5 +294,26 @@ mod tests {
         let ascii = album_key("ABC", "X", false, &PathBuf::from("/m/a/1.mp3"));
         let wide = album_key("ＡＢＣ", "ｘ", false, &PathBuf::from("/m/a/1.mp3"));
         assert_eq!(ascii, wide);
+    }
+
+    #[test]
+    fn a_disc_folder_tells_its_number() {
+        for (name, number) in [
+            ("CD1", Some(1)),
+            ("cd 02", Some(2)),
+            ("Disc 2", Some(2)),
+            ("disk3", Some(3)),
+            ("Disc-10", Some(10)),
+            (" DISC_4 ", Some(4)),
+            ("CD", None),
+            ("Disco", None),
+            ("CD1234", None),
+            ("cdé", None),
+            ("디스크 2", None),
+            ("Live", None),
+        ] {
+            assert_eq!(disc_folder_number(name), number, "{name}");
+            assert_eq!(is_disc_folder(name), number.is_some(), "{name}");
+        }
     }
 }

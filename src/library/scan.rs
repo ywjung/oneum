@@ -908,13 +908,22 @@ pub(crate) fn sheet_track_length(start: u64, next: Option<u64>, total_ms: u64) -
 /// Removes directories that are inside another directory of the set.
 fn prune_nested(dirs: BTreeSet<PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    // BTreeSet order puts a parent before its children.
+    let mut kept: HashSet<PathBuf> = HashSet::new();
+    // BTreeSet order puts a parent before its children. (Looked up by its ancestors,
+    // not compared with every directory kept so far: a tagger that touches a few
+    // thousand album folders at once hands in as many.)
     for dir in dirs {
-        if !out.iter().any(|kept| dir.starts_with(kept)) {
+        if !dir.ancestors().any(|above| kept.contains(above)) {
+            kept.insert(dir.clone());
             out.push(dir);
         }
     }
     out
+}
+
+/// Whether `path` lies in one of `dirs` (or is one of them).
+fn lies_in(path: &Path, dirs: &HashSet<&Path>) -> bool {
+    path.ancestors().any(|above| dirs.contains(above))
 }
 
 fn scan_root(
@@ -952,6 +961,7 @@ fn scan_root(
 
     // Tracks the library already has in the scanned area, including individually
     // registered files that live under this folder (they are adopted by it).
+    let scanned: HashSet<&Path> = scan_dirs.iter().map(PathBuf::as_path).collect();
     let known: HashMap<PathBuf, Known> = {
         let state = lock(&inner.state);
         state
@@ -962,7 +972,9 @@ fn scan_root(
                 // Files the walk would not visit stay individually registered.
                 None => is_walkable(root_path, &entry.track.path),
             })
-            .filter(|entry| full || scan_dirs.iter().any(|d| entry.track.path.starts_with(d)))
+            // (Every track of the library is looked at here, with the library's
+            // state held: by the track's own ancestors, not once for each directory.)
+            .filter(|entry| full || lies_in(&entry.track.path, &scanned))
             .map(|entry| {
                 let t = &entry.track;
                 (
@@ -1499,7 +1511,7 @@ fn relink_key(track: &Track) -> RelinkKey {
 /// Pairs missing tracks with newly found files. A pair is made only when it is
 /// unambiguous: one missing track and one new file share a key, or — among several —
 /// exactly one of each has the same file name.
-fn match_relinks(missing: &[Arc<Track>], new: &[Arc<Track>]) -> Vec<(TrackId, TrackId)> {
+pub(super) fn match_relinks(missing: &[Arc<Track>], new: &[Arc<Track>]) -> Vec<(TrackId, TrackId)> {
     // Per key: (missing tracks, new files).
     type Group<'a> = (Vec<&'a Arc<Track>>, Vec<&'a Arc<Track>>);
     let mut groups: HashMap<RelinkKey, Group<'_>> = HashMap::new();
@@ -1635,10 +1647,10 @@ fn relink_moved(
     cancel: &AtomicBool,
 ) -> HashSet<TrackId> {
     let mut relinked = HashSet::new();
-    if new_ids.is_empty() && lock(&inner.recently_added).is_empty() {
+    if missing.is_empty() && new_ids.is_empty() && lock(&inner.recently_added).is_empty() {
         return relinked; // nothing was found that a missing track could have moved to
     }
-    let (gone, found) = {
+    let (gone, found, older) = {
         let state = lock(&inner.state);
         let listed: HashSet<TrackId> = missing.iter().chain(new_ids).copied().collect();
         let track = |id: &TrackId| state.tracks.get(id).map(|entry| Arc::clone(&entry.track));
@@ -1663,21 +1675,48 @@ fn relink_moved(
             .filter_map(track)
             .filter(|t| t.available)
             .collect();
-        (gone, found)
+        // For the files this scan found gone: every file the library has had for
+        // longer, too. A file that was copied to another music folder first and
+        // taken away afterwards (a move across disks, a collection brought to a new
+        // drive), or one that is merely spelled otherwise now, is in the library as
+        // a song of its own by the time the old one goes, with nothing of what the
+        // listener did with the old one.
+        let older: Vec<Arc<Track>> = if missing.is_empty() {
+            Vec::new()
+        } else {
+            let recent: HashSet<TrackId> = found_ids.iter().copied().collect();
+            state
+                .tracks
+                .values()
+                .map(|entry| &entry.track)
+                .filter(|t| t.available && !recent.contains(&t.id) && !listed.contains(&t.id))
+                .cloned()
+                .collect()
+        };
+        (gone, found, older)
     };
-    if gone.is_empty() || found.is_empty() {
+    if gone.is_empty() || (found.is_empty() && older.is_empty()) {
         return relinked;
     }
     let confirmed: HashSet<TrackId> = missing.iter().copied().collect();
     let paths: HashMap<TrackId, &Path> = gone.iter().map(|t| (t.id, t.path.as_path())).collect();
     // Tracks from elsewhere in the library are only taken if their file is really gone
     // (the "unavailable" flag may be stale); this scan's own were checked already.
-    let pairs: Vec<(TrackId, TrackId)> = match_relinks(&gone, &found)
+    let mut pairs: Vec<(TrackId, TrackId)> = match_relinks(&gone, &found)
         .into_iter()
         .filter(|(keep, _)| {
             confirmed.contains(keep) || paths.get(keep).is_some_and(|path| file_is_gone(path))
         })
         .collect();
+    // What found no file among the new ones is looked for among the older ones (as
+    // carefully: one file that is plainly the same, or none).
+    let paired: HashSet<TrackId> = pairs.iter().map(|(keep, _)| *keep).collect();
+    let unpaired: Vec<Arc<Track>> = gone
+        .iter()
+        .filter(|t| confirmed.contains(&t.id) && !paired.contains(&t.id))
+        .cloned()
+        .collect();
+    pairs.extend(match_relinks(&unpaired, &older));
     for chunk in pairs.chunks(SMALL_CHUNK) {
         let mut db = lock(&inner.db);
         if cancel.load(Ordering::Relaxed) {
@@ -1822,13 +1861,27 @@ fn finish_scan(
     // Missing: known, not seen by the walk, and confirmed absent by asking for the file
     // itself. A file that exists but was not visited (or cannot be examined) is left
     // exactly as it is. Also missing: the tracks a sheet does not have (see above).
+    // Missing as well: a file that still answers to the name the library has for it,
+    // on a disk that does not tell that name from the one it has now (letters in the
+    // other case, a composed letter in its other form), and that is in the library
+    // under its name of now. There it is a song of its own; the old one would
+    // otherwise stay beside it for good, with all the listener did with it.
+    let respelled = |path: &Path| -> bool {
+        let Ok(real) = fs::canonicalize(path) else {
+            return false;
+        };
+        let state = lock(&inner.state);
+        let (now, _) = state.library_path(&real);
+        now != path && state.id_of_path(&now).is_some()
+    };
     let mut missing: Vec<(&Path, TrackId)> = known
         .iter()
         .filter(|(path, known)| {
             !replaced.contains(&known.id)
                 && (given(path) == Some(false)
                     || outdone.contains(&known.id)
-                    || (!walk.encountered.contains(*path) && file_is_gone(path)))
+                    || (!walk.encountered.contains(*path)
+                        && (file_is_gone(path) || respelled(path))))
         })
         .map(|(path, known)| (path.as_path(), known.id))
         .collect();
@@ -2370,5 +2423,34 @@ mod tests {
         assert!(is_hidden(std::ffi::OsStr::new(".DS_Store")));
         assert!(is_hidden(std::ffi::OsStr::new("._track.mp3")));
         assert!(!is_hidden(std::ffi::OsStr::new("track.mp3")));
+    }
+    #[test]
+    fn directories_inside_others_are_left_out_and_paths_are_found_in_them() {
+        let dirs: BTreeSet<PathBuf> = ["/m/a", "/m/a/b", "/m/ab", "/m/c/d", "/m/c/d/e/f", "/m/c"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let pruned = prune_nested(dirs);
+        assert_eq!(
+            pruned,
+            ["/m/a", "/m/ab", "/m/c"].map(PathBuf::from).to_vec()
+        );
+        let set: HashSet<&Path> = pruned.iter().map(PathBuf::as_path).collect();
+        for (path, inside) in [
+            ("/m/a/song.flac", true),
+            ("/m/a", true),
+            ("/m/a/b/c/song.flac", true),
+            ("/m/abc/song.flac", false),
+            ("/m/song.flac", false),
+            ("/m/c/sheet.cue/3", true),
+        ] {
+            assert_eq!(lies_in(Path::new(path), &set), inside, "{path}");
+            // (What the comparison with every directory said.)
+            assert_eq!(
+                pruned.iter().any(|dir| Path::new(path).starts_with(dir)),
+                inside,
+                "{path}"
+            );
+        }
     }
 }

@@ -56,6 +56,8 @@ pub(crate) struct ArtCache {
     /// Ids whose source turned out not to be a usable image (this session), so that the
     /// same broken picture is not decoded again for every track and every scan.
     unusable: Mutex<HashSet<String>>,
+    /// Ids whose file was marked as used in this session (see `load_rgba`).
+    used: Mutex<HashSet<String>>,
 }
 
 /// Marks an id as "being written" for as long as it lives; waiters are woken when it is
@@ -79,6 +81,7 @@ impl ArtCache {
             busy: Mutex::new(HashSet::new()),
             idle: Condvar::new(),
             unusable: Mutex::new(HashSet::new()),
+            used: Mutex::new(HashSet::new()),
         }
     }
 
@@ -167,7 +170,16 @@ impl ArtCache {
     /// Decodes the cached cover and scales it down so its longest edge is at most
     /// `max_px`. Returns `None` if the cache file is missing or unreadable.
     pub(crate) fn load_rgba(&self, art_id: &str, max_px: u32) -> Option<ArtImage> {
-        let bytes = fs::read(self.path_for(art_id)).ok()?;
+        let path = self.path_for(art_id);
+        let bytes = fs::read(&path).ok()?;
+        // The file's date is when it was last looked at (once a session is fine
+        // enough): when the cache has grown too large, what goes first is what has
+        // not been seen for longest, not what happened to be made first.
+        if lock(&self.used).insert(art_id.to_string())
+            && let Ok(file) = fs::File::options().write(true).open(&path)
+        {
+            let _ = file.set_modified(SystemTime::now());
+        }
         let image = image::load_from_memory_with_format(&bytes, ImageFormat::Jpeg).ok()?;
         let max_px = max_px.max(1);
         let image = if image.width().max(image.height()) > max_px {
@@ -621,5 +633,33 @@ mod tests {
         let again = cache.store_embedded(&jpeg(40, 40)).unwrap();
         assert_eq!(again, ids[0]);
         assert!(cache.exists(&ids[0]));
+    }
+
+    /// A cover that was looked at counts as new: what goes first from a cache that
+    /// has grown too large is what nobody has seen for longest.
+    #[test]
+    fn a_cover_that_was_looked_at_is_trimmed_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ArtCache::new(dir.path());
+        let ids: Vec<String> = (0..4u32)
+            .map(|n| cache.store_embedded(&jpeg(40 + n, 40)).unwrap())
+            .collect();
+        for (age, id) in ids.iter().enumerate() {
+            let file = fs::File::options()
+                .write(true)
+                .open(cache.path_for(id))
+                .unwrap();
+            let modified = SystemTime::now() - Duration::from_secs(3600 * (4 - age as u64));
+            file.set_modified(modified).unwrap();
+        }
+        // The oldest of them is shown.
+        assert!(cache.load_rgba(&ids[0], 64).is_some());
+        let size_of = |id: &String| fs::metadata(cache.path_for(id)).unwrap().len();
+        let referenced: HashSet<String> = ids.iter().cloned().collect();
+        let total: u64 = ids.iter().map(size_of).sum();
+        let keep_two = size_of(&ids[0]) + size_of(&ids[3]);
+        cache.cleanup_to(&referenced, &AtomicBool::new(false), total - 1, keep_two);
+        let left: Vec<bool> = ids.iter().map(|id| cache.exists(id)).collect();
+        assert_eq!(left, [true, false, false, true]);
     }
 }

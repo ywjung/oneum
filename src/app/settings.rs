@@ -249,6 +249,21 @@ pub fn tidy_text(text: &str, max: usize) -> String {
 }
 
 impl Settings {
+    /// Brings the pinned albums along when albums got other keys (`changed`: old and
+    /// new, see `library::OpenReport`). Says whether a pin was changed.
+    pub fn follow_album_keys(&mut self, changed: &[(u64, u64)]) -> bool {
+        let mut any = false;
+        for pin in &mut self.pinned {
+            if let Pin::Album(key) = pin
+                && let Some((_, now)) = changed.iter().find(|(before, _)| before == key)
+            {
+                *key = *now;
+                any = true;
+            }
+        }
+        any
+    }
+
     /// The settings as they are used: values that a hand-edited or damaged file can
     /// hold but the app never writes are brought back into range.
     pub fn sanitized(mut self) -> Self {
@@ -419,8 +434,8 @@ mod tests {
     use super::*;
 
     /// The settings file names the way of drawing by these words: a build that wrote
-    /// one must read it again as the same choice (a word it does not know costs the
-    /// whole file its place, see `storage::settings`).
+    /// one must read it again as the same choice. (A word a build does not know is
+    /// read as the default, and the rest of the file is kept: see below.)
     #[test]
     fn the_way_of_drawing_is_kept_under_its_word() {
         for (choice, word) in [
@@ -705,5 +720,40 @@ mod tests {
         let odd = odd.sanitized();
         assert_eq!((odd.crossfade_secs, odd.speed_percent), (0, 100));
         assert_eq!(odd.theme, ThemeChoice::Light);
+    }
+    /// A settings file with a value this build cannot read (the word of a later
+    /// version, a member of another kind) keeps everything else it holds: the
+    /// playlists, presets, profiles, folders and pins that are kept in it.
+    #[test]
+    fn a_value_this_build_cannot_read_does_not_reset_the_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let kept = Settings {
+            crossfade_secs: 5,
+            radio: true,
+            resume_long_tracks: false,
+            smart_playlists: vec![SmartPlaylist {
+                name: "새로 들인 곡".into(),
+                query: "added:30d".into(),
+            }],
+            pinned: vec![Pin::Artist("IU".into())],
+            ..Settings::default()
+        };
+        let mut json = serde_json::to_value(&kept).expect("serializes");
+        json["graphics"] = "Later".into();
+        json["theme"] = 7.into();
+        json["replaygain"] = serde_json::json!({ "mode": "Loudest" });
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let read: Settings = crate::storage::settings::load_json(&path);
+        assert_eq!(read.crossfade_secs, 5);
+        assert!(read.radio && !read.resume_long_tracks);
+        assert_eq!(read.smart_playlists, kept.smart_playlists);
+        assert_eq!(read.pinned, kept.pinned);
+        // What could not be read is as it is in a new installation.
+        let fresh = Settings::default();
+        assert_eq!(read.graphics, fresh.graphics);
+        assert_eq!(read.theme, fresh.theme);
+        assert_eq!(read.replaygain, fresh.replaygain);
+        assert!(dir.path().join("settings.json.partial").exists());
     }
 }

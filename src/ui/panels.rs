@@ -2311,7 +2311,8 @@ impl OneumApp {
             rows.push((s.info_album_artist, track.album_artist.clone()));
         }
         if let Some(n) = track.track_no {
-            let text = match track.disc_no.filter(|d| *d > 1) {
+            let disc = crate::library::disc_of(track);
+            let text = match Some(disc).filter(|d| *d > 1) {
                 Some(disc) => self.lang.track_on_disc(n, disc),
                 None => n.to_string(),
             };
