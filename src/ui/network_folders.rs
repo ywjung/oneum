@@ -179,14 +179,16 @@ impl OneumApp {
                         .strong(),
                 );
                 ui.add_space(8.0);
-                let field = |ui: &mut egui::Ui, text: &mut String, hint: &str, secret: bool| {
+                // (Each field under a name of its own: the form is laid out in one of
+                // two ways, and a field that is typed into stays the same field when
+                // the way changes, as it does when a phone is turned.)
+                let field = |ui: &mut egui::Ui, text: &mut String, hint: &str, name: &str| {
+                    let secret = name == PASSWORD_FIELD;
                     let mut edit = egui::TextEdit::singleline(text)
                         .hint_text(hint)
                         .password(secret)
-                        .desired_width(f32::INFINITY);
-                    if secret {
-                        edit = edit.id(egui::Id::unique(PASSWORD_FIELD));
-                    }
+                        .desired_width(f32::INFINITY)
+                        .id(egui::Id::unique(name));
                     if touch {
                         edit = edit
                             .font(egui::FontId::proportional(17.0))
@@ -209,14 +211,24 @@ impl OneumApp {
                     ui.add_space(6.0);
                     response
                 };
-                let address = field(ui, &mut form.address, s.folder_address_hint, false);
+                let address = field(
+                    ui,
+                    &mut form.address,
+                    s.folder_address_hint,
+                    "oneum-folder-address",
+                );
                 if form.focus {
                     form.focus = false;
                     address.request_focus();
                 }
-                field(ui, &mut form.name, s.folder_name_hint, false);
-                let user = field(ui, &mut form.user, s.folder_user_hint, false);
-                let password = field(ui, &mut form.password, s.folder_password_hint, true);
+                field(ui, &mut form.name, s.folder_name_hint, "oneum-folder-name");
+                let user = field(ui, &mut form.user, s.folder_user_hint, "oneum-folder-user");
+                let password = field(
+                    ui,
+                    &mut form.password,
+                    s.folder_password_hint,
+                    PASSWORD_FIELD,
+                );
                 // egui keeps what was typed into a field to take typing back: not of a
                 // password (it would outlive the form, and come back with "undo").
                 let field_id = egui::Id::unique(PASSWORD_FIELD);

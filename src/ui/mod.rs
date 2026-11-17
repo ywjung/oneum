@@ -373,6 +373,13 @@ pub struct OneumApp {
     /// A menu of choices (a drop-down) was open in the frame before: Escape closes it,
     /// and nothing else.
     popup_was_open: bool,
+    /// Whether the screen was wider than tall in the frame before, and until when
+    /// the keyboard is kept away after it changed (an iPhone that is turned while
+    /// its keyboard is up, see `ui`).
+    #[cfg(target_os = "ios")]
+    screen_was_wide: bool,
+    #[cfg(target_os = "ios")]
+    keyboard_away_until: Option<Instant>,
     /// A button or other control has keyboard focus (Tab navigation): Space, Return and
     /// the arrows are that control's, not the list's.
     widget_focused: bool,
@@ -588,6 +595,10 @@ impl OneumApp {
             search_had_focus: false,
             typing: false,
             popup_was_open: false,
+            #[cfg(target_os = "ios")]
+            screen_was_wide: false,
+            #[cfg(target_os = "ios")]
+            keyboard_away_until: None,
             settings_unsavable: false,
             widget_focused: false,
             key_pane: KeyPane::List,
@@ -3583,6 +3594,12 @@ fn bad_exits(text: &str) -> Vec<&str> {
     lines
 }
 
+/// How long an iPhone's keyboard is kept away after the screen has begun to turn: the
+/// turn takes about a third of a second, and a keyboard that comes up during it lies
+/// the old way.
+#[cfg(target_os = "ios")]
+const KEYBOARD_AWAY_FOR_A_TURN: Duration = Duration::from_millis(600);
+
 /// The side of the picture a phone keeps its glyphs in, at most (see `raw_input_hook`).
 const PHONE_GLYPH_PICTURE_SIDE: usize = 4096;
 
@@ -3954,6 +3971,27 @@ impl eframe::App for OneumApp {
                 self.menu_shortcuts(&ctx);
             }
             self.phone_frame(ui);
+            // An iPhone that is turned while its keyboard is up: the system turns the
+            // keyboards of its own text fields with the screen, but not the one of the
+            // view the windowing library types into, which stays as it lay (on its
+            // side, over the app). The field lets go of the keyboard while the screen
+            // turns (no field is named for it) and takes it again once it has: it
+            // comes back the right way round.
+            #[cfg(target_os = "ios")]
+            {
+                let screen = ctx.viewport_rect();
+                let wide = screen.width() > screen.height();
+                if std::mem::replace(&mut self.screen_was_wide, wide) != wide && self.typing {
+                    self.keyboard_away_until = Some(Instant::now() + KEYBOARD_AWAY_FOR_A_TURN);
+                }
+                match self.keyboard_away_until {
+                    Some(until) if self.typing && Instant::now() < until => {
+                        ctx.output_mut(|output| output.ime = None);
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                    }
+                    _ => self.keyboard_away_until = None,
+                }
+            }
         } else if self.mini.is_some() {
             // The mini player: the player bar is all there is.
             if crate::platform::MENU_IN_WINDOW {
