@@ -218,6 +218,12 @@ room_file "$WORK/room.wav"
 $ADB shell mkdir -p "$REMOTE-room"
 $ADB push "$WORK/room.wav" "$REMOTE-room/room.wav" >/dev/null
 room_checks "$REMOTE-room/room.wav"
+# The checks above take about as long as a song of the test library: the song that
+# is on is begun again (the button before the play button), so that it does not end
+# by itself under the steps that follow, and those count from the place it has.
+ui "tap $((2 * PLAY_X - NEXT_X)) $PLAY_Y" 'wait 1500' 'dump p6b.json'
+AT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["queue_index"])' "$OUT/p6b.json")
+check p6b.json 'd["state"] == "Playing" and d["position_ms"] < 5000' "the song that is on begins again"
 $ADB shell input keyevent KEYCODE_BACK
 ui 'wait 700' 'dump p7.json'
 check p7.json 'not p["player_open"] and d["state"] == "Playing"' "Back puts the player away and the music plays on"
@@ -232,7 +238,7 @@ ui 'wait 1200' 'dump m2.json'
 check m2.json 'd["state"] == "Playing"' "a play from outside plays"
 $ADB shell cmd media_session dispatch next >/dev/null
 ui 'wait 1500' 'dump m3.json'
-check m3.json 'd["queue_index"] == 2 and d["state"] == "Playing"' "next from outside"
+check m3.json "d['queue_index'] == $AT + 1 and d['state'] == 'Playing'" "next from outside"
 
 echo "== media keys while the app is on the screen (wired earphones, a keyboard)"
 # These come to the window in front, not to the media session.
@@ -244,7 +250,7 @@ ui 'wait 1200' 'dump mk2.json'
 check mk2.json 'd["state"] == "Playing"' "the play key plays"
 $ADB shell input keyevent KEYCODE_MEDIA_NEXT
 ui 'wait 1500' 'dump mk3.json'
-check mk3.json 'd["queue_index"] == 3 and d["state"] == "Playing"' "the next key goes on"
+check mk3.json "d['queue_index'] == $AT + 2 and d['state'] == 'Playing'" "the next key goes on"
 
 echo "== a keyboard that is plugged in or paired"
 # Its keys are the app's shortcuts while no field is typed into, and the input method
@@ -257,7 +263,7 @@ ui 'wait 1200' 'dump kb2.json'
 check kb2.json 'd["state"] == "Playing"' "and plays"
 $ADB shell input keycombination KEYCODE_CTRL_LEFT KEYCODE_DPAD_RIGHT
 ui 'wait 1500' 'dump kb3.json'
-check kb3.json 'd["queue_index"] == 4 and d["state"] == "Playing"' "Ctrl+Right goes to the next song"
+check kb3.json "d['queue_index'] == $AT + 3 and d['state'] == 'Playing'" "Ctrl+Right goes to the next song"
 $ADB shell input keycombination KEYCODE_CTRL_LEFT KEYCODE_U
 ui 'wait 900' 'dump kb4.json'
 check kb4.json 'p["player_open"] and p["player_view"] == "Queue"' "Ctrl+U shows the queue"
