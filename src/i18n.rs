@@ -392,6 +392,13 @@ strings! {
     info_signal_path: "신호 경로", "Signal Path";
     info_lyrics: "가사", "Lyrics";
     lyrics_seek_hint: "누르면 이 줄부터 재생합니다.", "Click to play from this line.";
+    lyrics_found_online: "인터넷에서 찾은 가사 (LRCLIB)", "Lyrics found online (LRCLIB)";
+    lyrics_seeking: "가사를 찾는 중…", "Looking for lyrics…";
+    online_lyrics_row: "인터넷에서 가사 찾기", "Find Lyrics Online";
+    online_lyrics_desc: "파일에 싱크 가사가 없는 곡의 가사를 LRCLIB(lrclib.net)에서 찾습니다.",
+        "Looks on LRCLIB (lrclib.net) for the lyrics of songs whose file has none that follow the song.";
+    online_lyrics_hint: "꺼져 있으면 가사를 인터넷에서 찾지 않습니다. 켜면 곡 정보나 가사 화면에 곡이 보일 때 그 곡의 제목·아티스트·앨범·길이만 보내고, 받은 가사는 이 기기에 보관해 같은 곡을 다시 묻지 않습니다. 파일에 싱크 가사가 있는 곡은 묻지 않습니다.",
+        "While this is off, lyrics are never looked for on the internet. While it is on, a song's title, artist, album and length are sent when the song is shown in the song info or the lyrics view, and nothing else; what comes back is kept on this device, so the same song is not asked for twice. Songs whose file has synced lyrics are not asked for.";
     info_credits: "크레딧", "Credits";
     role_composer: "작곡", "Composer";
     role_lyricist: "작사", "Lyricist";

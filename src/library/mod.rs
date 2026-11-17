@@ -20,6 +20,7 @@ mod legacy;
 mod loudness;
 pub mod lyrics;
 mod m3u;
+pub mod online_lyrics;
 pub mod radio;
 pub mod remote;
 mod scan;

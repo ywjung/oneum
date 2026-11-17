@@ -45,6 +45,8 @@ pub struct Details {
     pub credits: Vec<Credit>,
     pub facts: Vec<(Fact, String)>,
     pub lyrics: Option<Lyrics>,
+    /// The lyrics are not the file's: they were found on the internet.
+    pub lyrics_online: bool,
 }
 
 /// No more names than this per role, and none longer: a tag is not a book.
@@ -144,6 +146,14 @@ fn from_tagged(file: &TaggedFile) -> (Vec<Credit>, Vec<(Fact, String)>) {
     (credits, facts)
 }
 
+impl Details {
+    /// Whether lyrics from the internet would add something: the file has none that
+    /// follow the song.
+    pub fn wants_online_lyrics(&self) -> bool {
+        !self.lyrics.as_ref().is_some_and(|l| l.timed.is_some())
+    }
+}
+
 /// Everything the file of the track at `path` says beyond what the library keeps. A
 /// file that cannot be read says nothing (these are extras, not worth an error
 /// message); its lyrics may still come from a text file next to it.
@@ -167,7 +177,28 @@ pub fn read(path: &Path) -> Details {
         credits,
         facts,
         lyrics,
+        lyrics_online: false,
     }
+}
+
+/// Lyrics from the internet for a song whose file has none with times (`details`:
+/// what the file says). Called only for a listener who has switched online lyrics
+/// on. What the file has stays unless what is found has times and the file's has not.
+pub fn with_online_lyrics(
+    mut details: Details,
+    source: &super::online_lyrics::Source,
+    song: &crate::net::lyrics::Song<'_>,
+) -> Details {
+    if !details.wants_online_lyrics() {
+        return details;
+    }
+    if let Some(found) = source.find(song)
+        && (found.timed.is_some() || details.lyrics.is_none())
+    {
+        details.lyrics = Some(found);
+        details.lyrics_online = true;
+    }
+    details
 }
 
 #[cfg(test)]

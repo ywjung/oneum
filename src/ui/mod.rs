@@ -401,6 +401,9 @@ pub struct OneumApp {
     licenses_shown: bool,
     /// What the file of the song in the info panel says beyond the library.
     extras: Option<panels::Extras>,
+    /// Where lyrics are looked for on the internet, for a listener who switched that
+    /// on, and where what was found is kept.
+    lyrics_source: Arc<crate::library::online_lyrics::Source>,
     /// Which of the "listen again" lists is shown.
     rediscover: lists::Rediscover,
     /// The equalizer sheet is open.
@@ -522,6 +525,17 @@ impl OneumApp {
             )
         };
         let player = core.player.snapshot();
+        // (A verification run knows no lyrics service until its script names one:
+        // nothing of such a run is asked of the real one.)
+        let lyrics_service = if std::env::var_os("ONEUM_SCRIPT").is_some() {
+            crate::net::lyrics::NOWHERE
+        } else {
+            crate::net::lyrics::SERVICE
+        };
+        let lyrics_source = Arc::new(crate::library::online_lyrics::Source::new(
+            &core.paths.cache_dir,
+            lyrics_service,
+        ));
         let mut this = Self {
             perf: Perf::default(),
             art: ArtCache::new(core.library.clone(), ctx.clone()),
@@ -566,6 +580,7 @@ impl OneumApp {
             about_icon: None,
             licenses_shown: false,
             extras: None,
+            lyrics_source,
             rediscover: lists::Rediscover::default(),
             eq_open: false,
             peq_edit: None,
@@ -2670,6 +2685,21 @@ impl OneumApp {
                         }
                         continue;
                     }
+                    // Lyrics from the internet, on and off (as the settings switch
+                    // them), and a stand-in for the lyrics service: a verification run
+                    // asks nothing of the real one.
+                    if id == "online_lyrics" {
+                        self.set_online_lyrics(!self.settings.online_lyrics);
+                        continue;
+                    }
+                    if let Some(base) = id.strip_prefix("lyrics_service ") {
+                        self.lyrics_source = Arc::new(crate::library::online_lyrics::Source::new(
+                            &self.core.paths.cache_dir,
+                            base,
+                        ));
+                        self.extras = None;
+                        continue;
+                    }
                     // Playback speed, in percent (as the playback settings set it).
                     if let Some(percent) = id.strip_prefix("speed ") {
                         if let Ok(percent) = percent.parse::<u16>() {
@@ -3069,6 +3099,9 @@ impl OneumApp {
             "chars": lyrics.map(|l| l.plain.chars().count()),
             "timed_lines": lyrics.and_then(|l| l.timed.as_ref()).map(Vec::len),
             "current_line": lyrics.and_then(|l| l.line_at(p.position_now_ms())),
+            "online": self.settings.online_lyrics,
+            "found_online": details.is_some_and(|d| d.lyrics_online),
+            "seeking": self.seeking_lyrics(),
         });
         state["credits"] = serde_json::json!(details.map(|d| {
             d.credits

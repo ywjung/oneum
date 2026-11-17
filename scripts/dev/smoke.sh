@@ -14,6 +14,7 @@ MUSIC="$WORK/music"
 PROFILE="$WORK/profile"
 DLNA_PID=
 . scripts/dev/smoke-webdav.sh
+. scripts/dev/smoke-lyrics.sh
 trap 'pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true; [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
 
 echo "== generating test library"
@@ -448,6 +449,18 @@ import json, sys
 tried = json.load(open(sys.argv[1]))["network"]["secret_selftest"] or "not tried"
 print(("  ok   " if tried.startswith("ok") else "  note ") + "the keychain keeps, gives back, replaces and forgets a password: " + tried)
 PY
+
+echo "== lyrics from the internet"
+# A song of the library whose file has no lyrics, with Song Info open on it. (The
+# panel is put away as after the stars: through the queue button.)
+ui "open $MUSIC/아이유/꽃갈피/03 사랑이 지나가면.flac" 'wait 1500' 'menu song_info' 'wait 800'
+lyrics_checks 127.0.0.1 127.0.0.1 "$PROFILE"
+ui 'click 1118 20' 'wait 300' 'click 1118 20' 'wait 400' 'dump ly9.json'
+check ly9.json 'd["right_panel"] != "Info" and not d["lyrics"]["online"]' "the panel is put away, and lyrics from the internet are off again"
+if grep -rq "사랑이 지나가면" "$PROFILE/cache/lyrics" 2>/dev/null && ! ls "$PROFILE/cache/lyrics" | grep -q "사랑"; then
+  echo "  ok   what was found is kept in the cache folder, under a name that is not the song's"
+else echo "  FAIL the lyrics that were found are not kept as they should be"; ls -la "$PROFILE/cache/lyrics" 2>&1 | head -5; exit 1
+fi
 
 echo "== hidden window"
 ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json' \

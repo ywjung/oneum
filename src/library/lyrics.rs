@@ -49,6 +49,12 @@ impl Lyrics {
         })
     }
 
+    /// Lyrics from a text as it comes (with or without time stamps): for those found
+    /// on the internet. `None` when the text holds no words.
+    pub fn from_text(raw: &str) -> Option<Self> {
+        Self::from_raw(raw)
+    }
+
     /// Index of the line that is being sung at `position_ms`: the last one whose time
     /// has come. `None` before the first line, and for lyrics without times.
     pub fn line_at(&self, position_ms: u64) -> Option<usize> {

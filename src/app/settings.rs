@@ -99,6 +99,10 @@ pub struct Settings {
     pub correction: Option<String>,
     /// Radio: when the queue runs out, go on with songs like the last one (off by default).
     pub radio: bool,
+    /// Lyrics are looked for on the internet for a song whose file has none that
+    /// follow it (off by default: nothing is asked of the lyrics service unless the
+    /// listener switches this on).
+    pub online_lyrics: bool,
     /// Shuffle whole albums instead of single tracks (off by default).
     pub shuffle_by_album: bool,
     /// Shuffle with the listener's stars in mind (off by default).
@@ -334,6 +338,7 @@ impl Default for Settings {
             corrections: Vec::new(),
             correction: None,
             radio: false,
+            online_lyrics: false,
             shuffle_by_album: false,
             shuffle_by_rating: false,
             resume_long_tracks: true,
@@ -407,6 +412,10 @@ mod tests {
         assert!(
             !s.radio,
             "the queue ends where it ends unless the user asks for radio"
+        );
+        assert!(
+            !s.online_lyrics,
+            "nothing is asked of the internet unless the listener switches it on"
         );
         assert_eq!(s.crossfeed, Crossfeed::Off);
         let cf: Settings = serde_json::from_str(r#"{"crossfeed":"Medium"}"#).expect("parses");

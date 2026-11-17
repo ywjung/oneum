@@ -14,6 +14,7 @@ mod auth;
 pub mod dav;
 pub mod folders;
 pub mod http;
+pub mod lyrics;
 pub mod ssdp;
 pub mod tls;
 pub mod upnp;

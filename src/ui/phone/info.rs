@@ -116,7 +116,7 @@ impl OneumApp {
         let s = self.s();
         // What the file says beyond what the library keeps is read in the background:
         // those lines join the others a moment later.
-        let details = self.extras_of(track);
+        let details = self.extras_of(track, false);
         let versions = self.other_versions_of(track.id);
         let artists = self.artist_names();
         let mut close = false;

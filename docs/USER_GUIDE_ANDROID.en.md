@@ -12,7 +12,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - **Remove** leaves a folder's files as they are. Its songs only leave OnEum's lists.
 - A music file in another app can also be opened with **Open with → OnEum**.
 - OnEum only reads music files. It never changes or deletes files or their tags. Favourites, play counts and playlists are kept inside OnEum only.
-- No account and no internet connection are needed.
+- No account and no internet connection are needed (lyrics alone are also looked for on the internet if you switch that on in Settings).
 
 ## The screen
 - **Tabs at the bottom**: Library · Search · Playlists · Settings. Pressing the open tab again returns to its first page.
@@ -32,6 +32,7 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - **The player**: cover, title (press it for the album), heart (favourite), position, shuffle · previous · play · next · repeat, app volume. Under shuffle and repeat is what each stands at, in words (Shuffle Off · Shuffle On; Repeat Off · Repeat All · Repeat One); one that is on is coloured and stands on a tinted ground. **⌄** at the top left closes it, and so does pulling the cover down.
 - The three buttons at the top right of the player choose what is shown in the cover's place: **Lyrics · VU Meter · Up Next**. Pressing the same button again brings the cover back.
 - **Lyrics**: the lyrics in the file's tags or in an .lrc file of the same name. With time stamps the line being sung is followed, and pressing a line plays from there.
+- **Find Lyrics Online** (Settings → General → Lyrics, off at first): while it is on, a song whose lyrics view is opened and whose file has no lyrics with time stamps is looked for on LRCLIB (lrclib.net); what is found is shown with the note "Lyrics found online (LRCLIB)" under it. Only the song's title, artist, album and length are sent (the service can see the internet address the request comes from), and what comes back is kept on the device, so the same song is not asked for twice. While it is off, nothing is asked.
 - **VU Meter**: needles for the loudness of the left and right channel, a spectrum, and the file's format with the path the sound takes.
 - **Up Next**: press a song to play from it; ⋯ removes it from the queue. Drag the **≡** handle at the right of a song to move it. **Save** keeps the queue as a playlist, **Clear Queue** empties it. Press **Select** and choose several songs: **Selected Songs…** moves them to the top, adds them to a playlist or takes them out of the queue, all at once.
 - A menu that ⋯ brought up closes when you press outside it or pull its handle down.

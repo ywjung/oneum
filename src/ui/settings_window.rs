@@ -275,26 +275,46 @@ impl OneumApp {
         });
 
         // The song table and its columns are the desk's.
-        if self.phone_mode {
-            return;
+        if !self.phone_mode {
+            ui.add_space(14.0);
+            widgets::section_title(ui, s.settings_section_lists);
+            widgets::card(ui, |ui| {
+                widgets::setting_row(
+                    ui,
+                    s.show_format_title,
+                    Some(s.show_format_desc),
+                    true,
+                    |ui| {
+                        widgets::toggle(
+                            ui,
+                            &mut self.settings.show_format_column,
+                            s.show_format_title,
+                        );
+                    },
+                );
+            });
         }
+
+        // Lyrics from the internet: the one thing here that asks something of a
+        // service out there, and only for who switches it on.
         ui.add_space(14.0);
-        widgets::section_title(ui, s.settings_section_lists);
+        widgets::section_title(ui, s.info_lyrics);
+        let mut online = self.settings.online_lyrics;
         widgets::card(ui, |ui| {
             widgets::setting_row(
                 ui,
-                s.show_format_title,
-                Some(s.show_format_desc),
+                s.online_lyrics_row,
+                Some(s.online_lyrics_desc),
                 true,
                 |ui| {
-                    widgets::toggle(
-                        ui,
-                        &mut self.settings.show_format_column,
-                        s.show_format_title,
-                    );
+                    widgets::toggle(ui, &mut online, s.online_lyrics_row);
                 },
             );
         });
+        widgets::section_note(ui, s.online_lyrics_hint);
+        if online != self.settings.online_lyrics {
+            self.set_online_lyrics(online);
+        }
     }
 
     pub(super) fn settings_library(&mut self, ui: &mut egui::Ui) {

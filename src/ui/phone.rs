@@ -3559,7 +3559,7 @@ impl OneumApp {
         let Some(track) = track else {
             return;
         };
-        let details = self.extras_of(track);
+        let details = self.extras_of(track, true);
         let inside = rect.shrink2(vec2(16.0, 12.0));
         let mut words_ui = ui.new_child(
             UiBuilder::new()
@@ -3574,9 +3574,18 @@ impl OneumApp {
             return;
         };
         let Some(lyrics) = details.lyrics.as_ref() else {
-            widgets::empty_state(ui, Icon::Lyrics, s.phone_no_lyrics, s.phone_no_lyrics_hint);
+            if self.seeking_lyrics() {
+                ui.label(
+                    RichText::new(s.lyrics_seeking)
+                        .font(font(15.0))
+                        .color(theme::dim(ui)),
+                );
+            } else {
+                widgets::empty_state(ui, Icon::Lyrics, s.phone_no_lyrics, s.phone_no_lyrics_hint);
+            }
             return;
         };
+        let found_online = details.lyrics_online;
         let position = self.player.position_now_ms();
         let current = lyrics.line_at(position);
         let line_changed = self.phone.lyrics_line != current;
@@ -3598,6 +3607,13 @@ impl OneumApp {
                         )
                         .wrap(),
                     );
+                    if found_online {
+                        ui.label(
+                            RichText::new(s.lyrics_found_online)
+                                .font(font(12.0))
+                                .color(dim),
+                        );
+                    }
                     return;
                 };
                 for (index, line) in lines.iter().enumerate() {
@@ -3643,6 +3659,14 @@ impl OneumApp {
                     if tapped {
                         seek = Some(u64::from(line.at_ms));
                     }
+                }
+                if found_online {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(s.lyrics_found_online)
+                            .font(font(12.0))
+                            .color(dim),
+                    );
                 }
             });
         if let Some(position) = seek {

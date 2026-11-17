@@ -298,6 +298,9 @@ pub(super) struct Extras {
     /// Still being read while this is there.
     pending: Option<std::sync::mpsc::Receiver<crate::library::details::Details>>,
     pub(super) details: Option<std::sync::Arc<crate::library::details::Details>>,
+    /// The song's lyrics were looked for on the internet (or are being looked for:
+    /// `pending`). Only ever true for a listener who switched online lyrics on.
+    asked_online: bool,
     /// Other tracks in the library that are the same song (see `other_versions`).
     versions: Vec<crate::model::TrackId>,
     /// The synchronised line that was current when the panel was last drawn, so that
@@ -1220,9 +1223,15 @@ impl OneumApp {
 
     /// What the file of `track` says beyond the library (see [`Extras`]), once it has
     /// been read. `None` while it is being read.
+    ///
+    /// `words`: the caller shows the song's lyrics. Then, for a listener who has
+    /// switched online lyrics on, a song whose file has no lyrics that follow it is
+    /// looked for on the internet (once the file has been read: what the file says is
+    /// shown without waiting for that).
     pub(super) fn extras_of(
         &mut self,
         track: &crate::model::Track,
+        words: bool,
     ) -> Option<std::sync::Arc<crate::library::details::Details>> {
         // Collect a read that has finished, whichever song it was for.
         if let Some(extras) = self.extras.as_mut()
@@ -1241,6 +1250,9 @@ impl OneumApp {
             e.track == track.id && e.mtime_ns == track.mtime_ns && e.available == track.available
         });
         if known {
+            if words && self.settings.online_lyrics {
+                self.seek_lyrics_online(track);
+            }
             return self.extras.as_ref().and_then(|e| e.details.clone());
         }
         // Another song. One read at a time: stepping through a list on a drive that is
@@ -1267,12 +1279,82 @@ impl OneumApp {
             available: track.available,
             pending: started.then_some(rx),
             details: None,
+            asked_online: false,
             versions: other_versions(&self.snapshot.tracks, track),
             shown_line: None,
             line_top: None,
             scroll_due: false,
         });
         None
+    }
+
+    /// Looks for the lyrics of `track` on the internet, once: when its file has been
+    /// read and has none that follow the song. Only called while the listener has
+    /// online lyrics switched on and the lyrics are shown.
+    fn seek_lyrics_online(&mut self, track: &crate::model::Track) {
+        let Some(extras) = self.extras.as_mut() else {
+            return;
+        };
+        let Some(details) = extras.details.clone() else {
+            return;
+        };
+        if extras.asked_online || extras.pending.is_some() {
+            return;
+        }
+        extras.asked_online = true;
+        let song = crate::net::lyrics::Song {
+            title: &track.title,
+            artist: &track.artist,
+            album: &track.album,
+            duration_ms: track.duration_ms,
+        };
+        if !details.wants_online_lyrics() || !song.can_be_asked_for() {
+            return;
+        }
+        let (title, artist, album, duration_ms) = (
+            track.title.clone(),
+            track.artist.clone(),
+            track.album.clone(),
+            track.duration_ms,
+        );
+        let source = self.lyrics_source.clone();
+        let core = self.core.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = std::thread::Builder::new()
+            .name("oneum-lyrics".into())
+            .spawn(move || {
+                let song = crate::net::lyrics::Song {
+                    title: &title,
+                    artist: &artist,
+                    album: &album,
+                    duration_ms,
+                };
+                let details = crate::library::details::with_online_lyrics(
+                    std::sync::Arc::unwrap_or_clone(details),
+                    &source,
+                    &song,
+                );
+                let _ = tx.send(details);
+                core.request_repaint();
+            })
+            .is_ok();
+        extras.pending = started.then_some(rx);
+    }
+
+    /// Switches lyrics from the internet on or off. What is shown of the song at hand
+    /// is read again: lyrics that were found go when the switch does, and a song
+    /// without any is looked for once it is on.
+    pub(super) fn set_online_lyrics(&mut self, on: bool) {
+        self.settings.online_lyrics = on;
+        self.extras = None;
+    }
+
+    /// The lyrics of the song whose details are shown are being looked for on the
+    /// internet right now.
+    pub(super) fn seeking_lyrics(&self) -> bool {
+        self.extras
+            .as_ref()
+            .is_some_and(|e| e.asked_online && e.pending.is_some())
     }
 
     /// Synchronised lyrics of the song that is playing, in a box of their own that
@@ -2253,7 +2335,7 @@ impl OneumApp {
             return;
         };
         let dim = theme::dim(ui);
-        let details = self.extras_of(&track);
+        let details = self.extras_of(&track, true);
         let versions = self.other_versions_of(track.id);
         // The library's own spelling of a name, if it has an artist of that name:
         // only such names are links, so that a link always leads somewhere.
@@ -2396,7 +2478,15 @@ impl OneumApp {
                     ui.add_space(12.0);
                     signal_path_block(ui, s, &path);
                 }
-                // The words, when the file (or a text file next to it) has them.
+                // The words, when the file (or a text file next to it) has them, or
+                // when they were found on the internet for a listener who asked for that.
+                let found_online = details.as_ref().is_some_and(|d| d.lyrics_online);
+                if details.as_ref().is_some_and(|d| d.lyrics.is_none()) && self.seeking_lyrics() {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(s.info_lyrics).small().color(dim));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(s.lyrics_seeking).size(12.5).color(dim));
+                }
                 if let Some(lyrics) = details.as_ref().and_then(|d| d.lyrics.as_ref()) {
                     ui.add_space(12.0);
                     ui.label(RichText::new(s.info_lyrics).small().color(dim));
@@ -2413,6 +2503,10 @@ impl OneumApp {
                                     .selectable(true),
                             );
                         }
+                    }
+                    if found_online {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(s.lyrics_found_online).small().color(dim));
                     }
                 }
                 ui.add_space(10.0);

@@ -13,7 +13,7 @@
 
 - You can also open music files without adding a folder: **File → Open Music Files…** (⌘O), or drag the files onto the window or the Dock icon. They become the queue and start playing, and stay in the library as individually added songs.
 - OnEum only reads your music files. It never changes or deletes files or tags. Favorites, play counts, playlists and the loudness the app measured are all kept in the app's own data.
-- No account and no internet connection are needed. Lyrics, cover art and song details are shown only from what is in the files and their folders.
+- No account and no internet connection are needed. Lyrics, cover art and song details are shown only from what is in the files and their folders (lyrics alone are also looked for on the internet if you switch that on in Settings).
 - You can open this guide again at any time from **Help → OnEum User Guide** in the menu bar. Click an entry on the left to go to that section; press Esc to close.
 
 ## The Window
@@ -120,8 +120,9 @@ Open it with the ⓘ button at the top right or with ⌘I. It shows the song tha
 - **Going further**: click the artist, album or genre to go to that artist's, album's or genre's songs. When several genres are named, each can be clicked on its own.
 - **Credits and work details**: when the file names them, the composer, lyricist, conductor, arranger, performers, producer, engineer, mixing and remixer, and the work, movement, label, catalog number, recording date and release date are shown. A name in the credits that is an artist in your library can be clicked.
 - **Other Versions of This Song**: if the library has more songs with the same title and artist (on another album, in another format), up to six are listed, the best sounding first. Click one to see its details.
-- **Lyrics**: shown when the file's tags contain lyrics, or when an `.lrc` or `.txt` file with the same name as the song is in the same folder. When the lyrics carry times (`.lrc`), the current line is highlighted and followed as the song plays, and clicking a line plays from there. Lyric files saved on older Korean Windows (EUC-KR) are read as well. Lyrics are not looked up on the internet.
+- **Lyrics**: shown when the file's tags contain lyrics, or when an `.lrc` or `.txt` file with the same name as the song is in the same folder. When the lyrics carry times (`.lrc`), the current line is highlighted and followed as the song plays, and clicking a line plays from there. Lyric files saved on older Korean Windows (EUC-KR) are read as well.
 - When a lyrics file gives a translation or a pronunciation for the same moment, it is shown in smaller type under the original and highlighted with it.
+- **Find Lyrics Online** (Settings → General → Lyrics, off at first): while it is on, a song shown in Song Info whose file has no lyrics with times is looked for on LRCLIB (lrclib.net), and what is found is shown with the note "Lyrics found online (LRCLIB)". Only the song's title, artist, album and length are sent (the service can see the internet address the request comes from), and what comes back is kept on this computer, so the same song is not asked for twice. While it is off, nothing is asked. Songs without an artist are not asked for.
 - **File check results**: for a checked song, **Integrity** (Intact (MD5 matches) / Intact (decodes to the end) / Damaged), **Dynamic range** (the DR value, with the album's) and **True peak** (see "File Check").
 - When the volume leveling values end with "(measured by the app)", they were measured by the app rather than read from the file's tags (see "Volume Leveling").
 
@@ -303,7 +304,7 @@ MP3, MP2 (.mp2), FLAC, WAV (ADPCM included), AIFF, ALAC (.m4a), AAC (.m4a), Ogg 
 | A smart playlist is empty | No songs match it at the moment. Right-click → **Edit Search** to check the search. A value that cannot be understood (`year:abc`, `fav:maybe`) finds nothing. |
 | A correction file cannot be imported | The notice says why. "a filter that is not supported" means it contains filters other than PK, LSC and HSC; "this line could not be understood" means that line has another form (it should look like `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70`). Choose `ParametricEQ.txt`, not the file for graphic equalizers (`GraphicEQ.txt`). |
 | The sound is odd (too much bass, a narrow stereo image) | Check whether the equalizer, headphone correction or headphone crossfeed is on. The **Signal Path** in Song Info lists everything that is being applied. |
-| No lyrics are shown | The file's tags hold no lyrics, and there is no `.lrc` or `.txt` with the song's name in its folder. Name the lyrics file exactly like the song file, with only the extension different. |
+| No lyrics are shown | The file's tags hold no lyrics, and there is no `.lrc` or `.txt` with the song's name in its folder. Switch on Settings → General → Lyrics → Find Lyrics Online, or name the lyrics file exactly like the song file, with only the extension different. |
 | An album appears split in two | When an album's files are spread over several folders and only some of them have an "album artist" tag, the album can be split. Make the tags match or put the files in one folder, and it comes together. |
 | Titles or artists look garbled, like `°¡»ç` | The tags were written on older Korean Windows. OnEum reads such text as Korean; if songs scanned by an earlier version still look garbled, **Rescan** (⌘R) puts them right. Songs that still look garbled may be in an old encoding of a language other than Korean. |
 | A notice that the library data was damaged | A new library was made. Add your music folders again. The damaged file is kept in `~/Library/Application Support/OnEum/`. |

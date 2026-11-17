@@ -36,6 +36,7 @@ GRAPHICS=
 [ -z "${ONEUM_GRAPHICS:-}" ] || GRAPHICS="--es ONEUM_GRAPHICS $ONEUM_GRAPHICS"
 DLNA_PID=
 . scripts/dev/smoke-webdav.sh
+. scripts/dev/smoke-lyrics.sh
 cleanup() {
   [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true
   for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done
@@ -160,7 +161,7 @@ side = max(min(w - 56, body - 308), 120)
 spare = max(body - 308 - side, 0)
 controls = top + 50 + 8 + side + 16 + 0.6 * spare
 print(f"PLAY_X={28 + step * 2.5:.0f} NEXT_X={28 + step * 3.5:.0f} PLAY_Y={controls + 156:.0f}")
-print(f"RIGHT={w - 28:.0f} VIEW_METERS={w - 70:.0f}")
+print(f"RIGHT={w - 28:.0f} VIEW_METERS={w - 70:.0f} VIEW_LYRICS={w - 112:.0f}")
 PY
 )"
 
@@ -205,6 +206,11 @@ ui "tap $NEXT_X $PLAY_Y" 'wait 1200' 'dump p6.json'
 check p6.json 'd["queue_index"] == 1 and d["state"] == "Playing"' "next"
 ui "tap $VIEW_METERS $HEAD" 'wait 1500' 'dump v1.json'
 check v1.json 'p["player_view"] == "Meters" and d["meter"]["position"][0] > 0' "the VU meters follow what is playing"
+ui "tap $VIEW_LYRICS $HEAD" 'wait 800' 'dump v2.json'
+check v2.json 'p["player_view"] == "Lyrics"' "the lyrics take the cover's place"
+# Lyrics from the internet, while the lyrics of a song without any are in view. (The
+# emulator reaches this computer at 10.0.2.2.)
+lyrics_checks 10.0.2.2 0.0.0.0 "$OUT"
 $ADB shell input keyevent KEYCODE_BACK
 ui 'wait 700' 'dump p7.json'
 check p7.json 'not p["player_open"] and d["state"] == "Playing"' "Back puts the player away and the music plays on"
