@@ -7,23 +7,29 @@ use crate::library::stats::{self, LibraryMakeup, ListeningStats};
 use eframe::egui::{self, RichText, Sense, Ui};
 use std::time::{Duration, Instant};
 
-/// The span the statistics cover, back from now.
+/// The span the statistics cover: back from now, or a year of the calendar (this one
+/// and the one before it: the listener's year in review).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Period {
     Week,
     #[default]
     Month,
-    Year,
+    ThisYear,
+    LastYear,
     All,
 }
 
 impl Period {
-    fn seconds(self) -> Option<i64> {
+    /// The span as Unix seconds, from its first moment to its end (not included),
+    /// at `now` where local time is `offset_secs` ahead of UTC.
+    fn span(self, now: i64, offset_secs: i32) -> (i64, i64) {
+        let year = stats::year_of(now, offset_secs);
         match self {
-            Period::Week => Some(7 * 86_400),
-            Period::Month => Some(30 * 86_400),
-            Period::Year => Some(365 * 86_400),
-            Period::All => None,
+            Period::Week => (now - 7 * 86_400, i64::MAX),
+            Period::Month => (now - 30 * 86_400, i64::MAX),
+            Period::ThisYear => stats::year_span(year, offset_secs),
+            Period::LastYear => stats::year_span(year - 1, offset_secs),
+            Period::All => (i64::MIN, i64::MAX),
         }
     }
 }
@@ -62,8 +68,9 @@ impl OneumApp {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs() as i64);
-                let since = period.seconds().map_or(i64::MIN, |span| now - span);
-                let plays = library.plays_since(since);
+                let (since, until) = period.span(now, crate::platform::clock::utc_offset_secs());
+                let mut plays = library.plays_since(since);
+                plays.retain(|&(_, at)| at < until);
                 let snapshot = library.snapshot();
                 let data = StatsData {
                     period,
@@ -80,10 +87,12 @@ impl OneumApp {
         }
     }
 
-    /// For the verification channel: plays and songs of the figures shown, if any.
+    /// For the verification channel: plays and songs of the figures shown, if any
+    /// (those of the period that is chosen: none while they are being worked out).
     pub(super) fn stats_summary_for_dump(&self) -> Option<(usize, usize, usize)> {
         self.stats
             .as_ref()
+            .filter(|d| d.period == self.stats_period)
             .map(|d| (d.listening.plays, d.listening.songs, d.makeup.songs))
     }
 
@@ -102,6 +111,12 @@ impl OneumApp {
         if !touch {
             self.view_title(ui, s.stats, None);
         }
+        // The two years of the calendar are named by their numbers.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let year = stats::year_of(now, crate::platform::clock::utc_offset_secs());
+        let (this_year, last_year) = (year.to_string(), (year - 1).to_string());
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             widgets::segmented(
@@ -111,7 +126,8 @@ impl OneumApp {
                 &[
                     (Period::Week, s.stats_7d),
                     (Period::Month, s.stats_30d),
-                    (Period::Year, s.stats_1y),
+                    (Period::ThisYear, this_year.as_str()),
+                    (Period::LastYear, last_year.as_str()),
                     (Period::All, s.stats_all),
                 ],
             );

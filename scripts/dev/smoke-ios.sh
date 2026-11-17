@@ -307,8 +307,10 @@ echo "== a section repeated, stars, the library's data"
 ui 'menu repeat_section' 'wait 1500' 'menu repeat_section' 'wait 300' 'dump n1.json' 'wait 3500' 'dump n2.json' \
    'menu repeat_section' 'wait 300' 'dump n3.json'
 check n1.json 'd["section"] is not None and d["section"][1] is not None and d["state"] == "Playing"' "a section of the song is marked, from one press to the next"
-check n2.json 'd["state"] == "Playing" and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
-check n3.json 'd["section"] is None and d["state"] == "Playing"' "the third press gives the section up"
+# (Going back to the beginning of the section is a seek: for a moment of every round
+# the state says so.)
+check n2.json 'd["state"] in ("Playing", "Seeking") and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
+check n3.json 'd["section"] is None and d["state"] in ("Playing", "Seeking")' "the third press gives the section up"
 ui 'menu rate_current 4' 'wait 600' 'dump n4.json' "menu data_export $PROFILE/data.json" 'wait 1500' 'dump n5.json' \
    'menu rate_current 0' 'wait 600' 'dump n6.json' "menu data_import $PROFILE/data.json" 'wait 1500' 'dump n7.json'
 check n4.json 'd["current_rating"] == 4' "the song that is playing is given four stars"
@@ -334,6 +336,16 @@ ui 'menu correction_edit_new' 'wait 300' 'menu correction_edit_band 3200 5 2.5' 
    'menu correction_edit_save' 'wait 400' 'dump n11.json' 'menu correction_off' 'wait 300'
 check n10.json 'd["correction_editing"][1] == 2 and d["correction"]["applied"] == d["correction_editing"][0]' "a correction profile is made band by band, and heard while it is edited"
 check n11.json 'd["correction_editing"] is None and d["correction"]["profiles"][-1][1] == 2 and d["correction"]["selected"] == d["correction"]["profiles"][-1][0]' "saved, it is one of the user's own profiles and selected"
+# Where a year begins for the listener is a matter of the device's time zone: the
+# simulator's is this Mac's.
+if python3 - "$PROFILE/n11.json" <<'PY'
+import json, sys, time
+told = json.load(open(sys.argv[1]))["utc_offset_secs"]
+assert told == time.localtime().tm_gmtoff, (told, time.localtime().tm_gmtoff)
+PY
+then echo "  ok   the app knows how far the device's clock is from UTC"
+else echo "  FAIL the app's offset from UTC is not the device's"; exit 1
+fi
 
 echo "== restart"
 ui 'wait 300' 'dump r0.json'

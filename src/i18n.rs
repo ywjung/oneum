@@ -561,7 +561,6 @@ strings! {
     stats: "통계", "Statistics";
     stats_7d: "7일", "7 Days";
     stats_30d: "30일", "30 Days";
-    stats_1y: "1년", "Year";
     stats_all: "전체", "All Time";
     top_artists: "많이 들은 아티스트", "Top Artists";
     top_albums: "많이 들은 앨범", "Top Albums";
@@ -571,7 +570,7 @@ strings! {
     stats_library: "라이브러리 구성", "Your Library";
     stats_formats: "형식", "Formats";
     stats_rates: "샘플레이트", "Sample Rates";
-    stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 컴퓨터에만 있습니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this computer.";
+    stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 컴퓨터에만 있습니다. 연도(올해·작년)는 이 기기의 시간대로 가릅니다. 재생 하나하나의 기록은 최근 2만 번까지 보관하므로, 그보다 많이 들은 기간은 최근 것만 나옵니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this computer. The years (this one and the last) are those of this device's time zone. The plays themselves are kept for the last 20,000, so a period with more than that shows only the latest of them.";
     subfolders: "하위 폴더", "Folders inside";
     check_row: "음악 파일 검사", "Check Music Files";
     check_start: "검사", "Check";
@@ -702,7 +701,7 @@ strings! {
     phone_import_failed: "가져오지 못했습니다.", "Could not import.";
     phone_eq_note: "조절한 소리는 1초 안에 들립니다. 슬라이더를 두 번 탭하면 0 dB로 돌아갑니다. 대역을 올린 만큼 프리앰프를 내려 두면 소리가 최대 음량을 넘지 않습니다(기본 프리셋은 그렇게 맞춰져 있습니다). 그래도 넘는 순간은 잘리지 않고 피크 보호가 눌러 줍니다.",
         "Changes are heard within a second. Double-tap a slider to return it to 0 dB. Lowering the pre-amp by as much as the highest band is raised keeps the sound within full scale (the built-in presets are set that way). What still goes over is not clipped: peak protection brings it down.";
-    phone_stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 휴대폰에만 있습니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this phone.";
+    phone_stats_note: "재생은 곡의 절반(긴 곡은 4분)을 넘게 들었을 때 셉니다. 기록은 이 휴대폰에만 있습니다. 연도(올해·작년)는 이 기기의 시간대로 가릅니다. 재생 하나하나의 기록은 최근 2만 번까지 보관하므로, 그보다 많이 들은 기간은 최근 것만 나옵니다.", "A play counts once half of a song (4 minutes of a long one) has been heard. The history stays on this phone. The years (this one and the last) are those of this device's time zone. The plays themselves are kept for the last 20,000, so a period with more than that shows only the latest of them.";
     phone_pin: "보관함에 고정", "Pin to Library";
     phone_pins_full: "고정은 12개까지 할 수 있습니다. 하나를 해제한 뒤 다시 고정하세요.", "Up to 12 things can be pinned. Unpin one, then pin again.";
     phone_sort: "정렬", "Sort";

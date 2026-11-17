@@ -2764,6 +2764,20 @@ impl OneumApp {
                             self.go(Nav::Stats);
                             continue;
                         }
+                        // The periods of the statistics page that are years of the
+                        // calendar, and the one it opens with.
+                        "stats_this_year" => {
+                            self.stats_period = stats_view::Period::ThisYear;
+                            continue;
+                        }
+                        "stats_last_year" => {
+                            self.stats_period = stats_view::Period::LastYear;
+                            continue;
+                        }
+                        "stats_month" => {
+                            self.stats_period = stats_view::Period::Month;
+                            continue;
+                        }
                         "pin_first_album" => {
                             if let Some(album) = self.snapshot.albums().first() {
                                 let pin = Pin::Album(album.key);
@@ -3002,6 +3016,7 @@ impl OneumApp {
         });
         state["pinned"] = serde_json::json!(self.settings.pinned.len());
         state["stats"] = serde_json::json!(self.stats_summary_for_dump());
+        state["utc_offset_secs"] = serde_json::json!(crate::platform::clock::utc_offset_secs());
         state["subfolders"] = serde_json::json!(
             self.folder_children
                 .as_ref()

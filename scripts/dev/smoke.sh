@@ -116,8 +116,10 @@ ui 'menu repeat_section' 'wait 1500' 'dump ab1.json' 'menu repeat_section' 'wait
    'wait 3500' 'dump ab3.json' 'menu repeat_section' 'wait 300' 'dump ab4.json'
 check ab1.json 'd["section"] is not None and d["section"][1] is None and d["state"] == "Playing"' "the beginning of a section is marked"
 check ab2.json 'd["section"][1] is not None and 1000 <= d["section"][1] - d["section"][0] <= 2500' "…and its end, about a second and a half on"
-check ab3.json 'd["state"] == "Playing" and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
-check ab4.json 'd["section"] is None and d["state"] == "Playing"' "the third time gives the section up"
+# (Going back to the beginning of the section is a seek: for a moment of every round
+# the state says so.)
+check ab3.json 'd["state"] in ("Playing", "Seeking") and d["section"][0] - 300 <= d["position_ms"] <= d["section"][1] + 500' "left alone, the song plays inside the section, over and over"
+check ab4.json 'd["section"] is None and d["state"] in ("Playing", "Seeking")' "the third time gives the section up"
 
 echo "== stars"
 # A rating for the song that is playing, kept in the app's database only: the song is
@@ -446,6 +448,20 @@ ui 'menu go_first_folder' 'wait 500' 'dump fo1.json' 'menu go_stats' 'wait 1500'
    'menu pin_first_album' 'wait 300' 'dump pn1.json'
 check fo1.json 'd["nav"].startswith("Folder") and d["rows"] == 20 and d["subfolders"] == 5' "the folder view: every song under the music folder, its five folders as ways in"
 check st1.json 'd["nav"] == "Stats" and d["stats"] is not None and d["stats"][0] >= 1 and d["stats"][2] == 20' "statistics: the plays of this run and the whole library"
+# The years of the calendar: what was heard in this run was heard this year, and
+# nothing last year (the profile is new). The year turns by this Mac's clock.
+ui 'menu go_stats' 'wait 400' 'menu stats_this_year' 'wait 1500' 'dump sy1.json' 'menu stats_last_year' 'wait 1500' 'dump sy2.json' \
+   'menu stats_month' 'wait 800'
+check sy1.json 'd["stats"] is not None and d["stats"][0] >= 1' "statistics of this year of the calendar: the plays of this run"
+check sy2.json 'd["stats"] is not None and d["stats"][0] == 0 and d["stats"][2] == 20' "…and none in the year before"
+if python3 - "$PROFILE/sy1.json" <<'PY'
+import json, sys, time
+told = json.load(open(sys.argv[1]))["utc_offset_secs"]
+assert told == time.localtime().tm_gmtoff, (told, time.localtime().tm_gmtoff)
+PY
+then echo "  ok   the app knows how far this Mac's clock is from UTC"
+else echo "  FAIL the app's offset from UTC is not this Mac's"; exit 1
+fi
 check pn1.json 'd["pinned"] == 1' "an album is pinned to the sidebar"
 
 echo "== library data, to a file and back"

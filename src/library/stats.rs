@@ -38,6 +38,40 @@ pub struct LibraryMakeup {
     pub damaged: usize,
 }
 
+/// Days from 1970-01-01 to the given day of the calendar (Gregorian, also before 1970).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y.rem_euclid(400);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The year a moment (Unix seconds) falls in, where local time is `offset_secs` ahead
+/// of UTC.
+pub fn year_of(unix_secs: i64, offset_secs: i32) -> i32 {
+    let days = (unix_secs + i64::from(offset_secs)).div_euclid(86_400);
+    // Civil from days (the same reckoning as `days_from_civil`, the other way round).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let year = year_of_era + era * 400 + i64::from(month_index >= 10);
+    year as i32
+}
+
+/// A calendar year as a span of Unix seconds, from its first moment to the first of
+/// the next year (not included), where local time is `offset_secs` ahead of UTC.
+pub fn year_span(year: i32, offset_secs: i32) -> (i64, i64) {
+    let start =
+        |year: i32| days_from_civil(i64::from(year), 1, 1) * 86_400 - i64::from(offset_secs);
+    (start(year), start(year + 1))
+}
+
 /// The genres named in a genre tag ("Rock; Indie / Alternative"), as the genre view
 /// splits them.
 fn genre_names_in(tag: &str) -> impl Iterator<Item = &str> {
@@ -237,5 +271,27 @@ mod tests {
         let stats = listening(&snap, &[(1, 0), (2, 0), (3, 0)]);
         assert_eq!(stats.top_albums.len(), 1, "{:?}", stats.top_albums);
         assert_eq!(stats.top_albums[0].3, 3);
+    }
+
+    #[test]
+    fn a_year_begins_and_ends_where_the_clock_on_the_wall_says() {
+        // 2026-01-01 00:00:00 UTC is 1,767,225,600.
+        assert_eq!(year_span(2026, 0), (1_767_225_600, 1_798_761_600));
+        // In Seoul the year begins nine hours earlier.
+        let (start, end) = year_span(2026, 9 * 3600);
+        assert_eq!(start, 1_767_225_600 - 32_400);
+        assert_eq!(end - start, 365 * 86_400);
+        assert_eq!(year_of(start, 9 * 3600), 2026);
+        assert_eq!(year_of(start - 1, 9 * 3600), 2025);
+        assert_eq!(year_of(end - 1, 9 * 3600), 2026);
+        assert_eq!(year_of(end, 9 * 3600), 2027);
+        // The same moment is another year further west.
+        assert_eq!(year_of(1_767_225_600, 0), 2026);
+        assert_eq!(year_of(1_767_225_600, -5 * 3600), 2025);
+        // Leap years, and days before 1970.
+        assert_eq!(year_span(2024, 0).1 - year_span(2024, 0).0, 366 * 86_400);
+        assert_eq!(year_of(0, 0), 1970);
+        assert_eq!(year_of(-1, 0), 1969);
+        assert_eq!(year_of(951_782_400, 0), 2000, "2000-02-29");
     }
 }

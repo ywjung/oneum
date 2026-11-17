@@ -25,7 +25,7 @@
 - Click an album, artist or genre to see its songs, and the **Back** button to return. **Genres** gathers the genres in your tags, with the number of songs in each (a song with several genres is in each of them).
 - **Pin to Sidebar**: right-click an album, artist, genre or playlist → **Pin to Sidebar** to keep it under "Pinned" at the top on the left (up to 12). Right-click a pinned entry → **Unpin**.
 - **Folders**: browse your music folders the way they are laid out on disk. Click a name in the path at the top to go to that folder, or a button below it to go into a folder inside. The list shows every song in the folder, in path order.
-- **Statistics**: from the play history kept on this computer, how often and how long you listened in the last 7 days, 30 days, year or all time, with your top artists, albums, songs and genres; and what your library is made of (formats, sample rates). Click a name to go there.
+- **Statistics**: from the play history kept on this computer, how often and how long you listened in the last 7 days or 30 days, in this year and the last (years of the calendar, named by their numbers: a year in review) or in all time, with your top artists, albums, songs and genres; and what your library is made of (formats, sample rates). Click a name to go there.
 
 ## Listening
 - Double-click a song (or select it and press Return): the whole list you are looking at becomes the queue, starting from that song. If you have searched or sorted, the results become the queue just as they are.
