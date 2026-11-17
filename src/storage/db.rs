@@ -903,6 +903,49 @@ impl Db {
         self.get_track(keep)
     }
 
+    /// Row `keep` takes over what the listener did with row `gone` (favourite, rating,
+    /// plays, the earlier of the two dates added, its places in playlists, in the
+    /// queue and in the history), and row `gone` is deleted. `keep` stays the file it
+    /// is, under its own id: for a track whose file is gone while the same file is in
+    /// the library as another track, which may be the one that is playing. Returns
+    /// the row that is kept.
+    pub fn absorb_track(&mut self, keep: TrackId, gone: TrackId) -> SqlResult<Option<StoredTrack>> {
+        let Some(source) = self.get_track(gone)? else {
+            return Ok(None);
+        };
+        let Some(target) = self.get_track(keep)? else {
+            return Ok(None);
+        };
+        let tx = self.conn.transaction()?;
+        for table in ["playlist_items", "queue", "history"] {
+            tx.execute(
+                &format!("UPDATE {table} SET track_id = ?1 WHERE track_id = ?2"),
+                params![keep, gone],
+            )?;
+        }
+        tx.execute("DELETE FROM tracks WHERE id = ?1", params![gone])?;
+        let s = &source.track;
+        let last_played = match (target.track.last_played_at, s.last_played_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        tx.execute(
+            "UPDATE tracks SET favorite = ?2, play_count = ?3, last_played_at = ?4, \
+             rating = CASE WHEN rating = 0 THEN ?5 ELSE rating END, \
+             added_at = MIN(added_at, ?6) WHERE id = ?1",
+            params![
+                keep,
+                target.track.favorite || s.favorite,
+                target.track.play_count.saturating_add(s.play_count),
+                last_played,
+                s.rating,
+                s.added_at,
+            ],
+        )?;
+        tx.commit()?;
+        self.get_track(keep)
+    }
+
     /// Stores what was measured for tracks, replacing earlier measurements. Each entry
     /// names the state of the file it was measured from. Tracks that no longer exist
     /// are skipped.

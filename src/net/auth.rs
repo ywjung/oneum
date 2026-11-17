@@ -973,6 +973,12 @@ mod tests {
                 .is_some_and(|answer| answer.starts_with("Digest "))
         );
 
+        // A folder whose server did not ask when it was added: never the password
+        // itself, whoever asks for it now.
+        let server = "http://kept-c.test";
+        assert_eq!(asked(server, basic, "word", Kept::Only("none")), None);
+        assert!(asked(server, digest, "word", Kept::Only("none")).is_some());
+
         // Nothing kept (a folder of an earlier version): a server that offered Digest
         // in this run is not given the password itself afterwards, over http.
         let server = "http://run.test";

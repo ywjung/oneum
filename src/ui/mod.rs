@@ -2697,7 +2697,9 @@ impl OneumApp {
         responder::set_text_input_secret(secret);
         responder::set_text_input_active(typing);
         let was_typing = std::mem::replace(&mut self.typing, typing);
-        let popup_open = ctx.any_popup_open();
+        // (As the UI library remembers it from the frame before: what this frame
+        // itself shows is not known yet.)
+        let popup_open = egui::Popup::is_any_open(ctx);
         let popup_was_open = std::mem::replace(&mut self.popup_was_open, popup_open) || popup_open;
         self.widget_focused = !typing && ctx.memory(|m| m.focused()).is_some();
         if self.dialog.is_some() {

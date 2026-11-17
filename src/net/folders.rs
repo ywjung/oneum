@@ -36,8 +36,9 @@ pub struct Folder {
     /// one that no authority stands behind (see `net::tls`).
     pub pinned: Option<String>,
     /// How the server asked who is there when the folder was added (see
-    /// [`asked_way`]): `digest`, or `basic` and the realm it named. Empty: not known
-    /// (nobody was asked for, or the folder was added by an earlier version).
+    /// [`asked_way`]): `digest`, `basic` and the realm it named, or `none` when a
+    /// name was given and the server did not ask for it. Empty: not known (the
+    /// folder has no name to be there as, or was added by an earlier version).
     pub sign_in: String,
 }
 
@@ -74,7 +75,8 @@ impl Folder {
         }
         self.user = tidy(&self.user, 128);
         self.sign_in = tidy(&self.sign_in, 256);
-        if self.sign_in != "digest" && !self.sign_in.starts_with("basic") {
+        if !matches!(self.sign_in.as_str(), "digest" | "none") && !self.sign_in.starts_with("basic")
+        {
             self.sign_in.clear();
         }
         self.pinned = self
@@ -101,11 +103,18 @@ impl Folder {
 /// over a connection that is not TLS, where nothing else tells that it is the same
 /// server that answers (the device may be on another network, with another device
 /// at that address).
+///
+/// A server that was given a name and did not ask for it is kept as `none`: one
+/// that asks at that address later is given the password only in a way that does
+/// not send it.
 pub fn asked_way(address: &str, user: &str) -> String {
+    if user.is_empty() {
+        return String::new();
+    }
     Url::parse_web(address)
         .ok()
         .and_then(|url| super::auth::how_asked(&url.server(), user))
-        .unwrap_or_default()
+        .unwrap_or_else(|| "none".to_string())
 }
 
 /// A new id for a folder: nothing is told by it (not the server, not the name).

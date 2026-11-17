@@ -1732,8 +1732,9 @@ impl Library {
     /// files in the other music folders, where a file there is plainly the same one
     /// (as a moved file is told, see `scan::match_relinks`). A collection that was
     /// copied to a new place, the new folder added and the old one taken away,
-    /// would otherwise be the copies with nothing attached. The song keeps its row
-    /// and takes the other file; songs nothing was done with go with their folder.
+    /// would otherwise be the copies with nothing attached. The copy keeps its row
+    /// (it may be the song that is playing) and takes the marks over; songs nothing
+    /// was done with go with their folder.
     fn hand_to_twins(&self, root_id: i64) {
         let marked = match lock(&self.inner.db).marked_tracks_of_root(root_id) {
             Ok(ids) => ids,
@@ -1761,12 +1762,12 @@ impl Library {
             (leaving, staying)
         };
         let mut handed = 0;
-        for (keep, take) in scan::match_relinks(&leaving, &staying) {
+        for (gone, keep) in scan::match_relinks(&leaving, &staying) {
             let mut db = lock(&self.inner.db);
-            match db.relink_track(keep, take) {
+            match db.absorb_track(keep, gone) {
                 Ok(Some(row)) => {
                     let mut state = lock(&self.inner.state);
-                    state.remove(take);
+                    state.remove(gone);
                     state.insert(row.track, row.art_from_folder);
                     handed += 1;
                 }

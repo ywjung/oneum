@@ -971,20 +971,35 @@ fn files_copied_to_another_folder_take_over_when_the_old_ones_go() {
     assert_eq!(library.snapshot().len(), 4);
     library.debug_forget_recently_added();
 
+    // The copy is a song of its own by now (it may be the one that is playing).
+    let copy = library
+        .snapshot()
+        .tracks
+        .iter()
+        .find(|t| t.path == new.join("album/one.wav"))
+        .expect("the copy")
+        .clone();
+    assert!(!copy.favorite && copy.id != one.id);
+
     fs::remove_dir_all(old.join("album")).unwrap();
     rescan(&library);
     assert_eq!(library.snapshot().len(), 2, "one of each again");
-    let after = library.track(one.id).expect("the old row lives on");
+    assert!(
+        library.track(one.id).is_none(),
+        "the row of the file that went"
+    );
+    let after = library.track(copy.id).expect("the copy keeps its row");
     assert_eq!(after.path, new.join("album/one.wav"));
     assert_eq!(after.root_id, Some(new_root));
     assert!(after.available && after.favorite);
     assert_eq!((after.rating, after.play_count), (4, 1));
+    assert_eq!(after.added_at, one.added_at.min(copy.added_at));
     let items: Vec<i64> = library
         .playlist_items(playlist)
         .iter()
         .map(|item| item.track_id)
         .collect();
-    assert_eq!(items, [one.id]);
+    assert_eq!(items, [copy.id]);
 }
 
 /// The same, with the old folder taken out of the library instead of its files being
@@ -1023,27 +1038,36 @@ fn removing_a_folder_hands_its_songs_marks_to_their_copies_elsewhere() {
     wait_scan(&library);
     assert_eq!(library.snapshot().len(), 5);
 
+    let copy = library
+        .snapshot()
+        .tracks
+        .iter()
+        .find(|t| t.path == new.join("album/one.wav"))
+        .expect("the copy")
+        .clone();
+
     library.remove_folder(old_root).unwrap();
     let snapshot = library.snapshot();
     assert_eq!(snapshot.len(), 2, "the folder that stays has two songs");
-    let after = library.track(one.id).expect("the marked song lives on");
+    let after = library.track(copy.id).expect("the copy keeps its row");
     assert_eq!(after.path, new.join("album/one.wav"));
     assert_eq!(after.root_id, Some(new_root));
     assert!(after.favorite);
     assert_eq!(after.play_count, 1);
-    // The song that has no copy went with its folder, and its place in the playlist.
-    assert!(library.track(only.id).is_none());
+    // The songs of the folder went with it; the one without a copy took its place
+    // in the playlist with it.
+    assert!(library.track(one.id).is_none() && library.track(only.id).is_none());
     let items: Vec<i64> = library
         .playlist_items(playlist)
         .iter()
         .map(|item| item.track_id)
         .collect();
-    assert_eq!(items, [one.id]);
+    assert_eq!(items, [copy.id]);
     // It holds after a restart.
     drop(library);
     let library = env.open();
     assert_eq!(library.snapshot().len(), 2);
-    assert!(library.track(one.id).unwrap().favorite);
+    assert!(library.track(copy.id).unwrap().favorite);
 }
 
 /// Discs kept in folders of their own (`CD1`, `CD2`) are one album. Where the files

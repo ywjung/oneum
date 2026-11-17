@@ -72,7 +72,9 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
             // one of them does not cost all the others. What the file held is kept
             // beside it, since the next save writes it without them.
             if let Some((value, left_out)) = bytes.as_deref().and_then(member_by_member::<T>) {
-                let aside = free_aside_name(path, "partial");
+                // (One copy, the latest: the file is read like this at every start
+                // until it is next saved.)
+                let aside = with_suffix(path, ".partial");
                 let copied = fs::copy(path, &aside).is_ok();
                 tracing::warn!(
                     error = %err,

@@ -1702,7 +1702,7 @@ fn relink_moved(
     let paths: HashMap<TrackId, &Path> = gone.iter().map(|t| (t.id, t.path.as_path())).collect();
     // Tracks from elsewhere in the library are only taken if their file is really gone
     // (the "unavailable" flag may be stale); this scan's own were checked already.
-    let mut pairs: Vec<(TrackId, TrackId)> = match_relinks(&gone, &found)
+    let pairs: Vec<(TrackId, TrackId)> = match_relinks(&gone, &found)
         .into_iter()
         .filter(|(keep, _)| {
             confirmed.contains(keep) || paths.get(keep).is_some_and(|path| file_is_gone(path))
@@ -1716,7 +1716,9 @@ fn relink_moved(
         .filter(|t| confirmed.contains(&t.id) && !paired.contains(&t.id))
         .cloned()
         .collect();
-    pairs.extend(match_relinks(&unpaired, &older));
+    // (There the file that is there keeps its row, which may be the song that is
+    // playing, and takes over what was done with the one that went.)
+    let absorbed = match_relinks(&unpaired, &older);
     for chunk in pairs.chunks(SMALL_CHUNK) {
         let mut db = lock(&inner.db);
         if cancel.load(Ordering::Relaxed) {
@@ -1732,6 +1734,24 @@ fn relink_moved(
                 }
                 Ok(None) => {}
                 Err(err) => tracing::warn!(%err, "could not relink a moved track"),
+            }
+        }
+    }
+    for chunk in absorbed.chunks(SMALL_CHUNK) {
+        let mut db = lock(&inner.db);
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        for &(gone, keep) in chunk {
+            match db.absorb_track(keep, gone) {
+                Ok(Some(row)) => {
+                    let mut state = lock(&inner.state);
+                    state.remove(gone);
+                    state.insert(row.track, row.art_from_folder);
+                    relinked.insert(gone);
+                }
+                Ok(None) => {}
+                Err(err) => tracing::warn!(%err, "could not hand a gone track's marks over"),
             }
         }
     }
