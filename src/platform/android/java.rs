@@ -318,3 +318,49 @@ pub(super) fn update_playback(
 pub(super) fn stop_playback() {
     ask(jni_str!("stopPlayback"), "stopPlayback");
 }
+
+/// Keeps a password under `id` (see `Secrets.java`). False when it could not be kept.
+pub(super) fn secret_put(id: &str, secret: &str) -> bool {
+    with_activity("secretPut", |env, activity| {
+        let id = env.new_string(id)?;
+        let secret = env.new_string(secret)?;
+        env.call_method(
+            activity,
+            jni_str!("secretPut"),
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Z"),
+            &[JValue::Object(&id), JValue::Object(&secret)],
+        )?
+        .z()
+    })
+    .unwrap_or(false)
+}
+
+/// The password kept under `id`.
+pub(super) fn secret_get(id: &str) -> Option<String> {
+    with_activity("secretGet", |env, activity| {
+        let id = env.new_string(id)?;
+        let answer = env
+            .call_method(
+                activity,
+                jni_str!("secretGet"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
+                &[JValue::Object(&id)],
+            )?
+            .l()?;
+        string_of(env, answer)
+    })
+    .flatten()
+}
+
+pub(super) fn secret_remove(id: &str) {
+    with_activity("secretRemove", |env, activity| {
+        let id = env.new_string(id)?;
+        env.call_method(
+            activity,
+            jni_str!("secretRemove"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[JValue::Object(&id)],
+        )?;
+        Ok(())
+    });
+}

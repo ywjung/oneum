@@ -18,6 +18,7 @@ mod memory;
 mod menubar;
 mod meter;
 mod network;
+mod network_folders;
 mod panels;
 mod phone;
 mod player_bar;
@@ -420,6 +421,8 @@ pub struct OneumApp {
     /// message is shown in front of it for its few seconds and never replaces it.
     alert: Option<Toast>,
     dialog: Option<Dialog>,
+    /// The form that adds a network folder, while it is open.
+    folder_form: Option<network_folders::FolderForm>,
     renaming: Option<(i64, String, bool)>,
     settings_open: bool,
     settings_tab: settings_window::Tab,
@@ -572,6 +575,7 @@ impl OneumApp {
             toast: None,
             alert: None,
             dialog: None,
+            folder_form: None,
             renaming: None,
             settings_open: false,
             guide_open: false,
@@ -3608,6 +3612,7 @@ impl eframe::App for OneumApp {
             self.guide_window(&ctx);
             self.equalizer_window(&ctx);
             self.dialogs(&ctx);
+            self.folder_form_window(&ctx);
             for action in actions {
                 self.apply(action);
             }

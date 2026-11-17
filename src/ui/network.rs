@@ -1,5 +1,7 @@
-//! Media servers of the network (DLNA/UPnP): finding them, and looking through what
-//! the one that is open holds. Nothing here touches the network before the view is
+//! Media servers of the network (DLNA/UPnP) and network folders (a share of a NAS over
+//! WebDAV): finding the servers, and looking through what the server or the folder
+//! that is open holds. A folder is shown the way a server is: its folders, and the
+//! music files in them by their names. Nothing here touches the network before the view is
 //! opened or a server is asked for: the app stays offline until the listener goes
 //! there.
 //!
@@ -9,7 +11,9 @@ use super::icons::{self, Icon};
 use super::{Action, OneumApp, theme, widgets};
 use crate::app::settings::SavedServer;
 use crate::library::remote::RemoteTrack;
-use crate::net::{ssdp, upnp};
+use crate::net::folders::{self, Credentials, Folder};
+use crate::net::{NetError, dav, ssdp, upnp};
+use crate::platform::secrets::Secret;
 use eframe::egui::{self, Align2, RichText, Sense, Ui};
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
@@ -26,7 +30,87 @@ const PAGE: u32 = 200;
 /// …and no further than this (a server's "all songs" can be very long).
 const MAX_ENTRIES: usize = 5000;
 
+/// Why a network folder could not be read or added.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Why {
+    /// The server does not take the name and the password.
+    Refused,
+    /// The server's certificate is not one that is trusted (its fingerprint).
+    Untrusted(String),
+    /// What was typed is no address of a folder.
+    Address,
+    /// Anything else, in the words of what went wrong.
+    Other(String),
+}
+
+fn why_of(error: NetError) -> Why {
+    match error {
+        NetError::Status(401 | 403) => Why::Refused,
+        NetError::Untrusted { fingerprint } => Why::Untrusted(fingerprint),
+        NetError::BadAddress => Why::Address,
+        other => Why::Other(other.to_string()),
+    }
+}
+
+/// A network folder's listing as the view shows a server's: its folders, and of its
+/// files those that are music by their names, each with its address.
+fn folder_page(entries: Vec<dav::Entry>) -> upnp::Page {
+    let entries: Vec<upnp::Entry> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.folder {
+                return Some(upnp::Entry::Folder(upnp::Folder {
+                    id: entry.url,
+                    title: entry.name,
+                    child_count: None,
+                }));
+            }
+            // (A cover picture, a text file: not shown.) The kind of file is told
+            // by its name: a folder gives none.
+            let mime = upnp::type_of_name(&entry.name)?;
+            let title = match entry.name.rsplit_once('.') {
+                Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+                _ => entry.name.clone(),
+            };
+            Some(upnp::Entry::Item(upnp::Item {
+                id: entry.url.clone(),
+                title,
+                artist: None,
+                album: None,
+                album_artist: None,
+                genre: None,
+                track_number: None,
+                art_url: None,
+                audio: true,
+                resources: vec![upnp::Resource {
+                    url: entry.url,
+                    mime: mime.to_string(),
+                    size: entry.size,
+                    duration_ms: None,
+                    sample_rate: None,
+                    bit_depth: None,
+                    channels: None,
+                    converted: false,
+                }],
+            }))
+        })
+        .collect();
+    let total = entries.len() as u32;
+    upnp::Page { entries, total }
+}
+
 enum Event {
+    /// A network folder was read.
+    FolderPage {
+        ticket: u64,
+        result: Result<upnp::Page, Why>,
+    },
+    /// A folder the listener wants to add was asked whether it is there.
+    Tried {
+        folder: Folder,
+        password: Secret,
+        result: Result<(), Why>,
+    },
     Found(Vec<upnp::Server>),
     /// A saved server was asked for by its address.
     Opened {
@@ -69,6 +153,18 @@ pub(super) struct Browser {
     add_failed: bool,
     /// A server added by its address, for the app to keep in the settings.
     added: Option<upnp::Server>,
+    /// The network folder that is open (`server` then stands for it by its name).
+    folder: Option<Folder>,
+    /// Why the open folder could not be read.
+    pub(super) why: Option<Why>,
+    /// A folder that was tried, for the app to keep or to say why not.
+    tried: Option<(Folder, Secret, Result<(), Why>)>,
+    /// The try under way was asked for by a verification script (there is no form).
+    pub(super) scripted_try: bool,
+    /// Why the last try of a folder failed (for verification scripts).
+    pub(super) last_try_failed: Option<Why>,
+    /// How a try of the system's store for passwords went (for verification scripts).
+    pub(super) secret_selftest: Option<Result<String, String>>,
 }
 
 impl Browser {
@@ -91,6 +187,12 @@ impl Browser {
             adding: false,
             add_failed: false,
             added: None,
+            folder: None,
+            why: None,
+            tried: None,
+            scripted_try: false,
+            last_try_failed: None,
+            secret_selftest: None,
         }
     }
 
@@ -148,6 +250,29 @@ impl Browser {
                         }
                     }
                 }
+                Event::FolderPage { ticket, result } => {
+                    if ticket != self.ticket.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    self.loading = false;
+                    match result {
+                        Ok(page) => {
+                            self.entries = page.entries;
+                            self.note_entries();
+                        }
+                        Err(why) => {
+                            // (Never the password: `Why` holds none.)
+                            tracing::info!(?why, "could not read a network folder");
+                            self.failed = true;
+                            self.why = Some(why);
+                        }
+                    }
+                }
+                Event::Tried {
+                    folder,
+                    password,
+                    result,
+                } => self.tried = Some((folder, password, result)),
                 Event::Added(server) => {
                     self.adding = false;
                     self.add_failed = server.is_none();
@@ -163,6 +288,46 @@ impl Browser {
     /// The server added by address since the last call, to be kept.
     pub(super) fn take_added(&mut self) -> Option<upnp::Server> {
         self.added.take()
+    }
+
+    /// Asks whether a folder the listener wants to add is there, as who they say.
+    pub(super) fn try_folder(&mut self, folder: Folder, password: Secret) {
+        self.last_try_failed = None;
+        self.run("oneum-net-folder", move |tx| {
+            let credentials = Credentials::of(&folder.user, &password, folder.pinned.as_deref());
+            let result = dav::list(&folder.url, &credentials.access())
+                .map(|_| ())
+                .map_err(why_of);
+            let _ = tx.send(Event::Tried {
+                folder,
+                password,
+                result,
+            });
+        });
+    }
+
+    /// The folder that was tried since the last call, with its password and how the
+    /// try went.
+    pub(super) fn take_tried(&mut self) -> Option<(Folder, Secret, Result<(), Why>)> {
+        self.tried.take()
+    }
+
+    /// Opens a network folder at its top.
+    pub(super) fn open_network_folder(&mut self, folder: Folder) {
+        self.server = Some(upnp::Server {
+            name: folder.name.clone(),
+            udn: format!("folder:{}", folder.id),
+            location: folder.url.clone(),
+            control_url: folder.url.clone(),
+        });
+        self.folder = Some(folder);
+        self.path.clear();
+        self.browse();
+    }
+
+    /// Whether what is open is a network folder (not a media server).
+    pub(super) fn in_folder(&self) -> bool {
+        self.folder.is_some()
     }
 
     /// Asks the network which media servers are there.
@@ -208,6 +373,7 @@ impl Browser {
     /// Opens a server that was kept: it is asked again for where its lists are (the
     /// port can have changed since).
     pub(super) fn open_saved(&mut self, saved: &SavedServer) {
+        self.folder = None;
         let ticket = self.next_ticket();
         self.server = Some(upnp::Server {
             name: saved.name.clone(),
@@ -227,6 +393,7 @@ impl Browser {
     }
 
     pub(super) fn open(&mut self, server: upnp::Server) {
+        self.folder = None;
         self.server = Some(server);
         self.path.clear();
         self.browse();
@@ -253,6 +420,8 @@ impl Browser {
     pub(super) fn close(&mut self) {
         self.next_ticket();
         self.server = None;
+        self.folder = None;
+        self.why = None;
         self.path.clear();
         self.entries.clear();
         self.note_entries();
@@ -269,6 +438,23 @@ impl Browser {
         self.entries.clear();
         self.note_entries();
         self.failed = false;
+        self.why = None;
+        if let Some(folder) = &self.folder {
+            // A network folder: one question gives all it holds. It is asked as the
+            // folder's account (the address itself carries neither name nor password).
+            let url = self
+                .path
+                .last()
+                .map_or_else(|| folder.url.clone(), |(id, _)| id.clone());
+            self.loading = self.run("oneum-net-folder", move |tx| {
+                let credentials = folders::credentials_for(&url);
+                let result = dav::list(&url, &credentials.access())
+                    .map(folder_page)
+                    .map_err(why_of);
+                let _ = tx.send(Event::FolderPage { ticket, result });
+            });
+            return;
+        }
         if server.control_url.is_empty() {
             // A kept server that has not answered yet: asked again.
             let saved = SavedServer {
@@ -523,6 +709,7 @@ impl OneumApp {
     /// address into the settings.
     pub(super) fn sync_network(&mut self) {
         self.network.poll();
+        self.take_tried_folder();
         if let Some(server) = self.network.take_added() {
             let known = self
                 .settings
@@ -577,6 +764,9 @@ impl OneumApp {
                     focus: true,
                 });
             }
+            if ui.add(button(s.folder_add)).clicked() {
+                self.folder_form = Some(super::network_folders::FolderForm::new());
+            }
             if self.network.searching || self.network.adding {
                 ui.spinner();
                 ui.label(RichText::new(s.network_searching).color(theme::dim(ui)));
@@ -598,6 +788,9 @@ impl OneumApp {
             .filter(|server| !saved.iter().any(|s| s.location == server.location))
             .cloned()
             .collect();
+        let shares = self.settings.network_folders.clone();
+        let mut open_share = None;
+        let mut forget_share = None;
         let mut open_saved = None;
         let mut forget = None;
         let mut open_found = None;
@@ -605,6 +798,22 @@ impl OneumApp {
             .id_salt("network-servers")
             .auto_shrink(false)
             .show(ui, |ui| {
+                if !shares.is_empty() {
+                    section(ui, s.folder_list);
+                    for (index, share) in shares.iter().enumerate() {
+                        let response = row(ui, Icon::Folder, &share.name, &share.url, "", false);
+                        if response.clicked() {
+                            open_share = Some(index);
+                        }
+                        response.context_menu(|ui| {
+                            if ui.button(s.network_forget).clicked() {
+                                forget_share = Some(index);
+                                ui.close();
+                            }
+                        });
+                    }
+                    ui.add_space(8.0);
+                }
                 if !saved.is_empty() {
                     section(ui, s.network_saved);
                     for (index, server) in saved.iter().enumerate() {
@@ -630,14 +839,22 @@ impl OneumApp {
                         }
                     }
                 }
-                if saved.is_empty() && found.is_empty() && !self.network.searching {
+                if saved.is_empty()
+                    && found.is_empty()
+                    && shares.is_empty()
+                    && !self.network.searching
+                {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(s.network_none).color(theme::dim(ui)));
                     });
                 }
             });
-        if let Some(index) = forget {
+        if let Some(index) = forget_share {
+            self.forget_network_folder(index);
+        } else if let Some(index) = open_share {
+            self.network.open_network_folder(shares[index].clone());
+        } else if let Some(index) = forget {
             self.settings.network_servers.remove(index);
         } else if let Some(index) = open_saved {
             self.network.open_saved(&saved[index]);
@@ -705,7 +922,13 @@ impl OneumApp {
                 if self.network.failed {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(s.network_failed).color(theme::dim(ui)));
+                        // A network folder says why.
+                        let words = match &self.network.why {
+                            Some(Why::Refused) => s.folder_refused_later,
+                            Some(Why::Untrusted(_)) => s.folder_changed_certificate,
+                            _ => s.network_failed,
+                        };
+                        ui.label(RichText::new(words).color(theme::dim(ui)));
                     });
                     return;
                 }
@@ -813,6 +1036,45 @@ impl OneumApp {
             ("forget", Some(n)) if n < self.settings.network_servers.len() => {
                 self.settings.network_servers.remove(n);
             }
+            // A network folder: `folder-add <address> [name] [password]` tries it and
+            // keeps it when it answers; `folder-trust` goes on with the certificate
+            // the last try was refused for; `folder-open <n>`, `folder-forget <n>`.
+            ("folder-add", _) | ("folder-trust", _) => {
+                let (user, password) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let pinned = match (&self.network.last_try_failed, verb) {
+                    (Some(Why::Untrusted(fingerprint)), "folder-trust") => {
+                        Some(fingerprint.clone())
+                    }
+                    _ => None,
+                };
+                let folder = Folder {
+                    id: folders::new_id(),
+                    name: String::new(),
+                    url: super::network_folders::folder_address(argument),
+                    user: user.to_string(),
+                    pinned,
+                }
+                .sanitized();
+                match folder {
+                    Some(folder) => {
+                        self.network.scripted_try = true;
+                        self.network.try_folder(folder, Secret::new(password));
+                    }
+                    None => self.network.last_try_failed = Some(Why::Address),
+                }
+            }
+            ("folder-open", Some(n)) => {
+                if let Some(folder) = self.settings.network_folders.get(n).cloned() {
+                    self.network.open_network_folder(folder);
+                }
+            }
+            ("folder-forget", Some(n)) => self.forget_network_folder(n),
+            // The system's own store for passwords, tried with a password made for
+            // the purpose (a verification run keeps the folders' in memory).
+            ("secret-selftest", _) => {
+                self.network.secret_selftest =
+                    Some(crate::platform::secrets::try_system_store().map(str::to_string));
+            }
             // What a tap on that entry does: into a folder, or play the folder from
             // that track.
             ("open", Some(n)) => match self.network.entries.get(n) {
@@ -868,6 +1130,30 @@ impl OneumApp {
                 .iter()
                 .map(|s| s.name.clone())
                 .collect::<Vec<_>>(),
+            // (Names, addresses and who to be there; a password is in neither the
+            // settings nor here.)
+            "shares": self
+                .settings
+                .network_folders
+                .iter()
+                .map(|f| serde_json::json!({
+                    "name": f.name,
+                    "url": f.url,
+                    "user": f.user,
+                    "pinned": f.pinned,
+                }))
+                .collect::<Vec<_>>(),
+            "in_share": network.in_folder(),
+            "share_failed": network.why.as_ref().or(network.last_try_failed.as_ref()).map(|why| match why {
+                Why::Refused => "refused".to_string(),
+                Why::Untrusted(_) => "untrusted".to_string(),
+                Why::Address => "address".to_string(),
+                Why::Other(reason) => format!("other: {reason}"),
+            }),
+            "secret_selftest": network.secret_selftest.clone().map(|r| match r {
+                Ok(done) => format!("ok: {done}"),
+                Err(why) => format!("failed: {why}"),
+            }),
         })
     }
 }
@@ -953,5 +1239,78 @@ mod tests {
     fn a_length_the_server_does_not_tell_is_left_empty() {
         assert_eq!(length(0), "");
         assert_eq!(length(61_000), "1:01");
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    /// A network folder's files are shown like a server's songs: the music among
+    /// them, by its name, whatever the address begins with.
+    #[test]
+    fn a_folders_music_files_are_songs_and_the_rest_is_left_out() {
+        let entry = |name: &str, folder: bool| dav::Entry {
+            name: name.to_string(),
+            url: format!("https://nas.local:5006/music/{}", name.replace(' ', "%20")),
+            folder,
+            size: (!folder).then_some(1_000),
+        };
+        let page = folder_page(vec![
+            entry("Albums", true),
+            entry("01 First.flac", false),
+            entry("02 Second.WV", false),
+            entry("cover.jpg", false),
+            entry("notes.txt", false),
+            entry("book.m4b", false),
+            entry("old.mp2", false),
+            entry("noextension", false),
+        ]);
+        let titles: Vec<String> = page
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                upnp::Entry::Folder(folder) => format!("[{}]", folder.title),
+                upnp::Entry::Item(item) => item.title.clone(),
+            })
+            .collect();
+        assert_eq!(titles, ["[Albums]", "01 First", "02 Second", "book", "old"]);
+        // Each can be queued, with its address as it is and the kind its name says.
+        let tracks: Vec<RemoteTrack> = page
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                upnp::Entry::Item(item) => remote_track("NAS", item),
+                upnp::Entry::Folder(_) => None,
+            })
+            .collect();
+        assert_eq!(tracks.len(), 4);
+        assert_eq!(
+            tracks[0].url,
+            "https://nas.local:5006/music/01%20First.flac"
+        );
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|t| t.container.as_str())
+                .collect::<Vec<_>>(),
+            ["flac", "wv", "m4a", "mp3"]
+        );
+        assert_eq!(tracks[0].server, "NAS");
+    }
+
+    #[test]
+    fn a_failure_says_what_the_listener_can_do_about_it() {
+        assert_eq!(why_of(NetError::Status(401)), Why::Refused);
+        assert_eq!(why_of(NetError::Status(403)), Why::Refused);
+        assert_eq!(
+            why_of(NetError::Untrusted {
+                fingerprint: "ab".into()
+            }),
+            Why::Untrusted("ab".into())
+        );
+        assert_eq!(why_of(NetError::BadAddress), Why::Address);
+        assert!(matches!(why_of(NetError::Status(500)), Why::Other(_)));
+        assert!(matches!(why_of(NetError::Timeout), Why::Other(_)));
     }
 }

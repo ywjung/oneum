@@ -408,6 +408,12 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     tracing::info!(version = VERSION, "starting OnEum");
     let settings: Settings =
         crate::storage::settings::load_json::<Settings>(&paths.settings_file()).sanitized();
+    // A verification run keeps the passwords of network folders in memory: nothing
+    // of such a run gets into the keychain of the person at the machine.
+    if std::env::var_os("ONEUM_SCRIPT").is_some() {
+        platform::secrets::use_memory();
+    }
+    crate::net::folders::set_known(&settings.network_folders);
     let system_prefers_korean = platform::locale::prefers_korean();
     let lang = settings.language.resolve(system_prefers_korean);
 

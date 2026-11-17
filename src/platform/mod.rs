@@ -17,6 +17,7 @@ pub mod dialogs;
 mod menu_action;
 #[cfg(not(target_os = "macos"))]
 pub mod no_device;
+pub mod secrets;
 #[cfg(any(target_os = "android", test))]
 pub(crate) mod typed;
 

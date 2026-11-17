@@ -17,7 +17,8 @@ WORK=$(mktemp -d /tmp/oneum-ios-smoke.XXXXXX)
 MUSIC="$WORK/music"
 PROFILE="$WORK/profile"
 DLNA_PID=
-trap '[ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; xcrun simctl terminate "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; xcrun simctl uninstall "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+. scripts/dev/smoke-webdav.sh
+trap '[ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done; xcrun simctl terminate "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; xcrun simctl uninstall "$DEVICE" "$BUNDLE" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
 export ONEUM_NO_MEDIA_SESSION=1
 
 ui() { # ui <command>…: sends commands and waits for the files of any shot/dump
@@ -441,6 +442,12 @@ ui 'wait 800' 'dump n6.json'
 check n6.json 'd["network"]["saved"] == ["OnEum test server"] and d["current"] == "02 꽃"' "after a restart the server is still listed, and its song is the one that was on"
 kill "$DLNA_PID" 2>/dev/null || true
 DLNA_PID=
+
+echo "== a network folder (WebDAV)"
+# (The Simulator shares this computer's network.)
+ui 'volume 0' 'wait 300'
+webdav_checks 127.0.0.1 127.0.0.1
+check w9.json 'd["network"]["secret_selftest"].startswith("ok")' "the keychain keeps, gives back, replaces and forgets a password"
 
 echo "== a song removed from the library stays out"
 # Removed through the song's sheet, as it is done by hand. Its file stays where it is,

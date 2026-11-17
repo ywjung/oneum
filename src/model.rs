@@ -12,8 +12,13 @@ pub type TrackId = i64;
 /// file's path does (see `library::remote`).
 pub fn http_address(path: &std::path::Path) -> Option<&str> {
     let text = path.to_str()?;
-    text.get(..7)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+    // (`https://` too: a network folder of a NAS may be at such an address.)
+    ["http://", "https://"]
+        .iter()
+        .any(|scheme| {
+            text.get(..scheme.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+        })
         .then_some(text)
 }
 

@@ -625,6 +625,23 @@ impl Format {
         })
     }
 
+    /// What a server calls a file of this format.
+    fn mime(self) -> &'static str {
+        match self {
+            Format::Flac => "audio/flac",
+            Format::Wav => "audio/wav",
+            Format::Aiff => "audio/aiff",
+            Format::Dsf => "audio/x-dsf",
+            Format::Dff => "audio/x-dff",
+            Format::Mp4 => "audio/mp4",
+            Format::Mp3 => "audio/mpeg",
+            Format::Ogg => "audio/ogg",
+            Format::Opus => "audio/opus",
+            Format::WavPack => "audio/x-wavpack",
+            Format::Ape => "audio/x-ape",
+        }
+    }
+
     fn of(resource: &Resource, audio: bool) -> Option<Format> {
         if resource.converted {
             return None;
@@ -664,6 +681,22 @@ impl Format {
 /// Lossless formats go before lossy ones; among equals the first listed wins (servers
 /// list the file itself first). Conversions the server would make on request are
 /// never chosen, nor is raw PCM (`audio/L16`), which says too little about itself.
+/// The type a server would give a music file of this name (by its extension), for
+/// files that come without one: those of a network folder. `None`: not a file the
+/// player reads.
+pub fn type_of_name(name: &str) -> Option<&'static str> {
+    let (_, extension) = name.rsplit_once('.')?;
+    let extension = extension.to_ascii_lowercase();
+    // (The older MPEG layers and audiobooks, which a media server's types do not
+    // tell apart from their kin.)
+    let format = match extension.as_str() {
+        "mp2" | "mp1" => Format::Mp3,
+        "m4b" => Format::Mp4,
+        other => Format::of_extension(other)?,
+    };
+    Some(format.mime())
+}
+
 pub fn best_resource(item: &Item) -> Option<&Resource> {
     item.resources
         .iter()

@@ -13,7 +13,8 @@ WORK=$(mktemp -d /tmp/oneum-smoke.XXXXXX)
 MUSIC="$WORK/music"
 PROFILE="$WORK/profile"
 DLNA_PID=
-trap 'pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true; [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+. scripts/dev/smoke-webdav.sh
+trap 'pkill -f "dist/dev/OnEum.app/Contents/MacOS/OnEum" 2>/dev/null || true; [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true; for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
 
 echo "== generating test library"
 scripts/dev/gen-test-library.sh "$MUSIC" >/dev/null
@@ -430,6 +431,23 @@ ui 'net up' 'wait 500' 'net up' 'wait 500' 'net up' 'wait 300' 'net forget 0' 'w
 check n7.json 'd["network"]["server"] is None and d["network"]["saved"] == []' "back out of the server, and it can be taken off the list"
 kill "$DLNA_PID" 2>/dev/null || true
 DLNA_PID=
+
+echo "== a network folder (WebDAV)"
+webdav_checks 127.0.0.1 127.0.0.1
+# The password is in the system's store for passwords (in this run: in memory) and
+# nowhere among the app's files; the folders themselves were written to the settings.
+ui 'wait 2500' 'dump w10.json'
+if grep -rq "smoke-test-word" "$PROFILE/data" "$PROFILE/logs" "$PROFILE/cache" 2>/dev/null; then
+  echo "  FAIL the password of a network folder is in one of the app's files"; exit 1
+else echo "  ok   the password is in none of the app's files (settings, database, log)"
+fi
+# The keychain of this Mac, tried with a password made for the purpose. It may be
+# locked or ask the person at the machine: that is told, and is no failure of the app.
+python3 - "$PROFILE/w9.json" <<'PY'
+import json, sys
+tried = json.load(open(sys.argv[1]))["network"]["secret_selftest"] or "not tried"
+print(("  ok   " if tried.startswith("ok") else "  note ") + "the keychain keeps, gives back, replaces and forgets a password: " + tried)
+PY
 
 echo "== hidden window"
 ui 'hide' 'wait 800' "open $MUSIC/tone_48k.flac" 'wait 1500' 'dump h1.json' 'activate' 'wait 700' 'dump h2.json' \

@@ -382,6 +382,21 @@ public final class MainActivity extends NativeActivity {
         });
     }
 
+    /** For the app: keeps the password of a network folder (see {@link Secrets}). */
+    public boolean secretPut(String id, String secret) {
+        return Secrets.put(getApplicationContext(), id, secret);
+    }
+
+    /** For the app: the password kept under this name, or null. */
+    public String secretGet(String id) {
+        return Secrets.get(getApplicationContext(), id);
+    }
+
+    /** For the app: forgets the password kept under this name. */
+    public void secretRemove(String id) {
+        Secrets.remove(getApplicationContext(), id);
+    }
+
     /** For the app: puts a text on the system's clipboard (the app has none of its own). */
     public void copyText(String text) {
         runOnUiThread(() -> putOnClipboard(text));

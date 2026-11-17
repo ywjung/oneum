@@ -64,13 +64,9 @@ enum Outcome {
 }
 
 impl OneumApp {
-    pub(super) fn dialogs(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.dialog.take() else {
-            return;
-        };
-        let s = self.s();
-        let mut outcome = Outcome::Open;
-        let id = egui::Id::unique("oneum-dialog");
+    /// The shell of a dialog: on a phone in the upper part of the screen, with the
+    /// strips around the content dimmed like the rest.
+    pub(super) fn modal(&self, ctx: &egui::Context, id: egui::Id) -> egui::Modal {
         let mut modal = egui::Modal::new(id);
         if self.phone_mode {
             // In the upper part of the screen: the keyboard comes up over the lower.
@@ -111,6 +107,16 @@ impl OneumApp {
                     .corner_radius(16),
             );
         }
+        modal
+    }
+
+    pub(super) fn dialogs(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.dialog.take() else {
+            return;
+        };
+        let s = self.s();
+        let mut outcome = Outcome::Open;
+        let modal = self.modal(ctx, egui::Id::unique("oneum-dialog"));
         let width = 400.0_f32.min(ctx.content_rect().width() - 56.0);
         let modal = modal.show(ctx, |ui| {
             ui.set_width(width);

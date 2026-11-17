@@ -85,6 +85,9 @@ pub struct Settings {
     pub crossfeed: Crossfeed,
     /// Crossfade between songs, in seconds (0, the default: none).
     pub crossfade_secs: u8,
+    /// Network folders the listener added (a share of a NAS): where each is and who
+    /// to be there. Never a password: those are in the system's store for passwords.
+    pub network_folders: Vec<crate::net::folders::Folder>,
     /// How fast songs go, in percent of their own speed (100, the default: as they
     /// are; see `audio::pace`).
     pub speed_percent: u16,
@@ -242,6 +245,17 @@ impl Settings {
         self.smart_playlists.retain(|smart| {
             !smart.name.is_empty() && !smart.query.is_empty() && names.insert(smart.name.clone())
         });
+        // Network folders: each in shape, each id and each address once.
+        let (mut ids, mut addresses) = (
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        );
+        self.network_folders = std::mem::take(&mut self.network_folders)
+            .into_iter()
+            .filter_map(crate::net::folders::Folder::sanitized)
+            .filter(|folder| ids.insert(folder.id.clone()) && addresses.insert(folder.url.clone()))
+            .take(crate::net::folders::MAX_FOLDERS)
+            .collect();
         self.network_servers.truncate(MAX_NETWORK_SERVERS);
         let mut locations = std::collections::HashSet::new();
         for server in &mut self.network_servers {
@@ -315,6 +329,7 @@ impl Default for Settings {
             eq: EqSettings::default(),
             crossfeed: Crossfeed::Off,
             crossfade_secs: 0,
+            network_folders: Vec::new(),
             speed_percent: 100,
             corrections: Vec::new(),
             correction: None,

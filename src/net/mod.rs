@@ -3,14 +3,19 @@
 //! the three need (`xml`).
 //!
 //! Only the standard library's sockets are used, so the same code runs on every system
-//! the app is built for. There is no TLS: media servers in a home speak plain `http://`,
-//! and nothing else is accepted.
+//! the app is built for. Media servers in a home speak plain `http://`, and nothing
+//! else is accepted from them; the folders of a NAS (`dav`) and the lyrics service may
+//! be reached over TLS (`tls`), and a NAS may ask for a name and a password (`auth`).
 //!
 //! Whatever arrives is taken for what any device on the network could have sent: every
 //! length is limited, nothing is expanded or followed without a bound, and damaged
 //! input ends in an error (or in fewer results), never in a panic.
+mod auth;
+pub mod dav;
+pub mod folders;
 pub mod http;
 pub mod ssdp;
+pub mod tls;
 pub mod upnp;
 pub mod xml;
 
@@ -30,6 +35,12 @@ pub enum NetError {
     BadResponse(&'static str),
     /// A UPnP error the server reported (its description).
     Upnp(String),
+    /// The server's certificate is not one that is trusted: no authority stands
+    /// behind it (a NAS that made its own), or it is for another name, or it has
+    /// run out. With the fingerprint of what the server showed.
+    Untrusted {
+        fingerprint: String,
+    },
 }
 
 impl std::fmt::Display for NetError {
@@ -43,6 +54,7 @@ impl std::fmt::Display for NetError {
             NetError::Status(status) => write!(f, "the server answered with status {status}"),
             NetError::BadResponse(what) => write!(f, "unexpected answer: {what}"),
             NetError::Upnp(description) => write!(f, "the server reported: {description}"),
+            NetError::Untrusted { .. } => write!(f, "the server's certificate is not trusted"),
         }
     }
 }

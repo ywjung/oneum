@@ -1,0 +1,307 @@
+//! The network folders the listener has added (a share of a NAS, over WebDAV): which
+//! name, which password and which trusted certificate go with an address.
+//!
+//! A folder is kept in the settings without its password. The password is in the
+//! system's store for passwords (`platform::secrets`), under the folder's id, and is
+//! read from there the first time something of the folder is asked for; in memory it
+//! is held as a [`Secret`] (wiped when let go of, never printed).
+//!
+//! An address gets a folder's name and password only when it lies inside that folder:
+//! on the same server (scheme, host and port) and under the folder's path. A song's
+//! address carries neither; whoever plays it asks here.
+use super::http::{Access, Url};
+use crate::platform::secrets::{self, Secret};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Mutex, RwLock};
+
+/// The most network folders that are kept.
+pub const MAX_FOLDERS: usize = 32;
+
+/// A network folder, as the settings keep it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Folder {
+    /// The app's own name for it (letters, digits and hyphens): what its password is
+    /// kept under.
+    pub id: String,
+    /// What the listener calls it.
+    pub name: String,
+    /// Where it is: an `http://` or `https://` address of a folder, ending with '/'.
+    /// Never with a name or a password in it.
+    pub url: String,
+    /// The name to be there as. Empty: the server asks nobody.
+    pub user: String,
+    /// The fingerprint of the server's certificate, when the listener said to trust
+    /// one that no authority stands behind (see `net::tls`).
+    pub pinned: Option<String>,
+}
+
+impl Folder {
+    /// The folder with what a settings file can hold but the app never writes taken
+    /// out; `None` when it is no folder at all (an address that cannot be asked for,
+    /// an id that names no password).
+    pub fn sanitized(mut self) -> Option<Folder> {
+        let url = Url::parse_web(&self.url).ok()?;
+        self.url = url.to_string();
+        if !self.url.split('?').next().unwrap_or("").ends_with('/') {
+            return None;
+        }
+        let plain_id = !self.id.is_empty()
+            && self.id.len() <= 64
+            && self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        if !plain_id {
+            return None;
+        }
+        let tidy = |text: &str, max: usize| -> String {
+            text.chars()
+                .filter(|c| !c.is_control())
+                .take(max)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        self.name = tidy(&self.name, 80);
+        if self.name.is_empty() {
+            self.name = url.host.clone();
+        }
+        self.user = tidy(&self.user, 128);
+        self.pinned = self
+            .pinned
+            .map(|print| print.to_ascii_lowercase())
+            .filter(|print| print.len() == 64 && print.bytes().all(|b| b.is_ascii_hexdigit()));
+        Some(self)
+    }
+
+    /// Whether `url` lies in this folder.
+    fn holds(&self, url: &Url) -> bool {
+        let Ok(own) = Url::parse_web(&self.url) else {
+            return false;
+        };
+        let own_path = own.path.split('?').next().unwrap_or("/");
+        own.origin() == url.origin() && url.path.starts_with(own_path)
+    }
+}
+
+/// A new id for a folder: nothing is told by it (not the server, not the name).
+pub fn new_id() -> String {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 12];
+    if ring::rand::SystemRandom::new().fill(&mut bytes).is_err() {
+        for byte in &mut bytes {
+            *byte = fastrand::u8(..);
+        }
+    }
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("folder-{hex}")
+}
+
+static KNOWN: RwLock<Vec<Folder>> = RwLock::new(Vec::new());
+/// Passwords read from the system's store in this run, by folder id.
+static PASSWORDS: Mutex<Option<HashMap<String, Secret>>> = Mutex::new(None);
+
+fn passwords() -> std::sync::MutexGuard<'static, Option<HashMap<String, Secret>>> {
+    PASSWORDS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Tells this module the folders there are (at the start, and whenever they change).
+/// What was held of a folder that is no longer among them is let go of.
+pub fn set_known(folders: &[Folder]) {
+    *KNOWN.write().unwrap_or_else(|p| p.into_inner()) = folders.to_vec();
+    if let Some(held) = passwords().as_mut() {
+        held.retain(|id, _| folders.iter().any(|folder| &folder.id == id));
+    }
+}
+
+/// The folder an address lies in: the one with the longest path, should one folder
+/// be inside another.
+pub fn folder_of(url: &str) -> Option<Folder> {
+    let url = Url::parse_web(url).ok()?;
+    KNOWN
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|folder| folder.holds(&url))
+        .max_by_key(|folder| folder.url.len())
+        .cloned()
+}
+
+/// Keeps a folder's password: in the system's store, and at hand for this run.
+pub fn keep_password(id: &str, password: &Secret) -> Result<(), String> {
+    secrets::put(id, password)?;
+    passwords()
+        .get_or_insert_with(HashMap::new)
+        .insert(id.to_string(), password.clone());
+    Ok(())
+}
+
+/// Forgets a folder's password, here and in the system's store.
+pub fn forget_password(id: &str) {
+    if let Some(held) = passwords().as_mut() {
+        held.remove(id);
+    }
+    secrets::remove(id);
+}
+
+fn password_of(id: &str) -> Option<Secret> {
+    if let Some(found) = passwords().as_ref().and_then(|held| held.get(id)) {
+        return Some(found.clone());
+    }
+    let read = secrets::get(id)?;
+    passwords()
+        .get_or_insert_with(HashMap::new)
+        .insert(id.to_string(), read.clone());
+    Some(read)
+}
+
+/// What a request to an address is made with.
+#[derive(Debug, Default)]
+pub struct Credentials {
+    user: String,
+    password: Secret,
+    pinned: Option<String>,
+}
+
+impl Credentials {
+    /// For a folder that is being tried before it is added (nothing is kept yet).
+    pub fn of(user: &str, password: &Secret, pinned: Option<&str>) -> Self {
+        Credentials {
+            user: user.to_string(),
+            password: password.clone(),
+            pinned: pinned.map(str::to_string),
+        }
+    }
+
+    pub fn access(&self) -> Access<'_> {
+        Access {
+            account: (!self.user.is_empty()).then(|| (self.user.as_str(), self.password.reveal())),
+            pinned: self.pinned.as_deref(),
+        }
+    }
+}
+
+/// The name, password and trusted certificate for a request to `url`: those of the
+/// folder it lies in, or none.
+pub fn credentials_for(url: &str) -> Credentials {
+    let Some(folder) = folder_of(url) else {
+        return Credentials::default();
+    };
+    let password = if folder.user.is_empty() {
+        Secret::default()
+    } else {
+        password_of(&folder.id).unwrap_or_default()
+    };
+    Credentials {
+        user: folder.user,
+        password,
+        pinned: folder.pinned,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(id: &str, url: &str, user: &str) -> Folder {
+        Folder {
+            id: id.into(),
+            name: "NAS".into(),
+            url: url.into(),
+            user: user.into(),
+            pinned: None,
+        }
+    }
+
+    /// (One test: the folders that are known are one list for the whole process.)
+    #[test]
+    fn an_address_gets_the_account_of_the_folder_it_lies_in_and_no_other() {
+        let music = folder("folder-a", "https://nas.local:5006/music/", "me");
+        let inner = folder("folder-b", "https://nas.local:5006/music/kids/", "child");
+        let open = folder("folder-c", "http://10.0.0.5/share/", "");
+        set_known(&[music.clone(), inner.clone(), open]);
+        keep_password("folder-a", &Secret::new("word a")).unwrap();
+        keep_password("folder-b", &Secret::new("word b")).unwrap();
+
+        let of = |url: &str| {
+            let found = credentials_for(url);
+            found
+                .access()
+                .account
+                .map(|(user, word)| (user.to_string(), word.to_string()))
+        };
+        assert_eq!(
+            of("https://nas.local:5006/music/a/b.flac"),
+            Some(("me".into(), "word a".into()))
+        );
+        assert_eq!(
+            of("https://nas.local:5006/music/kids/x.mp3"),
+            Some(("child".into(), "word b".into())),
+            "the folder inside goes first"
+        );
+        // Not inside: another path, port, scheme or host; a folder nobody is asked in.
+        for url in [
+            "https://nas.local:5006/video/a.flac",
+            "https://nas.local:5006/musical/a.flac",
+            "https://nas.local/music/a.flac",
+            "http://nas.local:5006/music/a.flac",
+            "https://nas.local.example:5006/music/a.flac",
+            "http://10.0.0.5/share/a.flac",
+            "not an address",
+        ] {
+            assert_eq!(of(url), None, "{url}");
+        }
+        assert_eq!(
+            folder_of("https://nas.local:5006/music/x").unwrap().id,
+            "folder-a"
+        );
+
+        // A folder that is gone takes what was held of it along; a password that is
+        // forgotten is gone from the store as well.
+        set_known(&[music]);
+        assert_eq!(
+            of("https://nas.local:5006/music/kids/x.mp3").unwrap().0,
+            "me"
+        );
+        forget_password("folder-a");
+        assert_eq!(
+            of("https://nas.local:5006/music/a.flac"),
+            Some(("me".into(), String::new()))
+        );
+        assert!(secrets::get("folder-a").is_none());
+        secrets::remove("folder-b");
+        set_known(&[]);
+    }
+
+    #[test]
+    fn a_folder_of_a_settings_file_is_brought_into_shape_or_dropped() {
+        let good = folder("folder-1", "HTTPS://NAS.local/Music/", " me ")
+            .sanitized()
+            .unwrap();
+        assert_eq!(good.url, "https://nas.local/Music/");
+        assert_eq!(good.user, "me");
+        let mut pinned = folder("folder-1", "https://nas.local/m/", "");
+        pinned.pinned = Some("AB".repeat(32));
+        assert_eq!(pinned.sanitized().unwrap().pinned, Some("ab".repeat(32)));
+        let mut bad_pin = folder("folder-1", "https://nas.local/m/", "");
+        bad_pin.pinned = Some("xyz".into());
+        assert_eq!(bad_pin.sanitized().unwrap().pinned, None);
+        let mut unnamed = folder("folder-1", "http://10.0.0.5/share/", "");
+        unnamed.name = " \u{7} ".into();
+        assert_eq!(unnamed.sanitized().unwrap().name, "10.0.0.5");
+        for (id, url) in [
+            ("folder-1", "ftp://nas.local/music/"),
+            ("folder-1", "https://nas.local/music"),
+            ("folder-1", "https://user:word@nas.local/music/"),
+            ("", "https://nas.local/music/"),
+            ("../x", "https://nas.local/music/"),
+        ] {
+            assert_eq!(folder(id, url, "").sanitized(), None, "{id} {url}");
+        }
+        let (a, b) = (new_id(), new_id());
+        assert!(a != b && a.starts_with("folder-") && a.len() == 31);
+        assert!(folder(&a, "http://h/", "").sanitized().is_some());
+    }
+}

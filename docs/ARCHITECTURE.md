@@ -489,6 +489,16 @@ Windows판은 `x86_64-pc-windows-gnu`로 Mac에서 크로스 컴파일한다(`sc
 - **표지**: 서버가 준 주소에서 받아 보관함의 표지 캐시에 넣는다(주소당 한 번, 백그라운드).
 - **하지 않는 것**: 음량 보정(서버의 곡에는 태그도 측정값도 없다), 가사, 파일 검사, 서버 안 검색, 하위 폴더까지 한꺼번에 재생.
 
+## 네트워크 폴더 (WebDAV)
+2026-11-17. NAS의 WebDAV 공유를 미디어 서버와 같은 화면에서 둘러본다. 보관함과 별개이고, 곡은 미디어 서버의 곡과 같은 길(`library::remote`, 음수 번호, 주소가 경로 자리에)을 탄다.
+
+- **목록** (`net::dav`): `PROPFIND`(Depth 1) 한 번. 답(multistatus)에서 `href` · `collection` · `getcontentlength`만 읽고(접두사는 무시), 폴더 자신 · 더 깊은 것 · 다른 서버의 주소 · 숨김 파일은 버린다. 답은 16MB, 항목은 1만 개까지. 화면에는 `upnp::Entry`로 바꿔 넘겨 미디어 서버의 화면 코드를 그대로 쓴다(`ui::network::folder_page`; 파일의 종류는 이름의 확장자로 정한다).
+- **HTTP** (`net::http`): 기존 클라이언트에 `https://`(`Url::parse_web`, 미디어 서버용 `Url::parse`는 여전히 `http://`만), 본문이 있는 임의 메서드(`send`), 계정과 신뢰 정보(`Access`)를 더했다. 401을 받으면 한 번 답한다(`net::auth`: Digest SHA-256 → Digest MD5 → Basic). 계정과 고정한 인증서는 **요청을 보낸 그 서버에만** 쓴다: 리디렉션으로 다른 origin에 가면 둘 다 빠진다. `https://`에서 `http://`로는 가지 않는다.
+- **TLS** (`net::tls`): rustls + ring(cmake가 필요 없어 네 타깃에서 그대로 빌드됨), 인증 기관은 `webpki-roots`. 검증기는 보통의 WebPKI 검증에 예외 하나를 둔 것이다: 서버가 보인 인증서의 SHA-256이 고정한 지문과 같으면 통과시킨다(핸드셰이크 서명 검증은 그대로 하므로 그 인증서의 개인 키를 가진 서버여야 한다). 검증에 실패하면 서버가 보인 지문을 `NetError::Untrusted`에 실어 돌려준다 — 화면이 그것을 보여 주고 사용자가 고른다.
+- **폴더와 계정** (`net::folders`): 설정에는 `Folder { id, name, url, user, pinned }`만 있다(비밀번호 없음). 주소가 어느 폴더 안에 있는지(같은 origin, 폴더 경로 아래; 겹치면 더 깊은 폴더)로 계정을 정한다. 곡의 주소에는 이름도 비밀번호도 없고, 재생할 때 `audio::remote`가 여기에 묻는다.
+- **비밀번호** (`platform::secrets`): macOS · iOS는 키체인(`security-framework`, 서비스 "OnEum network folders"), Windows는 자격 증명 관리자(`CredWriteW`), Android는 `Secrets.java`(AndroidKeyStore의 AES-256-GCM 열쇠로 암호화해 앱의 SharedPreferences에). 메모리에서는 `Secret`(drop 때 0으로, Debug에 안 찍힘). 테스트와 검증 실행(`ONEUM_SCRIPT`)은 메모리 보관소를 쓴다: 검증 실행이 사용자의 키체인을 건드리지 않는다. 실제 보관소는 `net secret-selftest` 명령으로 따로 확인한다.
+- **하지 않는 것**: 쓰기(읽기 전용), 폴더를 보관함으로 스캔하기, 태그 · 표지 읽기(제목은 파일 이름), 하위 폴더까지 한꺼번에 재생, SMB(확인할 서버가 없어 넣지 않음: `smb2` 크레이트를 후보로 봐 둠), 클라이언트 인증서.
+
 ## 추상화 원칙
 trait은 테스트 경계에만 둔다: 플레이어가 바깥을 보는 창구 `PlayerHost`(곡 조회, 재생 기록, 세션 저장) 하나다.
 오디오 출력은 trait 없이 엔진의 오프라인 모드(`Engine::new_offline`)로 장치 없이 검증한다. 그 외에는 구체 타입을 쓴다.

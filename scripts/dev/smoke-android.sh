@@ -35,8 +35,10 @@ mkdir -p "$OUT"
 GRAPHICS=
 [ -z "${ONEUM_GRAPHICS:-}" ] || GRAPHICS="--es ONEUM_GRAPHICS $ONEUM_GRAPHICS"
 DLNA_PID=
+. scripts/dev/smoke-webdav.sh
 cleanup() {
   [ -z "$DLNA_PID" ] || kill "$DLNA_PID" 2>/dev/null || true
+  for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done
   $ADB shell am force-stop $PKG >/dev/null 2>&1 || true
   $ADB uninstall $PKG >/dev/null 2>&1 || true
   $ADB shell rm -rf "$REMOTE" >/dev/null 2>&1 || true
@@ -340,6 +342,12 @@ ui 'wait 800' 'dump n6.json'
 check n6.json 'd["network"]["saved"] == ["OnEum test server"] and d["current"] == "02 꽃"' "after a restart the server is still listed, and its song is the one that was on"
 kill "$DLNA_PID" 2>/dev/null || true
 DLNA_PID=
+
+echo "== a network folder (WebDAV)"
+# (The emulator reaches this computer at 10.0.2.2.)
+ui 'volume 0' 'wait 300'
+webdav_checks 10.0.2.2 0.0.0.0
+check w9.json 'd["network"]["secret_selftest"].startswith("ok")' "the phone's key store keeps, gives back, replaces and forgets a password"
 
 echo "== a song removed from the library stays out"
 # Removed through the song's sheet, as it is done by hand. Its file stays where it is,

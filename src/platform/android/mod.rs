@@ -70,6 +70,20 @@ pub fn copy_text(text: &str) -> bool {
     java::copy_text(text)
 }
 
+/// Keeps the password of a network folder in the phone's store (`Secrets.java`).
+pub fn secret_put(id: &str, secret: &str) -> bool {
+    java::secret_put(id, secret)
+}
+
+/// The password kept under `id`, if there is one.
+pub fn secret_get(id: &str) -> Option<String> {
+    java::secret_get(id)
+}
+
+pub fn secret_remove(id: &str) {
+    java::secret_remove(id);
+}
+
 /// A line the system shows for a moment, also once the app is gone.
 pub fn notice(text: &str) {
     java::notice(text);

@@ -1,12 +1,16 @@
-//! A track of a media server on the network as something to decode: the bytes behind
-//! an `http://` address, read in order over one connection and, where the decoder
-//! jumps (a seek, a table at the end of the file), by asking the server for the part
-//! from there on.
+//! A track of a media server on the network, or of a network folder, as something to
+//! decode: the bytes behind an `http://` (a folder's may be `https://`) address, read
+//! in order over one connection and, where the decoder jumps (a seek, a table at the
+//! end of the file), by asking the server for the part from there on.
+//!
+//! An address that lies in a network folder is asked for as that folder's account,
+//! with the certificate the listener trusted for it (`net::folders`).
 //!
 //! Such a track is loaded into memory while it plays whenever it fits (see
 //! `source.rs`), whatever the memory playback setting says: once it is there, the
 //! network dropping out for a moment cannot interrupt it.
 use super::source::{Budget, FileInMemory, Origin};
+use crate::net::folders::{self, Credentials};
 use crate::net::http::{self, Limits, Stream};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -30,6 +34,7 @@ fn to_io(error: crate::net::NetError) -> io::Error {
     use crate::net::NetError;
     let kind = match &error {
         NetError::Status(404 | 410) => io::ErrorKind::NotFound,
+        NetError::Status(401 | 403) | NetError::Untrusted { .. } => io::ErrorKind::PermissionDenied,
         NetError::Timeout => io::ErrorKind::TimedOut,
         NetError::Connect(_) => io::ErrorKind::ConnectionRefused,
         _ => io::ErrorKind::Other,
@@ -46,6 +51,8 @@ struct Cursor {
 /// The file behind an address.
 pub(crate) struct HttpOrigin {
     url: String,
+    /// Who asks: the account of the network folder the address lies in, if it does.
+    credentials: Credentials,
     /// Connections that are not being read at the moment, each where its last read
     /// ended. A read that goes on where one of them stands takes it.
     idle: Mutex<Vec<Cursor>>,
@@ -56,13 +63,15 @@ pub(crate) struct HttpOrigin {
 impl HttpOrigin {
     /// Connects, and tells the file's length if the server says it.
     fn connect(url: &str) -> io::Result<(Self, Option<u64>)> {
-        let stream = http::open(url, 0, &limits()).map_err(to_io)?;
+        let credentials = folders::credentials_for(url);
+        let stream = http::open_web(url, 0, &limits(), &credentials.access()).map_err(to_io)?;
         let len = stream.total_len();
         // The request asked for "everything from 0 on" as a part: a server that
         // answers with the plain file does not give parts.
         let ranges = stream.ranged();
         let origin = HttpOrigin {
             url: url.to_owned(),
+            credentials,
             idle: Mutex::new(vec![Cursor { at: 0, stream }]),
             ranges: AtomicBool::new(ranges),
         };
@@ -109,7 +118,8 @@ impl HttpOrigin {
                 "the server gives the file only from its start",
             ));
         }
-        let stream = http::open(&self.url, offset, &limits()).map_err(to_io)?;
+        let stream = http::open_web(&self.url, offset, &limits(), &self.credentials.access())
+            .map_err(to_io)?;
         if offset > 0 && !stream.ranged() {
             self.ranges.store(false, Ordering::Release);
             return Err(io::Error::new(

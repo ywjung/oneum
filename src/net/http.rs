@@ -2,10 +2,15 @@
 //! server's description, to send it a command and to read a music file from any byte
 //! on, and nothing else. One connection carries one request (`Connection: close`).
 //!
-//! Only `http://` is spoken. The server is not trusted: the header block, the lines in
-//! it and (for `get` and `post`) the body are limited, a silent server is given up on
-//! after the read timeout, and an answer that is not HTTP is an error.
-use super::NetError;
+//! Media servers are spoken to in `http://` only (`get`, `post`, `open`). The folders
+//! of a NAS and the lyrics service may be at an `https://` address and may ask who is
+//! there (`send`, `get_web`, `open_web`, with an [`Access`]): TLS is in `tls`, the
+//! answer to a server's question in `auth`.
+//!
+//! The server is not trusted: the header block, the lines in it and (for `get`, `post`
+//! and `send`) the body are limited, a silent server is given up on after the read
+//! timeout, and an answer that is not HTTP is an error.
+use super::{NetError, auth, tls};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
@@ -30,9 +35,11 @@ const MAX_ADDRESSES: usize = 4;
 /// a request going for hours.
 const BODY_TIMEOUTS: u32 = 6;
 
-/// An `http://` address, taken apart.
+/// An `http://` (or `https://`) address, taken apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Url {
+    /// `https://`: the connection speaks TLS.
+    pub secure: bool,
     /// Lower case; an IPv6 address without its brackets.
     pub host: String,
     pub port: u16,
@@ -52,15 +59,48 @@ impl Url {
     /// address, so an address that only fits the 2048 bytes before it is encoded is
     /// refused as well.
     pub fn parse(text: &str) -> Result<Url, NetError> {
+        Url::read(text, false)
+    }
+
+    /// Like [`Url::parse`], and `https://` addresses as well (port 443 unless given).
+    pub fn parse_web(text: &str) -> Result<Url, NetError> {
+        Url::read(text, true)
+    }
+
+    fn read(text: &str, secure_too: bool) -> Result<Url, NetError> {
         if text.len() > MAX_URL_BYTES {
             return Err(NetError::BadAddress);
         }
-        let rest = strip_scheme(text).ok_or(NetError::BadAddress)?;
+        let (secure, rest) = strip_scheme(text).ok_or(NetError::BadAddress)?;
+        if secure && !secure_too {
+            return Err(NetError::BadAddress);
+        }
         let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let (authority, tail) = rest.split_at(authority_end);
-        let (host, port) = parse_authority(authority).ok_or(NetError::BadAddress)?;
+        let default_port = if secure { 443 } else { 80 };
+        let (host, port) = parse_authority(authority, default_port).ok_or(NetError::BadAddress)?;
         let path = clean_path(tail).ok_or(NetError::BadAddress)?;
-        Url { host, port, path }.if_short_enough()
+        Url {
+            secure,
+            host,
+            port,
+            path,
+        }
+        .if_short_enough()
+    }
+
+    fn scheme(&self) -> &'static str {
+        if self.secure { "https" } else { "http" }
+    }
+
+    fn default_port(&self) -> u16 {
+        if self.secure { 443 } else { 80 }
+    }
+
+    /// The server an address is at: what name and password are for, and what a
+    /// trusted certificate belongs to.
+    pub fn origin(&self) -> (bool, &str, u16) {
+        (self.secure, &self.host, self.port)
     }
 
     /// The address `reference` means when it is found in a document at this address:
@@ -70,11 +110,18 @@ impl Url {
         if reference.len() > MAX_URL_BYTES {
             return Err(NetError::BadAddress);
         }
+        // An `https://` address leads to `https://` addresses only (never from an
+        // encrypted connection to one that is not), an `http://` one to `http://`.
         if has_scheme(reference) {
-            return Url::parse(reference);
+            let url = Url::read(reference, self.secure)?;
+            return if url.secure == self.secure {
+                Ok(url)
+            } else {
+                Err(NetError::BadAddress)
+            };
         }
         if reference.starts_with("//") {
-            return Url::parse(&format!("http:{reference}"));
+            return Url::read(&format!("{}:{reference}", self.scheme()), self.secure);
         }
         let reference = reference.split('#').next().unwrap_or("");
         let base_path = self.path.split('?').next().unwrap_or("/");
@@ -93,6 +140,7 @@ impl Url {
             None => remove_dot_segments(&merged),
         };
         Url {
+            secure: self.secure,
             host: self.host.clone(),
             port: self.port,
             path: clean_path(&merged).ok_or(NetError::BadAddress)?,
@@ -102,7 +150,7 @@ impl Url {
 
     /// The address, unless it is longer written out than an address may be.
     fn if_short_enough(self) -> Result<Url, NetError> {
-        let written = "http://".len() + self.authority().len() + self.path.len();
+        let written = self.scheme().len() + 3 + self.authority().len() + self.path.len();
         if written > MAX_URL_BYTES {
             return Err(NetError::BadAddress);
         }
@@ -116,7 +164,7 @@ impl Url {
         } else {
             self.host.clone()
         };
-        if self.port != 80 {
+        if self.port != self.default_port() {
             let _ = write!(text, ":{}", self.port);
         }
         text
@@ -125,17 +173,21 @@ impl Url {
 
 impl std::fmt::Display for Url {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "http://{}{}", self.authority(), self.path)
+        write!(f, "{}://{}{}", self.scheme(), self.authority(), self.path)
     }
 }
 
-/// What follows `http://`, when `text` begins with it.
-fn strip_scheme(text: &str) -> Option<&str> {
-    const SCHEME: &str = "http://";
-    let start = text.get(..SCHEME.len())?;
-    start
-        .eq_ignore_ascii_case(SCHEME)
-        .then(|| &text[SCHEME.len()..])
+/// What follows `http://` or `https://`, when `text` begins with one of them, and
+/// whether it was the second.
+fn strip_scheme(text: &str) -> Option<(bool, &str)> {
+    [(false, "http://"), (true, "https://")]
+        .into_iter()
+        .find_map(|(secure, scheme)| {
+            let start = text.get(..scheme.len())?;
+            start
+                .eq_ignore_ascii_case(scheme)
+                .then(|| (secure, &text[scheme.len()..]))
+        })
 }
 
 /// Whether `reference` begins with a scheme (`mailto:`, `https://…`), which makes it
@@ -153,7 +205,7 @@ fn has_scheme(reference: &str) -> bool {
 }
 
 /// Host and port of `host`, `host:port`, `[v6]` or `[v6]:port`.
-fn parse_authority(authority: &str) -> Option<(String, u16)> {
+fn parse_authority(authority: &str, default_port: u16) -> Option<(String, u16)> {
     let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
         let (address, after) = bracketed.split_once(']')?;
         let address: Ipv6Addr = address.parse().ok()?;
@@ -180,7 +232,7 @@ fn parse_authority(authority: &str) -> Option<(String, u16)> {
         (host.to_ascii_lowercase(), port)
     };
     let port = match port {
-        None | Some("") => 80,
+        None | Some("") => default_port,
         Some(digits) => {
             if digits.len() > 5 || !digits.chars().all(|c| c.is_ascii_digit()) {
                 return None;
@@ -272,9 +324,40 @@ impl Limits {
     }
 }
 
+/// Who asks, and what is trusted of the server, for the requests that may go to an
+/// `https://` address or to a server that asks for a name.
+#[derive(Clone, Copy, Default)]
+pub struct Access<'a> {
+    /// Name and password. They are given only to a server that asks for them, only to
+    /// the server the request was made to (not to one it sends on to), and where the
+    /// server offers it in a way that does not send the password itself (`auth`).
+    pub account: Option<(&'a str, &'a str)>,
+    /// The fingerprint of a certificate that is trusted as it is (see `tls`).
+    pub pinned: Option<&'a str>,
+}
+
+// Not derived: a password must never be printed with the rest.
+impl std::fmt::Debug for Access<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Access")
+            .field("account", &self.account.map(|(user, _)| user))
+            .field("pinned", &self.pinned)
+            .finish()
+    }
+}
+
 /// The whole body of a GET (follows redirects; non-2xx is `NetError::Status`).
 pub fn get(url: &str, limits: &Limits) -> Result<Vec<u8>, NetError> {
-    let (head, mut body) = fetch(url, &Request::Get { range_from: None }, limits)?;
+    get_from(Url::parse(url)?, limits, &Access::default())
+}
+
+/// Like [`get`], for an `http://` or `https://` address and with an [`Access`].
+pub fn get_web(url: &str, limits: &Limits, access: &Access<'_>) -> Result<Vec<u8>, NetError> {
+    get_from(Url::parse_web(url)?, limits, access)
+}
+
+fn get_from(url: Url, limits: &Limits, access: &Access<'_>) -> Result<Vec<u8>, NetError> {
+    let (head, mut body) = fetch(url, &Request::Get { range_from: None }, limits, access)?;
     if !(200..300).contains(&head.status) {
         return Err(NetError::Status(head.status));
     }
@@ -293,7 +376,40 @@ pub fn post(
     body: &[u8],
     limits: &Limits,
 ) -> Result<(u16, Vec<u8>), NetError> {
-    if !headers.iter().all(|(name, value)| is_header(name, value)) {
+    send_to(
+        Url::parse(url)?,
+        "POST",
+        headers,
+        body,
+        limits,
+        &Access::default(),
+    )
+}
+
+/// A request with a method of its own and a body (WebDAV's `PROPFIND`), to an
+/// `http://` or `https://` address; returns the status and the body whatever the
+/// status is. Redirects are followed as [`post`] follows them.
+pub fn send(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    limits: &Limits,
+    access: &Access<'_>,
+) -> Result<(u16, Vec<u8>), NetError> {
+    send_to(Url::parse_web(url)?, method, headers, body, limits, access)
+}
+
+fn send_to(
+    url: Url,
+    method: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    limits: &Limits,
+    access: &Access<'_>,
+) -> Result<(u16, Vec<u8>), NetError> {
+    let plain_method = !method.is_empty() && method.bytes().all(|b| b.is_ascii_uppercase());
+    if !plain_method || !headers.iter().all(|(name, value)| is_header(name, value)) {
         // The caller's mistake, not the network's; it must still not reach the wire,
         // where a line break in a value would begin a header of its own.
         return Err(NetError::Io(io::Error::new(
@@ -301,7 +417,12 @@ pub fn post(
             "a request header with characters that cannot be sent",
         )));
     }
-    let (head, mut answer) = fetch(url, &Request::Post { headers, body }, limits)?;
+    let request = Request::Send {
+        method,
+        headers,
+        body,
+    };
+    let (head, mut answer) = fetch(url, &request, limits, access)?;
     answer.give_time(limits.read);
     let bytes = read_whole(&mut answer, head.length(), limits.max_body)?;
     Ok((head.status, bytes))
@@ -314,10 +435,24 @@ pub fn post(
 /// which is what seeking needs to know. `limits.max_body` is not looked at; the
 /// caller reads as much as it wants.
 pub fn open(url: &str, from: u64, limits: &Limits) -> Result<Stream, NetError> {
+    open_at(Url::parse(url)?, from, limits, &Access::default())
+}
+
+/// Like [`open`], for an `http://` or `https://` address and with an [`Access`].
+pub fn open_web(
+    url: &str,
+    from: u64,
+    limits: &Limits,
+    access: &Access<'_>,
+) -> Result<Stream, NetError> {
+    open_at(Url::parse_web(url)?, from, limits, access)
+}
+
+fn open_at(url: Url, from: u64, limits: &Limits, access: &Access<'_>) -> Result<Stream, NetError> {
     let request = Request::Get {
         range_from: Some(from),
     };
-    let (head, mut body) = fetch(url, &request, limits)?;
+    let (head, mut body) = fetch(url, &request, limits, access)?;
     // From here on only the read timeout counts: a music file is read for as long as
     // it plays.
     body.reader.get_mut().deadline = None;
@@ -410,7 +545,8 @@ enum Request<'a> {
     Get {
         range_from: Option<u64>,
     },
-    Post {
+    Send {
+        method: &'a str,
         headers: &'a [(&'a str, &'a str)],
         body: &'a [u8],
     },
@@ -421,15 +557,21 @@ impl Request<'_> {
     fn follows(&self, status: u16) -> bool {
         match self {
             Request::Get { .. } => matches!(status, 301 | 302 | 303 | 307 | 308),
-            Request::Post { .. } => matches!(status, 307 | 308),
+            Request::Send { .. } => matches!(status, 307 | 308),
         }
     }
 
-    fn bytes(&self, url: &Url) -> Vec<u8> {
-        let method = match self {
+    fn method(&self) -> &str {
+        match self {
             Request::Get { .. } => "GET",
-            Request::Post { .. } => "POST",
-        };
+            Request::Send { method, .. } => method,
+        }
+    }
+
+    /// The request as it is sent. `authorization`: the answer to the server's
+    /// question who is there, when it has asked.
+    fn bytes(&self, url: &Url, authorization: Option<&str>) -> Vec<u8> {
+        let method = self.method();
         // `identity`: the body is wanted as it is stored, so that byte positions in
         // it mean what they say. `close`: one request per connection, so the end of
         // the connection can end a body.
@@ -439,6 +581,9 @@ impl Request<'_> {
             url.path,
             url.authority()
         );
+        if let Some(authorization) = authorization {
+            let _ = write!(head, "Authorization: {authorization}\r\n");
+        }
         match self {
             Request::Get { range_from } => {
                 if let Some(from) = range_from {
@@ -447,7 +592,7 @@ impl Request<'_> {
                 head.push_str("\r\n");
                 head.into_bytes()
             }
-            Request::Post { headers, body } => {
+            Request::Send { headers, body, .. } => {
                 for (name, value) in *headers {
                     let _ = write!(head, "{name}: {value}\r\n");
                 }
@@ -473,14 +618,42 @@ fn is_header(name: &str, value: &str) -> bool {
 
 /// Sends the request, following redirects, and reads the head of the answer.
 fn fetch(
-    url: &str,
+    mut url: Url,
     request: &Request<'_>,
     limits: &Limits,
+    access: &Access<'_>,
 ) -> Result<(Head, Body<Socket>), NetError> {
-    let mut url = Url::parse(url)?;
+    // Name, password and a trusted certificate are for the server the request is
+    // made to: an address that server sends on to gets none of them.
+    let first = url.clone();
     let mut redirects = 0;
+    let mut authorization: Option<String> = None;
     loop {
-        let (head, body) = exchange(&url, request, limits)?;
+        let here = url.origin() == first.origin();
+        let pinned = access.pinned.filter(|_| here);
+        let (head, body) = exchange(
+            &url,
+            request,
+            authorization.as_deref().filter(|_| here),
+            limits,
+            pinned,
+        )?;
+        // The server asks who is there: answered once.
+        if head.status == 401
+            && here
+            && authorization.is_none()
+            && let Some((user, password)) = access.account
+            && let Some(answer) = auth::answer(
+                &head.challenges,
+                user,
+                password,
+                request.method(),
+                &url.path,
+            )
+        {
+            authorization = Some(answer);
+            continue;
+        }
         if !request.follows(head.status) {
             return Ok((head, body));
         }
@@ -500,12 +673,15 @@ fn fetch(
 fn exchange(
     url: &Url,
     request: &Request<'_>,
+    authorization: Option<&str>,
     limits: &Limits,
+    pinned: Option<&str>,
 ) -> Result<(Head, Body<Socket>), NetError> {
-    let mut socket = connect(url, limits)?;
+    let mut socket = connect(url, limits, pinned)?;
     socket
         .stream
-        .write_all(&request.bytes(url))
+        .write_all(&request.bytes(url, authorization))
+        .and_then(|()| socket.stream.flush())
         .map_err(from_io)?;
     // The head is a few hundred bytes that leave the server at once.
     socket.deadline = Instant::now().checked_add(socket.read);
@@ -520,7 +696,7 @@ fn not_zero(timeout: Duration) -> Duration {
     timeout.max(Duration::from_millis(1))
 }
 
-fn connect(url: &Url, limits: &Limits) -> Result<Socket, NetError> {
+fn connect(url: &Url, limits: &Limits, pinned: Option<&str>) -> Result<Socket, NetError> {
     let addresses: Vec<SocketAddr> = match url.host.parse::<IpAddr>() {
         Ok(address) => vec![SocketAddr::new(address, url.port)],
         // A name is looked up by the system, which takes the time it takes (there is
@@ -543,7 +719,7 @@ fn connect(url: &Url, limits: &Limits) -> Result<Socket, NetError> {
             return Err(NetError::Timeout);
         };
         match TcpStream::connect_timeout(&address, left) {
-            Ok(stream) => return Socket::new(stream, not_zero(limits.read)),
+            Ok(stream) => return Socket::new(stream, not_zero(limits.read), url, pinned),
             Err(error) => failure = Some(error),
         }
     }
@@ -560,7 +736,7 @@ fn connect(url: &Url, limits: &Limits) -> Result<Socket, NetError> {
 /// The connection as the answer is read from it: every read gives up after the read
 /// timeout, and while a deadline is set also when that has passed.
 struct Socket {
-    stream: TcpStream,
+    stream: Wire,
     read: Duration,
     /// The timeout the system has been told for this socket: `read`, or what is left
     /// until the deadline when that is less.
@@ -568,8 +744,55 @@ struct Socket {
     deadline: Option<Instant>,
 }
 
+/// What the bytes travel over: the connection itself, or TLS on it.
+enum Wire {
+    Plain(TcpStream),
+    Secure(Box<tls::Secure>),
+}
+
+impl Wire {
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            Wire::Plain(stream) => stream,
+            Wire::Secure(secure) => &secure.sock,
+        }
+    }
+}
+
+impl Read for Wire {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Wire::Plain(stream) => stream.read(buf),
+            Wire::Secure(secure) => secure.read(buf),
+        }
+    }
+}
+
+impl io::Write for Wire {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Wire::Plain(stream) => stream.write(buf),
+            Wire::Secure(secure) => secure.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Wire::Plain(stream) => stream.flush(),
+            Wire::Secure(secure) => secure.flush(),
+        }
+    }
+}
+
 impl Socket {
-    fn new(stream: TcpStream, read: Duration) -> Result<Socket, NetError> {
+    /// `stream`: a connection just made to the server of `url`. For an `https://`
+    /// address TLS is spoken on it first, to the end of the handshake.
+    fn new(
+        stream: TcpStream,
+        read: Duration,
+        url: &Url,
+        pinned: Option<&str>,
+    ) -> Result<Socket, NetError> {
         stream
             .set_read_timeout(Some(read))
             .and_then(|()| stream.set_write_timeout(Some(read)))
@@ -577,6 +800,11 @@ impl Socket {
         // Without it a small request can wait for the system to gather more to send.
         // Not every system offers it, and the request leaves without it too.
         let _ = stream.set_nodelay(true);
+        let stream = if url.secure {
+            Wire::Secure(Box::new(tls::connect(&url.host, stream, pinned)?))
+        } else {
+            Wire::Plain(stream)
+        };
         Ok(Socket {
             stream,
             read,
@@ -588,7 +816,7 @@ impl Socket {
     /// Tells the system the timeout, when it is another than the one it has.
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
         if timeout != self.timeout {
-            self.stream.set_read_timeout(Some(timeout))?;
+            self.stream.tcp().set_read_timeout(Some(timeout))?;
             self.timeout = timeout;
         }
         Ok(())
@@ -659,6 +887,8 @@ struct Head {
     location: Option<String>,
     content_type: Option<String>,
     content_range: Option<String>,
+    /// What the server offers for telling it who is there (`WWW-Authenticate`).
+    challenges: Vec<String>,
 }
 
 impl Head {
@@ -721,6 +951,8 @@ impl Head {
             self.content_type.get_or_insert_with(|| value.to_string());
         } else if name.eq_ignore_ascii_case(b"content-range") {
             self.content_range.get_or_insert_with(|| value.to_string());
+        } else if name.eq_ignore_ascii_case(b"www-authenticate") && self.challenges.len() < 8 {
+            self.challenges.push(value.to_string());
         }
         Ok(())
     }
@@ -794,6 +1026,7 @@ fn read_head<R: BufRead>(reader: &mut R) -> Result<Head, NetError> {
             location: None,
             content_type: None,
             content_range: None,
+            challenges: Vec::new(),
         };
         loop {
             let line = head_line(reader, &mut budget, &mut lines)?;
@@ -1120,17 +1353,18 @@ mod tests {
             range_from: Some(7),
         };
         assert_eq!(
-            String::from_utf8(get.bytes(&url)).unwrap(),
+            String::from_utf8(get.bytes(&url, None)).unwrap(),
             "GET /a%20b?c=d HTTP/1.1\r\nHost: example.local:8200\r\nUser-Agent: OnEum\r\n\
              Accept-Encoding: identity\r\nConnection: close\r\nRange: bytes=7-\r\n\r\n"
         );
         let url = Url::parse("http://[::1]/ctl").unwrap();
-        let post = Request::Post {
+        let post = Request::Send {
+            method: "POST",
             headers: &[("SOAPACTION", "\"x\"")],
             body: b"<a/>",
         };
         assert_eq!(
-            String::from_utf8(post.bytes(&url)).unwrap(),
+            String::from_utf8(post.bytes(&url, None)).unwrap(),
             "POST /ctl HTTP/1.1\r\nHost: [::1]\r\nUser-Agent: OnEum\r\n\
              Accept-Encoding: identity\r\nConnection: close\r\nSOAPACTION: \"x\"\r\n\
              Content-Length: 4\r\n\r\n<a/>"

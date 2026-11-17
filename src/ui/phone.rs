@@ -746,6 +746,7 @@ impl OneumApp {
         self.phone_toast(&ctx, safe, above_bars);
         self.phone_sheet(&ctx, &mut actions);
         self.dialogs(&ctx);
+        self.folder_form_window(&ctx);
         for action in actions {
             match action {
                 Action::Go(nav) => self.phone_open(nav),

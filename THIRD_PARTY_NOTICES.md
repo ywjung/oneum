@@ -6,21 +6,21 @@ own license. The full license texts come with the app in the file
 `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
 next to the program; on Android inside the APK, under assets).
 
-Crates: 323
+Crates: 335
 
 ## License summary
 
-- `MIT OR Apache-2.0` — 145
+- `MIT OR Apache-2.0` — 150
 - `MIT` — 55
 - `Zlib OR Apache-2.0 OR MIT` — 26
-- `Apache-2.0 OR MIT` — 21
+- `Apache-2.0 OR MIT` — 22
 - `MPL-2.0` — 17
 - `MIT/Apache-2.0` — 11
 - `Apache-2.0` — 9
+- `ISC` — 5
 - `MIT OR Apache-2.0 OR Zlib` — 5
 - `Unlicense OR MIT` — 4
 - `(MIT OR Apache-2.0) AND Unicode-3.0` — 3
-- `ISC` — 3
 - `Apache-2.0/MIT` — 2
 - `BSD-2-Clause OR Apache-2.0 OR MIT` — 2
 - `BSD-3-Clause OR Apache-2.0` — 2
@@ -31,11 +31,15 @@ Crates: 323
 - `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` — 1
 - `0BSD OR Apache-2.0` — 1
 - `0BSD OR MIT OR Apache-2.0` — 1
+- `Apache-2.0 AND ISC` — 1
 - `Apache-2.0 AND MIT` — 1
 - `Apache-2.0 OR GPL-2.0-only` — 1
+- `Apache-2.0 OR ISC OR MIT` — 1
 - `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` — 1
 - `BSD-2-Clause OR MIT OR Apache-2.0` — 1
+- `BSD-3-Clause` — 1
 - `CC0-1.0` — 1
+- `CDLA-Permissive-2.0` — 1
 - `MIT / Apache-2.0` — 1
 - `Zlib OR MIT OR Apache-2.0` — 1
 
@@ -85,6 +89,7 @@ Notes:
 | codespan-reporting | 0.13.1 | Apache-2.0 | https://github.com/brendanzab/codespan |
 | color | 0.3.3 | Apache-2.0 OR MIT | https://github.com/linebender/color |
 | combine | 4.6.9 | MIT | https://github.com/Marwes/combine |
+| core-foundation | 0.10.1 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-foundation | 0.9.4 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-graphics | 0.23.2 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
@@ -137,6 +142,7 @@ Notes:
 | foreign-types-shared | 0.3.1 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
 | generic-array | 0.14.7 | MIT | https://github.com/fizyk20/generic-array.git |
 | gethostname | 1.1.0 | Apache-2.0 | https://codeberg.org/swsnr/gethostname.rs.git |
+| getrandom | 0.2.17 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | glifo | 0.3.0 | Apache-2.0 OR MIT | https://github.com/linebender/vello |
 | glow | 0.17.0 | MIT OR Apache-2.0 OR Zlib | https://github.com/grovesNL/glow |
@@ -271,6 +277,7 @@ Notes:
 | regex-lite | 0.1.9 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | renderdoc-sys | 1.1.0 | MIT OR Apache-2.0 | https://github.com/ebkalderon/renderdoc-rs |
 | rfd | 0.18.0 | MIT | https://github.com/PolyMeilex/rfd |
+| ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
 | roxmltree | 0.21.2 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
 | rtrb | 0.4.1 | MIT OR Apache-2.0 | https://github.com/mgeier/rtrb |
 | rubato | 5.0.1 | MIT OR Apache-2.0 | https://github.com/HEnquist/rubato |
@@ -279,9 +286,14 @@ Notes:
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustfft | 6.4.1 | MIT OR Apache-2.0 | https://github.com/ejmahler/RustFFT |
 | rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
+| rustls-pki-types | 1.16.0 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
+| rustls-webpki | 0.103.17 | ISC | https://github.com/rustls/webpki |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
+| security-framework | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
+| security-framework-sys | 2.17.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
 | self_cell | 1.3.0 | Apache-2.0 OR GPL-2.0-only | https://github.com/Voultapher/self_cell |
 | serde | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
@@ -297,6 +309,7 @@ Notes:
 | spirv | 0.4.0+sdk-1.4.341.0 | Apache-2.0 | https://github.com/gfx-rs/rspirv |
 | static_assertions | 1.1.0 | MIT OR Apache-2.0 | https://github.com/nvzqz/static-assertions-rs |
 | strength_reduce | 0.2.4 | MIT OR Apache-2.0 | http://github.com/ejmahler/strength_reduce |
+| subtle | 2.6.1 | BSD-3-Clause | https://github.com/dalek-cryptography/subtle |
 | symphonia | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-bundle-flac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-bundle-mp3 | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
@@ -343,6 +356,7 @@ Notes:
 | unicode-script | 0.5.9 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-script |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | unicode-width | 0.2.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
+| untrusted | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
 | uuid | 1.29.2 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
 | vello_common | 0.2.0 | Apache-2.0 OR MIT | https://github.com/linebender/vello |
 | vello_cpu | 0.2.0 | Apache-2.0 OR MIT | https://github.com/linebender/vello |
@@ -351,6 +365,7 @@ Notes:
 | wavicle | 0.1.0 | MIT OR Apache-2.0 | https://github.com/mark-ik/wavicle |
 | wayland-sys | 0.31.11 | MIT | https://github.com/smithay/wayland-rs |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
+| webpki-roots | 1.0.12 | CDLA-Permissive-2.0 | https://github.com/rustls/webpki-roots |
 | weezl | 0.1.12 | MIT OR Apache-2.0 | https://github.com/image-rs/weezl |
 | wgpu | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-core | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
@@ -367,6 +382,7 @@ Notes:
 | x11rb-protocol | 0.13.2 | MIT OR Apache-2.0 | https://github.com/psychon/x11rb |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zerocopy-derive | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zune-core | 0.5.3 | MIT OR Apache-2.0 OR Zlib | https://github.com/etemesi254/zune-image |
