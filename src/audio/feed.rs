@@ -13,7 +13,7 @@ use super::pace::{self, Pacer};
 use super::peq::{Corrector, PeqShared};
 use super::render::FeedConsumer;
 use super::resample::{Converter, StereoResampler};
-use super::source::{Budget, FileInMemory, LoadCompletion};
+use super::source::{Budget, FileInMemory, KeptFile, LoadCompletion};
 use super::{PlaybackError, PlaybackErrorKind};
 use crate::model::{ReplayGainTags, TrackId};
 use std::collections::VecDeque;
@@ -193,6 +193,9 @@ pub struct FeedParams {
     /// Memory playback: load each file into memory while it plays, and the next one
     /// ahead of time.
     pub memory: bool,
+    /// The file of the track that plays, while it is in memory: shared by the feeds
+    /// of one engine (see [`KeptFile`]).
+    pub kept: Arc<KeptFile>,
     /// Counts the frames whose gain the peak limiter turned down (all feeds together).
     pub limited: Arc<AtomicU64>,
     /// The equalizer's settings; followed while the feed runs.
@@ -360,16 +363,27 @@ impl Worker {
                 .take()
                 .filter(|p| p.path == req.path)
                 .and_then(Preload::take);
-            return match ahead {
+            // What a feed before this one took into memory of this very track (it
+            // was fed anew: a seek, the next round of a section, another setting)
+            // is read on, and not asked of the server from its first byte again.
+            let kept = || self.params.kept.get(&req.path);
+            return match ahead.or_else(kept) {
                 Some(file) => {
                     self.current_load = Some(file.completion());
+                    self.params.kept.set(&file);
                     TrackDecoder::open_in_memory(file)
                 }
                 None => {
+                    // (Another track: the room of the one before counts for it.)
+                    self.params.kept.clear();
                     let file =
                         super::remote::RemoteFile::open(url).map_err(|e| map_file_error(&e))?;
-                    let (decoder, load) = TrackDecoder::open_remote(file)?;
-                    self.current_load = load;
+                    let (decoder, kept) =
+                        TrackDecoder::open_remote_keeping(file, Budget::global())?;
+                    self.current_load = kept.as_ref().map(FileInMemory::completion);
+                    if let Some(kept) = &kept {
+                        self.params.kept.set(kept);
+                    }
                     Ok(decoder)
                 }
             };
@@ -377,6 +391,7 @@ impl Worker {
         if !self.params.memory {
             // (What was loaded ahead for a server's track that did not get its turn.)
             self.preload = None;
+            self.params.kept.clear();
             return TrackDecoder::open(&req.path);
         }
         // What is decided about the track after the one opened now is decided again.
@@ -392,18 +407,28 @@ impl Worker {
             .take()
             .filter(|p| p.path == req.path)
             .and_then(Preload::take);
+        // The same file as the track before (a CUE sheet's), or the one a feed
+        // before this one has in memory of this very track (see above).
         let same_file = self
             .current_file
             .as_ref()
             .filter(|(path, _)| *path == real)
-            .map(|(_, file)| file.share());
+            .map(|(_, file)| file.share())
+            .or_else(|| self.params.kept.get(&real));
         let file = match ahead.or(same_file) {
             Some(file) => Some(file),
-            None => FileInMemory::start(&real).map_err(|e| map_file_error(&e))?,
+            None => {
+                // Another file: what is held of the one before is let go of first,
+                // so that its room counts for this one.
+                self.current_file = None;
+                self.params.kept.clear();
+                FileInMemory::start(&real).map_err(|e| map_file_error(&e))?
+            }
         };
         match file {
             Some(file) => {
                 self.current_load = Some(file.completion());
+                self.params.kept.set(&file);
                 self.current_file = Some((real, file.share()));
                 TrackDecoder::open_in_memory(file)?.within(segment.as_ref())
             }
@@ -701,8 +726,10 @@ impl Worker {
         // end of the track before fades out under its beginning, and its own end is
         // held back while the next one is to be mixed with it.
         macro_rules! deliver {
-            ($ready:expr, $info:expr) => {{
+            ($ready:expr, $info:expr, $left_ms:expr) => {{
                 let ready: &mut Vec<f32> = $ready;
+                // What is still to come of the track, where that is known.
+                let left_ms: Option<u64> = $left_ms;
                 // The end of the track before fades out under this beginning.
                 if let Some((tail, done)) = mixing.as_mut() {
                     mix_in(tail, done, ready);
@@ -717,6 +744,13 @@ impl Worker {
                     None => self.params.next.crossfade_ms(),
                     Some(_) => 0,
                 };
+                // Only the end is held. Far from it (where the track's length is
+                // known) everything goes on at once: held from its first frame, a
+                // track would be heard only when as much of it as the fade is long
+                // had been decoded, after every start and every seek.
+                let far = held.is_empty()
+                    && left_ms.is_some_and(|left| left > u64::from(hold_ms) + HOLD_AHEAD_MS);
+                let hold_ms = if far { 0 } else { hold_ms };
                 if hold_ms > 0 {
                     held.extend(ready.iter());
                     ready.clear();
@@ -828,6 +862,10 @@ impl Worker {
             let ramp_step = 1.0 / (GAIN_RAMP_SECONDS * info.sample_rate as f32);
             // What follows, when it had to be known before this track's end (see above).
             let mut followed: Option<Option<TrackRequest>> = None;
+            // Where in the track the decoding began, and how many frames it has given
+            // since: how far the end is (see `deliver!`).
+            let begun_at = start_ms.saturating_mul(u64::from(info.sample_rate)) / 1000;
+            let mut taken = 0u64;
 
             loop {
                 if self.cancelled() {
@@ -866,6 +904,7 @@ impl Worker {
                     }
                 }
                 if !decoded.is_empty() {
+                    taken += (decoded.len() / info.channels.max(1)) as u64;
                     stereo.clear();
                     to_stereo(&decoded, info.channels, &mut stereo);
                     // Settings may change while playing: ramp towards the new gain.
@@ -922,7 +961,7 @@ impl Worker {
                         }
                         None => converted,
                     };
-                    deliver!(ready, info);
+                    deliver!(ready, info, left_ms(&info, begun_at, taken, speed));
                 }
                 if last {
                     break;
@@ -952,7 +991,7 @@ impl Worker {
                     }
                     None => &mut paced,
                 };
-                deliver!(ready, info);
+                deliver!(ready, info, Some(0));
             }
             let next = match followed.take() {
                 Some(next) => next,
@@ -1028,6 +1067,29 @@ impl Worker {
         self.written.store(written, Ordering::Relaxed);
         true
     }
+}
+
+/// How much earlier than a crossfade's length before a track's end the holding back
+/// of that end begins: what is still on its way through the rate conversion and the
+/// pacer by then, and a length that is not quite what the file says, are far less.
+const HOLD_AHEAD_MS: u64 = 2000;
+
+/// How many milliseconds of a track are still to be heard when `taken` of its frames
+/// have been decoded from frame `begun_at` on, at `speed` times its own speed. `None`
+/// when the track's length is not known.
+fn left_ms(info: &SourceInfo, begun_at: u64, taken: u64, speed: f32) -> Option<u64> {
+    let left = info
+        .total_frames?
+        .saturating_sub(begun_at.saturating_add(taken));
+    let ms = left.saturating_mul(1000) / u64::from(info.sample_rate.max(1));
+    // (Faster, the same music takes less time; never counted as more than twice
+    // what it is, so that the end is not missed for a speed that is no speed.)
+    let speed = if speed.is_finite() {
+        speed.clamp(0.5, 4.0)
+    } else {
+        1.0
+    };
+    Some((ms as f64 / f64::from(speed)) as u64)
 }
 
 /// How many frames `ms` milliseconds are at `rate`.
@@ -1111,6 +1173,7 @@ mod tests {
             speed: 1.0,
             filter: Default::default(),
             room: None,
+            kept: Arc::default(),
             events,
             memory: false,
         }
@@ -1381,5 +1444,33 @@ mod tests {
         assert!((rest[2] - crossfade_gains(3, 4).0).abs() < 1e-6);
         assert!(rest[2] < rest[0]);
         assert!(rest_of(&tail, 4).is_empty());
+    }
+    /// How much of a track is still to come: by its length where the file tells it,
+    /// by the speed it is played at, and not at all where the length is not known.
+    #[test]
+    fn what_is_left_of_a_track_is_told_by_its_length_and_the_speed() {
+        let info = |total: Option<u64>| SourceInfo {
+            sample_rate: 48_000,
+            total_frames: total,
+            ..TrackDecoder::open(std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/gap_a.wav"
+            )))
+            .expect("fixture")
+            .info()
+            .clone()
+        };
+        let minute = info(Some(48_000 * 60));
+        assert_eq!(left_ms(&minute, 0, 0, 1.0), Some(60_000));
+        assert_eq!(
+            left_ms(&minute, 48_000 * 10, 48_000 * 20, 1.0),
+            Some(30_000)
+        );
+        assert_eq!(left_ms(&minute, 0, 48_000 * 30, 2.0), Some(15_000));
+        assert_eq!(left_ms(&minute, 0, 48_000 * 30, 0.5), Some(60_000));
+        // More decoded than the file said it has: at its end, not far from it.
+        assert_eq!(left_ms(&minute, 0, 48_000 * 61, 1.0), Some(0));
+        assert_eq!(left_ms(&minute, 0, 0, f32::NAN), Some(60_000));
+        assert_eq!(left_ms(&info(None), 0, 0, 1.0), None);
     }
 }

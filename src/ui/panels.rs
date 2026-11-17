@@ -93,6 +93,9 @@ struct PathInputs<'a> {
     crossfade: Option<String>,
     /// The playback speed in words, while it is not the song's own.
     speed: Option<String>,
+    /// While the speed is not the song's own: the rate the song is brought to for
+    /// the pacer (`audio::pace::working_rate`), from where it goes to the output's.
+    pacing_rate: Option<u32>,
     /// The name of the upsampling filter, while the song's rate is raised with one
     /// the listener chose.
     filter: Option<&'a str>,
@@ -152,12 +155,26 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
             decibels(input.leveling),
         );
     }
-    if input.source_rate != input.out_rate {
-        let rates = format!(
-            "{} → {} Hz",
-            group_digits(input.source_rate as usize),
-            group_digits(input.out_rate as usize)
-        );
+    // At another speed the song goes by way of the pacer's rate, which may lie
+    // below the output's: a conversion down and up again, also where the song's
+    // rate is the output's.
+    let by_way_of = input
+        .pacing_rate
+        .filter(|rate| *rate != input.out_rate && *rate != input.source_rate);
+    if input.source_rate != input.out_rate || by_way_of.is_some() {
+        let rates = match by_way_of {
+            Some(rate) => format!(
+                "{} → {} → {} Hz",
+                group_digits(input.source_rate as usize),
+                group_digits(rate as usize),
+                group_digits(input.out_rate as usize)
+            ),
+            None => format!(
+                "{} → {} Hz",
+                group_digits(input.source_rate as usize),
+                group_digits(input.out_rate as usize)
+            ),
+        };
         add(
             StageKind::Conversion,
             s.info_proc_resample,
@@ -1596,6 +1613,8 @@ impl OneumApp {
                 .then(|| self.lang.crossfade_detail(self.player.crossfade_secs)),
             speed: (self.player.speed_percent != 100)
                 .then(|| self.lang.speed_detail(self.player.speed_percent)),
+            pacing_rate: (self.player.speed_percent != 100)
+                .then(|| crate::audio::pace::working_rate(out_rate)),
             filter: {
                 use crate::audio::upsample::Filter;
                 let filter = self.player.output_settings.filter;
@@ -2681,6 +2700,7 @@ mod tests {
             crossfeed: None,
             crossfade: None,
             speed: None,
+            pacing_rate: None,
             filter: None,
             room: None,
             peak_protection: false,
@@ -2740,6 +2760,39 @@ mod tests {
             ]
         );
         assert_eq!(path_summary(&all), PathSummary::ConvertedAndAdjusted);
+    }
+
+    /// At another speed a song of a high rate goes down to the pacer's rate and up
+    /// again: the path says so, also where the song's rate is the output's.
+    #[test]
+    fn the_signal_path_shows_the_rate_the_pacer_works_at() {
+        let rates = |source_rate: u32, out_rate: u32, pacing_rate: Option<u32>| {
+            path_stages(&PathInputs {
+                source_rate,
+                out_rate,
+                speed: pacing_rate.map(|_| "1.25×".to_string()),
+                pacing_rate,
+                ..plain_path()
+            })
+            .into_iter()
+            .find(|stage| stage.kind == StageKind::Conversion)
+            .map(|stage| stage.detail)
+        };
+        assert_eq!(
+            rates(96_000, 96_000, Some(48_000)).as_deref(),
+            Some("96,000 → 48,000 → 96,000 Hz")
+        );
+        assert_eq!(
+            rates(44_100, 96_000, Some(48_000)).as_deref(),
+            Some("44,100 → 48,000 → 96,000 Hz")
+        );
+        // The pacer at the song's rate, or at the output's: one conversion, or none.
+        assert_eq!(
+            rates(48_000, 96_000, Some(48_000)).as_deref(),
+            Some("48,000 → 96,000 Hz")
+        );
+        assert_eq!(rates(44_100, 44_100, Some(44_100)), None);
+        assert_eq!(rates(96_000, 96_000, None), None);
     }
 
     #[test]

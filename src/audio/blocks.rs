@@ -277,7 +277,7 @@ impl WavPack {
             let mut i = 0;
             while i + HEADER_LEN <= read && at + (i as u64) < until {
                 if &piece[i..i + 4] == b"wvpk"
-                    && let Ok(header) = BlockHeader::parse(&piece[i..i + HEADER_LEN])
+                    && let Ok(header) = header_of(&piece[i..i + HEADER_LEN])
                     && self.agrees(&header)
                 {
                     let place = at + i as u64;
@@ -305,7 +305,7 @@ impl WavPack {
         if read_at(&mut self.reader, at, &mut bytes)? < HEADER_LEN {
             return Ok(None);
         }
-        Ok(BlockHeader::parse(&bytes).ok())
+        Ok(header_of(&bytes).ok())
     }
 
     /// The block `frame` is in: its place and first frame. `None`: the file ends
@@ -389,6 +389,23 @@ impl WavPack {
     }
 }
 
+/// The largest block there is, header and all.
+const MAX_BLOCK_BYTES: u64 = 1 << 20;
+
+/// A block's header, from bytes of a file. The size it names is looked at here
+/// first: where the header is parsed it is checked by a sum that overflows for the
+/// largest sizes, which passes the check (in a build without overflow checks) with
+/// a block of four gigabytes to set memory aside for, from a file of a few bytes.
+fn header_of(bytes: &[u8]) -> Result<BlockHeader, WvError> {
+    if let Some(&[a, b, c, d]) = bytes.get(4..8) {
+        let size = u32::from_le_bytes([a, b, c, d]);
+        if u64::from(size) + 8 > MAX_BLOCK_BYTES {
+            return Err(WvError::BadBlockSize(size));
+        }
+    }
+    BlockHeader::parse(bytes)
+}
+
 /// Reads the block at `at` into `block`: its header, or why it is none. `None`: the
 /// file has no block there (its end, or the tags after the audio).
 fn read_block(
@@ -400,7 +417,7 @@ fn read_block(
     if read_at(reader, at, block)? < HEADER_LEN || &block[..4] != b"wvpk" {
         return Ok(None);
     }
-    let header = match BlockHeader::parse(block) {
+    let header = match header_of(block) {
         Ok(header) => header,
         Err(e) => return Ok(Some(Err(e))),
     };
@@ -923,5 +940,35 @@ mod tests {
         out.clear();
         pcm_to_floats(&[0, 0, 0, 0x80, 0, 0, 0, 0x40], 4, &mut out);
         assert_eq!(out, [-1.0, 0.5]);
+    }
+    /// A header that names a block of four gigabytes is no header: the size is seen
+    /// before anything is set aside for the block (and before the sum that would
+    /// overflow where the header is parsed).
+    #[test]
+    fn a_header_with_an_absurd_size_is_refused_before_memory_is_taken() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gap_a.wv");
+        let fixture = std::fs::read(path).expect("fixture");
+        assert!(header_of(&fixture[..HEADER_LEN]).is_ok());
+        for size in [u32::MAX, u32::MAX - 7, u32::MAX - 8, 1 << 20, (1 << 20) - 7] {
+            let mut header = fixture[..HEADER_LEN].to_vec();
+            header[4..8].copy_from_slice(&size.to_le_bytes());
+            assert!(
+                matches!(header_of(&header), Err(WvError::BadBlockSize(_))),
+                "{size:#x}"
+            );
+            // As a file: refused or found damaged, in no time and no memory.
+            let mut reader: Box<dyn ReadSeek> = Box::new(std::io::Cursor::new(header.clone()));
+            let mut block = Vec::new();
+            assert!(matches!(
+                read_block(&mut reader, 0, &mut block),
+                Ok(Some(Err(_)))
+            ));
+            assert!(block.capacity() < 4096, "{size:#x}: {}", block.capacity());
+            let _ = WavPack::new(Box::new(std::io::Cursor::new(header)), 0, true);
+        }
+        // The largest block there is still is one.
+        let mut header = fixture[..HEADER_LEN].to_vec();
+        header[4..8].copy_from_slice(&((1u32 << 20) - 8).to_le_bytes());
+        assert!(header_of(&header).is_ok());
     }
 }

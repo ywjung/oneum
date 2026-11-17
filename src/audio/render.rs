@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 /// Frames processed per inner block (stack buffer size).
 const BLOCK: usize = 256;
 const FADE_SECONDS: f32 = 0.006;
+/// After the ring ran dry: how much has to be there before playing goes on (what a
+/// new feed is given before it is first heard, see the engine's prebuffer).
+const REFILL_SECONDS: f32 = 0.12;
 const VOLUME_RAMP_SECONDS: f32 = 0.03;
 const EPOCH_SHIFT: u32 = 48;
 const FRAME_MASK: u64 = (1 << EPOCH_SHIFT) - 1;
@@ -265,6 +268,11 @@ pub struct Renderer {
     vol_step: f32,
     /// State of the dither noise generator (never 0).
     noise: u32,
+    /// The ring ran dry while playing: what arrives now is waited for until there is
+    /// enough of it to go on with (see `REFILL_SECONDS`).
+    starved: bool,
+    /// `REFILL_SECONDS` in frames.
+    refill_frames: usize,
     block: [f32; BLOCK * 2],
 }
 
@@ -286,6 +294,8 @@ pub fn render_pair(shared: Arc<RenderShared>, sample_rate: u32) -> (Renderer, Re
         vol,
         vol_step: 1.0 / (VOLUME_RAMP_SECONDS * rate),
         noise: 0x9E37_79B9,
+        starved: false,
+        refill_frames: (REFILL_SECONDS * rate) as usize,
         block: [0.0; BLOCK * 2],
     };
     (
@@ -355,6 +365,7 @@ impl Renderer {
                 self.current = self.pending.take();
                 self.consumed = 0;
                 self.fade = 0.0;
+                self.starved = false;
             }
             let Some(cur) = self.current.as_mut() else {
                 break;
@@ -372,6 +383,22 @@ impl Renderer {
                 n = n.min((self.fade / self.fade_step).ceil() as usize).max(1);
             }
             let mut avail = cur.consumer.slots() / 2;
+            if self.starved && self.pending.is_none() {
+                // What comes after the ring ran dry is not played piece by piece as
+                // it lands (each piece faded in and cut off at its end: a stutter
+                // with a click for every piece) but when there is enough of it to
+                // go on with, or all there will be.
+                let enough = self
+                    .refill_frames
+                    .min(cur.consumer.buffer().capacity() / 4)
+                    .max(1);
+                if avail >= enough || cur.finished.load(Ordering::Acquire) {
+                    self.starved = false;
+                } else {
+                    underrun = playing && !superseded;
+                    break;
+                }
+            }
             if avail == 0 {
                 if self.pending.is_some() {
                     self.fade = 0.0; // nothing left to fade: swap right away
@@ -390,6 +417,7 @@ impl Renderer {
                 } else {
                     underrun = playing && !superseded;
                     self.fade = 0.0; // fade back in when data returns
+                    self.starved = true;
                     break;
                 }
             }
@@ -581,6 +609,54 @@ mod tests {
         assert_eq!(shared.underruns(), 1);
         assert_eq!(shared.drained_epoch(), 1);
         assert_eq!(shared.position(), (1, 150));
+    }
+
+    /// After the ring ran dry, a little that arrives is not played at once: playing
+    /// goes on when there is enough to go on with, faded in, or when the feed ends.
+    #[test]
+    fn after_running_dry_playing_waits_for_enough_to_go_on_with() {
+        let (shared, mut r, mut link) = setup(48_000);
+        let (f, mut tx, flag) = feed(1, &[0.25; 200], false);
+        link.incoming.push(f).expect("push");
+        shared.set_playing(true);
+        let mut out = vec![0.0; 800];
+        r.render(&mut out, 2);
+        assert_eq!(shared.underruns(), 1);
+        assert_eq!(shared.position(), (1, 100));
+        // Twenty frames arrive: too little to go on with (the ring holds 132).
+        for _ in 0..40 {
+            tx.push(0.25).expect("room");
+        }
+        r.render(&mut out, 2);
+        assert!(out.iter().all(|s| *s == 0.0), "held back");
+        assert_eq!(shared.position(), (1, 100));
+        assert_eq!(shared.underruns(), 2, "silence while playing is counted");
+        // Sixty more: enough. It goes on, from silence.
+        for _ in 0..120 {
+            tx.push(0.25).expect("room");
+        }
+        let mut out = vec![0.0; 120];
+        r.render(&mut out, 2);
+        assert!(
+            out[0].abs() < 0.01 && out[118] > out[0],
+            "fades in: {out:?}"
+        );
+        assert_eq!(shared.position(), (1, 160));
+        assert_eq!(shared.underruns(), 2);
+        // Dry again; the little that is left when the feed ends is played out.
+        let mut out = vec![0.0; 800];
+        r.render(&mut out, 2);
+        assert_eq!(shared.underruns(), 3);
+        for _ in 0..10 {
+            tx.push(0.25).expect("room");
+        }
+        r.render(&mut out, 2);
+        assert_eq!(shared.position(), (1, 180), "waiting");
+        flag.store(true, Ordering::Release);
+        r.render(&mut out, 2);
+        r.render(&mut out, 2);
+        assert_eq!(shared.position(), (1, 185));
+        assert_eq!(shared.drained_epoch(), 1);
     }
 
     #[test]

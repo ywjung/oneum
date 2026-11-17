@@ -43,14 +43,22 @@ impl Filter {
 
     /// Whether a conversion from `in_rate` to `out_rate` is done with this filter
     /// (and not the usual way): a whole factor up, and a filter other than the usual.
+    ///
+    /// The slow filter lets through what lies just above half the song's rate, on
+    /// the understanding that nobody hears it there (above 22 kHz for a CD). Below a
+    /// CD's rate that understanding does not hold (a 22.05 kHz file's images would
+    /// begin at 11 kHz), and such a song is converted the usual way.
     pub fn applies(self, in_rate: u32, out_rate: u32) -> bool {
         self != Filter::Sharp
             && in_rate != 0
             && out_rate.is_multiple_of(in_rate)
             && FACTORS.contains(&(out_rate / in_rate))
+            && (self != Filter::Slow || in_rate >= SLOW_FROM_RATE)
     }
 }
 
+/// The lowest rate of a song the slow filter is used for.
+const SLOW_FROM_RATE: u32 = 44_100;
 /// The factors this is done for.
 const FACTORS: std::ops::RangeInclusive<u32> = 2..=8;
 /// How far down the filters push what they stop, in dB.
@@ -464,5 +472,22 @@ mod tests {
         assert!(design(Filter::Sharp, 2).is_none());
         assert!((bessel_i0(0.0) - 1.0).abs() < 1e-15);
         assert!((bessel_i0(1.0) - 1.266_065_877_752_008).abs() < 1e-12);
+    }
+    /// The slow filter is for songs of a CD's rate and above; below it the usual
+    /// conversion is used, as for every factor that is not a whole one.
+    #[test]
+    fn the_filters_are_used_only_where_they_are_meant_for() {
+        for filter in [Filter::Slow, Filter::Minimum] {
+            assert!(filter.applies(44_100, 352_800));
+            assert!(filter.applies(48_000, 96_000));
+            assert!(!filter.applies(44_100, 48_000));
+            assert!(!filter.applies(44_100, 44_100));
+            assert!(!filter.applies(0, 44_100));
+        }
+        assert!(!Filter::Sharp.applies(44_100, 88_200));
+        for low in [8_000, 11_025, 22_050, 24_000, 32_000] {
+            assert!(!Filter::Slow.applies(low, low * 2), "{low}");
+            assert!(Filter::Minimum.applies(low, low * 2), "{low}");
+        }
     }
 }

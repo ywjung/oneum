@@ -229,3 +229,74 @@ fn a_connection_cut_in_the_middle_of_a_song_is_made_anew() {
         );
     }
 }
+
+/// A track of a server that is fed anew (a seek, the next round of a repeated section,
+/// a setting that begins the feed again) is read on from where it is in memory: the
+/// server is not asked for the file a second time.
+#[test]
+fn a_servers_track_that_is_fed_anew_is_not_fetched_again() {
+    use oneum::audio::feed::{NextSlot, NextTrack, TrackRequest};
+    use oneum::audio::{Engine, EngineEvent, ReplayGainSettings};
+    use oneum::model::ReplayGainTags;
+    let server = serve(&[("gap_a.flac", "audio/flac")]);
+    let (mut engine, mut renderer) =
+        Engine::new_offline(44_100, 1.0, ReplayGainSettings::default());
+    let request = TrackRequest {
+        item_id: 1,
+        track_id: -1,
+        path: PathBuf::from(server.media_url(0)),
+        replaygain: ReplayGainTags::default(),
+        crossfade_ms: 0,
+    };
+    let slot = NextSlot::new();
+    slot.set(NextTrack::End);
+    // Plays until `frames` have been heard of the feed that is on, or to its end.
+    let mut play = |engine: &mut Engine, frames: u64| -> bool {
+        let mut out = vec![0f32; 1024];
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            assert!(Instant::now() < deadline, "the feed did not get there");
+            let mut events = Vec::new();
+            engine.poll(&mut events);
+            if events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::Drained { .. }))
+            {
+                return true;
+            }
+            match engine.active_buffered() {
+                Some((buffered, finished)) if buffered >= 512 || finished => {
+                    renderer.render(&mut out, 2);
+                    if engine.shared().position().1 >= frames {
+                        return false;
+                    }
+                }
+                _ => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    };
+    engine
+        .start_feed(request.clone(), 0, slot.clone())
+        .expect("feed starts");
+    engine.set_playing(true);
+    assert!(!play(&mut engine, 8_000), "still playing");
+    let asked = server.media_requests();
+    assert!(asked >= 1);
+    for start_ms in [500, 100, 900] {
+        engine
+            .start_feed(request.clone(), start_ms, slot.clone())
+            .expect("feed starts");
+        assert!(!play(&mut engine, 2_000), "plays on from {start_ms} ms");
+    }
+    assert!(play(&mut engine, u64::MAX), "plays to its end");
+    assert_eq!(
+        server.media_requests(),
+        asked,
+        "nothing more was asked of the server"
+    );
+    // Stopped, the file is let go of: played again, it is asked for again.
+    engine.stop_feeds();
+    engine.start_feed(request, 0, slot).expect("feed starts");
+    assert!(play(&mut engine, u64::MAX));
+    assert_eq!(server.media_requests(), asked + 1);
+}

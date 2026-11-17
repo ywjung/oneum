@@ -1749,6 +1749,26 @@ fn changing_output_settings_keeps_the_position() {
         snap.source.as_ref().is_some_and(|s| s.in_memory),
         "the new feed plays from memory"
     );
+
+    // Another upsampling filter alone: what plays is fed anew from where it is.
+    let feeds = rig.feeds();
+    let before = snap.position_now_ms();
+    rig.send(Command::SetOutput(OutputSettings {
+        match_sample_rate: true,
+        exclusive: true,
+        memory_playback: true,
+        filter: oneum::audio::upsample::Filter::Minimum,
+        ..OutputSettings::default()
+    }));
+    let snap = rig.wait("fed anew with the other filter", |s| {
+        s.output_settings.filter == oneum::audio::upsample::Filter::Minimum
+            && s.state == PlayState::Playing
+            && rig.feeds() > feeds
+    });
+    assert!(
+        snap.position_now_ms() + 200 >= before,
+        "goes on where it was: {before} → {snap:?}"
+    );
 }
 
 const MP3_A: TrackId = 80; // gap_a.mp3

@@ -2595,6 +2595,68 @@ fn a_crossfade_mixes_the_end_of_a_track_with_the_beginning_of_the_next() {
     assert_eq!(play(&["gap_a.wav", "gap_b.wav"], 44_100).frames(), 88_200);
 }
 
+/// Only the end of a track is held back for the mix. In a track that is much longer
+/// than the fade, the holding begins somewhere in its middle, which nothing is heard
+/// of: every frame is the file's own up to the mix, and the mix is the two files'.
+/// A feed that begins near the track's end (a seek) holds from its first frame.
+#[test]
+fn a_long_track_is_held_back_only_at_its_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rate = 44_100u32;
+    let noise = |seed: u32| -> Vec<i16> {
+        let mut x = seed;
+        (0..rate * 6)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((x >> 16) as i16) / 6
+            })
+            .collect()
+    };
+    let (path_a, path_b) = (dir.path().join("a.wav"), dir.path().join("b.wav"));
+    write_wav(&path_a, rate, &noise(1));
+    write_wav(&path_b, rate, &noise(2));
+    let (a, b) = (decode_path(&path_a), decode_path(&path_b));
+    assert_eq!(a.len(), rate as usize * 6 * 2);
+    // One second, of tracks of six: the holding begins three seconds before the end.
+    let overlap = rate as usize;
+    let expected = crossfaded(&a, &b, overlap);
+    for start_ms in [0u64, 4_500] {
+        let (mut engine, mut renderer) =
+            Engine::new_offline(rate, 1.0, ReplayGainSettings::default());
+        let queue = vec![
+            TrackRequest {
+                path: path_a.clone(),
+                ..request(1, "gap_a.wav")
+            },
+            TrackRequest {
+                path: path_b.clone(),
+                crossfade_ms: 1000,
+                ..request(2, "gap_b.wav")
+            },
+        ];
+        let slot = NextSlot::new();
+        slot.set(NextTrack::Track(queue[1].clone()));
+        engine
+            .start_feed(queue[0].clone(), start_ms, slot.clone())
+            .expect("feed starts");
+        engine.set_playing(true);
+        let played = pump(&mut engine, &mut renderer, &queue, &slot);
+        assert_eq!(played.underruns, 0);
+        assert_eq!(played.limited, 0);
+        let skipped = (start_ms * u64::from(rate) / 1000) as usize;
+        assert_eq!(
+            played.frames(),
+            expected.len() / 2 - skipped,
+            "from {start_ms} ms"
+        );
+        let diff = max_abs_diff(
+            &played.pcm[FADE_GUARD * 2..],
+            &expected[(skipped + FADE_GUARD) * 2..],
+        );
+        assert!(diff < 1e-6, "from {start_ms} ms: differs by {diff}");
+    }
+}
+
 /// Three tracks, each mixed into the one before it; and through the rate converter,
 /// where each track gets a converter of its own at the mix.
 #[test]

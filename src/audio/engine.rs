@@ -26,6 +26,12 @@ const DEVICE_MISSING_POLLS: u8 = 2;
 /// Longest wait for the device to play out what it has already been given before the
 /// stream is closed at the end of a feed (see `Engine::let_tail_play_out`).
 const TAIL_MAX: Duration = Duration::from_millis(500);
+/// How long the callback is waited for to fade out before a stream that sounds is
+/// closed (it runs every few milliseconds; a stream that is not called at all is not
+/// waited on for longer).
+const FADE_WAIT_MAX: Duration = Duration::from_millis(120);
+/// The fade itself, with a little to spare (see the renderer's).
+const FADE_OUT: Duration = Duration::from_millis(10);
 /// A close this soon after a feed drained is the player reacting to that drain.
 const TAIL_WINDOW: Duration = Duration::from_millis(100);
 
@@ -78,6 +84,8 @@ pub struct Engine {
     speed: f32,
     /// The room correction of the feeds started from now on (see `FeedParams::room`).
     room: Option<Arc<super::room::Impulse>>,
+    /// The file of the track that plays, while it is in memory (see `KeptFile`).
+    kept: Arc<super::source::KeptFile>,
     sink: Sink,
     /// `None` = follow the system default device.
     device_pref: Option<String>,
@@ -136,6 +144,7 @@ impl Engine {
             crossfeed: Arc::new(AtomicU8::new(0)),
             speed: 1.0,
             room: None,
+            kept: Arc::default(),
             peq: PeqShared::new(None),
             sink: Sink::Closed,
             device_pref,
@@ -337,6 +346,11 @@ impl Engine {
                 return Ok(());
             }
         }
+        // (A track that played to its end has nothing left to fade: its tail is
+        // waited for where the stream is closed.)
+        if self.drained_at.is_none() {
+            self.fade_out_before_closing();
+        }
         self.close_stream();
         self.refused_rate = None;
         self.opened_use = wanted_use;
@@ -422,9 +436,48 @@ impl Engine {
         }
     }
 
+    /// A stream that is closed while it sounds is cut off at whatever level the music
+    /// has at that moment: a click, and then the device is set up anew. The callback
+    /// is told to stop, which it does with a short fade, and is given the time for
+    /// it: to get to it, the fade itself, and what the device still holds of it.
+    /// Nothing is waited for when the stream stopped sounding a while ago.
+    fn fade_out_before_closing(&mut self) {
+        let Sink::Device(stream) = &self.sink else {
+            return;
+        };
+        if !stream.is_running() {
+            return;
+        }
+        let just_stopped = self
+            .idle_since
+            .is_some_and(|since| since.elapsed() < FADE_WAIT_MAX);
+        if !self.shared.is_playing() && !just_stopped {
+            return;
+        }
+        let held = f64::from(self.shared.latency_frames()) / f64::from(stream.sample_rate().max(1));
+        self.set_playing(false);
+        // The callback fades when it next runs; the one after it writes silence.
+        let (seen, started) = (self.shared.callbacks(), Instant::now());
+        while self.shared.callbacks().wrapping_sub(seen) < 2 && started.elapsed() < FADE_WAIT_MAX {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let tail = FADE_OUT.as_secs_f64() + held;
+        std::thread::sleep(Duration::from_secs_f64(
+            tail.clamp(0.0, TAIL_MAX.as_secs_f64()),
+        ));
+    }
+
     /// Closes the output and lets go of the device: exclusive access is given back and
-    /// a changed sample rate or format is put back the way it was.
+    /// a changed sample rate or format is put back the way it was. What sounds is
+    /// faded out first.
     pub fn close_output(&mut self) {
+        self.fade_out_before_closing();
+        self.drop_output();
+    }
+
+    /// [`Engine::close_output`] without the fade: for a device that is gone, or a
+    /// stream the system has stopped already.
+    fn drop_output(&mut self) {
         // The stream goes first; the device is only reconfigured once nothing plays.
         self.close_stream();
         self.hold = None;
@@ -464,6 +517,7 @@ impl Engine {
             speed: self.speed,
             filter: self.settings.filter,
             room: self.room.clone(),
+            kept: self.kept.clone(),
         };
         let handle = FeedHandle::spawn(params)
             .ok_or_else(|| OutputError::Backend("cannot spawn decode thread".into()))?;
@@ -481,6 +535,8 @@ impl Engine {
     pub fn stop_feeds(&mut self) {
         self.loading = None;
         self.active = None;
+        // (Nothing plays: the file that was kept in memory for it is let go of.)
+        self.kept.clear();
     }
 
     pub fn active_epoch(&self) -> Option<u16> {
@@ -715,7 +771,7 @@ impl Engine {
         };
         if signal.lost {
             tracing::warn!("output device lost");
-            self.close_output();
+            self.drop_output();
             events.push(EngineEvent::DeviceLost);
         } else if signal.invalidated {
             // A stream is also invalidated when its device is unplugged. Reopening would
@@ -743,7 +799,7 @@ impl Engine {
             } else {
                 tracing::info!(gone, "output stream invalidated");
                 if gone {
-                    self.close_output();
+                    self.drop_output();
                     events.push(EngineEvent::DeviceLost);
                 } else {
                     // Keep the claim: the player reopens the stream on the same device.
@@ -764,7 +820,7 @@ impl Engine {
                     self.device_missing_polls += 1;
                     if self.device_missing_polls >= DEVICE_MISSING_POLLS {
                         tracing::warn!("output device no longer listed");
-                        self.close_output();
+                        self.drop_output();
                         events.push(EngineEvent::DeviceLost);
                     }
                 }
@@ -777,7 +833,7 @@ impl Engine {
                         && !exclusive
                         && output::default_output_id().is_some_and(|id| id != current_id)
                     {
-                        self.close_output();
+                        self.drop_output();
                         events.push(EngineEvent::OutputChanged);
                     }
                 }

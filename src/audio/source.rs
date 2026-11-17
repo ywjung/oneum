@@ -264,6 +264,11 @@ impl FileInMemory {
         &self.path
     }
 
+    /// Whether `other` is a handle to the same file in memory.
+    pub fn is(&self, other: &FileInMemory) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     /// Size of the file in bytes (never 0: empty files are not loaded).
     pub fn byte_len(&self) -> u64 {
         self.len
@@ -281,6 +286,40 @@ impl FileInMemory {
 
     pub fn into_source(self) -> MemorySource {
         MemorySource { file: self, pos: 0 }
+    }
+}
+
+/// The file of the track that plays, for as long as it is in memory: what a new feed
+/// of the same track (after a seek, for the next round of a repeated section, after
+/// a setting that begins the feed anew) reads, instead of loading the file once more
+/// or asking its server for it from the first byte. One for an engine, handed to
+/// each of its feeds; let go of when the feeds are stopped.
+#[derive(Default)]
+pub struct KeptFile(Mutex<Option<FileInMemory>>);
+
+impl KeptFile {
+    fn slot(&self) -> MutexGuard<'_, Option<FileInMemory>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A handle to the kept file, if it is the one at `path`.
+    pub fn get(&self, path: &Path) -> Option<FileInMemory> {
+        self.slot()
+            .as_ref()
+            .filter(|file| file.path() == path)
+            .map(FileInMemory::share)
+    }
+
+    /// Keeps `file` in the place of what was kept.
+    pub fn set(&self, file: &FileInMemory) {
+        let mut slot = self.slot();
+        if !slot.as_ref().is_some_and(|kept| kept.is(file)) {
+            *slot = Some(file.share());
+        }
+    }
+
+    pub fn clear(&self) {
+        *self.slot() = None;
     }
 }
 
@@ -584,5 +623,31 @@ mod tests {
         assert!(FileInMemory::start(dir.path()).is_ok_and(|f| f.is_none()));
         let missing = FileInMemory::start(&dir.path().join("nope.flac"));
         assert!(missing.is_err_and(|e| e.kind() == io::ErrorKind::NotFound));
+    }
+    /// The kept file is handed out for its own path only, as one more handle to the
+    /// same memory (its room is counted once), and let go of when it is cleared.
+    #[test]
+    fn a_kept_file_is_the_same_memory_for_whoever_asks_for_its_path() {
+        let path = fixture("gap_a.flac");
+        let len = std::fs::metadata(&path).unwrap().len();
+        let budget = Arc::new(Budget::new(1 << 30));
+        let file = FileInMemory::start_within(&path, &budget)
+            .unwrap()
+            .expect("fits");
+        let kept = KeptFile::default();
+        assert!(kept.get(&path).is_none());
+        kept.set(&file);
+        kept.set(&file);
+        let again = kept.get(&path).expect("kept");
+        assert!(again.is(&file));
+        assert!(kept.get(&fixture("gap_b.flac")).is_none());
+        assert_eq!(budget.used(), len);
+        // The handles go, the kept one stays; cleared, the room is free again.
+        drop((file, again));
+        assert_eq!(budget.used(), len);
+        assert!(kept.get(&path).is_some());
+        kept.clear();
+        assert!(kept.get(&path).is_none());
+        assert_eq!(budget.used(), 0);
     }
 }

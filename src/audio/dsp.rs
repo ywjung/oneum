@@ -85,9 +85,10 @@ pub fn volume_to_gain(volume: f32) -> f32 {
 }
 
 /// Converts interleaved `channels`-channel audio to interleaved stereo, appending to `dst`.
-/// Mono is duplicated; 5.1/7.1 (standard order FL FR FC LFE …) are down-mixed with −3 dB
-/// centre/surrounds and normalised so the result cannot exceed the input peak; other
-/// layouts average even channels into left and odd channels into right.
+/// Mono is duplicated; 3.0, 5.0, 5.1, 6.1 and 7.1 (standard order FL FR FC LFE …) are
+/// down-mixed with −3 dB centre/surrounds and normalised so the result cannot exceed the
+/// input peak; other layouts average even channels into left and odd channels into right
+/// (which is right for four channels: FL FR BL BR).
 pub fn to_stereo(src: &[f32], channels: usize, dst: &mut Vec<f32>) {
     match channels {
         0 => {}
@@ -113,6 +114,33 @@ pub fn to_stereo(src: &[f32], channels: usize, dst: &mut Vec<f32>) {
                 }
                 dst.push(l * norm);
                 dst.push(r * norm);
+            }
+        }
+        // FL FR FC, and FL FR FC BL BR: the centre belongs to both sides.
+        3 | 5 => {
+            const C: f32 = std::f32::consts::FRAC_1_SQRT_2;
+            let norm = 1.0 / (1.0 + C + C * ((channels - 3) / 2) as f32);
+            dst.reserve(src.len() / channels * 2);
+            for f in src.chunks_exact(channels) {
+                let mut l = f[0] + C * f[2];
+                let mut r = f[1] + C * f[2];
+                if channels == 5 {
+                    l += C * f[3];
+                    r += C * f[4];
+                }
+                dst.push(l * norm);
+                dst.push(r * norm);
+            }
+        }
+        // FL FR FC LFE BC SL SR: the centres (front and back) belong to both sides.
+        7 => {
+            const C: f32 = std::f32::consts::FRAC_1_SQRT_2;
+            let norm = 1.0 / (1.0 + C + C + 0.5);
+            dst.reserve(src.len() / channels * 2);
+            for f in src.chunks_exact(channels) {
+                let middle = C * f[2] + 0.5 * f[4];
+                dst.push((f[0] + middle + C * f[5]) * norm);
+                dst.push((f[1] + middle + C * f[6]) * norm);
             }
         }
         n => {
@@ -266,8 +294,46 @@ mod tests {
         to_stereo(&[1.0; 6], 6, &mut out);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|s| *s <= 1.0 + 1e-6 && *s > 0.9));
-        out.clear();
-        to_stereo(&[1.0, 0.0, 1.0], 3, &mut out);
-        assert_eq!(out, vec![1.0, 0.0]);
+    }
+
+    /// Three, five and seven channels have a centre, which is heard from both
+    /// sides; four have none. Nothing gets louder than it was.
+    #[test]
+    fn a_centre_channel_goes_to_both_sides() {
+        let centre_only = |channels: usize| {
+            let mut frame = vec![0.0; channels];
+            frame[2] = 1.0;
+            let mut out = Vec::new();
+            to_stereo(&frame, channels, &mut out);
+            out
+        };
+        for channels in [3, 5, 6, 7, 8] {
+            let out = centre_only(channels);
+            assert_eq!(out.len(), 2);
+            assert!(out[0] > 0.2 && out[0] == out[1], "{channels}: {out:?}");
+            let mut out = Vec::new();
+            to_stereo(&vec![1.0; channels], channels, &mut out);
+            assert!(
+                out.iter().all(|s| *s <= 1.0 + 1e-6 && *s > 0.9),
+                "{channels}: {out:?}"
+            );
+        }
+        // FL FR BL BR: the third channel is a left one.
+        assert_eq!(centre_only(4), vec![0.5, 0.0]);
+        // FL FR FC BL BR: each surround on its own side; FL FR FC LFE BC SL SR: the
+        // back centre on both, the LFE on neither.
+        let side = |channels: usize, at: usize| {
+            let mut frame = vec![0.0; channels];
+            frame[at] = 1.0;
+            let mut out = Vec::new();
+            to_stereo(&frame, channels, &mut out);
+            (out[0], out[1])
+        };
+        assert!(matches!(side(5, 3), (l, r) if l > 0.2 && r == 0.0));
+        assert!(matches!(side(5, 4), (l, r) if l == 0.0 && r > 0.2));
+        assert!(matches!(side(7, 4), (l, r) if l > 0.1 && l == r));
+        assert_eq!(side(7, 3), (0.0, 0.0));
+        assert!(matches!(side(7, 5), (l, r) if l > 0.2 && r == 0.0));
+        assert!(matches!(side(7, 6), (l, r) if l == 0.0 && r > 0.2));
     }
 }

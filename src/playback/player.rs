@@ -1698,13 +1698,21 @@ impl<H: PlayerHost> Player<H> {
                 self.dirty = true;
                 // Memory playback applies from the next feed on its own. How the device
                 // is used changes now: reopen the output and continue where we were.
-                if before.of_the_stream() != settings.of_the_stream() {
+                if before.of_the_device() != settings.of_the_device() {
                     let playing_from = self.chain.is_some().then(|| self.position_ms());
                     self.chain = None;
                     self.engine.close_output();
                     if let Some(position) = playing_from {
                         self.start_current(position, true);
                     }
+                } else if before.of_the_stream() != settings.of_the_stream() && self.chain.is_some()
+                {
+                    // Only the upsampling filter: the device stays as it is (giving
+                    // it back and taking it again is two changes of its rate and a
+                    // long silence for each filter that is listened to), and what
+                    // plays is fed anew from where it is.
+                    let position = self.position_ms();
+                    self.start_current(position, true);
                 }
             }
             Command::RetryOutput => {

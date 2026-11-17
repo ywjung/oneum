@@ -287,7 +287,7 @@ fn dff_chunk<R: Read + Seek>(reader: &mut R) -> Result<([u8; 4], u64, u64), Play
 
 fn read_dsdiff<R: Read + Seek>(reader: &mut R, file_len: u64) -> Result<DsdInfo, PlaybackError> {
     let size: [u8; 8] = read_array(reader)?;
-    let form_end = (12 + u64::from_be_bytes(size)).min(file_len);
+    let form_end = u64::from_be_bytes(size).saturating_add(12).min(file_len);
     let form: [u8; 4] = read_array(reader)?;
     if &form != b"DSD " {
         return Err(unsupported("dff: not a DSD form"));

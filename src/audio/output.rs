@@ -56,6 +56,13 @@ impl OutputSettings {
             self.filter,
         )
     }
+
+    /// The part of them that decides how the device itself is opened (its rate, who
+    /// else may use it). The filter is not of it: a track is turned into the same
+    /// rate with any of them.
+    pub fn of_the_device(&self) -> (bool, bool, bool) {
+        (self.match_sample_rate, self.exclusive, self.upsample)
+    }
 }
 
 /// The highest rate upsampling goes to.
@@ -802,5 +809,24 @@ mod tests {
             serde_json::from_str::<OutputSettings>("{}").expect("parses"),
             settings
         );
+    }
+    /// Another filter is another stream, on the same device.
+    #[test]
+    fn the_filter_is_of_the_stream_and_not_of_the_device() {
+        let sharp = OutputSettings {
+            upsample: true,
+            ..OutputSettings::default()
+        };
+        let slow = OutputSettings {
+            filter: super::super::upsample::Filter::Slow,
+            ..sharp
+        };
+        assert_ne!(sharp.of_the_stream(), slow.of_the_stream());
+        assert_eq!(sharp.of_the_device(), slow.of_the_device());
+        let exclusive = OutputSettings {
+            exclusive: true,
+            ..sharp
+        };
+        assert_ne!(sharp.of_the_device(), exclusive.of_the_device());
     }
 }

@@ -495,10 +495,20 @@ impl TrackDecoder {
         file: super::remote::RemoteFile,
         budget: &std::sync::Arc<super::source::Budget>,
     ) -> Result<(Self, Option<super::source::LoadCompletion>), PlaybackError> {
+        let (decoder, kept) = Self::open_remote_keeping(file, budget)?;
+        Ok((decoder, kept.map(|file| file.completion())))
+    }
+
+    /// [`TrackDecoder::open_remote_within`], with a handle to the file in memory
+    /// where it was taken there (for whoever opens the same track again).
+    pub fn open_remote_keeping(
+        file: super::remote::RemoteFile,
+        budget: &std::sync::Arc<super::source::Budget>,
+    ) -> Result<(Self, Option<super::source::FileInMemory>), PlaybackError> {
         match file.into_memory(budget) {
             Ok(in_memory) => {
-                let completion = in_memory.completion();
-                Ok((Self::open_in_memory(in_memory)?, Some(completion)))
+                let kept = in_memory.share();
+                Ok((Self::open_in_memory(in_memory)?, Some(kept)))
             }
             Err(file) => {
                 let name = file.name();
