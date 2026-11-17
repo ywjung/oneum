@@ -43,7 +43,7 @@ cleanup() {
   for p in $DAV_PIDS; do kill "$p" 2>/dev/null || true; done
   $ADB shell am force-stop $PKG >/dev/null 2>&1 || true
   $ADB uninstall $PKG >/dev/null 2>&1 || true
-  $ADB shell rm -rf "$REMOTE" "$REMOTE-room.wav" >/dev/null 2>&1 || true
+  $ADB shell rm -rf "$REMOTE" "$REMOTE-room" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -212,10 +212,12 @@ check v2.json 'p["player_view"] == "Lyrics"' "the lyrics take the cover's place"
 # Lyrics from the internet, while the lyrics of a song without any are in view. (The
 # emulator reaches this computer at 10.0.2.2.)
 lyrics_checks 10.0.2.2 0.0.0.0 "$OUT"
-# (Beside the music folder, not in it: the library would take it for a song.)
+# (In a folder beside the music folder, not in it: the library would take it for a
+# song.)
 room_file "$WORK/room.wav"
-$ADB push "$WORK/room.wav" "$REMOTE-room.wav" >/dev/null
-room_checks "$REMOTE-room.wav"
+$ADB shell mkdir -p "$REMOTE-room"
+$ADB push "$WORK/room.wav" "$REMOTE-room/room.wav" >/dev/null
+room_checks "$REMOTE-room/room.wav"
 $ADB shell input keyevent KEYCODE_BACK
 ui 'wait 700' 'dump p7.json'
 check p7.json 'not p["player_open"] and d["state"] == "Playing"' "Back puts the player away and the music plays on"

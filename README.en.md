@@ -17,10 +17,15 @@ The name is the Korean word **온음** ("on-eum"): a whole, unaltered sound, and
 - File check: damage (a FLAC is compared with the MD5 it carries), dynamic range (DR), true peak. Statistics (time listened per period, most played artists, albums, songs and genres). Play history and playlists can be brought over from an Apple Music library.
 - Volume leveling (ReplayGain): the file's tags are used, and songs without tags are measured by the app (EBU R 128). Music files are never changed.
 - Meter deck: analogue VU meters for left and right (needles that move to the standard, PEAK lamps), a 36-band spectrum between them, and the source and output path.
+- A WebDAV share of a NAS added as a network folder (the password is kept only in the system's store for passwords; a certificate the NAS made itself is trusted by its fingerprint).
 - Media servers of the same network (DLNA/UPnP): finding them or adding one by its address, looking through their folders, playing from them into memory as the music arrives. The network is used only when that view is opened
 - A ten-band equalizer (12 presets and your own), headphone correction (profiles for 35 widely used headphones, and correction files such as AutoEq's `ParametricEQ.txt`), headphone crossfeed, and a signal path that lists, in order, what the app does between the file and the device.
 - Listen Again (recently added, most played, not heard for long), lyrics (tags and `.lrc`, followed line by line when timed), credits and work information from the tags, a genre view, other versions of the same song, and radio (when the queue ends, similar songs from the library follow).
 - The user guide is inside the app (Help → OnEum User Guide), in Korean and English.
+- Playback speed (0.5× to 2× at the song's own pitch), crossfade between songs, a section repeated (A–B), ratings.
+- Room correction (optional): an impulse response made by measuring the room is imported and applied by a convolution that adds no delay.
+- Upsampling (optional): the device runs at the highest whole multiple of the song's sample rate it offers, with a choice of filter (sharp, slow, minimum phase).
+- Lyrics from the internet (optional, off unless switched on): for songs whose file has no synced lyrics, looked up on LRCLIB by the song's title, artist, album and length, and nothing else.
 - Optional output quality settings: set the device to the song's sample rate and play without resampling, exclusive output, memory playback. Dither is added only where an integer device needs it.
 - Where resampling is needed it is flat to 20 kHz (±0.001 dB; the measurements are in docs/ARCHITECTURE.md), and peaks above full scale are held down for that moment instead of being clipped (peak protection).
 - Drag songs and albums to playlists and the queue; select, play and tidy with the keyboard alone; type to find a song.
