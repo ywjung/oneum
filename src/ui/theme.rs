@@ -16,6 +16,26 @@ pub fn accent(dark: bool) -> Color32 {
     }
 }
 
+/// The colour of what is done to the sound because the device needs it (a conversion
+/// of the sample rate, of the channels, dither): the signal path and the guide's
+/// diagrams.
+pub fn conversion(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(0x5C, 0xC8, 0xB4)
+    } else {
+        Color32::from_rgb(0x1F, 0x8F, 0x7C)
+    }
+}
+
+/// The colour of what steps in only when it has to (peak protection).
+pub fn protection(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(0xE6, 0xB4, 0x5A)
+    } else {
+        Color32::from_rgb(0xB0, 0x78, 0x10)
+    }
+}
+
 /// Where [`touch`] is kept in the context's data.
 const TOUCH: &str = "oneum-touch";
 

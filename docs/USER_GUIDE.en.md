@@ -49,6 +49,19 @@
 - When you start OnEum again, the queue and the position you were at come back. Nothing plays until you press play.
 - The play, previous and next keys on your keyboard and Now Playing in Control Center work as well.
 
+**When a song ends**, what follows is decided in the order below. Read from the top: the first line that applies is what happens (a violet dot is something that applies only while it is switched on).
+
+```flow
+The song nears its end
++ Repeating a section (A–B) :: At the end of the section (B) it goes back to its beginning (A). The song does not end
++ Stop After Current Song :: Playback stops after this song. The next one is ready and waits
++ Repeat One :: The same song again, from its beginning
+The next song in the queue :: With shuffle, the next one of the shuffled order. Songs of one album follow without a gap; with crossfade on, others overlap
++ Repeat All :: After the last song of the queue, the first one (shuffled anew with shuffle on)
++ Radio :: With repeat off, five fitting songs were added to the end of the queue when the last song started, and playback goes on
+Stop :: With nothing to follow, playback stops. The last song stays, and Play starts it from its beginning
+```
+
 ## Song Lists
 - Click a column title to sort by it. Click again to reverse, and once more for the original order (artist → album → track number).
 - Select several songs with ⌘-click or ⇧-click; ⌘A selects all. Move with ↑↓ and extend or shrink the selection with ⇧↑↓. Home/End and Page Up/Down work too.
@@ -129,11 +142,31 @@ Open it with the ⓘ button at the top right or with ⌘I. It shows the song tha
 ## Signal Path
 The **Signal Path** in the Song Info panel shows, in order, what the app does to the song that is playing on its way from the file to the output device. For example: `Source FLAC · 44,100 Hz · 16 bit → Resampling 44,100 → 48,000 Hz → Equalizer Rock → Output MacBook Pro Speakers · 48,000 Hz`.
 - The word at the top right sums it up. **Unchanged**: the app does not change the samples. **Adjusted**: features you switched on, such as volume leveling, the equalizer, crossfeed or the app volume, are changing the sound. **Converted**: the sample rate, channels or bit depth are being converted for this device. Point at the word for an explanation.
-- The color of the dot tells the kind of step: violet for adjustments you switched on, teal for conversions for the device, amber for peak protection.
-- The steps that can appear: DSD to PCM, channel mapping (mono or 5.1/7.1 files to stereo), volume leveling, resampling, equalizer, headphone correction, crossfeed, room correction, crossfade, playback speed, peak protection, app volume and dither.
+- The color of the dot tells the kind of step: violet for adjustments you switched on, teal for conversions for the device, amber for peak protection. The diagrams of this guide use the same colors, and a hollow ring is a step that is always there.
 - **Peak protection** means the song has moments above full scale (0 dBFS), and the level was lowered slightly for just those moments so that the sound is not clipped and distorted. Songs without such moments are left alone.
 - **Dither** means a very small noise was added to prevent the distortion that rounding causes when playing to a 16- or 24-bit device. It is not added when the samples go out as they are.
 - "Unchanged" is about what happens inside the app. What comes after it — the operating system, the driver, the DAC — the app cannot see.
+
+**The order the sound passes through** is always the one below. Only the steps that apply appear in the signal path; the others are skipped.
+
+```flow
+File :: Read from the disk or the server (from memory, with Memory Playback on)
+Decoding :: The compressed data becomes samples. Lossless formats give the samples of the original
+~ DSD to PCM :: DSD files only
+~ Channel mapping :: Mono and 5.1/7.1 files only, to stereo
++ Volume leveling :: Each song is turned up or down by its own amount (see "Volume Leveling")
+~ Resampling · upsampling :: Only when the song's sample rate is not the output device's (see "Output Quality")
++ Playback speed :: At any speed but 1×
++ Crossfade :: The end of one song overlaps the beginning of the next. From here on the songs are one continuous sound
++ Equalizer :: The tone you chose
++ Headphone correction :: The filter that corrects your headphones
++ Crossfeed :: Mixes a little of left and right for headphones
++ Room correction :: The filter that corrects room and speakers. The last thing done to the sound
+! Peak protection :: Only at moments above full scale, and only for those moments
++ App volume :: Below 100%
+~ Dither :: Only when changed samples go to a 16- or 24-bit device
+Output device :: What comes after it — the operating system, the driver, the DAC — the app cannot see
+```
 
 ## Volume Leveling
 Songs are recorded at different loudness; leveling saves you from reaching for the volume all the time. Switch it on in Settings → Playback → **Volume Leveling (ReplayGain)**. It is off at first.
@@ -150,6 +183,18 @@ Songs are recorded at different loudness; leveling saves you from reaching for t
   - **Values Measured by the App → Clear** removes them all (analyze again to get them back). Songs that could not be read are remembered and passed over by later runs; they are tried again when the file changes, when the app starts again, or after Clear.
 - Tags written by older programs (mp3gain and the like) were measured in another way, so next to songs the app measured they may sound 1 to 2 dB different. Songs with tags always follow their tags.
 - Whether leveling is applied is shown as a "Volume leveling" step in the song's **Signal Path**. The VU meter shows the leveled level too.
+
+**How much a song is leveled** is decided in the order below.
+
+```flow
+Volume leveling is on :: When it is off, this is the end: nothing is done
+The file's ReplayGain tags :: A value that is in the tags is always the one used
+Values measured by the app :: Only for values the tags lack, in songs that Analyze Songs Without Tags has measured
+The value for the mode :: Track takes the song's value (the album's if there is none), Album the album's (the song's if there is none). A song with no value at all plays as it is
++ Pre-amp :: Added to the value
++ Prevent clipping :: Turns the song up only as far as its loudest moment stays below full scale
+! Peak protection :: Moments that still go above are held down, for just those moments
+```
 
 ## Equalizer (⌘E)
 Open it with the slider button at the top, **View → Equalizer…**, or **Equalizer → Open** in Settings → Playback. The button lights up in the accent color while the equalizer is changing the sound.
@@ -203,6 +248,16 @@ Options for listening through a DAC or good headphones (Settings → Playback). 
 | **Memory Playback** | Loads the file being played and the next one into memory ahead of time. Playback goes on even if an external drive goes to sleep or a network folder slows down. | Uses as much memory as the files being played (at most two, the next one included). Files larger than 1 GB are read from the disk as usual. |
 | **Upsampling** | Raises each song to the highest whole multiple of its sample rate the device offers (×8, ×4 or ×2, up to 384 kHz). A 44.1 kHz song becomes 352.8 or 176.4 kHz, a 48 kHz song 384 or 192 kHz. If the device offers no whole multiple, it is set to the song's own rate. | Nothing is added to the sound (the app does what the DAC would otherwise do). Works only on macOS, and there is a short break while the device changes between songs of the two rate families. |
 | **Upsampling Filter** | Chooses the filter a song is raised with when the output runs at a whole multiple of its sample rate. **Sharp**: flat to the top of the band with nothing left above it, but it rings for a while before and after anything sudden (the setting at first). **Slow**: rings for under a millisecond, rolls off gently from 18 kHz and leaves a little just above the band. **Minimum Phase**: flat to 20 kHz, and all of its ringing comes after the sound. | Conversions that are not a whole multiple (44.1 → 48 kHz and the like) always use the sharp one. What a song is being raised with is shown in the signal path of Song Info. |
+
+**The output device's sample rate** is decided in the order below. Read from the top: the first option that is on decides.
+
+```flow
+The song's sample rate :: For example 44,100 Hz
++ Upsampling :: The device is set to the highest whole multiple it offers (8, 4 or 2 times, up to 384 kHz). Without such a rate, to the song's own
++ Match the Song's Sample Rate :: The device is set to the song's sample rate. If it does not offer that rate: a whole multiple of it, else the next higher one, else the device's highest
+~ The device as it is set :: With both off the device is left alone, and the sound goes out at the rate it is set to
+Output :: Without conversion when the song's rate is the device's, resampled otherwise (with the chosen upsampling filter when the rate is a whole multiple)
+```
 
 - If a device setting was changed, it is **put back and exclusive access is released** when the queue ends, playback stops, or playback stays paused for more than 30 seconds. The same happens when you quit.
 - How a song is being played right now can be seen in the **Signal Path** of the Song Info panel (⌘I) and in **Output** and **Processing** on the meter deck. For example: `Output DAC · 96,000 Hz · 24 bit · exclusive`, `Processing: None`.

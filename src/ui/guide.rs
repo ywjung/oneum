@@ -326,6 +326,29 @@ mod tests {
             .collect()
     }
 
+    /// The diagrams of a document: for each, the kinds of its steps in order.
+    fn flows(blocks: &[Block]) -> Vec<Vec<markdown::StepKind>> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Flow(steps) => Some(steps.iter().map(|step| step.kind).collect()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What a diagram says, step by step (a step's note may be left out).
+    fn flow_texts(steps: &[markdown::Step]) -> Vec<String> {
+        let mut texts = Vec::new();
+        for step in steps {
+            texts.push(plain(&step.title));
+            if !step.note.is_empty() {
+                texts.push(plain(&step.note));
+            }
+        }
+        texts
+    }
+
     /// Tables whose rows all have as many cells as their head.
     fn tables(blocks: &[Block]) -> usize {
         blocks
@@ -434,8 +457,14 @@ mod tests {
                     Block::Table { head, rows } => {
                         texts.extend(head.iter().chain(rows.iter().flatten()).map(|c| plain(c)))
                     }
+                    Block::Flow(steps) => texts.extend(flow_texts(steps)),
                 }
             }
+            assert_eq!(
+                flows(blocks).len(),
+                4,
+                "what follows a song, the way of the sound, the leveling's value, the output's rate"
+            );
             for text in &texts {
                 assert!(!text.trim().is_empty(), "empty block");
                 assert!(
@@ -506,8 +535,14 @@ mod tests {
                     Block::Title(t) | Block::Heading(t) => texts.push(t.clone()),
                     Block::Paragraph(s) | Block::Item { text: s, .. } => texts.push(plain(s)),
                     Block::Table { .. } => panic!("the phone guide has no tables"),
+                    Block::Flow(steps) => texts.extend(flow_texts(steps)),
                 }
             }
+            assert_eq!(
+                flows(&blocks).len(),
+                2,
+                "what follows a song, the way of the sound"
+            );
             for text in &texts {
                 assert!(!text.trim().is_empty(), "empty block");
                 assert!(
@@ -526,6 +561,11 @@ mod tests {
         }
         for android in [false, true] {
             assert_eq!(outline(Lang::En, android), outline(Lang::Ko, android));
+            // The diagrams too: as many, with the same kinds of steps in the same order.
+            assert_eq!(
+                flows(&parse(phone_guide_markdown(Lang::En, android))),
+                flows(&parse(phone_guide_markdown(Lang::Ko, android)))
+            );
         }
     }
 
@@ -556,6 +596,8 @@ mod tests {
         };
         assert_eq!(outline(Lang::En), outline(Lang::Ko));
         assert_eq!(sections(Lang::En).len(), sections(Lang::Ko).len());
+        // The diagrams too: as many, with the same kinds of steps in the same order.
+        assert_eq!(flows(guide(Lang::En)), flows(guide(Lang::Ko)));
         // Shortcuts are the same keys.
         let keys = |lang: Lang| -> Vec<String> {
             guide(lang)

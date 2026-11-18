@@ -45,6 +45,19 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - A phone call pauses the music, and it goes on when the call is over. When headphones are pulled out the music pauses rather than coming out of the speaker.
 - Loudness is set with the phone's volume buttons. **App volume** in the player turns down OnEum's own sound only.
 
+**When a song ends**, what follows is decided in the order below. Read from the top: the first line that applies is what happens (a filled dot is something that applies only while it is switched on).
+
+```flow
+The song nears its end
++ Repeating a section (A–B) :: At the end of the section (B) it goes back to its beginning (A). The song does not end
++ Stop After Current Song :: Playback stops after this song
++ Repeat One :: The same song again, from its beginning
+The next song in the queue :: With shuffle, the next one of the shuffled order. Songs of one album follow without a gap; with crossfade on, others overlap
++ Repeat All :: After the last song of the queue, the first one
++ Radio :: With repeat off, five fitting songs are added to the end of the queue, and playback goes on
+Stop :: With nothing to follow, playback stops
+```
+
 ## Song lists
 - **Sort**: above the lists of Songs, Favorites, a genre, a folder and a smart playlist, **Sort** puts the songs in order of title, artist, album, year, length, play count, rating, date added, last played or format. Choosing the same one again turns the order round; **Default Order** brings the usual one back.
 - **Ratings**: under ⋯ of a song, press its rating (**No Rating** at first) to give it 1 to 5 stars; the stars in Song Info can be pressed too. Ratings are kept inside OnEum only, and files are not changed. **Sort** above a list can order by rating, and a search can ask for it: `rating:>=4`.
@@ -73,6 +86,29 @@ OnEum reads the music files on your phone where they are. Once, at the start, it
 - What plays is what the server gives as the original file: FLAC · WAV · AIFF · ALAC · AAC (MP4) · MP3 · Ogg Vorbis · Opus · WavPack · Monkey's Audio (APE) · DSD. A song is taken into memory as it arrives, and volume leveling (ReplayGain) is not applied to a server's songs.
 - **Network folders (WebDAV)**: a folder that a NAS shares over WebDAV can be looked through and played. In **Add a Network Folder…** enter the folder's address (like `https://nas.local:5006/music/`), a user name and a password, and press **Connect**. An added folder is remembered under "Network Folders"; a long press removes it from the list (and its password with it). Inside, folders and music files are shown as for a media server (a song's title is its file name), and the songs do not become part of the library.
 - **The password, and how safe the connection is**: the password is kept only in the phone, encrypted (the key is in the Android Keystore, where the app itself cannot read it). It is in neither the settings file, the log nor a file of the library's data. An `http://` address is not encrypted, so use an `https://` address if you can. If the NAS uses a certificate it made itself, the first connection shows the certificate's fingerprint: compare it with the one your NAS shows in its own settings and press **Trust and Connect**; from then on the app connects only while the server shows that certificate. SMB shares cannot be opened yet. If the NAS refuses the name and password, that password is not sent again for ten minutes (so that a wrong password sent with every song does not get this device blocked by the NAS): if you changed the password on the NAS, remove the folder from the list and add it again.
+
+## The order the sound passes through
+What OnEum does between the file and the sound that goes out is always in the order below. A filled dot is a step taken only in that case (violet: something switched on in Settings, teal: a conversion needed to send the sound out, amber: peak protection); with nothing switched on, the file's sound goes out as it is.
+
+```flow
+File :: Read from storage or from the server
+Decoding :: The compressed data becomes samples. DSD becomes PCM
+~ Channel mapping :: Mono and 5.1/7.1 files only, to stereo
++ Volume leveling :: Each song is turned up or down by its own amount
+~ Resampling · upsampling :: Only when the song's sample rate is not the output's
++ Playback speed :: At any speed but 1×
++ Crossfade :: The end of one song overlaps the beginning of the next
++ Equalizer :: The tone you chose
++ Headphone correction :: The filter that corrects your headphones
++ Crossfeed :: Mixes a little of left and right for headphones
++ Room correction :: The filter that corrects room and speakers
+! Peak protection :: Only at moments above full scale, and only for those moments
++ App volume :: Below 100%
+Output :: What comes after it is up to the system and to earphones, speakers or a DAC
+```
+
+- The steps that the song now playing really passes are shown at the bottom of the player's **VU meter** screen.
+- Volume leveling takes its values from the file's ReplayGain tags first; only values the tags lack are filled in from what the app measured (**Analyze Songs Without Tags** under Settings → Playback). A song with no value at all plays as it is.
 
 ## Settings
 - **Library**: Rescan, Open Music Files, importing a playlist, the music folders (adding, removing, and **Show** in the Files app), and the **file check**: it reads every music file to the end and finds damage, dynamic range and true peak. **Show Damaged** lists the damaged files, if there are any.

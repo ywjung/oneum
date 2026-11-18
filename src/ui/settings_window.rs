@@ -1913,6 +1913,7 @@ mod tests {
                     .chain(rows.iter().flatten())
                     .map(|c| plain(c))
                     .collect(),
+                Block::Flow(_) => panic!("the notices have no diagrams"),
             };
             for text in texts {
                 assert!(

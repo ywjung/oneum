@@ -3,8 +3,9 @@
 //! Two documents are compiled into the app and shown inside it: the user guide
 //! (`guide.rs`) and the open source notices (Settings). Only what they use is
 //! understood: a title, section headings, paragraphs, bulleted and numbered lists
-//! (nested by indentation), tables, **bold**, `code`, and a web address alone in a table
-//! cell, which becomes a link.
+//! (nested by indentation), tables, **bold**, `code`, a web address alone in a table
+//! cell, which becomes a link, and a diagram of steps that follow one another (a
+//! fenced block named `flow`, see [`Step`]).
 use super::{theme, widgets};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, Align, FontId, Layout, RichText, Sense};
@@ -15,6 +16,29 @@ pub(super) struct Span {
     pub text: String,
     pub bold: bool,
     pub code: bool,
+}
+
+/// Why a step of a diagram is there. Its dot has the colour that kind of step has in
+/// the signal path of the song that plays (`panels::signal_path_block`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StepKind {
+    /// Always there.
+    Plain,
+    /// Only where the listener switched it on (the line begins with `+`).
+    Chosen,
+    /// What the device needs (`~`).
+    Conversion,
+    /// Steps in only when it has to (`!`).
+    Protection,
+}
+
+/// One step of a diagram: a line of a `flow` block, `title :: note` behind the mark of
+/// its kind. The note may be left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Step {
+    pub kind: StepKind,
+    pub title: Vec<Span>,
+    pub note: Vec<Span>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +58,32 @@ pub(super) enum Block {
         head: Vec<Vec<Span>>,
         rows: Vec<Vec<Vec<Span>>>,
     },
+    /// A diagram: steps that follow one another, drawn as a chain from the first down
+    /// to the last.
+    Flow(Vec<Step>),
+}
+
+/// The fence that begins a diagram, and the one that ends it.
+const FLOW_FENCE: &str = "```flow";
+const FENCE: &str = "```";
+
+/// A line of a diagram as a step.
+fn step(line: &str) -> Step {
+    let (kind, rest) = match line.split_at_checked(2) {
+        Some(("+ ", rest)) => (StepKind::Chosen, rest),
+        Some(("~ ", rest)) => (StepKind::Conversion, rest),
+        Some(("! ", rest)) => (StepKind::Protection, rest),
+        _ => (StepKind::Plain, line),
+    };
+    let (title, note) = match rest.split_once(" :: ") {
+        Some((title, note)) => (title, note),
+        None => (rest, ""),
+    };
+    Step {
+        kind,
+        title: spans(title.trim()),
+        note: spans(note.trim()),
+    }
 }
 
 /// Splits a line into styled runs: `**bold**` and `` `code` `` (no nesting inside code).
@@ -114,6 +164,21 @@ pub(super) fn parse(markdown: &str) -> Vec<Block> {
             blocks.push(Block::Heading(
                 trimmed.trim_start_matches('#').trim().to_string(),
             ));
+        } else if trimmed.starts_with(FLOW_FENCE) {
+            end_paragraph(&mut paragraph, &mut blocks);
+            let mut steps = Vec::new();
+            for next in lines.by_ref() {
+                let next = next.trim();
+                if next.starts_with(FENCE) {
+                    break;
+                }
+                if !next.is_empty() {
+                    steps.push(step(next));
+                }
+            }
+            if !steps.is_empty() {
+                blocks.push(Block::Flow(steps));
+            }
         } else if trimmed.starts_with('|') {
             end_paragraph(&mut paragraph, &mut blocks);
             let mut table = vec![table_cells(trimmed)];
@@ -177,8 +242,19 @@ pub(super) struct Look {
 
 /// Styled text ready to be laid out with wrapping.
 fn job(ui: &egui::Ui, spans: &[Span], size: f32, strong: bool) -> LayoutJob {
+    job_in(ui, spans, size, strong, ui.visuals().text_color())
+}
+
+/// [`job`] with the colour of its plain text given (what is said beside a thing is
+/// dimmer than the thing).
+fn job_in(
+    ui: &egui::Ui,
+    spans: &[Span],
+    size: f32,
+    strong: bool,
+    text_color: egui::Color32,
+) -> LayoutJob {
     let mut job = LayoutJob::default();
-    let text_color = ui.visuals().text_color();
     let strong_color = ui.visuals().strong_text_color();
     for span in spans {
         let format = if span.code {
@@ -250,6 +326,83 @@ fn table(ui: &mut egui::Ui, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>], size: f
             widgets::row_divider(ui);
             ui.add_space(3.0);
             row(ui, cells, false);
+        }
+    });
+}
+
+/// A diagram: the steps one under the other, each with a dot on a line that runs from
+/// the first step down to the last, with a small arrow between two steps. The dot of a
+/// step that is always there is a ring; the others are filled with the colour of
+/// their kind.
+fn flow(ui: &mut egui::Ui, steps: &[Step], size: f32) {
+    const GUTTER: f32 = 26.0;
+    const DOT: f32 = 4.5;
+    let dark = ui.visuals().dark_mode;
+    let dim = theme::dim(ui);
+    widgets::card(ui, |ui| {
+        ui.add_space(9.0);
+        let left = ui.cursor().left();
+        let mut dots: Vec<(egui::Pos2, StepKind)> = Vec::with_capacity(steps.len());
+        for step in steps {
+            let top = ui.cursor().top();
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(GUTTER);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add(egui::Label::new(job(ui, &step.title, size - 0.5, true)).wrap());
+                    if !step.note.is_empty() {
+                        let note = job_in(ui, &step.note, size - 1.5, false, dim);
+                        ui.add(egui::Label::new(note).wrap());
+                    }
+                });
+            });
+            // (Beside the middle of the title's first line.)
+            dots.push((egui::pos2(left + DOT + 3.0, top + size * 0.68), step.kind));
+            ui.add_space(8.0);
+        }
+        ui.add_space(1.0);
+        let painter = ui.painter();
+        let line = egui::Stroke::new(1.5, ui.visuals().widgets.noninteractive.bg_stroke.color);
+        for pair in dots.windows(2) {
+            let (from, to) = (pair[0].0, pair[1].0);
+            painter.line_segment(
+                [
+                    from + egui::vec2(0.0, DOT + 2.0),
+                    to - egui::vec2(0.0, DOT + 2.0),
+                ],
+                line,
+            );
+            // The way the steps go: a small arrowhead in the middle of the line, where
+            // the line is long enough for one.
+            if to.y - from.y > 2.0 * DOT + 14.0 {
+                let tip = egui::pos2(from.x, (from.y + to.y) / 2.0 + 2.5);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        tip,
+                        tip + egui::vec2(-3.5, -5.0),
+                        tip + egui::vec2(3.5, -5.0),
+                    ],
+                    line.color,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        for (at, kind) in dots {
+            match kind {
+                StepKind::Plain => {
+                    painter.circle_stroke(at, DOT - 0.5, egui::Stroke::new(1.5, dim));
+                }
+                StepKind::Chosen => {
+                    painter.circle_filled(at, DOT, theme::accent(dark));
+                }
+                StepKind::Conversion => {
+                    painter.circle_filled(at, DOT, theme::conversion(dark));
+                }
+                StepKind::Protection => {
+                    painter.circle_filled(at, DOT, theme::protection(dark));
+                }
+            }
         }
     });
 }
@@ -438,6 +591,11 @@ pub(super) fn show(
                 }
                 ui.add_space(8.0);
             }
+            Block::Flow(steps) => {
+                ui.add_space(2.0);
+                flow(ui, steps, look.body);
+                ui.add_space(8.0);
+            }
         }
     }
 }
@@ -448,6 +606,46 @@ mod tests {
 
     fn plain(spans: &[Span]) -> String {
         spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    /// A fenced block named `flow` is a diagram: a step to a line, its kind by the
+    /// mark in front, what is said of it behind two colons.
+    #[test]
+    fn a_flow_block_is_a_diagram_of_steps() {
+        let blocks = parse(
+            "앞 문단\n\n```flow\n파일 :: 디스크에서 **그대로**\n+ 이퀄라이저 :: 켰을 때\n\n~ 리샘플링\n! 피크 보호 :: 넘는 순간만\n```\n뒤 문단",
+        );
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+        let Block::Flow(steps) = &blocks[1] else {
+            panic!("not a diagram: {:?}", blocks[1]);
+        };
+        let kinds: Vec<StepKind> = steps.iter().map(|step| step.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                StepKind::Plain,
+                StepKind::Chosen,
+                StepKind::Conversion,
+                StepKind::Protection
+            ]
+        );
+        assert_eq!(plain(&steps[0].title), "파일");
+        assert_eq!(plain(&steps[0].note), "디스크에서 그대로");
+        assert!(steps[0].note.iter().any(|span| span.bold));
+        assert_eq!(plain(&steps[1].title), "이퀄라이저");
+        assert_eq!(plain(&steps[2].title), "리샘플링");
+        assert!(steps[2].note.is_empty(), "a step without a note");
+        assert!(matches!(&blocks[2], Block::Paragraph(text) if plain(text) == "뒤 문단"));
+        // A fence that is never closed takes the rest; an empty one is nothing.
+        assert!(
+            matches!(parse("```flow\n한 단계").as_slice(), [Block::Flow(steps)] if steps.len() == 1)
+        );
+        assert!(parse("```flow\n```").is_empty());
+        // A title that begins with a letter of several bytes is no mark.
+        let blocks = parse("```flow\n곡이 끝남\n```");
+        assert!(
+            matches!(blocks.as_slice(), [Block::Flow(steps)] if steps[0].kind == StepKind::Plain)
+        );
     }
 
     #[test]

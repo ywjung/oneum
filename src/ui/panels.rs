@@ -119,9 +119,11 @@ fn decibels(gain: f32) -> String {
     }
 }
 
-/// The stages in the order the audio passes them: channel mapping and volume leveling
-/// at the file's rate, then the rate conversion, the equalizer and peak protection in
-/// the decode thread, the app volume and dither in the output callback.
+/// The stages in the order the audio passes them (`audio::feed`): channel mapping and
+/// volume leveling at the file's rate, then the rate conversion, another speed and the
+/// crossfade between two songs, then what runs over the joined stream (the equalizer,
+/// the headphone correction, the crossfeed, the room correction, peak protection), all
+/// in the decode thread; the app volume and dither in the output callback.
 fn path_stages(input: &PathInputs) -> Vec<Stage> {
     let s = input.s;
     let mut stages = Vec::new();
@@ -186,6 +188,18 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
             },
         );
     }
+    // Each song at its own speed, then the end of one mixed with the beginning of the
+    // next: both before what runs over the joined stream (the filters that follow).
+    if let Some(speed) = &input.speed {
+        add(StageKind::Adjustment, s.info_proc_speed, speed.clone());
+    }
+    if let Some(between) = &input.crossfade {
+        add(
+            StageKind::Adjustment,
+            s.info_proc_crossfade,
+            between.clone(),
+        );
+    }
     if let Some(setting) = &input.equalizer {
         add(StageKind::Adjustment, s.info_proc_eq, setting.clone());
     }
@@ -205,16 +219,6 @@ fn path_stages(input: &PathInputs) -> Vec<Stage> {
     }
     if let Some(room) = &input.room {
         add(StageKind::Adjustment, s.info_proc_room, room.clone());
-    }
-    if let Some(between) = &input.crossfade {
-        add(
-            StageKind::Adjustment,
-            s.info_proc_crossfade,
-            between.clone(),
-        );
-    }
-    if let Some(speed) = &input.speed {
-        add(StageKind::Adjustment, s.info_proc_speed, speed.clone());
     }
     if input.peak_protection {
         add(StageKind::Protection, s.info_proc_limiter, String::new());
@@ -442,12 +446,10 @@ fn other_versions(
 /// Colour of a stage's dot in the signal path.
 fn stage_color(ui: &Ui, kind: StageKind) -> egui::Color32 {
     let dark = ui.visuals().dark_mode;
-    match (kind, dark) {
-        (StageKind::Adjustment, _) => theme::accent(dark),
-        (StageKind::Conversion, true) => egui::Color32::from_rgb(0x5C, 0xC8, 0xB4),
-        (StageKind::Conversion, false) => egui::Color32::from_rgb(0x1F, 0x8F, 0x7C),
-        (StageKind::Protection, true) => egui::Color32::from_rgb(0xE6, 0xB4, 0x5A),
-        (StageKind::Protection, false) => egui::Color32::from_rgb(0xB0, 0x78, 0x10),
+    match kind {
+        StageKind::Adjustment => theme::accent(dark),
+        StageKind::Conversion => theme::conversion(dark),
+        StageKind::Protection => theme::protection(dark),
     }
 }
 
