@@ -1139,6 +1139,8 @@ impl OneumApp {
         let mut remove = false;
         // (begin anew, begin from the selected profile)
         let mut edit = (false, false);
+        let mut toggle_values = false;
+        let values_open = self.correction_values_open;
         let editing = self.peq_edit.is_some();
         widgets::card(ui, |ui| {
             let desc = summary.as_deref().unwrap_or(s.correction_none_desc);
@@ -1228,11 +1230,36 @@ impl OneumApp {
                         .clicked();
                 },
             );
+            widgets::row_divider(ui);
+            widgets::setting_row(
+                ui,
+                s.correction_values_row,
+                Some(s.correction_values_desc),
+                true,
+                |ui| {
+                    let label = if values_open {
+                        s.correction_values_hide
+                    } else {
+                        s.correction_values_show
+                    };
+                    // (While a profile is edited its values are in the editor.)
+                    toggle_values = ui
+                        .add_enabled(
+                            !editing && self.settings.correction.is_some(),
+                            egui::Button::new(label).min_size(egui::vec2(0.0, 26.0)),
+                        )
+                        .clicked();
+                },
+            );
         });
+        if toggle_values {
+            self.correction_values_open = !values_open;
+        }
         if edit.0 || edit.1 {
             self.peq_edit_begin(edit.1);
         }
         self.correction_editor(ui, rate);
+        self.correction_values(ui, rate);
         widgets::section_note(ui, s.correction_hint);
         // (Asked first: the bands of a profile that was made by hand are in no file.)
         if remove && let Some(name) = &before {
@@ -1247,6 +1274,85 @@ impl OneumApp {
         if import {
             self.pick_correction_file();
         }
+    }
+
+    /// The profile whose values are shown now: the chosen one, where the listener asked
+    /// to see its values and no profile is being edited (the editor shows its own).
+    pub(super) fn correction_values_shown(&self) -> Option<&crate::audio::PeqProfile> {
+        if !self.correction_values_open || self.peq_edit.is_some() {
+            return None;
+        }
+        self.settings.active_correction()
+    }
+
+    /// The values of the chosen correction profile, to be read: its response as a
+    /// curve, the preamp, and a line for each band as the profile has it (kind,
+    /// frequency, gain, Q). Those of the profiles that come with the app too, which
+    /// could be seen nowhere else. Nothing here until the listener asks for it.
+    fn correction_values(&self, ui: &mut egui::Ui, rate: u32) {
+        let s = self.s();
+        let Some(profile) = self.correction_values_shown() else {
+            return;
+        };
+        let touch = theme::touch(ui.ctx());
+        let dim = theme::dim(ui);
+        ui.add_space(10.0);
+        widgets::section_title(
+            ui,
+            &format!("{} · {}", s.correction_values_row, profile.name),
+        );
+        widgets::card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.add_space(6.0);
+            // What the preamp and the bands do together, as the player applies them
+            // (a preamp that had to give way shows beside the one in the profile).
+            let applied = profile.clone().sanitized();
+            let (curve, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), if touch { 130.0 } else { 150.0 }),
+                egui::Sense::hover(),
+            );
+            super::equalizer::paint_response(ui, curve, true, |hz| applied.response_db(rate, hz));
+            let size = if touch { 15.0 } else { 13.0 };
+            let number = |text: String| RichText::new(text).font(egui::FontId::monospace(size));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(s.correction_preamp).color(dim));
+                ui.label(number(gain_text(profile.preamp_db)));
+                if applied.preamp_db < profile.preamp_db - 0.05 {
+                    ui.label(
+                        RichText::new(format!("→ {}", gain_text(applied.preamp_db)))
+                            .small()
+                            .color(dim),
+                    );
+                }
+            });
+            egui::Grid::new("correction-values")
+                .num_columns(5)
+                .spacing(egui::vec2(if touch { 14.0 } else { 22.0 }, 6.0))
+                .show(ui, |ui| {
+                    let head = |ui: &mut egui::Ui, text: &str| {
+                        ui.label(RichText::new(text).small().color(dim));
+                    };
+                    head(ui, "#");
+                    head(ui, s.correction_col_kind);
+                    head(ui, s.correction_col_hz);
+                    head(ui, s.correction_col_gain);
+                    head(ui, "Q");
+                    ui.end_row();
+                    for (at, band) in profile.filters.iter().enumerate() {
+                        let [kind, hz, gain, q] = band_texts(s, band);
+                        ui.label(RichText::new((at + 1).to_string()).color(dim));
+                        ui.label(RichText::new(kind).size(size));
+                        // (Each number as wide as the widest of its column, so that
+                        // the digits stand under one another.)
+                        ui.label(number(format!("{hz:>9}")));
+                        ui.label(number(format!("{gain:>8}")));
+                        ui.label(number(q));
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(6.0);
+        });
+        widgets::section_note(ui, s.correction_values_hint);
     }
 
     /// The correction profile that is being made or changed on screen: its name, its
@@ -1818,6 +1924,39 @@ impl OneumApp {
     }
 }
 
+/// A gain as it is read: one decimal, with its sign ("+6.6 dB", "-4.5 dB", "0.0 dB").
+pub(super) fn gain_text(db: f32) -> String {
+    // (What rounds to nothing has no sign.)
+    if db.abs() < 0.05 {
+        "0.0 dB".to_string()
+    } else {
+        format!("{db:+.1} dB")
+    }
+}
+
+/// A band of a correction profile as it is read in the list of the profile's values:
+/// its kind, frequency, gain and Q.
+pub(super) fn band_texts(s: &crate::i18n::Strings, band: &crate::audio::PeqFilter) -> [String; 4] {
+    use crate::audio::PeqKind;
+    let kind = match band.kind {
+        PeqKind::Peak => s.correction_kind_peak,
+        PeqKind::LowShelf => s.correction_kind_low,
+        PeqKind::HighShelf => s.correction_kind_high,
+    };
+    // A whole number of Hz as files give it, with a decimal only where one is there.
+    let hz = if (band.hz - band.hz.round()).abs() < 0.05 {
+        format!("{} Hz", crate::i18n::group_digits(band.hz.round() as usize))
+    } else {
+        format!("{:.1} Hz", band.hz)
+    };
+    [
+        kind.to_string(),
+        hz,
+        gain_text(band.gain_db),
+        format!("{:.2}", band.q),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1825,6 +1964,42 @@ mod tests {
 
     fn plain(spans: &[Span]) -> String {
         spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    /// A band's values as the list of a profile's values shows them: the kind by its
+    /// name, the frequency with grouped digits (a decimal only where there is one),
+    /// the gain with its sign and one decimal, Q with two.
+    #[test]
+    fn the_values_of_a_band_as_they_are_read() {
+        use crate::audio::{PeqFilter, PeqKind};
+        let s = crate::i18n::Lang::En.strings();
+        let band = |kind, hz, gain_db, q| PeqFilter {
+            kind,
+            hz,
+            gain_db,
+            q,
+        };
+        assert_eq!(
+            band_texts(s, &band(PeqKind::LowShelf, 105.0, 6.6, 0.7)),
+            ["Low Shelf", "105 Hz", "+6.6 dB", "0.70"]
+        );
+        assert_eq!(
+            band_texts(s, &band(PeqKind::Peak, 12_500.0, -4.5, 2.5)),
+            ["Peak", "12,500 Hz", "-4.5 dB", "2.50"]
+        );
+        assert_eq!(
+            band_texts(s, &band(PeqKind::HighShelf, 62.5, 0.0, 1.414)),
+            ["High Shelf", "62.5 Hz", "0.0 dB", "1.41"]
+        );
+        let ko = crate::i18n::Lang::Ko.strings();
+        assert_eq!(
+            band_texts(ko, &band(PeqKind::Peak, 1_000.0, 1.0, 1.0))[0],
+            "피크"
+        );
+        // What rounds to nothing has no sign.
+        assert_eq!(gain_text(-0.04), "0.0 dB");
+        assert_eq!(gain_text(-6.2), "-6.2 dB");
+        assert_eq!(gain_text(3.0), "+3.0 dB");
     }
 
     #[test]

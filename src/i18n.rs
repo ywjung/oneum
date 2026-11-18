@@ -500,6 +500,14 @@ strings! {
     correction_kind_low: "로우 셸프", "Low Shelf";
     correction_kind_high: "하이 셸프", "High Shelf";
     correction_save: "저장", "Save";
+    correction_values_row: "프로필 값", "Profile Values";
+    correction_values_desc: "고른 프로필의 응답 곡선, 프리앰프와 밴드별 값을 봅니다.", "Shows the chosen profile's response, its preamp and the values of each band.";
+    correction_values_show: "보기", "Show";
+    correction_values_hide: "숨기기", "Hide";
+    correction_col_kind: "종류", "Type";
+    correction_col_hz: "주파수", "Frequency";
+    correction_col_gain: "게인", "Gain";
+    correction_values_hint: "프로필에 적힌 값 그대로입니다. 곡선은 프리앰프와 밴드를 모두 합친 응답이고, 고치려면 \"편집\"을 누릅니다.", "The values as the profile has them. The curve is the response of the preamp and all bands together; press \"Edit\" to change them.";
     correction_new_name: "내 보정", "My Correction";
     correction_copy_mark: "내 값", "mine";
     correction_edit_hint: "바꾸는 대로 소리에 적용됩니다. 저장하면 \"불러온 프로필\" 묶음에 들어가고, 취소하면 전에 고른 프로필로 돌아갑니다. 밴드를 올려 소리가 원래보다 12dB 넘게 커지면 프리앰프가 그만큼 스스로 내려갑니다(곡선에 그대로 보입니다). 밴드는 32개까지입니다.", "What you change is heard at once. Saving puts the profile among the imported ones; cancelling goes back to the profile that was selected before. Where bands would make the sound more than 12 dB louder than it was, the preamp gives way by as much (the curve shows it). Up to 32 bands.";

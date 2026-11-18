@@ -436,6 +436,9 @@ pub struct OneumApp {
     eq_open: bool,
     /// A correction profile that is being made or changed on screen.
     peq_edit: Option<PeqEdit>,
+    /// The values of the chosen correction profile are shown under the correction card
+    /// of Settings (`settings_window::correction_values`).
+    correction_values_open: bool,
     /// The mini player is shown (the window is as small as the player bar and stays
     /// above other windows): the size the full window had, to go back to.
     mini: Option<egui::Vec2>,
@@ -625,6 +628,7 @@ impl OneumApp {
             rediscover: lists::Rediscover::default(),
             eq_open: false,
             peq_edit: None,
+            correction_values_open: false,
             mini: None,
             mini_toggle: false,
             eq_name: String::new(),
@@ -3078,6 +3082,11 @@ impl OneumApp {
                         self.core.player.send(Command::SetCorrection(None));
                         continue;
                     }
+                    // The button that shows or hides the chosen profile's values.
+                    if id == "correction_values" {
+                        self.correction_values_open = !self.correction_values_open;
+                        continue;
+                    }
                     // The buttons of the loudness card in Settings.
                     match id.as_str() {
                         "loudness_start" => {
@@ -3257,6 +3266,19 @@ impl OneumApp {
                 .as_ref()
                 .map(|edit| (edit.profile.name.clone(), edit.profile.filters.len()))
         );
+        // The values of the chosen profile as Settings lists them (where they are shown).
+        state["correction_values"] =
+            serde_json::json!(self.correction_values_shown().map(|profile| {
+                serde_json::json!({
+                    "name": profile.name,
+                    "preamp": settings_window::gain_text(profile.preamp_db),
+                    "bands": profile
+                        .filters
+                        .iter()
+                        .map(|band| settings_window::band_texts(self.s(), band))
+                        .collect::<Vec<_>>(),
+                })
+            }));
         state["current_rating"] = serde_json::json!(
             p.current
                 .and_then(|c| self.snapshot.get(c.track_id))

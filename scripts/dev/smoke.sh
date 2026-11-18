@@ -370,13 +370,17 @@ ui "menu correction_import $WORK/unsupported.txt" 'wait 300' 'dump hc0.json' \
    'menu correction_off' 'wait 400' 'dump hc2.json' \
    'menu correction_select Sennheiser HD 800 S' 'wait 400' 'dump hc3.json' \
    'menu correction_select No Such Headphones' 'wait 300' 'dump hc4.json' \
-   'menu correction_off' 'wait 300' 'dump hc5.json'
-check hc0.json 'd["correction"] == {"selected": None, "applied": None, "profiles": [], "builtin": 35}' "a file with a filter that is not supported is not imported"
-check hc1.json 'd["correction"] == {"selected": "Test Phones", "applied": "Test Phones", "profiles": [["Test Phones", 2]], "builtin": 35}' "a correction file is imported, named after the file, and applied"
+   'menu correction_values' 'wait 300' 'dump hv1.json' \
+   'menu correction_off' 'wait 300' 'dump hc5.json' 'menu correction_values' 'wait 200'
+check hc0.json 'd["correction"] == {"selected": None, "applied": None, "profiles": [], "builtin": 36}' "a file with a filter that is not supported is not imported"
+check hc1.json 'd["correction"] == {"selected": "Test Phones", "applied": "Test Phones", "profiles": [["Test Phones", 2]], "builtin": 36}' "a correction file is imported, named after the file, and applied"
 check hc2.json 'd["correction"]["applied"] is None and d["correction"]["profiles"] == [["Test Phones", 2]]' "…and can be switched off, the profile kept"
 check hc3.json 'd["correction"]["selected"] == "Sennheiser HD 800 S" and d["correction"]["applied"] == "Sennheiser HD 800 S" and d["correction"]["profiles"] == [["Test Phones", 2]]' "a built-in headphone profile is applied without being copied into the settings"
 check hc4.json 'd["correction"]["applied"] == "Sennheiser HD 800 S"' "a name that is no profile changes nothing"
-check hc5.json 'd["correction"]["applied"] is None' "…and the built-in profile can be switched off"
+# The values of a profile that comes with the app can be read (AutoEq's for this
+# headphone: ten bands, the first a low shelf at 105 Hz).
+check hv1.json 'd["correction_values"]["name"] == "Sennheiser HD 800 S" and d["correction_values"]["preamp"] == "-6.2 dB" and len(d["correction_values"]["bands"]) == 10 and d["correction_values"]["bands"][0][1:] == ["105 Hz", "+6.6 dB", "0.70"]' "the values of the chosen profile can be shown: preamp and bands as the profile has them"
+check hc5.json 'd["correction"]["applied"] is None and d["correction_values"] is None' "…and the built-in profile can be switched off (no values are shown then)"
 # A profile made on screen: begun anew (one flat band), two bands added (what is edited
 # is what is heard), kept among the user's own when saved; one that is given up leaves
 # the saved one selected.

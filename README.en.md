@@ -19,7 +19,7 @@ The name is the Korean word **온음** ("on-eum"): a whole, unaltered sound, and
 - Meter deck: analogue VU meters for left and right (needles that move to the standard, PEAK lamps), a 36-band spectrum between them, and the source and output path.
 - A WebDAV share of a NAS added as a network folder (the password is kept only in the system's store for passwords; a certificate the NAS made itself is trusted by its fingerprint).
 - Media servers of the same network (DLNA/UPnP): finding them or adding one by its address, looking through their folders, playing from them into memory as the music arrives. The network is used only when that view is opened
-- A ten-band equalizer (12 presets and your own), headphone correction (profiles for 35 widely used headphones, and correction files such as AutoEq's `ParametricEQ.txt`), headphone crossfeed, and a signal path that lists, in order, what the app does between the file and the device.
+- A ten-band equalizer (12 presets and your own), headphone correction (profiles for 36 widely used headphones, and correction files such as AutoEq's `ParametricEQ.txt`), headphone crossfeed, and a signal path that lists, in order, what the app does between the file and the device.
 - Listen Again (recently added, most played, not heard for long), lyrics (tags and `.lrc`, followed line by line when timed), credits and work information from the tags, a genre view, other versions of the same song, and radio (when the queue ends, similar songs from the library follow).
 - The user guide is inside the app (Help → OnEum User Guide), in Korean and English.
 - Playback speed (0.5× to 2× at the song's own pitch), crossfade between songs, a section repeated (A–B), ratings.

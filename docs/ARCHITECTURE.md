@@ -259,7 +259,7 @@ AAC 인코더는 음악 앞에 준비 구간(ffmpeg 1,024프레임, Apple 2,112�
 - 프로필이 없거나 아무것도 바꾸지 않으면 단계가 경로에서 빠진다(비트 단위 통과). 프로필을 바꾸면 이전 체인과 새 체인을 0.04초 동안 함께 돌려 크로스페이드한다. 샘플레이트의 45%를 넘는 필터는 걸지 않는다.
 - 필터를 합친 올림(20Hz~20kHz 격자와 각 필터의 중심 주파수에서, 44.1·48·96·192kHz)이 12dB를 넘지 않게 프리앰프를 낮춘다. 필터 하나하나의 한도(±30dB)만으로는 32개가 한 주파수에 겹친 파일을 막지 못한다.
 - 프로필은 `settings.json`에 값으로 저장한다(30개까지, 필터 32개까지, 값은 불러올 때 범위 안으로). 디코드 스레드와는 `Arc<Mutex<Option<Arc<프로필>>>>`과 버전 번호로 나눈다(디코드 스레드는 실시간 스레드가 아니다).
-- 기본 프로필 35종은 `assets/corrections/headphones.txt`에 있고 빌드할 때 프로그램에 들어간다(`peq::builtin_profiles`, 처음 쓸 때 한 번 해석). 34종의 값은 AutoEq(`results/oratory1990`, MIT)의 `ParametricEQ.txt`를 고치지 않고 옮긴 것이고(Sennheiser Momentum 5 Wireless 하나는 AutoEq에 결과가 없어, Super* Review가 공개한 측정을 AutoEq 4.1.2로 같은 목표·같은 설정으로 계산한 `ParametricEQ.txt`를 옮겼다 — 절차는 그 파일 머리말과 docs/TESTING.md),
+- 기본 프로필 36종은 `assets/corrections/headphones.txt`에 있고 빌드할 때 프로그램에 들어간다(`peq::builtin_profiles`, 처음 쓸 때 한 번 해석). 고른 프로필의 값(응답 곡선, 프리앰프, 밴드별 종류 · 주파수 · 게인 · Q)은 설정의 **프로필 값 → 보기**로 읽을 수 있다(`settings_window::correction_values`, 읽기 전용 — 편집 중에는 편집기가 값을 보여 주므로 숨는다). 35종의 값은 AutoEq(`results/oratory1990`, MIT)의 `ParametricEQ.txt`를 고치지 않고 옮긴 것이고(Sennheiser Momentum 5 Wireless 하나는 AutoEq에 결과가 없어, Super* Review가 공개한 측정을 AutoEq 4.1.2로 같은 목표·같은 설정으로 계산한 `ParametricEQ.txt`를 옮겼다 — 절차는 그 파일 머리말과 docs/TESTING.md),
   프로필마다 `# check <숫자 개수> <합>` 줄이 있어 테스트가 파일의 숫자를 다시 세고 더해 대조한다(옮기다 틀린 값을 잡기 위한 것 — 합은 원본 페이지에서 계산했다). 설정에는 이름만 저장하고(`correction`),
   이름은 불러온 프로필에서 먼저 찾고 없으면 기본 프로필에서 찾는다. 기본 프로필은 `settings.json`에 복사하지 않는다. 라이선스 전문은 `assets/corrections/LICENSE-AutoEq.txt`이고 고지 문서 생성 스크립트 둘이 이 파일을 넣는다.
 - 10밴드 이퀄라이저와 따로 둔 이유: 보정은 헤드폰에 맞춘 고정값이고 이퀄라이저는 취향이라, 하나를 바꿀 때 다른 하나가 지워지면 안 된다.

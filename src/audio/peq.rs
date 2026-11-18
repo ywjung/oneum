@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn the_builtin_profiles_are_what_the_source_says() {
         let sections = builtin_sections(BUILTIN_TEXT);
-        assert_eq!(sections.len(), 35);
+        assert_eq!(sections.len(), 36);
         assert_eq!(builtin_profiles().len(), sections.len(), "every one parses");
         let mut names = std::collections::HashSet::new();
         for ((name, text), profile) in sections.iter().zip(builtin_profiles()) {
@@ -900,6 +900,23 @@ mod tests {
                 q: 4.36
             }
         );
+        // The earphone added on 2026-11-18, as AutoEq has it.
+        let n5005 = builtin_profiles()
+            .iter()
+            .find(|p| p.name == "AKG N5005")
+            .expect("included");
+        assert_eq!(n5005.preamp_db, -1.8);
+        assert_eq!(n5005.filters.len(), 10);
+        assert_eq!(
+            n5005.filters[1],
+            PeqFilter {
+                kind: PeqKind::Peak,
+                hz: 9_406.0,
+                gain_db: 3.0,
+                q: 1.31
+            }
+        );
+        assert_eq!(n5005.filters[5].kind, PeqKind::HighShelf);
         // The one computed with AutoEq from Super* Review's measurement: it stands with
         // its brand, after the Momentum 4 Wireless.
         let at = builtin_profiles()

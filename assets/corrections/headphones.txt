@@ -2,9 +2,9 @@
 #
 # Source: the AutoEq project by Jaakko Pasanen (https://github.com/jaakkopasanen/AutoEq,
 # MIT License, Copyright (c) 2018-2022 Jaakko Pasanen), directory results/oratory1990,
-# read on 2026-11-13 (Beyerdynamic T5 (3rd Gen) on 2026-11-14). The values are AutoEq's
-# results for measurements by oratory1990, equalized to the Harman target curves. They
-# are reproduced here unchanged.
+# read on 2026-11-13 (Beyerdynamic T5 (3rd Gen) on 2026-11-14, AKG N5005 on 2026-11-18).
+# The values are AutoEq's results for measurements by oratory1990, equalized to the
+# Harman target curves. They are reproduced here unchanged.
 #
 # One profile is not from that directory: Sennheiser Momentum 5 Wireless. AutoEq had
 # published no result for it by 2026-11-16 (its last commit, 7ae0f56, is of 2025-07-20;
@@ -518,3 +518,20 @@ Filter 8: ON PK Fc 5857 Hz Gain 3.3 dB Q 5.80
 Filter 9: ON PK Fc 143 Hz Gain -0.7 dB Q 3.18
 Filter 10: ON PK Fc 4796 Hz Gain -0.6 dB Q 4.12
 # check 41 28134.42
+
+# AutoEq lists this earphone once under oratory1990, without saying which of its four
+# exchangeable sound filters was on it when it was measured (the other sources there
+# list each filter by itself).
+## AKG N5005
+Preamp: -1.8 dB
+Filter 1: ON LSC Fc 105 Hz Gain -0.8 dB Q 0.70
+Filter 2: ON PK Fc 9406 Hz Gain 3.0 dB Q 1.31
+Filter 3: ON PK Fc 892 Hz Gain 2.7 dB Q 1.01
+Filter 4: ON PK Fc 1593 Hz Gain -1.4 dB Q 0.18
+Filter 5: ON PK Fc 77 Hz Gain 1.4 dB Q 1.19
+Filter 6: ON HSC Fc 10000 Hz Gain -3.6 dB Q 0.70
+Filter 7: ON PK Fc 4702 Hz Gain -2.0 dB Q 5.51
+Filter 8: ON PK Fc 3571 Hz Gain 1.3 dB Q 2.99
+Filter 9: ON PK Fc 6150 Hz Gain 2.2 dB Q 5.73
+Filter 10: ON PK Fc 4894 Hz Gain -0.7 dB Q 4.27
+# check 41 41468.89
