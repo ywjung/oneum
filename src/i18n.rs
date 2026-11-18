@@ -779,6 +779,10 @@ strings! {
     phone_now_playing: "지금 재생", "Now Playing";
     phone_more: "더 보기", "More";
     phone_empty_title: "음악을 넣어 주세요", "Add your music";
+    phone_sample_music: "샘플 음악 넣기", "Add Sample Music";
+    phone_sample_note: "지어낸 곡 9개(약 3MB)를 OnEum 폴더에 넣어 앱을 바로 써 볼 수 있습니다. 언제든 지울 수 있습니다.", "Puts nine made-up songs (about 3 MB) into the OnEum folder, to try the app at once. They can be deleted at any time.";
+    phone_sample_folder: "OnEum 샘플 음악", "OnEum Sample Music";
+    phone_sample_failed: "샘플 음악을 넣지 못했습니다.", "The sample music could not be added.";
     phone_empty_body: "파일 앱의 ‘나의 iPhone › OnEum’ 폴더에 음악을 넣으면 여기에 나타납니다. 다른 곳에 있는 음악은 아래에서 가져올 수 있습니다.",
         "Music put into “On My iPhone › OnEum” in the Files app appears here. Music kept elsewhere can be brought in below.";
     phone_import_files: "파일 가져오기", "Import Files";

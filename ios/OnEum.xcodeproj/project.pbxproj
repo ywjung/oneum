@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		0E0000000000000000000020 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 0E0000000000000000000010 /* main.m */; };
 		0E0000000000000000000021 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0E0000000000000000000012 /* Assets.xcassets */; };
+		0E0000000000000000000022 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 0E0000000000000000000015 /* PrivacyInfo.xcprivacy */; };
+		0E0000000000000000000023 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 0E0000000000000000000016 /* InfoPlist.strings */; };
+		0E0000000000000000000024 /* samples in Resources */ = {isa = PBXBuildFile; fileRef = 0E0000000000000000000019 /* samples */; };
 		0E00000000000000000000B0 /* OnEumWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E00000000000000000000A0 /* OnEumWidget.swift */; };
 		0E00000000000000000000B1 /* OnEumWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0E00000000000000000000A4 /* OnEumWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -43,6 +46,10 @@
 		0E0000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0E0000000000000000000013 /* build-rust.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "build-rust.sh"; sourceTree = "<group>"; };
 		0E0000000000000000000014 /* OnEum.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OnEum.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0E0000000000000000000015 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		0E0000000000000000000017 /* ko */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ko; path = ko.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		0E0000000000000000000018 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		0E0000000000000000000019 /* samples */ = {isa = PBXFileReference; lastKnownFileType = folder; name = samples; path = ../assets/samples; sourceTree = "<group>"; };
 		0E00000000000000000000A0 /* OnEumWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnEumWidget.swift; sourceTree = "<group>"; };
 		0E00000000000000000000A1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		0E00000000000000000000A2 /* OnEumWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OnEumWidget.entitlements; sourceTree = "<group>"; };
@@ -75,6 +82,9 @@
 				0E0000000000000000000013 /* build-rust.sh */,
 				0E0000000000000000000011 /* Info.plist */,
 				0E0000000000000000000012 /* Assets.xcassets */,
+				0E0000000000000000000015 /* PrivacyInfo.xcprivacy */,
+				0E0000000000000000000016 /* InfoPlist.strings */,
+				0E0000000000000000000019 /* samples */,
 				0E00000000000000000000A3 /* OnEum.entitlements */,
 				0E00000000000000000000A8 /* Widget */,
 				0E0000000000000000000003 /* Products */,
@@ -182,6 +192,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				0E0000000000000000000021 /* Assets.xcassets in Resources */,
+				0E0000000000000000000022 /* PrivacyInfo.xcprivacy in Resources */,
+				0E0000000000000000000023 /* InfoPlist.strings in Resources */,
+				0E0000000000000000000024 /* samples in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -235,6 +248,18 @@
 			targetProxy = 0E00000000000000000000C5 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		0E0000000000000000000016 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				0E0000000000000000000017 /* ko */,
+				0E0000000000000000000018 /* en */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
 		0E0000000000000000000050 /* Debug */ = {

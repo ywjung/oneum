@@ -1678,6 +1678,22 @@ impl OneumApp {
         self.pick(PickFor::ImportMusic, PickRequest::new(kind));
     }
 
+    /// Puts the sample music that comes with the app into its music folder (an iPhone)
+    /// and reads it.
+    pub(super) fn add_sample_music(&mut self) {
+        match crate::platform::files::add_sample_music(self.s().phone_sample_folder) {
+            Ok(folder) => {
+                tracing::info!(folder = %folder.display(), "sample music added");
+                self.announce_scan = true;
+                self.core.library.rescan();
+            }
+            Err(error) => {
+                tracing::warn!("the sample music could not be added: {error}");
+                self.warn_toast(self.s().phone_sample_failed);
+            }
+        }
+    }
+
     /// On a phone: asks for a folder of music to use where it is (in iCloud Drive, on
     /// a drive that is plugged in), without a copy.
     fn link_folder(&mut self) {
@@ -3082,6 +3098,11 @@ impl OneumApp {
                         self.core.player.send(Command::SetCorrection(None));
                         continue;
                     }
+                    // The button of the phone's empty library that adds the sample music.
+                    if id == "sample_music" {
+                        self.add_sample_music();
+                        continue;
+                    }
                     // The button that shows or hides the chosen profile's values.
                     if id == "correction_values" {
                         self.correction_values_open = !self.correction_values_open;
@@ -3349,6 +3370,7 @@ impl OneumApp {
                 .map(|p| (p.name.clone(), p.query.clone()))
                 .collect::<Vec<_>>()
         );
+        state["sample_music"] = serde_json::json!(crate::platform::files::sample_music().is_some());
         state["correction"] = serde_json::json!({
             "selected": self.settings.correction,
             "applied": p.correction,

@@ -66,6 +66,11 @@ sips -z 180 180 "$ICON" --out "$APP/AppIcon60x60@3x.png" >/dev/null
 plutil -insert CFBundleIcons -json \
   '{"CFBundlePrimaryIcon":{"CFBundleIconFiles":["AppIcon60x60"],"CFBundleIconName":"AppIcon"}}' \
   "$APP/Info.plist"
+# What Xcode copies as resources (ios/OnEum.xcodeproj): the privacy manifest, the
+# texts of the Info.plist in each language, the sample music.
+cp ios/PrivacyInfo.xcprivacy "$APP/"
+cp -R ios/ko.lproj ios/en.lproj "$APP/"
+cp -R assets/samples "$APP/samples"
 # An iPhone app (Xcode writes this from TARGETED_DEVICE_FAMILY).
 plutil -insert UIDeviceFamily -json '[1]' "$APP/Info.plist"
 plutil -lint "$APP/Info.plist" >/dev/null

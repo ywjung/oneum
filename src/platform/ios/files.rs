@@ -473,6 +473,30 @@ pub fn reach_linked_folders() -> bool {
     any
 }
 
+/// The folder of the app's bundle that holds its sample music (`assets/samples`):
+/// invented artists, synthetic sound. See [`add_sample_music`].
+const SAMPLES: &str = "samples";
+
+/// The sample music that comes with the app, if its bundle has it.
+pub fn sample_music() -> Option<PathBuf> {
+    let resources = objc2_foundation::NSBundle::mainBundle().resourcePath()?;
+    let folder = PathBuf::from(resources.to_string()).join(SAMPLES);
+    folder.is_dir().then_some(folder)
+}
+
+/// Puts the sample music into the Documents folder, in a folder called `name`, for
+/// someone who has no music on the phone yet (App Review among them): the library
+/// reads it from there like any other. Returns that folder.
+pub fn add_sample_music(name: &str) -> std::io::Result<PathBuf> {
+    let from = sample_music().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "the app has no sample music")
+    })?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home folder"))?;
+    crate::storage::files::add_samples(&from, &home.join("Documents"), name)
+}
+
 /// Whether music folders can be read at all: the app's own folder always can. (Android
 /// needs a right the user gives in the system's settings.)
 pub fn has_storage_access() -> bool {

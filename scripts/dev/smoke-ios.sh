@@ -472,6 +472,19 @@ check x2.json "d['library_tracks'] == $SONGS - 1 and not d['scan_running'] and d
 ui 'restore removed' 'wait 3000' 'dump x3.json'
 check x3.json "d['library_tracks'] == $SONGS and d['removed_songs'] == 0" "\"Bring Back Removed Songs\" takes it in again"
 
+echo "== the App Store's files and the sample music"
+# What the store asks of the bundle: a privacy manifest and the permission's text in
+# each language. And the sample music that the empty library offers (made-up songs),
+# added through what its button does: nine songs, and not twice.
+APPDIR=$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE" app)
+for part in PrivacyInfo.xcprivacy ko.lproj/InfoPlist.strings en.lproj/InfoPlist.strings samples; do
+  [ -e "$APPDIR/$part" ] && echo "  ok   the installed app has $part" \
+    || { echo "  FAIL the installed app has no $part"; exit 1; }
+done
+ui 'menu sample_music' 'wait 4000' 'dump sm1.json' 'menu sample_music' 'wait 3000' 'dump sm2.json'
+check sm1.json "d['sample_music'] and d['library_tracks'] == $SONGS + 9 and not d['scan_running']" "the sample music that comes with the app is added: nine songs"
+check sm2.json "d['library_tracks'] == $SONGS + 9" "…and asked for again, not twice"
+
 echo "== copying the record"
 # What "Copy the Record" under Settings → About does: on a phone the app puts the text
 # on the system's pasteboard itself (the UI library has none there). Read back from the

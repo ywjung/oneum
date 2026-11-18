@@ -98,6 +98,19 @@ pub fn hand_out(file: &Path) {
     super::java::hand_out(&file.to_string_lossy(), &name);
 }
 
+/// The sample music that comes with the app: only the iPhone app has it (see
+/// `platform::ios::files::sample_music`).
+pub fn sample_music() -> Option<std::path::PathBuf> {
+    None
+}
+
+pub fn add_sample_music(_name: &str) -> std::io::Result<std::path::PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no sample music here",
+    ))
+}
+
 /// Whether the app may read all of shared storage.
 pub fn has_storage_access() -> bool {
     super::java::has_all_files_access()

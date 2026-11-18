@@ -85,6 +85,29 @@ pub fn take_in(from: &Path, into: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// Puts what is in `from` (the sample music that comes with the app) into the folder
+/// `name` of `music`, and returns that folder. What is there already with the same
+/// bytes is left as it is, so that asking twice adds nothing (see [`take_in`]).
+pub fn add_samples(from: &Path, music: &Path, name: &str) -> io::Result<PathBuf> {
+    let to = music.join(name);
+    std::fs::create_dir_all(&to)?;
+    let mut added = 0usize;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        match take_in(&entry.path(), &to) {
+            Ok(_) => added += 1,
+            Err(error) => tracing::warn!("left out {}: {error}", entry.path().display()),
+        }
+    }
+    if added == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "there is no sample music to add",
+        ));
+    }
+    Ok(to)
+}
+
 /// A path in `folder` for something named `name`: the name itself, or "name 2",
 /// "name 3" … (before the extension). With `same_as`, the first of them that is a
 /// file with the bytes of that one is the answer, though it is there; otherwise the
@@ -130,6 +153,34 @@ mod tests {
     /// Brought in again, what is there already stays as it is: the same file is the
     /// same file, a folder takes in only what is new, and only another file of the
     /// same name gets a name of its own.
+    /// The sample music is put into a folder of its own in the music folder, as it is
+    /// laid out (artist, album, files); asked for again, it is not there twice.
+    #[test]
+    fn the_sample_music_is_added_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let samples = dir.path().join("samples");
+        let album = samples.join("Artist").join("Album");
+        std::fs::create_dir_all(&album).expect("mkdir");
+        std::fs::write(album.join("01 Song.mp3"), b"one").expect("write");
+        std::fs::write(album.join("cover.jpg"), b"picture").expect("write");
+        let music = dir.path().join("Documents");
+        let to = add_samples(&samples, &music, "Sample Music").expect("added");
+        assert_eq!(to, music.join("Sample Music"));
+        let song = to.join("Artist").join("Album").join("01 Song.mp3");
+        assert_eq!(std::fs::read(&song).expect("read"), b"one");
+        assert!(to.join("Artist").join("Album").join("cover.jpg").is_file());
+        // Again: nothing more.
+        add_samples(&samples, &music, "Sample Music").expect("added again");
+        let files: Vec<_> = std::fs::read_dir(to.join("Artist").join("Album"))
+            .expect("read_dir")
+            .collect();
+        assert_eq!(files.len(), 2, "{files:?}");
+        // Nothing to add is said so.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        assert!(add_samples(&empty, &music, "Other").is_err());
+    }
+
     #[test]
     fn what_is_brought_in_again_is_not_there_twice() {
         let dir = tempfile::tempdir().unwrap();

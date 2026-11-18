@@ -1,0 +1,2 @@
+/* What the system shows when the app first looks for media servers on the network. */
+"NSLocalNetworkUsageDescription" = "같은 네트워크의 미디어 서버(DLNA)와 NAS를 찾아 그 음악을 재생합니다. 네트워크 화면을 열 때와 서버를 추가할 때만 씁니다.";

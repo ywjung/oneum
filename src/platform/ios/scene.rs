@@ -184,13 +184,25 @@ fn report_no_safe_area() {
 
 /// The margins the system asks to keep free (status bar, Dynamic Island, home
 /// indicator) as top, left, bottom, right in points. `None` before the window exists.
+///
+/// On an iPad (iPadOS 26 and later) the app runs in a window whose controls, three dots
+/// at its top left, lie inside the safe area: over the back button and the title of a
+/// page. The safe area "with corner adaptation" keeps them free too; vertically, so that
+/// the page begins below them rather than everything moving aside. Only its top is
+/// taken: elsewhere it also keeps clear of the rounded corners of the screen (16 points
+/// at each side of an iPhone), which the app's pages need not, and which would take
+/// the screen's left edge, where a finger pulls a page back.
 pub(super) fn safe_area_insets() -> Option<[f32; 4]> {
     VIEW.with(|slot| {
         let view = slot.borrow();
-        let window = view.as_ref()?.window()?;
+        let view = view.as_ref()?;
+        let window = view.window()?;
         // SAFETY: `UIWindow`'s own getter, not the override on winit's subclass above.
-        let insets: UIEdgeInsets =
+        let mut insets: UIEdgeInsets =
             unsafe { objc2::msg_send![super(&*window, UIWindow::class()), safeAreaInsets] };
+        if let Some(adapted) = corner_adapted_insets(view) {
+            insets.top = insets.top.max(adapted.top);
+        }
         Some([
             insets.top as f32,
             insets.left as f32,
@@ -198,6 +210,39 @@ pub(super) fn safe_area_insets() -> Option<[f32; 4]> {
             insets.right as f32,
         ])
     })
+}
+
+thread_local! {
+    /// `+[UIViewLayoutRegion safeAreaLayoutRegionWithCornerAdaptation:]` with the
+    /// vertical axis, made once; `None` where the system has no such thing (before
+    /// iOS 26).
+    static ADAPTED_REGION: RefCell<Option<Option<Retained<AnyObject>>>> =
+        const { RefCell::new(None) };
+}
+
+/// The insets of `view`'s safe area adapted to the window's corner controls (see
+/// [`safe_area_insets`]), where the system knows of them.
+fn corner_adapted_insets(view: &UIView) -> Option<UIEdgeInsets> {
+    /// `UIViewLayoutRegionAdaptivityAxisVertical`.
+    const VERTICAL: usize = 2;
+    let region = ADAPTED_REGION.with(|slot| {
+        slot.borrow_mut()
+            .get_or_insert_with(|| {
+                let class = AnyClass::get(c"UIViewLayoutRegion")?;
+                // SAFETY: a class method of `UIViewLayoutRegion` (iOS 26) that takes an
+                // `NSUInteger` and returns an autoreleased region.
+                unsafe {
+                    objc2::msg_send![class, safeAreaLayoutRegionWithCornerAdaptation: VERTICAL]
+                }
+            })
+            .clone()
+    })?;
+    if !view.respondsToSelector(sel!(edgeInsetsForLayoutRegion:)) {
+        return None;
+    }
+    // SAFETY: `-[UIView edgeInsetsForLayoutRegion:]` (iOS 26), which the view answers
+    // to (checked above), with a region made by the class above.
+    Some(unsafe { objc2::msg_send![view, edgeInsetsForLayoutRegion: &*region] })
 }
 
 /// The view controller to present another one from (the document picker).

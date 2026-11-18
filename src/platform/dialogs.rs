@@ -40,6 +40,19 @@ pub fn restore_linked_folders(
     Vec::new()
 }
 
+/// The sample music that comes with the app: only the iPhone app has it (see
+/// `platform::ios::files::sample_music`).
+pub fn sample_music() -> Option<std::path::PathBuf> {
+    None
+}
+
+pub fn add_sample_music(_name: &str) -> std::io::Result<std::path::PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no sample music here",
+    ))
+}
+
 /// Whether music folders can be read at all: always on a desk. (Android needs a right
 /// the user gives in the system's settings.)
 pub fn has_storage_access() -> bool {

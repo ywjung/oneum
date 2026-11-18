@@ -1571,6 +1571,8 @@ impl OneumApp {
         let mut allow = false;
         let mut rescan = false;
         let mut network = false;
+        let mut samples = false;
+        let has_samples = crate::platform::files::sample_music().is_some();
         egui::ScrollArea::vertical()
             .id_salt("phone-empty")
             .auto_shrink(false)
@@ -1634,8 +1636,31 @@ impl OneumApp {
                     ui.add_space(10.0);
                     network =
                         pill_button(ui, Icon::Network, s.network_open, width, false).clicked();
+                    // Someone with no music on the phone yet can try the app with the
+                    // sample music that comes with it (made-up songs).
+                    if has_samples {
+                        ui.add_space(24.0);
+                        samples = pill_button(ui, Icon::Note, s.phone_sample_music, width, false)
+                            .clicked();
+                        ui.add_space(6.0);
+                        ui.allocate_ui(vec2(width, 0.0), |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(s.phone_sample_note)
+                                        .font(font(13.0))
+                                        .color(theme::dim(ui)),
+                                )
+                                .wrap()
+                                .halign(Align::Center),
+                            );
+                        });
+                        ui.add_space(16.0);
+                    }
                 });
             });
+        if samples {
+            self.add_sample_music();
+        }
         if network {
             self.phone.push(Page::List(Nav::Network));
         }

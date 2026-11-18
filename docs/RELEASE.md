@@ -156,6 +156,24 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
   파일이 없는 crate는 목록과 함께 표준 본문이 묶음 안에 있는지 스크립트가 검사합니다(없으면 실패).
 - 판매·공개 전 남은 일: Developer ID 서명과 공증(4·5절), Windows 실제 실행 확인(docs/TESTING.md "Windows"), 그리고 가능하면 Windows 코드 서명(없으면 SmartScreen 경고).
 
+## iPhone: App Store 제출 준비 (2026-11-18 점검)
+서명 전까지 확인하고 고친 것과, 제출하는 사람이 할 일입니다. 서명 없는 아카이브(`xcodebuild … archive CODE_SIGNING_ALLOWED=NO`)는 앱과 위젯 확장이 같은 버전 · 빌드 번호로 들어간 정상 구조이고, 안에 아래 파일들이 있습니다.
+
+| 항목 | 상태 |
+|---|---|
+| 개인정보 매니페스트 | `ios/PrivacyInfo.xcprivacy`. 추적 없음, 수집하는 데이터 없음. 앱 바이너리가 쓰는 사유 필요 API(`nm -u`로 확인): 파일 시각 C617.1 · 3B52.1, 시스템 가동 시간 35F9.1, 디스크 공간 E174.1(번들한 SQLite가 데이터베이스를 쓰기 전에 볼륨 종류를 묻는 것 — 딱 맞는 사유가 없어 가장 가까운 것). 위젯 확장은 이런 API를 쓰지 않음 |
+| 권한 안내문의 번역 | `ios/ko.lproj` · `ios/en.lproj`의 `InfoPlist.strings`(로컬 네트워크) |
+| 심사자가 쓸 음악 | 빈 보관함 화면의 **샘플 음악 넣기**: 앱에 든 지어낸 곡 9개(3개 앨범, `assets/samples`, 약 3MB, `scripts/dev/gen-demo-library.py --samples`로 만듦)를 OnEum 폴더에 복사 |
+| iPad에서 | iPhone 전용 앱이 iPad의 창으로 열릴 때 창 단추(왼쪽 위의 점 세 개)를 피해 화면이 그 아래에서 시작(`platform::ios::scene::safe_area_insets`) |
+| 암호화 수출 | `ITSAppUsesNonExemptEncryption = false`로 되어 있음. 앱은 시스템의 것이 아닌 TLS 구현(rustls · ring)을 담고 있어, 프랑스에 배포하려면 신고가 필요한 분류로 보임 — **결정 필요** |
+| 서버 자동 찾기 | iPhone에서 SSDP 멀티캐스트는 Apple의 `com.apple.developer.networking.multicast` 승인이 필요하고 프로젝트에 없음. 승인 전에는 자동 찾기가 막히고 주소로 추가는 됨 — **결정 필요** |
+| 인터넷 가사(LRCLIB) | 꺼져 있는 선택 기능. 저작권 있는 가사를 제3자에게서 가져오므로 심사에서 문제 삼을 수 있음 — **결정 필요** |
+| 계정 · 주소 | 유료 Apple Developer Program, 개인정보 처리방침 URL, 지원 URL, 앱 이름 확인 — **제출하는 사람의 일** |
+
+심사 메모(App Review Information → Notes)에 쓸 글의 초안:
+
+> OnEum plays music files that are on the device; it has no account and no server of its own. To try it without music of your own: open the app, and on the empty Library screen tap **Add Sample Music**. Nine short made-up songs (three albums, synthesized sound, no one's recordings) are copied into the app's folder; play any of them from Library → Albums. Media servers (DLNA) and WebDAV folders on a local network are optional. Online lyrics are off by default (Settings → General → Lyrics).
+
 ## 샌드박스와 권한
 - 직접 배포이므로 **App Sandbox는 쓰지 않습니다.** 사용자가 고른 폴더를 일반 파일 권한으로 읽습니다.
   (샌드박스를 도입하려면 security-scoped bookmark의 저장·복원·해제를 함께 구현해야 합니다.)

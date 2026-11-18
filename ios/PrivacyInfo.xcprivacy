@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The app's privacy manifest. OnEum tracks nobody and collects nothing: the music,
+     the library and the settings stay on the device. It does use APIs for which Apple
+     asks a reason (checked with `nm -u` on the app's binary; the reasons are those of
+     Apple's "Describing use of required reason API"):
+     - file timestamps (stat, fstat, lstat, fstatat): the library notices changed music
+       files by their time and size, in the app's own folders (C617.1) and in folders
+       the person linked or imported with the document picker (3B52.1);
+     - system boot time (mach_absolute_time, clock_gettime): measuring how much time has
+       passed within the app (playback, fades, timers) (35F9.1);
+     - disk space (statfs, fstatfs): the SQLite library the app is built with asks for
+       the kind of volume a database file lies on before it writes to it (E174.1, the
+       nearest of Apple's reasons; nothing of it leaves the device).
+     The widgets (ios/Widget) use none of these. -->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+				<string>3B52.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

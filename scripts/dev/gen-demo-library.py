@@ -3,6 +3,12 @@
 (the homepage in site/, the guides): nothing in it is anybody's music.
 
     python3 scripts/dev/gen-demo-library.py <output-folder>
+    python3 scripts/dev/gen-demo-library.py --samples assets/samples
+
+With --samples: the sample music that comes with the iPhone app (a button on its empty
+library offers it, for someone who has no music on the phone yet, such as App Review).
+Three of the albums, three short tracks each, small files and covers: it is part of
+the app's download.
 
 Each album gets a drawn cover (cover.png) and a few tracks of synthetic sound: a chord
 of sine tones that swells and fades, so that the VU meters and the spectrum have
@@ -41,10 +47,9 @@ ALBUMS = [
 ]
 
 
-def cover(path: Path, colours: tuple[str, str, str], seed: int) -> None:
+def cover(path: Path, colours: tuple[str, str, str], seed: int, size: int = 900) -> None:
     """A square picture out of three colours: a soft ground and a few plain shapes."""
     rng = random.Random(seed)
-    size = 900
     ground, shape, light = colours
     image = Image.new("RGB", (size, size), ground)
     draw = ImageDraw.Draw(image)
@@ -54,7 +59,7 @@ def cover(path: Path, colours: tuple[str, str, str], seed: int) -> None:
             radius = size * (0.46 - step * 0.06)
             centre = (size * 0.5, size * 0.56)
             box = [centre[0] - radius, centre[1] - radius, centre[0] + radius, centre[1] + radius]
-            draw.ellipse(box, outline=shape if step % 2 else light, width=14)
+            draw.ellipse(box, outline=shape if step % 2 else light, width=round(14 * size / 900))
     elif kind == 1:  # a sun over bands
         draw.ellipse([size * 0.25, size * 0.14, size * 0.75, size * 0.64], fill=light)
         for band in range(6):
@@ -63,17 +68,21 @@ def cover(path: Path, colours: tuple[str, str, str], seed: int) -> None:
     elif kind == 2:  # waves
         for line in range(9):
             points = []
-            for x in range(0, size + 1, 12):
-                y = size * (0.2 + line * 0.075) + math.sin(x / size * math.tau * 2 + line) * 34
+            for x in range(0, size + 1, max(4, round(12 * size / 900))):
+                y = size * (0.2 + line * 0.075) + math.sin(x / size * math.tau * 2 + line) * 34 * size / 900
                 points.append((x, y))
-            draw.line(points, fill=light if line % 3 else shape, width=10)
+            draw.line(points, fill=light if line % 3 else shape, width=round(10 * size / 900))
     else:  # scattered discs
         for _ in range(11):
             radius = rng.uniform(0.04, 0.16) * size
             x, y = rng.uniform(0.1, 0.9) * size, rng.uniform(0.1, 0.9) * size
             draw.ellipse([x - radius, y - radius, x + radius, y + radius],
                          fill=rng.choice([shape, light]))
-    image.filter(ImageFilter.GaussianBlur(0.6)).save(path)
+    picture = image.filter(ImageFilter.GaussianBlur(0.6))
+    if path.suffix == ".jpg":
+        picture.save(path, quality=82, optimize=True)
+    else:
+        picture.save(path)
 
 
 def sound(path: Path, seconds: int, seed: int, kind: str, tags: dict[str, str]) -> None:
@@ -95,9 +104,10 @@ def sound(path: Path, seconds: int, seed: int, kind: str, tags: dict[str, str]) 
         return "+".join(parts)
     source = f"aevalsrc={channel(0.0)}|{channel(1.3)}:s={rate}:d={seconds}"
     codec = {
-        "flac": ["-c:a", "flac", "-sample_fmt", "s16"],
+        "flac": ["-c:a", "flac", "-sample_fmt", "s16", "-compression_level", "8"],
         "hires": ["-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24"],
         "mp3": ["-c:a", "libmp3lame", "-b:a", "64k"],
+        "aac": ["-c:a", "aac", "-b:a", "64k"],
     }[kind]
     command = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", source, *codec]
     for key, value in tags.items():
@@ -105,7 +115,34 @@ def sound(path: Path, seconds: int, seed: int, kind: str, tags: dict[str, str]) 
     subprocess.run([*command, str(path)], check=True)
 
 
+# The sample music of the iPhone app: (number of the album above, kind, seconds per
+# track). One album of each kind the reviewer may want to see in the signal path.
+SAMPLES = [(0, "flac", 14), (1, "mp3", 30), (2, "aac", 30)]
+
+
+def samples(out: Path) -> None:
+    count = 0
+    for number, kind, seconds in SAMPLES:
+        artist, album, year, genre, colours, _, tracks = ALBUMS[number]
+        folder = out / artist / album
+        folder.mkdir(parents=True, exist_ok=True)
+        cover(folder / "cover.jpg", colours, number, size=500)
+        for index, (title, _) in enumerate(tracks[:3], start=1):
+            extension = {"flac": "flac", "mp3": "mp3", "aac": "m4a"}[kind]
+            tags = {
+                "title": title, "artist": artist, "album": album, "album_artist": artist,
+                "track": str(index), "date": str(year), "genre": genre,
+            }
+            sound(folder / f"{index:02d} {title}.{extension}", seconds, number * 31 + index,
+                  kind, tags)
+            count += 1
+    print(f"wrote {count} sample tracks in {len(SAMPLES)} albums to {out}")
+
+
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--samples":
+        samples(Path(sys.argv[2]))
+        return
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     out = Path(sys.argv[1])

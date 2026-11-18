@@ -10,6 +10,7 @@ OnEum plays the music that is in its own folder. There are three ways to put mus
 - Music that was added appears by itself within half a minute or so while OnEum is on the screen. To read it at once, press **Settings → Library → Rescan**.
 - **Link Folder**: **Settings → Library → Link Folder** reads a folder in iCloud Drive or on a drive that is plugged in where it is, without copying. After plugging a drive in again, press **Rescan**. Of the songs in iCloud Drive only those downloaded to the iPhone are read. **Unlink** leaves the files as they are.
 - A music file in another app can also be opened with **Share → OnEum**.
+- **Add Sample Music**: while the library is empty, the button at the bottom of the first screen puts nine made-up songs that come with the app (three albums, about 3 MB) into "OnEum Sample Music" in the OnEum folder, to listen to at once. Delete that folder in the Files app when you no longer want it.
 - OnEum only reads music files. It never changes or deletes files or their tags. Favourites, play counts and playlists are kept inside OnEum only.
 - No account and no internet connection are needed (lyrics alone are also looked for on the internet if you switch that on in Settings).
 

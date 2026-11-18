@@ -1,0 +1,2 @@
+/* What the system shows when the app first looks for media servers on the network. */
+"NSLocalNetworkUsageDescription" = "OnEum looks for media servers (DLNA) and NAS folders on your network to play their music. It does so only when you open the Network screen or add a server.";

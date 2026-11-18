@@ -1047,6 +1047,18 @@ scripts/dev/smoke-android.sh
 - 키보드의 키를 단축키가 읽는 키 사건으로 바꾸기: Android의 키 코드 → egui의 키, Ctrl이 단축키의 "command"가 되고 Shift·Alt가 함께 전해짐, 쓰지 않는 키(Tab)는 버림(`ui::hardkeys`의 테스트 2개. Android 전용 코드 밖에 두어 모든 시스템에서 돎).
 - 앱 안의 사용 안내: Android용 글 한·영이 같은 구성(절 8개, 항목 수 같음)이고, 마크업이 남지 않으며, iPhone을 말하지 않음(`ui::guide`의 폰 안내 테스트가 iPhone 글과 Android 글을 모두 확인).
 
+## App Store 제출 준비 (2026-11-18)
+서명 전 점검(docs/RELEASE.md "App Store 제출 준비")에서 나온 네 가지를 고친 뒤 확인한 것.
+
+- 서명 없는 아카이브(`xcodebuild archive CODE_SIGNING_ALLOWED=NO`): 앱 번들에 `PrivacyInfo.xcprivacy`(사유 C617.1 · 3B52.1 · 35F9.1 · E174.1, 추적 없음), `ko.lproj` · `en.lproj`의 `InfoPlist.strings`(각 언어의 로컬 네트워크 안내문), `samples`(파일 12개, 2.8MB)가 들어감. 사유 코드는 Apple 문서(NSPrivacyAccessedAPITypeReasons)에서 대조했고, 어떤 API를 쓰는지는 릴리스 빌드에 `nm -u`로 확인(디스크 공간 API는 번들한 SQLite의 것 — 볼륨 종류를 묻는 데 씀).
+- iPad Pro 13 시뮬레이터(iPadOS 27.2, iPhone 앱이 창으로 열림): 안전 영역의 위쪽이 47 → 90pt가 되어 제목과 뒤로 가기 단추가 창 단추 아래로 내려감(화면 캡처). 빈 보관함의 **샘플 음악 넣기**를 손가락으로 눌러 곡 9개 · 앨범 3개가 들어오고(알림 "스캔 완료 · 라이브러리 9곡"), 표지가 나오고, FLAC 앨범이 재생됨(볼륨 0).
+- ★ 처음 판은 모서리에 맞춘 안전 영역을 네 방향 모두 썼는데, iPhone 17 Pro에서 좌우가 16pt씩 줄어 왼쪽 끝에서 밀어 뒤로 가는 동작이 막혔다(iPhone 스모크 "a finger pulling from the left edge goes back"가 찾음). 위쪽만 쓰게 고친 뒤 iPhone의 안전 영역은 전과 같다([0, 62, 402, 840]).
+- 테스트: `storage::files`의 샘플 복사(폴더 구조 그대로, 두 번째에는 더하지 않음, 넣을 것이 없으면 오류). iPhone 스모크 6항목 추가(설치된 앱에 매니페스트 · 두 언어의 안내문 · 샘플 폴더가 있음, 샘플 음악이 9곡 들어오고 두 번 넣어도 9곡).
+
+돌린 것(모두 볼륨 0): `scripts/check.sh` 837개 통과, macOS 앱 스모크 193항목, iPhone 시뮬레이터 스모크 134항목, Android 에뮬레이터 스모크 125항목.
+
+확인하지 못한 것: App Store Connect에 실제로 올리는 것(유료 계정과 서명이 필요), 실제 iPad, 매니페스트의 디스크 공간 사유가 심사에서 받아들여지는지, 영어 안내문이 시스템 권한 창에 실제로 쓰이는지(시뮬레이터에서 권한 창을 띄워 보지 않음).
+
 ## 공개 전 검토와 스크린샷 교체 (2026-11-18)
 GitHub에 올리기 전에 추적되는 파일 508개와 `main`의 커밋 117개 전체(추가된 모든 줄, 10.4MB)를 검사했다: 키 · 토큰 · 비밀번호 대입 · 서명 파일, 이메일 주소, 홈 경로와 계정 · 컴퓨터 이름, 팀 · 기기 식별자, 공인 IP. 나온 것은 예제 주소(example.org 등)와 지어낸 기기 UUID뿐이다. 커밋의 작성자 · 커미터는 117개 모두 같은 한 사람이다.
 
