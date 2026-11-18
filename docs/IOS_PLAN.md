@@ -1,7 +1,7 @@
 # iPhone 지원 계획
 
 상태: 0~4단계와 6단계의 기기 설치까지 진행(2026-11-14). iOS 27.0 시뮬레이터에서 확인했고, 실제 iPhone 18 Pro(iOS 27.2.1)에는 **설치해서 실행되는 것까지만** 확인했다.
-작성 2026-11-14 · 계획 기준 커밋 576394d · 결정 기록은 [adr/0002-iphone.md](adr/0002-iphone.md), 확인 범위는 [TESTING.md](TESTING.md)의 "iPhone".
+작성 2026-11-14 · 계획 기준 커밋 f6f35b4 · 결정 기록은 [adr/0002-iphone.md](adr/0002-iphone.md), 확인 범위는 [TESTING.md](TESTING.md)의 "iPhone".
 
 ## 진행 결과 (2026-11-14)
 

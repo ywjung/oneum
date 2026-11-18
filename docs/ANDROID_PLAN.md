@@ -1,7 +1,7 @@
 # Android 지원 계획
 
 상태: 0~4단계를 진행했다(2026-11-15). **Android 16 에뮬레이터에서 확인했고, 실제 기기에는 아직 설치하지 않았다.**
-작성 2026-11-15 · 계획 기준: `feature/ios`(커밋 e41f121) · 작업 브랜치 `feature/android` · iPhone 때의 계획과 결과는 [IOS_PLAN.md](IOS_PLAN.md), 확인 범위는 [TESTING.md](TESTING.md)의 "Android".
+작성 2026-11-15 · 계획 기준: `feature/ios`(커밋 7180c2f) · 작업 브랜치 `feature/android` · iPhone 때의 계획과 결과는 [IOS_PLAN.md](IOS_PLAN.md), 확인 범위는 [TESTING.md](TESTING.md)의 "Android".
 
 ## 진행 결과 (2026-11-15)
 
