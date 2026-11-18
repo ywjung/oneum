@@ -329,13 +329,14 @@ check la3.json 'd["rediscover"] == "Played" and d["rows"] > 0' "…and back"
 check la4.json 'd["nav"] == "Songs" and d["rows"] == 20' "back to all songs"
 
 echo "== equalizer, crossfeed, radio"
-# The Playback tab: scrolled to its end for the radio switch, and 318 points back up from
+# The Playback tab: scrolled to its end for the radio switch, and 373 points back up from
 # there for the equalizer row and the crossfeed strengths (the correction card lies between:
-# when the explanation under it gains or loses a line, 13 points, this number moves with it).
+# when it gains a row, 55 points, or the explanation under it gains or loses a line, 13
+# points, this number moves with it).
 # Then the equalizer sheet: preset list, on/off switch, reset.
-ui 'click 1081 20' 'wait 600' 'click 510 176' 'wait 500' 'scroll 590 400 -2000' 'wait 500' 'scroll 590 400 318' 'wait 500' \
+ui 'click 1081 20' 'wait 600' 'click 510 176' 'wait 500' 'scroll 590 400 -2000' 'wait 500' 'scroll 590 400 373' 'wait 500' \
    'click 779 413' 'wait 400' 'dump sh1.json' 'click 671 413' 'wait 300' 'scroll 590 400 -2000' 'wait 500' 'click 846 526' 'wait 400' 'dump sh2.json' \
-   'click 846 526' 'wait 400' 'dump sh3.json' 'scroll 590 400 318' 'wait 500' 'click 843 301' 'wait 600' 'dump sh4.json' \
+   'click 846 526' 'wait 400' 'dump sh3.json' 'scroll 590 400 373' 'wait 500' 'click 843 301' 'wait 600' 'dump sh4.json' \
    'click 435 183' 'wait 500' 'click 342 435' 'wait 500' 'dump sh5.json' 'click 855 133' 'wait 400' 'dump sh6.json' \
    'click 883 183' 'wait 400' 'dump sh7.json' 'key Escape' 'wait 400' 'dump sh8.json'
 check sh1.json 'd["crossfeed"] == "Medium"' "Playback tab: headphone crossfeed strength"
