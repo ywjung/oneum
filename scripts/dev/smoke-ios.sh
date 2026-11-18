@@ -365,19 +365,19 @@ fi
 
 echo "== the widgets"
 # The widgets of the home and lock screens are drawn by an extension of the app, which
-# reads what the app left in the folder of the group both belong to. (That the system
-# draws them is seen by hand: docs/TESTING.md.)
-GROUP=$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE" groups 2>/dev/null | awk -v g="group.$BUNDLE" '$1 == g { print $2 }')
-ui 'wait 300' 'dump wg.json'
-if [ -n "$GROUP" ] && python3 - "$GROUP/now-playing.json" "$PROFILE/wg.json" <<'PY'
+# reads what the app left in the group of keychain items both may reach. The app reads
+# it back the way the extension does. (That the system draws the widgets with it is
+# seen by hand: docs/TESTING.md.)
+ui 'wait 600' 'dump wg.json'
+if python3 - "$PROFILE/wg.json" <<'PY'
 import json, sys
-left = json.load(open(sys.argv[1]))
-state = json.load(open(sys.argv[2]))
-assert state["current"] and left["title"] == state["current"], (left, state["current"])
-assert left["artist"], left
+state = json.load(open(sys.argv[1]))
+left = (state.get("widgets") or {}).get("song") or {}
+assert state["current"] and left.get("title") == state["current"], (left, state["current"])
+assert left.get("artist"), left
 PY
-then echo "  ok   the song that plays is left for the widgets, in the folder they share with the app"
-else echo "  FAIL the widgets are not told the song that plays (group folder: ${GROUP:-none})"; exit 1
+then echo "  ok   the song that plays is left for the widgets, in the keychain group they share with the app"
+else echo "  FAIL the widgets are not told the song that plays"; exit 1
 fi
 [ -d "$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE" app)/PlugIns/OnEumWidget.appex" ] \
   && echo "  ok   the widget extension is inside the installed app" \

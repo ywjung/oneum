@@ -23,7 +23,6 @@ set -eu
 set -o pipefail 2>/dev/null || true
 cd "$(dirname "$0")/.."
 CONFIG=Release
-WITHOUT_GROUP=0
 INSTALL=1
 for arg in "$@"; do
   case "$arg" in
@@ -54,27 +53,10 @@ build() { # build [more settings for xcodebuild…]
     DEVELOPMENT_TEAM="$TEAM" ONEUM_BUNDLE_ID="$BUNDLE_ID" \
     MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" "$@" build
 }
-# The app and its widgets share a folder (the song the widgets show), which takes an
-# App Group "group.<the app's identifier>" on the developer account. Xcode makes the
-# profiles by itself but not the group: on a team that has none, signing is refused.
-# The app is then built without the group: it works as ever, and its widgets show no
-# song until the group is there (once, in Xcode: the OnEum target ▸ Signing &
-# Capabilities ▸ App Groups ▸ +, with the team and identifier used here).
-LOG=$(mktemp)
-trap 'rm -f "$LOG"' EXIT
-if ! build 2>&1 | tee "$LOG"; then
-  if grep -q "application-groups entitlement" "$LOG"; then
-    echo >&2
-    echo "This team has no App Group \"group.$BUNDLE_ID\": building without it." >&2
-    echo "The app works as ever; its widgets show no song until the group is registered" >&2
-    echo "(Xcode ▸ the OnEum target ▸ Signing & Capabilities ▸ App Groups ▸ +)." >&2
-    echo >&2
-    WITHOUT_GROUP=1
-    build CODE_SIGN_ENTITLEMENTS= || exit 1
-  else
-    exit 1
-  fi
-fi
+# (The app and its widgets share a group of keychain items, the song the widgets show:
+# that takes nothing on the developer account, unlike an App Group, which Xcode does
+# not make by itself. See ios/OnEum.entitlements.)
+build || exit 1
 APP=target/xcode/Build/Products/$CONFIG-iphoneos/OnEum.app
 # An iPhone refuses an app whose signature is missing or not of what is in it, with a
 # message that does not say so plainly: better to find out here.
@@ -83,7 +65,6 @@ if ! codesign --verify --strict "$APP" 2>/dev/null; then
   codesign --verify --strict "$APP" >&2 || true
   exit 1
 fi
-[ "$WITHOUT_GROUP" = 0 ] || echo "(Built without the App Group: the widgets of this build show no song.)" >&2
 [ "$INSTALL" = 1 ] || { echo "$APP"; exit 0; }
 
 DEVICE=${ONEUM_IOS_DEVICE:-}

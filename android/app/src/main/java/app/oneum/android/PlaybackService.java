@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -372,8 +373,15 @@ public final class PlaybackService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // Swiped away: the activity goes, and with it the app (see MainActivity).
-        stopSelf();
+        // Swiped away: the activity goes, and with it the app (see MainActivity). Only
+        // for the app's own task. A button of the home screen widget runs in a task of
+        // its own (WidgetActionActivity), which is gone as soon as it has passed the
+        // press on, and the system tells of that here too: stopping for it took the
+        // notification, the session and the foreground away from an app that plays on.
+        ComponentName root = rootIntent == null ? null : rootIntent.getComponent();
+        if (root == null || MainActivity.class.getName().equals(root.getClassName())) {
+            stopSelf();
+        }
         super.onTaskRemoved(rootIntent);
     }
 

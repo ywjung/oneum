@@ -2,10 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- The folder the app and its widgets share (the song the widgets show). -->
-	<key>com.apple.security.application-groups</key>
+	<!-- The groups of keychain items the app may reach. Its own comes first, where
+	     what it keeps without naming a group goes (the passwords of network folders);
+	     the second is the one it shares with its widgets (the song they show, see
+	     src/platform/ios/widget.rs). A group of keychain items takes nothing but the
+	     team's own prefix, which every signing profile allows. -->
+	<key>keychain-access-groups</key>
 	<array>
-		<string>group.$(ONEUM_BUNDLE_ID)</string>
+		<string>$(AppIdentifierPrefix)$(ONEUM_BUNDLE_ID)</string>
+		<string>$(AppIdentifierPrefix)$(ONEUM_BUNDLE_ID).nowplaying</string>
 	</array>
 </dict>
 </plist>

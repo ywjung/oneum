@@ -3389,6 +3389,17 @@ impl OneumApp {
                 "safe": [safe.left(), safe.top(), safe.right(), safe.bottom()],
             });
         }
+        // What an iPhone's widgets would read now (the song the app left for them).
+        #[cfg(all(target_os = "ios", any(debug_assertions, feature = "automation")))]
+        {
+            state["widgets"] = match crate::platform::ios::widget::left() {
+                Some((song, cover)) => serde_json::json!({
+                    "song": serde_json::from_str::<serde_json::Value>(&song).ok(),
+                    "cover": cover,
+                }),
+                None => serde_json::Value::Null,
+            };
+        }
         state["crossfeed"] = serde_json::json!(format!("{:?}", p.crossfeed));
         state["rediscover"] = serde_json::json!(format!("{:?}", self.rediscover));
         let details = self.extras.as_ref().and_then(|e| e.details.as_ref());

@@ -2,12 +2,39 @@
 //
 // A widget is drawn by this extension, a process of its own that the system starts
 // when it wants a widget drawn. It cannot ask the app anything: the app leaves the
-// song (title, artist, a copy of the cover) in the folder of the group both belong
-// to, and tells the system when that changed (src/platform/ios/widget.rs). A tap on
-// a widget opens the app.
+// song (title, artist, a small copy of the cover) in a group of keychain items that
+// both may read, and tells the system when that changed
+// (src/platform/ios/widget.rs, which says why the keychain). A tap on a widget opens
+// the app.
 import ImageIO
+import Security
 import SwiftUI
 import WidgetKit
+
+/// What the app left for the widgets: items of the keychain group both share.
+enum Left {
+    /// The group's full name (with the team's prefix), which the build writes into
+    /// this extension's Info.plist as it does into the app's.
+    static let group = Bundle.main.object(forInfoDictionaryKey: "OneumSharedKeychain") as? String
+
+    /// The item kept under `account` ("song", "cover"), if there is one.
+    static func read(_ account: String) -> Data? {
+        guard let group = group, !group.isEmpty else { return nil }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: "OnEum widgets",
+            kSecAttrAccount: account,
+            kSecAttrAccessGroup: group,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ]
+        var found: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess else {
+            return nil
+        }
+        return found as? Data
+    }
+}
 
 /// What the app left: the song, and its cover if it has one.
 struct Song {
@@ -15,36 +42,25 @@ struct Song {
     let artist: String
     let cover: UIImage?
 
-    /// The folder the app and its widgets share: that of the group named after the app
-    /// ("group." and the app's identifier, which this extension's begins with).
-    static func sharedFolder() -> URL? {
-        guard var app = Bundle.main.bundleIdentifier else { return nil }
-        if app.hasSuffix(".widget") { app.removeLast(".widget".count) }
-        return FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group." + app)
-    }
-
     static func load() -> Song? {
-        guard let folder = sharedFolder(),
-            let data = try? Data(contentsOf: folder.appendingPathComponent("now-playing.json")),
+        guard let data = Left.read("song"),
             let told = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let title = told["title"] as? String, !title.isEmpty
         else { return nil }
-        let cover = (told["cover"] as? Bool) == true
-            ? small(folder.appendingPathComponent("cover.jpg")) : nil
+        let cover = (told["cover"] as? Bool) == true ? Left.read("cover").flatMap(small) : nil
         return Song(title: title, artist: told["artist"] as? String ?? "", cover: cover)
     }
 
-    /// The picture in a file, no larger than a widget shows it. The system does not
+    /// The picture in `data`, no larger than a widget shows it. The system does not
     /// draw a widget whose pictures are too large, and an extension has little memory:
-    /// the file is never decoded at its full size.
-    static func small(_ file: URL) -> UIImage? {
+    /// the picture is never decoded at more than this size.
+    static func small(_ data: Data) -> UIImage? {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: 320,
         ]
-        guard let source = CGImageSourceCreateWithURL(file as CFURL, nil),
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
             let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
         else { return nil }
         return UIImage(cgImage: image)
