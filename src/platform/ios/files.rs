@@ -10,7 +10,7 @@
 //! for as long as the app runs; a bookmark made then brings that right back on later
 //! runs. The bookmarks are kept in the app's data folder.
 use super::{run_on_main, scene};
-use crate::platform::{PickKind, PickRequest};
+use crate::platform::{HandedOut, PickKind, PickRequest};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class};
@@ -39,13 +39,20 @@ enum Keep {
 const IMPORTED: &str = "Imported";
 
 type Done = Box<dyn FnOnce(Vec<PathBuf>) + Send>;
+type Told = Box<dyn FnOnce(HandedOut) + Send>;
 
 /// The picker that is up: where its choice goes and who is told.
 static PENDING: Mutex<Option<(Keep, Done)>> = Mutex::new(None);
 
+/// The question "where to keep this file" that is up: who is told what became of it.
+static HANDING_OUT: Mutex<Option<Told>> = Mutex::new(None);
+
 thread_local! {
     /// The picker's delegate (the picker does not keep it alive itself).
     static DELEGATE: RefCell<Option<Retained<PickerDelegate>>> = const { RefCell::new(None) };
+    /// The delegate of the question where to keep a file.
+    static HAND_OUT_DELEGATE: RefCell<Option<Retained<HandOutDelegate>>> =
+        const { RefCell::new(None) };
 }
 
 define_class!(
@@ -70,6 +77,31 @@ define_class!(
             if let Ok(mut pending) = PENDING.lock() {
                 pending.take();
             }
+        }
+    }
+);
+
+define_class!(
+    // SAFETY: `NSObject` has no subclassing requirements; the class has no instance
+    // variables and does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "OneumHandOutDelegate"]
+    struct HandOutDelegate;
+
+    unsafe impl NSObjectProtocol for HandOutDelegate {}
+
+    unsafe impl UIDocumentPickerDelegate for HandOutDelegate {
+        // Offered as a copy: the system has made it where the user chose once it says
+        // where that is.
+        #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
+        fn kept(&self, _picker: &UIDocumentPickerViewController, _urls: &NSArray<NSURL>) {
+            handed_out(HandedOut::Kept);
+        }
+
+        #[unsafe(method(documentPickerWasCancelled:))]
+        fn put_away(&self, _picker: &UIDocumentPickerViewController) {
+            handed_out(HandedOut::PutAway);
         }
     }
 );
@@ -170,27 +202,63 @@ fn chosen(urls: Vec<Retained<NSURL>>) {
 }
 
 /// Offers a file the app wrote to the user: where to keep it (the Files app's places).
-pub fn hand_out(file: &Path) {
+/// `done` is told, later and on the main thread, once it is kept there (the system has
+/// copied it), the question was put away, or it could not be asked.
+pub fn hand_out(file: &Path, done: impl FnOnce(HandedOut) + Send + 'static) {
     let file = file.to_path_buf();
+    let done: Told = Box::new(done);
     run_on_main(move || {
         let (Some(mtm), Some(root), Some(path)) = (
             MainThreadMarker::new(),
             scene::root_view_controller(),
             file.to_str(),
         ) else {
+            tracing::warn!("no view to offer a file from");
+            done(HandedOut::Failed);
             return;
         };
+        // (A question that is still up cannot be: the sheet covers the app. Were it
+        // so, it is taken as put away.)
+        let earlier = HANDING_OUT
+            .lock()
+            .ok()
+            .and_then(|mut waiting| waiting.replace(done));
+        if let Some(earlier) = earlier {
+            earlier(HandedOut::PutAway);
+        }
         let url = NSURL::fileURLWithPath(&NSString::from_str(path));
         let urls = NSArray::from_retained_slice(&[url]);
         let picker =
             UIDocumentPickerViewController::initForExportingURLs_asCopy(mtm.alloc(), &urls, true);
+        let delegate = HAND_OUT_DELEGATE.with(|slot| {
+            slot.borrow_mut()
+                .get_or_insert_with(|| {
+                    // SAFETY: a class without instance variables: `init` is all it needs.
+                    unsafe { objc2::msg_send![HandOutDelegate::alloc(mtm), init] }
+                })
+                .clone()
+        });
+        picker.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         root.presentViewController_animated_completion(&picker, true, None);
     });
 }
 
+/// The file that was offered is kept, or the question was put away: whoever asked is
+/// told.
+fn handed_out(outcome: HandedOut) {
+    tracing::info!(?outcome, "a file offered to the user");
+    let done = HANDING_OUT
+        .lock()
+        .ok()
+        .and_then(|mut waiting| waiting.take());
+    if let Some(done) = done {
+        done(outcome);
+    }
+}
+
 /// A file or folder the system handed over ("Open in OnEum"), as a path the app can
 /// read for good: itself if it lies in the app's container, otherwise a copy in the
-/// Documents folder.
+/// Documents folder. Copying a large file takes a while: not on the main thread.
 pub(super) fn take_in(url: &NSURL) -> Option<PathBuf> {
     bring(url, Keep::Music)
 }

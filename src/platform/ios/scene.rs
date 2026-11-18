@@ -12,7 +12,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, Message, define_class, ffi, sel};
 use objc2_core_foundation::CGRect;
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSSet};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSSet, NSURL,
+};
 use objc2_ui_kit::{
     UIEdgeInsets, UIKeyboardFrameEndUserInfoKey, UIKeyboardWillChangeFrameNotification,
     UIOpenURLContext, UIResponder, UIScene, UISceneConnectionOptions, UISceneDelegate,
@@ -324,11 +326,22 @@ fn attach_window() {
 }
 
 /// Files handed over by the system: copied into the app's folder if they lie outside it,
-/// then given to the app like files opened from Finder on a Mac.
+/// then given to the app like files opened from Finder on a Mac. The copying (and the
+/// comparing with a file that is there already) is done off the main thread, as for
+/// files chosen in the app's own picker: a large file would hold the screen still.
 fn open(contexts: &NSSet<UIOpenURLContext>) {
-    let paths: Vec<_> = contexts
-        .iter()
-        .filter_map(|context| files::take_in(&context.URL()))
-        .collect();
-    app_hooks::receive(paths);
+    let urls: Vec<Retained<NSURL>> = contexts.iter().map(|context| context.URL()).collect();
+    if urls.is_empty() {
+        return;
+    }
+    let bring_in = move || {
+        let paths: Vec<_> = urls.iter().filter_map(|url| files::take_in(url)).collect();
+        app_hooks::receive(paths);
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("oneum-open".into())
+        .spawn(bring_in)
+    {
+        tracing::warn!("cannot start taking in what was opened: {error}");
+    }
 }

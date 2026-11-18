@@ -68,7 +68,9 @@ pub struct Song {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
-    /// Indexes into the file's songs, in the playlist's order.
+    /// Indexes into the file's songs, in the playlist's order. Empty: the list was
+    /// empty where the file was written (a list whose songs the file does not hold is
+    /// not written at all).
     pub songs: Vec<u32>,
 }
 
@@ -114,8 +116,15 @@ pub struct DataImport {
     pub matched: usize,
     /// Songs of the file that are not.
     pub unmatched: usize,
+    /// Songs of the file that were left alone because their name fits more than one
+    /// song, of the file or of the library (two music folders of the same name, say):
+    /// which is which cannot be told, and what one of them was given must not go to
+    /// the other.
+    pub ambiguous: usize,
     /// Playlists made.
     pub playlists: usize,
+    /// Playlists of the file none of whose songs is in the library: not made.
+    pub playlists_without_songs: usize,
     /// The file's saved searches: the settings keep those, so they are for the caller
     /// to take in.
     pub searches: Vec<Search>,
@@ -142,7 +151,8 @@ pub fn song_key(root: Option<&Path>, path: &Path) -> String {
     all[all.len().saturating_sub(kept)..].join("/")
 }
 
-/// Reads the file. Songs, plays and playlists that point at nothing are left out.
+/// Reads the file. Songs, plays and playlists that point at nothing are left out (a
+/// playlist that was empty where the file was written is kept).
 pub fn parse(bytes: &[u8]) -> Result<LibraryData, Unreadable> {
     /// What every version of the file begins with.
     #[derive(Deserialize)]
@@ -161,11 +171,11 @@ pub fn parse(bytes: &[u8]) -> Result<LibraryData, Unreadable> {
     let songs = data.songs.len();
     let known = |index: &u32| (*index as usize) < songs;
     data.plays.retain(|(song, _)| known(song));
-    for playlist in &mut data.playlists {
+    data.playlists.retain_mut(|playlist| {
+        let empty = playlist.songs.is_empty();
         playlist.songs.retain(known);
-    }
-    data.playlists
-        .retain(|playlist| !playlist.name.trim().is_empty() && !playlist.songs.is_empty());
+        !playlist.name.trim().is_empty() && (empty || !playlist.songs.is_empty())
+    });
     data.searches
         .retain(|search| !search.name.trim().is_empty() && !search.query.trim().is_empty());
     Ok(data)
@@ -253,15 +263,20 @@ impl Library {
             .into_iter()
             .filter_map(|(id, at)| Some((*index.get(&id)?, at)))
             .collect();
+        // A list of songs the file does not hold (those of a media server) is left out:
+        // in the file it would be a list that was empty, and come back as one.
         let playlists: Vec<Playlist> = lock(&self.inner.playlists)
             .iter()
-            .map(|playlist| Playlist {
-                name: playlist.name.clone(),
-                songs: playlist
+            .filter_map(|playlist| {
+                let songs: Vec<u32> = playlist
                     .items
                     .iter()
                     .filter_map(|item| index.get(&item.track_id).copied())
-                    .collect(),
+                    .collect();
+                (!songs.is_empty() || playlist.items.is_empty()).then(|| Playlist {
+                    name: playlist.name.clone(),
+                    songs,
+                })
             })
             .collect();
         let data = LibraryData {
@@ -291,10 +306,12 @@ impl Library {
     /// Takes in library data that [`Self::export_data`] wrote, here or on another
     /// device. A song is found by the name the file gives it; failing that by the end
     /// of that name (the folders it lies in and its file name, see
-    /// [`apple::match_by_tail`]), and only where that end belongs to one song there and
-    /// one here. What the file knows is merged into what the library knows, and the
-    /// playlists are made; songs that are not in the library are counted, not added.
-    /// Blocking.
+    /// [`apple::match_by_tail`]). Either way only where the name, or its end, belongs
+    /// to one song of the file and one here: two music folders of the same name give
+    /// two songs one name, and neither is taken for the other. What the file knows is
+    /// merged into what the library knows, and the playlists are made (one that was
+    /// empty too); songs that are not in the library, and those that cannot be told
+    /// apart, are counted, not added. Blocking.
     pub fn import_data(&self, file: &Path) -> Result<DataImport, LibraryError> {
         let bytes = crate::storage::files::read_bounded(file, MAX_FILE_BYTES)?
             .ok_or_else(|| unreadable(Unreadable::NotData))?;
@@ -302,7 +319,7 @@ impl Library {
         drop(bytes);
 
         let ours = self.songs_by_key();
-        // A name that two songs here answer to finds none of them.
+        // A name that two songs answer to, here or in the file, finds none of them.
         let mut by_key: HashMap<String, Option<TrackId>> = HashMap::new();
         for (id, key, _) in &ours {
             by_key
@@ -310,12 +327,24 @@ impl Library {
                 .and_modify(|one| *one = None)
                 .or_insert(Some(*id));
         }
-        let mut found: HashMap<u32, TrackId> = data
-            .songs
-            .iter()
-            .enumerate()
-            .filter_map(|(at, song)| Some((at as u32, (*by_key.get(&composed(&song.file))?)?)))
-            .collect();
+        let keys: Vec<String> = data.songs.iter().map(|song| composed(&song.file)).collect();
+        let mut in_file: HashMap<&str, usize> = HashMap::new();
+        for key in &keys {
+            *in_file.entry(key).or_default() += 1;
+        }
+        let mut found: HashMap<u32, TrackId> = HashMap::new();
+        let mut doubtful: HashSet<u32> = HashSet::new();
+        for (at, key) in keys.iter().enumerate() {
+            match by_key.get(key) {
+                Some(Some(id)) if in_file[key.as_str()] == 1 => {
+                    found.insert(at as u32, *id);
+                }
+                Some(_) => {
+                    doubtful.insert(at as u32);
+                }
+                None => {}
+            }
+        }
         let taken: HashSet<TrackId> = found.values().copied().collect();
         let theirs: Vec<(u32, &Path)> = data
             .songs
@@ -329,7 +358,12 @@ impl Library {
             .filter(|(id, _, _)| !taken.contains(id))
             .map(|(id, key, _)| (*id, Path::new(key)))
             .collect();
-        found.extend(apple::match_by_tail(&theirs, &rest));
+        // (The songs whose name was in doubt go in as well: their ends are as much in
+        // doubt, and no other song of the file is to be taken for theirs.)
+        let tails = apple::tails(&theirs, &rest);
+        found.extend(tails.found);
+        doubtful.extend(tails.doubtful);
+        doubtful.retain(|at| !found.contains_key(at));
 
         let rows: Vec<crate::storage::db::ListeningRow> = data
             .songs
@@ -347,18 +381,23 @@ impl Library {
                 ))
             })
             .collect();
-        let playlists: Vec<(String, Vec<TrackId>)> = data
+        let playlists: Vec<super::ListIn> = data
             .playlists
             .iter()
-            .map(|playlist| {
-                let tracks = playlist
+            .map(|playlist| super::ListIn {
+                name: playlist.name.clone(),
+                tracks: playlist
                     .songs
                     .iter()
                     .filter_map(|song| found.get(song).copied())
-                    .collect();
-                (playlist.name.clone(), tracks)
+                    .collect(),
+                empty_there: playlist.songs.is_empty(),
             })
             .collect();
+        let playlists_without_songs = playlists
+            .iter()
+            .filter(|list| !list.empty_there && list.tracks.is_empty())
+            .count();
         let made = self.take_over(&rows, &playlists, MARK)?;
 
         // The plays themselves, for the statistics and for what was heard last.
@@ -374,12 +413,19 @@ impl Library {
             }
         }
 
-        let matched = found.len();
-        tracing::info!(matched, playlists = made, "library data taken in");
+        let (matched, ambiguous) = (found.len(), doubtful.len());
+        tracing::info!(
+            matched,
+            ambiguous,
+            playlists = made,
+            "library data taken in"
+        );
         Ok(DataImport {
             matched,
-            unmatched: data.songs.len() - matched,
+            unmatched: data.songs.len() - matched - ambiguous,
+            ambiguous,
             playlists: made,
+            playlists_without_songs,
             searches: data.searches,
         })
     }
@@ -487,13 +533,16 @@ mod tests {
         let text = r#"{"format":"oneum-library-data","version":1,"written_at":5,
             "songs":[{"file":"a/b/c.mp3","plays":2}],
             "plays":[[0,10],[7,11]],
-            "playlists":[{"name":"Kept","songs":[0,9,0]},{"name":"Empty","songs":[4]},{"name":" ","songs":[0]}],
+            "playlists":[{"name":"Kept","songs":[0,9,0]},{"name":"Gone","songs":[4]},{"name":" ","songs":[0]},{"name":"Nothing yet","songs":[]}],
             "searches":[{"name":"","query":"x"},{"name":"n","query":" "},{"name":"n","query":"q"}],
             "later":"fields of a later build are passed over"}"#;
         let data = parse(text.as_bytes()).expect("reads");
         assert_eq!(data.plays, [(0, 10)]);
-        assert_eq!(data.playlists.len(), 1);
+        // A list whose songs are all gone is left out; one that was empty is kept.
+        let names: Vec<&str> = data.playlists.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Kept", "Nothing yet"]);
         assert_eq!(data.playlists[0].songs, [0, 0]);
+        assert!(data.playlists[1].songs.is_empty());
         assert_eq!(
             data.searches,
             [Search {

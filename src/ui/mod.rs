@@ -38,7 +38,7 @@ use crate::model::{Track, TrackId};
 use crate::platform::MenuAction;
 use crate::platform::menu::AppMenu;
 use crate::platform::responder::{self, EditAction};
-use crate::platform::{PickKind, PickRequest, app_hooks, files, finder, window};
+use crate::platform::{HandedOut, PickKind, PickRequest, app_hooks, files, finder, window};
 use crate::playback::{Command, Notice, PlayState, PlayerSnapshot, RepeatMode};
 use art::ArtCache;
 use dialogs::Dialog;
@@ -1133,12 +1133,7 @@ impl OneumApp {
                 }
                 AppEvent::DataImported(Ok(result)) => {
                     let searches = self.take_in_searches(&result.searches);
-                    self.info_toast(self.lang.data_import_result(
-                        result.matched,
-                        result.unmatched,
-                        result.playlists,
-                        searches,
-                    ));
+                    self.info_toast(self.lang.data_import_result(&result, searches));
                     self.playlists_generation = self.core.library.playlists_generation();
                     self.playlists = self.core.library.playlists();
                 }
@@ -2076,10 +2071,22 @@ impl OneumApp {
         self.pick(PickFor::ImportData, request);
     }
 
+    /// What tells the window something from another thread: the event is sent and the
+    /// window looks again.
+    fn teller(&self) -> impl Fn(AppEvent) + Send + 'static {
+        let (events, core) = (self.events_tx.clone(), self.core.clone());
+        move |event| {
+            let _ = events.send(event);
+            core.request_repaint();
+        }
+    }
+
     /// Writes the library's own data to `dest`, with the saved searches the settings
     /// keep. On the edit thread: the destination may be slow to answer. With `hand_out`
     /// the written file is offered to the user where the system has them choose its
-    /// place afterwards (a phone); a verification run reads it where it was written.
+    /// place afterwards (a phone): it is done once it is there, not when it is written
+    /// (and nothing is said if the question was put away). A verification run reads it
+    /// where it was written.
     fn write_library_data(&mut self, dest: PathBuf, hand_out: bool) {
         let searches: Vec<crate::library::backup::Search> = self
             .settings
@@ -2090,15 +2097,23 @@ impl OneumApp {
                 query: search.query.clone(),
             })
             .collect();
+        let tell = self.teller();
         self.edit(move |library| {
             let written = library
                 .export_data(&dest, &searches)
                 .inspect_err(|error| tracing::warn!("library data export failed: {error}"))
                 .ok();
-            if written.is_some() && hand_out {
-                files::hand_out(&dest);
+            match written {
+                Some(written) if hand_out => {
+                    files::hand_out(&dest, move |outcome| match outcome {
+                        HandedOut::Kept => tell(AppEvent::DataExported(Some(written))),
+                        HandedOut::PutAway => {}
+                        HandedOut::Failed => tell(AppEvent::DataExported(None)),
+                    });
+                    None
+                }
+                written => Some(AppEvent::DataExported(written)),
             }
-            Some(AppEvent::DataExported(written))
         });
     }
 
@@ -2242,6 +2257,7 @@ impl OneumApp {
     /// Copies the log to the file the user is to keep.
     fn write_log(&mut self, dest: PathBuf) {
         let log = self.core.paths.log_dir.join("oneum.log");
+        let tell = self.teller();
         // Off the UI thread, after the edits before it: the place may be slow to answer.
         self.edit(move |_| {
             let copied = std::fs::read(&log).and_then(|mut text| {
@@ -2261,7 +2277,11 @@ impl OneumApp {
             });
             match copied {
                 Ok(()) => {
-                    files::hand_out(&dest);
+                    files::hand_out(&dest, move |outcome| {
+                        if outcome == HandedOut::Failed {
+                            tell(AppEvent::LogNotSaved);
+                        }
+                    });
                     None
                 }
                 Err(error) => {
@@ -2282,16 +2302,25 @@ impl OneumApp {
 
     /// Writes a playlist to the file the user chose for it.
     fn write_playlist(&mut self, id: i64, dest: PathBuf) {
-        // Written on the edit thread: the destination may be slow to answer.
+        let tell = self.teller();
+        // Written on the edit thread: the destination may be slow to answer. On a phone
+        // it is offered afterwards, and done once it is where the user chose.
         self.edit(move |library| {
             let written = library
                 .export_m3u8(id, &dest)
                 .inspect_err(|error| tracing::warn!("playlist export failed: {error}"))
                 .ok();
-            if written.is_some() {
-                files::hand_out(&dest);
+            match written {
+                Some(count) => {
+                    files::hand_out(&dest, move |outcome| match outcome {
+                        HandedOut::Kept => tell(AppEvent::PlaylistExported(Some(count))),
+                        HandedOut::PutAway => {}
+                        HandedOut::Failed => tell(AppEvent::PlaylistExported(None)),
+                    });
+                    None
+                }
+                None => Some(AppEvent::PlaylistExported(None)),
             }
-            Some(AppEvent::PlaylistExported(written))
         });
     }
 
@@ -3096,6 +3125,12 @@ impl OneumApp {
                     if id == "correction_off" {
                         self.settings.correction = None;
                         self.core.player.send(Command::SetCorrection(None));
+                        continue;
+                    }
+                    // The button that writes the library's data to a file the user
+                    // chooses the place of: on a phone, the system's save sheet.
+                    if id == "data_export_ask" {
+                        self.pick_data_export();
                         continue;
                     }
                     // The button of the phone's empty library that adds the sample music.

@@ -220,11 +220,45 @@ pub(crate) fn render<'a>(tracks: impl Iterator<Item = &'a Track>) -> (String, us
             )
         };
         out.push_str(&format!("#EXTINF:{seconds},{label}\n"));
-        out.push_str(&track.path.to_string_lossy());
+        out.push_str(&path_line(&track.path));
         out.push('\n');
         count += 1;
     }
     (out, count)
+}
+
+/// A path as a playlist line: as it is, where a line can hold it. One that cannot (a
+/// line break in a name, which would make two lines of it; bytes that are not UTF-8,
+/// which would be lost) is written as a `file://` URL with those bytes percent-encoded,
+/// which [`parse`] reads back to the same path.
+fn path_line(path: &Path) -> String {
+    match path.to_str() {
+        Some(text) if !text.contains(['\n', '\r']) => text.to_string(),
+        _ => file_url(path),
+    }
+}
+
+/// `path` as a `file://` URL: `/Music/a\nb.mp3` is `file:///Music/a%0Ab.mp3`, and on
+/// Windows `C:\Music\a.mp3` is `file:///C:/Music/a.mp3`.
+fn file_url(path: &Path) -> String {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut url = String::from("file://");
+    if !bytes.starts_with(b"/") {
+        url.push('/');
+    }
+    for &byte in bytes {
+        let byte = if cfg!(windows) && byte == b'\\' {
+            b'/'
+        } else {
+            byte
+        };
+        if byte.is_ascii_alphanumeric() || b"/-_.~:".contains(&byte) {
+            url.push(char::from(byte));
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
 }
 
 fn single_line(text: &str) -> String {
@@ -280,6 +314,32 @@ mod tests {
         }
         // The entry is still listed (it is reported as not found), just never looked at.
         assert_eq!(parse("file://evil.example/share/a.mp3", base).len(), 1);
+    }
+
+    /// A name with a line break in it would make two lines of one entry: such a path
+    /// is written as a URL, and read back as the same path.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_a_line_cannot_hold_is_written_as_a_url() {
+        use std::os::unix::ffi::OsStrExt;
+        let base = Path::new("/nowhere");
+        for path in [
+            PathBuf::from("/Music/Album/a\nb.mp3"),
+            PathBuf::from("/Music/Album/c\r\n100% d #1.mp3"),
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"/Music/\xb9\xe3\nx.mp3")),
+        ] {
+            let line = path_line(&path);
+            assert!(
+                line.starts_with("file:///") && !line.contains(['\n', '\r']),
+                "{line}"
+            );
+            let entries = parse(&format!("#EXTM3U\n{line}\n"), base);
+            assert_eq!(entries.len(), 1, "{line}");
+            assert_eq!(entries[0].path.as_deref(), Some(path.as_path()), "{line}");
+        }
+        // Everything else is written as it is.
+        let plain = Path::new("/Music/Album/01 #1 100%.mp3");
+        assert_eq!(path_line(plain), "/Music/Album/01 #1 100%.mp3");
     }
 
     #[test]

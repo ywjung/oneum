@@ -43,6 +43,12 @@ final class Native {
      */
     static native void onPickFailed(int id);
 
+    /**
+     * What became of the file offered under {@code id}: kept where the user wanted it
+     * (0), the question put away (1), not written (2).
+     */
+    static native void onHandedOut(int id, int outcome);
+
     /** Files another app asked to have opened: paths, one a line. */
     static native void onOpen(String paths);
 

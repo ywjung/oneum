@@ -30,7 +30,9 @@ pub fn pick(request: PickRequest, done: impl FnOnce(Vec<PathBuf>) + Send + 'stat
 }
 
 /// A file written for the user (`PickKind::SaveAs`) is where they asked for it already.
-pub fn hand_out(_file: &Path) {}
+pub fn hand_out(_file: &Path, done: impl FnOnce(super::HandedOut) + Send + 'static) {
+    done(super::HandedOut::Kept);
+}
 
 /// Folders outside the app's reach that were linked on an earlier run (a phone's way of
 /// using a folder where it is): none on a desk, where every folder can be read.

@@ -80,6 +80,17 @@ pub struct PickRequest {
     pub kind: PickKind,
 }
 
+/// What became of a file the app wrote and offered to the user (see `files::hand_out`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandedOut {
+    /// It is where the user wanted it.
+    Kept,
+    /// The user put the question away: it was kept nowhere.
+    PutAway,
+    /// It could not be written where the user wanted it.
+    Failed,
+}
+
 pub enum PickKind {
     /// A folder.
     Folder,

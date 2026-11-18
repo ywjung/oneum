@@ -269,19 +269,26 @@ pub(super) fn pick(kind: i32, id: i32) {
     });
 }
 
-/// Asks where to keep the file at `path` (suggesting `name`) and copies it there.
-pub(super) fn hand_out(path: &str, name: &str) {
+/// Asks where to keep the file at `path` (suggesting `name`) and copies it there; what
+/// became of it is told under `id` (`Native.onHandedOut`). False if Java could not be
+/// asked.
+pub(super) fn hand_out(path: &str, name: &str, id: i32) -> bool {
     with_activity("handOut", |env, activity| {
         let path = env.new_string(path)?;
         let name = env.new_string(name)?;
         env.call_method(
             activity,
             jni_str!("handOut"),
-            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
-            &[JValue::Object(&path), JValue::Object(&name)],
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;I)V"),
+            &[
+                JValue::Object(&path),
+                JValue::Object(&name),
+                JValue::Int(id),
+            ],
         )?;
         Ok(())
-    });
+    })
+    .is_some()
 }
 
 /// What plays, for the notification and the lock screen. Times in milliseconds.

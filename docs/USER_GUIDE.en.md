@@ -57,7 +57,7 @@ The song nears its end
 + Stop After Current Song :: Playback stops after this song. The next one is ready and waits
 + Repeat One :: The same song again, from its beginning
 The next song in the queue :: With shuffle, the next one of the shuffled order. Songs of one album follow without a gap; with crossfade on, others overlap
-+ Repeat All :: After the last song of the queue, the first one (shuffled anew with shuffle on)
++ Repeat All :: After the last song of the queue, the first one (shuffled anew with shuffle on; the song just heard does not come first)
 + Radio :: With repeat off, five fitting songs were added to the end of the queue when the last song started, and playback goes on
 Stop :: With nothing to follow, playback stops. The last song stays, and Play starts it from its beginning
 ```
@@ -318,8 +318,8 @@ In Apple Music, save an XML file with **File ▸ Library ▸ Export Library…**
 Under **Library Data** in Settings → Library, **Export…** saves one file; in OnEum on another device, choose that file with **Import…**. The file can also simply be kept.
 
 - The file holds play counts, the plays themselves (what the statistics and Listen Again go by), dates added, favorites, playlists and smart playlists. Settings such as appearance and output, and what is pinned, are not part of it.
-- Songs are found by their folders and file names below the music folder, which fits a device that holds a copy of the music folder. Songs that are not in the library, and songs that cannot be told apart because the same name occurs more than once, are skipped and counted.
-- An import merges: the higher play count, the later last play and the earlier date added are kept, and importing the same file twice changes nothing more. When a playlist of that name exists already, "(2)" is added to the name. Music files are not changed.
+- Songs are found by their folders and file names below the music folder, which fits a device that holds a copy of the music folder. Songs that are not in the library, and songs that cannot be told apart because the same path occurs more than once (two music folders of the same name holding the same path, say), are skipped and counted separately: one song's rating and favorite never go to another.
+- An import merges: the higher play count, the later last play and the earlier date added are kept, and importing the same file twice changes nothing more. When a playlist of that name exists already, "(2)" is added to the name. An empty playlist comes over empty; a playlist none of whose songs is found is not made, only counted. Music files are not changed.
 
 ## Settings (⌘,)
 The gear button at the top right opens them too. Close them with Esc, the close (×) button, or a click outside. Changes apply and are saved at once.

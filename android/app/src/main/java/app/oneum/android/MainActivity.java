@@ -22,6 +22,7 @@ import android.provider.Settings;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
+import android.util.SparseArray;
 import android.util.SparseIntArray;
 import android.view.View;
 import android.view.ViewGroup;
@@ -60,10 +61,15 @@ import java.util.concurrent.TimeoutException;
  */
 public final class MainActivity extends NativeActivity {
     private static final String TAG = "OnEum";
-    /** Request code of "where to keep this file"; pickers use the ids the app gives. */
-    private static final int HAND_OUT = 1;
     private static final int ASK_NOTIFICATIONS = 2;
-    /** The first id the app gives a picker (see files.rs: they count up from 1). */
+    /** What became of a file that was offered (Native.onHandedOut). */
+    private static final int HANDED_OUT_KEPT = 0;
+    private static final int HANDED_OUT_PUT_AWAY = 1;
+    private static final int HANDED_OUT_FAILED = 2;
+    /**
+     * Pickers and "where to keep this file" are asked for under the ids the app gives
+     * (see files.rs: they count up from 1), this added: the request code.
+     */
     private static final int PICK_BASE = 1000;
 
     static {
@@ -82,7 +88,8 @@ public final class MainActivity extends NativeActivity {
     private InputView input;
     /** Which kind of picker was shown under which request code. */
     private final SparseIntArray picking = new SparseIntArray();
-    private String handingOut;
+    /** Which file is offered under which request code. */
+    private final SparseArray<String> handingOut = new SparseArray<>();
     private boolean askedForNotifications;
     /** 0: the app follows the phone's theme, 1: it is light, 2: it is dark. */
     private int appearance;
@@ -550,19 +557,25 @@ public final class MainActivity extends NativeActivity {
         });
     }
 
-    /** Asks where to keep the file at {@code path} and copies it there. */
-    public void handOut(String path, String name) {
+    /**
+     * Asks where to keep the file at {@code path} and copies it there. The app is told
+     * under {@code id} once it is kept there, the question was put away, or it could not
+     * be written (Native.onHandedOut).
+     */
+    public void handOut(String path, String name, int id) {
         runOnUiThread(() -> {
-            handingOut = path;
             Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
                     .addCategory(Intent.CATEGORY_OPENABLE)
                     .setType(name.endsWith(".m3u8") || name.endsWith(".m3u")
                             ? "audio/x-mpegurl" : "application/octet-stream")
                     .putExtra(Intent.EXTRA_TITLE, name);
             try {
-                startActivityForResult(intent, HAND_OUT);
+                handingOut.put(PICK_BASE + id, path);
+                startActivityForResult(intent, PICK_BASE + id);
             } catch (RuntimeException error) {
                 Log.w(TAG, "no place to keep a file", error);
+                handingOut.remove(PICK_BASE + id);
+                Native.onHandedOut(id, HANDED_OUT_FAILED);
             }
         });
     }
@@ -633,12 +646,19 @@ public final class MainActivity extends NativeActivity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == HAND_OUT) {
-            String from = handingOut;
-            handingOut = null;
-            if (result == RESULT_OK && data != null && data.getData() != null && from != null) {
+        String from = handingOut.get(request);
+        if (from != null) {
+            handingOut.remove(request);
+            int id = request - PICK_BASE;
+            if (result != RESULT_OK) {
+                Native.onHandedOut(id, HANDED_OUT_PUT_AWAY);
+            } else if (data == null || data.getData() == null) {
+                Native.onHandedOut(id, HANDED_OUT_FAILED);
+            } else {
                 Uri to = data.getData();
-                new Thread(() -> copyOut(new File(from), to), "oneum-export").start();
+                new Thread(() -> Native.onHandedOut(id,
+                        copyOut(new File(from), to) ? HANDED_OUT_KEPT : HANDED_OUT_FAILED),
+                        "oneum-export").start();
             }
             return;
         }
@@ -968,15 +988,28 @@ public final class MainActivity extends NativeActivity {
         return have;
     }
 
-    private void copyOut(File from, Uri to) {
+    /**
+     * Copies {@code from} to the place the user chose; true once all of it is there
+     * (the place has taken it whole, which closing the stream says). What was made of a
+     * copy that failed is taken away again, where the place lets it be.
+     */
+    private boolean copyOut(File from, Uri to) {
         try (InputStream in = new FileInputStream(from);
                 OutputStream out = getContentResolver().openOutputStream(to)) {
-            if (out != null) {
-                copy(in, out);
+            if (out == null) {
+                throw new IOException("the place gives no way to write to it");
             }
+            copy(in, out);
         } catch (IOException | RuntimeException error) {
             Log.w(TAG, "cannot write the file where it was to be kept", error);
+            try {
+                DocumentsContract.deleteDocument(getContentResolver(), to);
+            } catch (IOException | RuntimeException ignored) {
+                // (Nothing more can be done: the user is told it was not written.)
+            }
+            return false;
         }
+        return true;
     }
 
     private static void copy(InputStream in, OutputStream out) throws IOException {

@@ -219,6 +219,15 @@ pub struct PlaylistItem {
     pub track_id: TrackId,
 }
 
+/// A playlist of another record (see `Library::take_over`), as it is to be made here.
+struct ListIn {
+    name: String,
+    /// Its songs that are in the library, in its order.
+    tracks: Vec<TrackId>,
+    /// It had no songs in the record either: it is made all the same, empty.
+    empty_there: bool,
+}
+
 /// What an Apple Music library import did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppleImport {
@@ -2753,16 +2762,18 @@ impl Library {
                 Some((id, t.play_count, t.last_played, t.added, t.loved, t.rating))
             })
             .collect();
-        let playlists: Vec<(String, Vec<TrackId>)> = export
+        let playlists: Vec<ListIn> = export
             .playlists
             .iter()
-            .map(|playlist| {
-                let tracks = playlist
+            .map(|playlist| ListIn {
+                name: playlist.name.clone(),
+                tracks: playlist
                     .items
                     .iter()
                     .filter_map(|item| found.get(item).copied())
-                    .collect();
-                (playlist.name.clone(), tracks)
+                    .collect(),
+                // (The export's lists without songs are left out when it is read.)
+                empty_there: false,
             })
             .collect();
         let made = self.take_over(&rows, &playlists, "Apple Music")?;
@@ -2780,12 +2791,12 @@ impl Library {
     /// rows are merged, not added up (see `Db::merge_listening`). The playlists are
     /// made, each with its songs in one step: one that is here already (same name,
     /// same songs: an earlier import) is not made again, one without a song that is
-    /// here is left out, and a name taken by another list gets `mark` behind it.
-    /// Returns how many playlists were made.
+    /// here is left out unless it was empty in the record too, and a name taken by
+    /// another list gets `mark` behind it. Returns how many playlists were made.
     fn take_over(
         &self,
         rows: &[crate::storage::db::ListeningRow],
-        playlists: &[(String, Vec<TrackId>)],
+        playlists: &[ListIn],
         mark: &str,
     ) -> Result<usize, LibraryError> {
         let changed: Vec<TrackId> = {
@@ -2828,8 +2839,13 @@ impl Library {
             })
             .collect();
         let mut made = 0;
-        for (name, tracks) in playlists {
-            if tracks.is_empty() {
+        for ListIn {
+            name,
+            tracks,
+            empty_there,
+        } in playlists
+        {
+            if tracks.is_empty() && !empty_there {
                 continue;
             }
             // The list is here already, under its name or a marked one: passed over.

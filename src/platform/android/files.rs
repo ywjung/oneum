@@ -5,7 +5,7 @@
 //! on a desk: a folder that is chosen is used where it is. A single file that is chosen
 //! (a playlist, a correction file) comes as an address of the system's; the Java side
 //! copies it into the app's cache and hands over the path of the copy.
-use crate::platform::{PickKind, PickRequest};
+use crate::platform::{HandedOut, PickKind, PickRequest};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -89,13 +89,40 @@ fn clean_name(name: &str) -> String {
     }
 }
 
-/// Offers a file the app wrote to the user: where to keep it.
-pub fn hand_out(file: &Path) {
+type Told = Box<dyn FnOnce(HandedOut) + Send>;
+
+/// Who waits to hear what became of which file that was offered.
+static HANDING_OUT: Mutex<Vec<(i32, Told)>> = Mutex::new(Vec::new());
+
+/// Offers a file the app wrote to the user: where to keep it. `done` is told, later
+/// and on another thread, once it is kept there (it is copied), the question was put
+/// away, or it could not be written.
+pub fn hand_out(file: &Path, done: impl FnOnce(HandedOut) + Send + 'static) {
     let name = file
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    super::java::hand_out(&file.to_string_lossy(), &name);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut waiting) = HANDING_OUT.lock() {
+        waiting.push((id, Box::new(done)));
+    }
+    if !super::java::hand_out(&file.to_string_lossy(), &name, id) {
+        handed_out(id, HandedOut::Failed);
+    }
+}
+
+/// What became of the file offered under `id` (see `natives`).
+pub(super) fn handed_out(id: i32, outcome: HandedOut) {
+    tracing::info!(?outcome, "a file offered to the user");
+    let done = HANDING_OUT.lock().ok().and_then(|mut waiting| {
+        let at = waiting
+            .iter()
+            .position(|(waiting_id, _)| *waiting_id == id)?;
+        Some(waiting.swap_remove(at).1)
+    });
+    if let Some(done) = done {
+        done(outcome);
+    }
 }
 
 /// The sample music that comes with the app: only the iPhone app has it (see

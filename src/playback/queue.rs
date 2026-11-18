@@ -67,6 +67,11 @@ pub struct Queue {
     by_rating: bool,
     /// The stars a track has, 0 to 5.
     rating_of: Option<RatingOf>,
+    /// The pass over a shuffled queue that ended at the last wrap, in the order it was
+    /// heard. The wrap mixes the order anew, so the order no longer tells what came
+    /// before the first item: "previous" from there walks back through this. Not
+    /// kept with the session.
+    heard_before: Vec<ItemId>,
 }
 
 /// Tells which album a track belongs to.
@@ -109,6 +114,7 @@ impl Queue {
             by_rating: false,
             rating_of: None,
             album_of: None,
+            heard_before: Vec::new(),
         }
     }
 
@@ -317,6 +323,7 @@ impl Queue {
         self.revision += 1;
         self.items = self.make_items(tracks);
         self.unshuffled.clear();
+        self.heard_before.clear();
         if self.items.is_empty() {
             self.current = None;
             return None;
@@ -420,6 +427,7 @@ impl Queue {
         self.revision += 1;
         self.items.clear();
         self.unshuffled.clear();
+        self.heard_before.clear();
         self.current = None;
     }
 
@@ -459,6 +467,7 @@ impl Queue {
         }
         self.shuffle = on;
         self.revision += 1;
+        self.heard_before.clear();
         let current_id = self.current().map(|c| c.id);
         if on {
             self.unshuffled = self.items.iter().map(|i| i.id).collect();
@@ -489,32 +498,84 @@ impl Queue {
     }
 
     /// Starts another pass over a shuffled queue in a fresh order. The track that just
-    /// played goes to the very end of the new order: it cannot come up again right away,
-    /// and since "previous" from the first item wraps to the last one, going back still
-    /// leads to the track that was actually heard before.
+    /// played may come anywhere in it but first (in album mode: its album), so that it
+    /// is not heard twice in a row; the pass that ended is remembered, so that
+    /// "previous" from the first item still leads to what was heard before it.
     fn reshuffle_for_wrap(&mut self) {
         self.revision += 1;
+        let heard: Vec<ItemId> = match self.current {
+            Some(c) => self.items[..=c].iter().map(|item| item.id).collect(),
+            None => Vec::new(),
+        };
         let last = self.current();
         self.shuffle_tail(0);
-        match (&self.album_of, last) {
-            // The album that just played goes to the end as a whole.
-            (Some(album_of), Some(last)) if self.by_album => {
+        if let Some(last) = last {
+            self.keep_from_the_front(last);
+        }
+        self.heard_before = heard;
+    }
+
+    /// After a fresh shuffle: `last` (the track that just played) or, in album mode,
+    /// its album, if it came first, goes to a place drawn among the others. Every
+    /// other order is as likely as before.
+    fn keep_from_the_front(&mut self, last: QueueItem) {
+        if self.items.len() < 2 {
+            return;
+        }
+        match &self.album_of {
+            Some(album_of) if self.by_album => {
                 let key = album_of(last.track);
-                let (same, mut others): (Vec<QueueItem>, Vec<QueueItem>) = self
+                let lead = self
                     .items
-                    .drain(..)
-                    .partition(|item| album_of(item.track) == key);
-                others.extend(same);
-                self.items = others;
+                    .iter()
+                    .take_while(|item| album_of(item.track) == key)
+                    .count();
+                if lead == 0 || lead == self.items.len() {
+                    return;
+                }
+                let album: Vec<QueueItem> = self.items.drain(..lead).collect();
+                // Where another album ends: after the first one at the earliest.
+                let ends: Vec<usize> = (1..=self.items.len())
+                    .filter(|&at| {
+                        at == self.items.len()
+                            || album_of(self.items[at].track) != album_of(self.items[at - 1].track)
+                    })
+                    .collect();
+                let at = ends[self.rng.usize(..ends.len())];
+                self.items.splice(at..at, album);
             }
-            (_, Some(last)) => {
-                if let Some(at) = self.index_of(last.id) {
-                    let end = self.items.len() - 1;
-                    self.items.swap(at, end);
+            _ => {
+                if self.items[0].id == last.id {
+                    let to = self.rng.usize(1..self.items.len());
+                    self.items.swap(0, to);
                 }
             }
-            _ => {}
         }
+    }
+
+    /// "Previous" from the first item of a pass that a wrap mixed: the item heard
+    /// before it in the pass that ended comes to the front and is current. `None` when
+    /// there is no such pass, or nothing of it is left to go back to.
+    fn back_into_the_pass_before(&mut self) -> Option<QueueItem> {
+        if !self.shuffle {
+            self.heard_before.clear();
+            return None;
+        }
+        while let Some(id) = self.heard_before.pop() {
+            // (One that has been taken out of the queue since, or that is the current
+            // item itself, is passed over.)
+            match self.index_of(id) {
+                Some(at) if at > 0 => {
+                    self.revision += 1;
+                    let item = self.items.remove(at);
+                    self.items.insert(0, item);
+                    self.current = Some(0);
+                    return Some(item);
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// The item that follows `id` when playback continues on its own, without changing
@@ -590,6 +651,8 @@ impl Queue {
         }
         if c > 0 {
             self.current = Some(c - 1);
+        } else if let Some(item) = self.back_into_the_pass_before() {
+            return Some(Previous::Item(item));
         } else if self.repeat == RepeatMode::Off || self.items.len() == 1 {
             return Some(Previous::Restart);
         } else {
@@ -618,6 +681,9 @@ mod tests {
     }
     fn cur(q: &Queue) -> TrackId {
         q.current().expect("has current").track
+    }
+    fn cur_item(q: &Queue) -> QueueItem {
+        q.current().expect("has current")
     }
     fn queue(n: i64, start: usize) -> Queue {
         let mut q = Queue::with_seed(42);
@@ -756,11 +822,20 @@ mod tests {
         assert_ne!(first / 10, last_album);
         let order = tracks(&q);
         assert!(albums_are_whole(&order), "{order:?}");
-        assert_eq!(
-            order[20] / 10,
-            last_album,
-            "the album just heard comes last"
-        );
+        // Over many passes the album heard last is not always the one that comes last
+        // (it may come anywhere but first), and never comes first.
+        let mut last_albums = HashSet::new();
+        for _ in 0..40 {
+            while q.current_index() != Some(q.len() - 1) {
+                q.advance_auto().expect("more items");
+            }
+            let heard = cur(&q) / 10;
+            last_albums.insert(heard);
+            let first = q.advance_auto().expect("wraps").track;
+            assert_ne!(first / 10, heard);
+            assert!(albums_are_whole(&tracks(&q)));
+        }
+        assert!(last_albums.len() > 2, "{last_albums:?}");
     }
 
     #[test]
@@ -1190,6 +1265,82 @@ mod tests {
         let mut all = tracks(&q);
         all.sort_unstable();
         assert_eq!(all, (1..=8).collect::<Vec<_>>());
+    }
+
+    /// Eight songs on "repeat all", shuffled, for many passes: every pass has every
+    /// song once, none starts with the song that ended the pass before, and the song
+    /// that ends a pass is not always the same one.
+    #[test]
+    fn the_last_song_of_a_shuffled_pass_is_not_always_the_same() {
+        for seed in 0..20 {
+            let mut q = queue(8, 0);
+            q.rng = fastrand::Rng::with_seed(seed);
+            q.set_shuffle(true);
+            q.set_repeat(RepeatMode::All);
+            let mut last_songs = HashSet::new();
+            for pass in 0..30 {
+                while q.current_index() != Some(q.len() - 1) {
+                    q.advance_auto().expect("more items");
+                }
+                let last = cur(&q);
+                last_songs.insert(last);
+                let first = q.advance_auto().expect("wraps").track;
+                assert_ne!(first, last, "seed {seed} pass {pass}: twice in a row");
+                let mut all = tracks(&q);
+                all.sort_unstable();
+                assert_eq!(all, (1..=8).collect::<Vec<_>>());
+            }
+            assert!(last_songs.len() >= 4, "seed {seed}: {last_songs:?}");
+        }
+    }
+
+    /// From the start of a pass that a wrap mixed, "previous" walks back through the
+    /// pass that was heard before it, in its order; "next" then comes forward through
+    /// the same songs and on into the new pass.
+    #[test]
+    fn previous_walks_back_through_the_pass_heard_before_the_wrap() {
+        for seed in 0..30 {
+            for steps in [1, 2, 6] {
+                let mut q = Queue::with_seed(seed);
+                q.set_repeat(RepeatMode::All);
+                q.set_shuffle(true);
+                q.replace(&[1, 2, 3, 4, 5, 6], 0);
+                let heard: Vec<ItemId> = q.items().iter().map(|i| i.id).collect();
+                while q.current_index() != Some(q.len() - 1) {
+                    q.advance_auto().expect("not at the end yet");
+                }
+                q.advance_auto().expect("wraps");
+                let new_pass: Vec<ItemId> = q.items().iter().map(|i| i.id).collect();
+                let mut back = Vec::new();
+                for _ in 0..steps {
+                    match q.previous_manual(0) {
+                        Some(Previous::Item(item)) => back.push(item.id),
+                        other => panic!("seed {seed}: {other:?}"),
+                    }
+                    assert_eq!(q.current_index(), Some(0));
+                }
+                back.reverse();
+                assert_eq!(back, heard[6 - steps..], "seed {seed}: the pass before");
+                // Forward again through the same songs…
+                let mut forward = vec![cur_item(&q).id];
+                for _ in 1..steps {
+                    forward.push(q.next_manual().expect("next").id);
+                }
+                assert_eq!(forward, back, "seed {seed}");
+                // …and on into the new pass, at its first song that was not gone back to.
+                if steps < 6 {
+                    let next = new_pass.iter().find(|id| !back.contains(id)).copied();
+                    assert_eq!(q.next_manual().map(|i| i.id), next, "seed {seed}");
+                }
+                let mut all = tracks(&q);
+                all.sort_unstable();
+                assert_eq!(
+                    all,
+                    [1, 2, 3, 4, 5, 6],
+                    "seed {seed}: nothing lost or doubled"
+                );
+            }
+        }
     }
 
     #[test]

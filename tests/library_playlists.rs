@@ -404,6 +404,33 @@ fn m3u8_export_and_import_round_trip() {
     );
 }
 
+/// A file whose name has a line break in it: exported and taken in again, it is the one
+/// song it was, not two lines that name nothing.
+#[cfg(unix)]
+#[test]
+fn m3u8_round_trip_keeps_a_name_with_a_line_break() {
+    let env = TestEnv::new();
+    write_tagged_wav(
+        &env.music().join("앨범/첫\n줄.wav"),
+        300,
+        "Broken",
+        "A",
+        "B",
+    );
+    let (library, _) = env.open_scanned();
+    let id = library.snapshot().tracks[0].id;
+    let playlist = library.create_playlist("줄").unwrap();
+    library.add_to_playlist(playlist, &[id]).unwrap();
+    let dest = env.dir.path().join("exports/줄.m3u8");
+    assert_eq!(library.export_m3u8(playlist, &dest).unwrap(), 1);
+    let text = fs::read_to_string(&dest).unwrap();
+    assert_eq!(text.lines().count(), 3, "{text:?}");
+    assert!(text.contains("%0A"), "{text:?}");
+    let imported = library.import_m3u8(&dest).unwrap();
+    assert_eq!((imported.matched, imported.missing.len()), (1, 0));
+    assert_eq!(track_ids(&library, imported.playlist_id), [id]);
+}
+
 #[test]
 fn m3u8_import_tolerates_real_world_files() {
     let env = TestEnv::new();
@@ -909,6 +936,86 @@ fn library_data_written_here_is_taken_in_on_another_device() {
         last.import_data(&env.dir.path().join("no such file")),
         Err(LibraryError::Io(_))
     ));
+}
+
+/// Two music folders of the same name give two songs one name in the library data.
+/// Taken in where only one song of that name is, neither is taken for it: what one of
+/// them was given (stars, a favourite) must not go to the other. They are counted
+/// apart from songs that are not there. A playlist that was empty comes back empty;
+/// one whose songs are not there is counted.
+#[test]
+fn library_data_does_not_take_one_song_for_another() {
+    let env = TestEnv::new();
+    let first = env.dir.path().join("a/Music");
+    let second = env.dir.path().join("b/Music");
+    write_tagged_wav(&first.join("Album/01.wav"), 300, "First", "X", "Album");
+    write_tagged_wav(&first.join("Album/02.wav"), 500, "Other", "X", "Album");
+    write_tagged_wav(&second.join("Album/01.wav"), 400, "Second", "X", "Album");
+    let library = env.open();
+    library.add_folder(&first).unwrap();
+    library.add_folder(&second).unwrap();
+    wait_scan(&library);
+    let id_in = |library: &Library, title: &str| {
+        library
+            .snapshot()
+            .tracks
+            .iter()
+            .find(|t| t.title == title)
+            .map(|t| t.id)
+            .unwrap()
+    };
+    let id = |title: &str| id_in(&library, title);
+    library.set_rating(&[id("Second")], 5).unwrap();
+    library.set_favorite(&[id("Second")], true).unwrap();
+    library.set_rating(&[id("Other")], 3).unwrap();
+    library.create_playlist("나중에").unwrap();
+    let only_second = library.create_playlist("B만").unwrap();
+    library
+        .add_to_playlist(only_second, &[id("Second")])
+        .unwrap();
+    let file = env.dir.path().join("OnEum Library.json");
+    let written = library.export_data(&file, &[]).expect("writes");
+    assert_eq!((written.songs, written.playlists), (3, 2));
+
+    let there = TestEnv::new();
+    let music = there.dir.path().join("Music");
+    write_tagged_wav(&music.join("Album/01.wav"), 300, "First", "X", "Album");
+    write_tagged_wav(&music.join("Album/02.wav"), 500, "Other", "X", "Album");
+    let other = there.open();
+    other.add_folder(&music).unwrap();
+    wait_scan(&other);
+    let result = other.import_data(&file).expect("takes in");
+    assert_eq!(
+        (result.matched, result.unmatched, result.ambiguous),
+        (1, 0, 2),
+        "the two songs of one name are in doubt, not missing and not matched"
+    );
+    let one = other.track(id_in(&other, "First")).unwrap();
+    assert_eq!(one.rating, 0, "the other song's stars stay with it");
+    assert!(!one.favorite, "and so does its favourite");
+    assert_eq!(other.track(id_in(&other, "Other")).unwrap().rating, 3);
+    assert_eq!(
+        (result.playlists, result.playlists_without_songs),
+        (1, 1),
+        "the empty list is made; the one whose song is in doubt is counted"
+    );
+    let later = other
+        .playlists()
+        .into_iter()
+        .find(|p| p.name == "나중에")
+        .expect("the empty playlist came back");
+    assert!(track_ids(&other, later.id).is_empty());
+
+    // Again: nothing more.
+    let again = other.import_data(&file).expect("takes in");
+    assert_eq!(again.playlists, 0);
+    assert_eq!(other.playlists().len(), 1);
+
+    // Taken in where both songs are, each is found by its own folder's place... which
+    // the file does not tell: the two stay in doubt here as well.
+    let both = library.import_data(&file).expect("takes in");
+    assert_eq!((both.matched, both.ambiguous), (1, 2));
+    assert_eq!(library.track(id("First")).unwrap().rating, 0);
 }
 
 /// The listener's stars: kept in the database, found by search and by sorting, left

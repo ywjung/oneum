@@ -175,6 +175,25 @@ pub extern "system" fn Java_app_oneum_android_Native_onPickFailed<'caller>(
     app_hooks::wake();
 }
 
+/// What became of the file offered under `id`: kept where the user wanted it (0), the
+/// question put away (1), or not written (2).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_oneum_android_Native_onHandedOut<'caller>(
+    _env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    id: jint,
+    outcome: jint,
+) {
+    use crate::platform::HandedOut;
+    let outcome = match outcome {
+        0 => HandedOut::Kept,
+        1 => HandedOut::PutAway,
+        _ => HandedOut::Failed,
+    };
+    super::files::handed_out(id, outcome);
+    app_hooks::wake();
+}
+
 /// The activity is going: for good (swiped away; `finishing` 1), or to be made anew
 /// by the system at once (0). What is kept is saved and the process ends, so that
 /// the next start is a fresh one.

@@ -1234,11 +1234,17 @@ impl Lang {
 
     pub fn data_import_result(
         self,
-        matched: usize,
-        unmatched: usize,
-        playlists: usize,
+        result: &crate::library::backup::DataImport,
         searches: usize,
     ) -> String {
+        let crate::library::backup::DataImport {
+            matched,
+            unmatched,
+            ambiguous,
+            playlists,
+            playlists_without_songs,
+            ..
+        } = *result;
         let mut text = match self {
             Lang::Ko => format!("{}곡의 기록을 가져왔습니다", group_digits(matched)),
             Lang::En => format!("Took over the history of {}", self.song_count(matched)),
@@ -1262,6 +1268,27 @@ impl Lang {
             text.push_str(&match self {
                 Lang::Ko => format!(" · 라이브러리에 없는 곡 {}곡", group_digits(unmatched)),
                 Lang::En => format!(" · {} not in your library", group_digits(unmatched)),
+            });
+        }
+        if ambiguous > 0 {
+            text.push_str(&match self {
+                Lang::Ko => format!(
+                    " · 같은 경로의 곡이 둘 이상이라 건너뛴 곡 {}곡",
+                    group_digits(ambiguous)
+                ),
+                Lang::En => format!(
+                    " · {} skipped: more than one song has that path",
+                    group_digits(ambiguous)
+                ),
+            });
+        }
+        if playlists_without_songs > 0 {
+            text.push_str(&match self {
+                Lang::Ko => format!(" · 곡을 찾지 못한 플레이리스트 {playlists_without_songs}개"),
+                Lang::En => format!(
+                    " · {} without any of its songs here",
+                    en_count(playlists_without_songs, "playlist", "playlists")
+                ),
             });
         }
         text.push('.');

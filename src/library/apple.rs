@@ -170,6 +170,23 @@ pub fn match_by_tail<A: Copy + Eq + std::hash::Hash, B: Copy + Eq + std::hash::H
     export: &[(A, &Path)],
     files: &[(B, &Path)],
 ) -> HashMap<A, B> {
+    tails(export, files).found
+}
+
+/// What [`match_by_tail`] found, and what it could not tell apart.
+pub struct TailMatch<A, B> {
+    pub found: HashMap<A, B>,
+    /// Songs of the export whose end belongs to a file here, but not to that file
+    /// alone or not to that song alone: there is a song here it may be, and no telling
+    /// which.
+    pub doubtful: std::collections::HashSet<A>,
+}
+
+/// [`match_by_tail`], with the songs it left alone because more than one fits.
+pub fn tails<A: Copy + Eq + std::hash::Hash, B: Copy + Eq + std::hash::Hash>(
+    export: &[(A, &Path)],
+    files: &[(B, &Path)],
+) -> TailMatch<A, B> {
     use unicode_normalization::UnicodeNormalization;
     let tail = |path: &Path, parts: usize| -> Option<String> {
         let all: Vec<String> = path
@@ -188,6 +205,7 @@ pub fn match_by_tail<A: Copy + Eq + std::hash::Hash, B: Copy + Eq + std::hash::H
     };
     let mut found: HashMap<A, B> = HashMap::new();
     let mut taken: std::collections::HashSet<B> = std::collections::HashSet::new();
+    let mut doubtful = std::collections::HashSet::new();
     for parts in [3, 2] {
         let mut theirs: HashMap<String, Vec<A>> = HashMap::new();
         for (id, path) in export {
@@ -206,13 +224,18 @@ pub fn match_by_tail<A: Copy + Eq + std::hash::Hash, B: Copy + Eq + std::hash::H
             }
         }
         for (key, songs) in theirs {
-            if let ([song], Some([file])) = (songs.as_slice(), ours.get(&key).map(Vec::as_slice)) {
-                found.insert(*song, *file);
-                taken.insert(*file);
+            match (songs.as_slice(), ours.get(&key).map(Vec::as_slice)) {
+                ([song], Some([file])) => {
+                    found.insert(*song, *file);
+                    taken.insert(*file);
+                }
+                (_, Some(_)) => doubtful.extend(songs),
+                _ => {}
             }
         }
     }
-    found
+    doubtful.retain(|song| !found.contains_key(song));
+    TailMatch { found, doubtful }
 }
 
 /// `file:///Users/me/Music/a%20b.mp3` (or `file://localhost/…`) as a path. Other
@@ -579,6 +602,20 @@ mod tests {
         assert_eq!(found.get(&5), None);
         assert_eq!(found.get(&6), Some(&60));
         assert_eq!(found.len(), 4);
+        // The one left alone because more than one file fits is told apart from the
+        // one that is not here at all.
+        let doubtful: Vec<i32> = tails(&export, &files).doubtful.into_iter().collect();
+        assert_eq!(doubtful, [4]);
+        // Two songs of the export that end alike, and one file here: neither is taken
+        // for it.
+        let twice = [
+            (1, Path::new("/Users/me/Music/Album/01.mp3")),
+            (2, Path::new("/Volumes/Disk/Music/Album/01.mp3")),
+        ];
+        let once = [(10, Path::new("/var/mobile/Documents/Music/Album/01.mp3"))];
+        let matched = tails(&twice, &once);
+        assert!(matched.found.is_empty());
+        assert_eq!(matched.doubtful.len(), 2);
         // A file's name alone is never enough.
         let lone = [(1, Path::new("/Users/me/Music/01 Song.m4a"))];
         let named = [(70, Path::new("/var/mobile/Documents/Other/01 Song.m4a"))];
