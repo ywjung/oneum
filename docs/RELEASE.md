@@ -48,6 +48,8 @@ scripts/package.sh --dmg
 결과물:
 - `dist/OnEum.app` — 번들(`Info.plist`, 아이콘, 고지와 라이선스 전문 포함. 사용 안내는 실행 파일에 내장)
 
+배포용 빌드(Mac · Windows · Android · iPhone)에는 빌드한 컴퓨터의 경로가 들어가지 않습니다: Rust가 오류 메시지용으로 넣는 소스 경로의 홈 폴더와 프로젝트 폴더 부분을 `scripts/release-paths.sh`가 `home` · `cargo` · `rustup` · `oneum`으로 바꿉니다. 공개 전에 `strings <프로그램> | grep -c /Users/`가 0인지 확인합니다.
+
 `scripts/package.sh`는 검증 채널(`ONEUM_SCRIPT`)이 없는 빌드를 만듭니다. 그 채널이 든 빌드는 `scripts/dev/run.sh`(`ONEUM_AUTOMATION=1`)가 `dist/dev`에만 만듭니다. **`dist/dev`의 앱을 배포하지 마세요.**
 - `dist/OnEum-<버전>-arm64.dmg` — 앱과 `/Applications` 바로가기
 - `dist/SHA256SUMS.txt`

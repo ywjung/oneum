@@ -19,6 +19,8 @@ TARGET=x86_64-pc-windows-gnu
 command -v x86_64-w64-mingw32-gcc >/dev/null || { echo "mingw-w64 is not installed (brew install mingw-w64)" >&2; exit 1; }
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+# (No path of this computer in the program: see the file.)
+. scripts/release-paths.sh
 cargo build --release --locked --target "$TARGET" --bin oneum
 TARGET_DIR=$(cargo metadata --format-version 1 --no-deps --locked \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')

@@ -21,6 +21,9 @@ for arg in "$@"; do
   esac
 done
 
+# (A release build has no path of this computer in it: see the file.)
+# shellcheck disable=SC1091
+[ "$PROFILE_DIR" = release ] && . scripts/release-paths.sh
 # The library crate, built as a shared library for this one target (the crate's own
 # kind stays what the other systems need).
 # shellcheck disable=SC2086

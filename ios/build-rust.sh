@@ -16,11 +16,17 @@ if ! PATH="$HOME/.cargo/bin:$PATH" rustup target list --installed 2>/dev/null | 
   echo "error: the Rust target $TARGET is not installed: rustup target add $TARGET" >&2
   exit 1
 fi
+# A release build has no path of this computer in it (scripts/release-paths.sh).
+PATHS_OUT=""
+if [ "$CONFIGURATION" = Release ]; then
+  PATHS_OUT=$(CFLAGS="" sh -c '. scripts/release-paths.sh; printf %s "$CARGO_ENCODED_RUSTFLAGS"')
+fi
 # cargo is run as it would be from a terminal. Xcode's own environment points the C
 # compiler at the iPhone SDK, which breaks the parts of the build that are compiled
 # for this Mac (build scripts).
 # shellcheck disable=SC2086
 env -i HOME="$HOME" USER="${USER:-}" \
+  ${PATHS_OUT:+CARGO_ENCODED_RUSTFLAGS="$PATHS_OUT"} \
   PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} \
   IPHONEOS_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \

@@ -34,6 +34,8 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 FEATURES=""
 [ "${ONEUM_AUTOMATION:-0}" = 1 ] && FEATURES="--features automation"
 if [ "$PROFILE" = release ]; then
+  # (No path of this computer in the program: see the file.)
+  . scripts/release-paths.sh
   # shellcheck disable=SC2086
   cargo build --release --locked --bin oneum $FEATURES
 else
