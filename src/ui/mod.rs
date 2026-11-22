@@ -692,10 +692,6 @@ impl OneumApp {
         if let Some(state) = cc.wgpu_render_state.as_ref() {
             renderer::watch(state);
         }
-        #[cfg(target_os = "android")]
-        if let Some(gl) = cc.gl.as_ref() {
-            renderer::note_glow(gl);
-        }
         // A phone that ran out of memory left nothing that said what had grown.
         if cfg!(target_os = "android") {
             memory::watch();
@@ -707,57 +703,7 @@ impl OneumApp {
             tracing::info!("started again after the screen was made anew: playing on");
             this.core.player.send(Command::Play);
         }
-        this.after_a_trial_given_up();
-        // An interface to the graphics hardware that is on trial has shown that it
-        // works once the app has drawn and lived a moment (a start that fails does not
-        // get that far). Not counted in frames alone: an app left alone draws few.
-        if app::relaunch::on_trial(&this.core.paths.data_dir) {
-            let dir = this.core.paths.data_dir.clone();
-            std::thread::spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_secs(3));
-                    if memory::frames() >= 3 {
-                        app::relaunch::end_trial(&dir);
-                        tracing::info!("graphics: the interface on trial works");
-                        break;
-                    }
-                }
-            });
-        }
         this
-    }
-
-    /// The run before was to draw through an interface that is not the system's first
-    /// choice and did not get far, so this run goes by the system's order (see
-    /// `app::relaunch::begin_trial`). So that the next start does not try the same
-    /// again: a choice of the settings goes back to "automatic", and what a device
-    /// was lost on is forgotten.
-    fn after_a_trial_given_up(&mut self) {
-        if !app::relaunch::gave_up() {
-            return;
-        }
-        self.settings.graphics = app::settings::GraphicsChoice::Auto;
-        app::relaunch::forget_lost_interface(&self.core.paths.data_dir);
-        self.warn_toast(self.s().graphics_gave_up);
-    }
-
-    /// The setting of what the screen is drawn through was changed: it holds from the
-    /// next start, which is now (Android, the only system with the choice).
-    pub(super) fn restart_for_graphics(&mut self) {
-        tracing::info!(choice = ?self.settings.graphics, "graphics: starting anew for another interface");
-        #[cfg(target_os = "android")]
-        {
-            // What a device was lost on belongs to the choice that was left.
-            app::relaunch::forget_lost_interface(&self.core.paths.data_dir);
-            // An interface on trial that let the settings be reached and changed has
-            // shown that it works: left open, its trial would make the next start
-            // give up the choice that was just made.
-            app::relaunch::end_trial(&self.core.paths.data_dir);
-            if crate::platform::android::open_again_after_exit() {
-                self.shutdown();
-                std::process::exit(0);
-            }
-        }
     }
 
     /// A run that the one before started because it could not go on (see
@@ -943,11 +889,6 @@ impl OneumApp {
         }
         let previous_track = self.player.current.map(|c| c.item_id);
         self.player = self.core.player.snapshot();
-        #[cfg(target_os = "android")]
-        WAS_PLAYING.store(
-            sounding(self.player.state),
-            std::sync::atomic::Ordering::Relaxed,
-        );
         if self.player.current.map(|c| c.item_id) != previous_track {
             self.queue_scroll_to_current = true;
         }
@@ -2261,12 +2202,10 @@ impl OneumApp {
         if let Some(adapter) = renderer::adapter() {
             about.push(format!("drawn with: {adapter}"));
         }
-        about.push(format!("graphics setting: {:?}", self.settings.graphics));
         if let Some(note) = app::relaunch::read(&self.core.paths.data_dir) {
             about.push(format!(
-                "last start anew: at {} (seconds since 1970), device lost on {}",
-                note.at,
-                note.lost_on.unwrap_or("-")
+                "last start anew after a lost device: at {} (seconds since 1970)",
+                note.at
             ));
         }
         // The thread that watches has the list of mappings; here only what is cheap.
@@ -3290,8 +3229,6 @@ impl OneumApp {
                     self.copy_text(ctx, report);
                 }
                 automation::AppStep::LoseDevice { told } => renderer::lose_device(told),
-                automation::AppStep::GlMistake => renderer::ask_for_gl_mistake(),
-                automation::AppStep::LoseSurface => renderer::lose_surface(),
                 automation::AppStep::Activate => window::show_main_window(),
                 automation::AppStep::Front => window::order_front_without_activating(),
                 automation::AppStep::Back => window::send_back(),
@@ -3662,11 +3599,6 @@ fn sounding(state: PlayState) -> bool {
     )
 }
 
-/// Whether the music was playing when the app last looked (`OneumApp::sync`): for an
-/// end of drawing that the app itself does not get to see ([`lost_after_drawing`]).
-#[cfg(target_os = "android")]
-static WAS_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// A run that cannot draw any more (Android): the note for the run that follows is
 /// written and the app is asked to be opened again in a new process, where the music
 /// goes on. Where that is not to be (it happened twice in a row) or cannot be, a line
@@ -3675,12 +3607,7 @@ static WAS_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 #[cfg(target_os = "android")]
 fn start_anew_after_loss(data_dir: &Path, playing: bool, s: &Strings) {
     use app::relaunch::Loss;
-    let loss = app::relaunch::note_loss(
-        data_dir,
-        playing,
-        renderer::backend_word(),
-        app::relaunch::now(),
-    );
+    let loss = app::relaunch::note_loss(data_dir, playing, app::relaunch::now());
     match loss {
         Loss::Again => {
             tracing::error!("graphics: lost again right after a new start; not starting anew");
@@ -3691,24 +3618,6 @@ fn start_anew_after_loss(data_dir: &Path, playing: bool, s: &Strings) {
             crate::platform::android::notice(s.graphics_lost_body);
         }
     }
-}
-
-/// The event loop ended on an error (Android). Under the UI framework's OpenGL
-/// renderer that is how a run ends whose driver gives up while a frame is shown: no
-/// error of OpenGL tells of it beforehand ([`renderer::note_gl_errors`]), the frame
-/// cannot be shown and the framework stops. Once the window had been drawn, that is a
-/// lost device like any other: what `OneumApp::graphics_lost` does is done here, for
-/// an app that is gone already (it saved what it keeps when it was dropped). False
-/// where nothing was ever drawn, a start that failed, which is for the caller to say.
-#[cfg(target_os = "android")]
-pub fn lost_after_drawing(data_dir: &Path, lang: Lang, error: &dyn std::fmt::Display) -> bool {
-    if memory::frames() == 0 {
-        return false;
-    }
-    let playing = WAS_PLAYING.load(std::sync::atomic::Ordering::Relaxed);
-    tracing::error!(playing, "graphics: the device is lost: {error}");
-    start_anew_after_loss(data_dir, playing, lang.strings());
-    true
 }
 
 /// Whether this run has drawn nothing yet (Android: an event loop that ended before
@@ -4053,17 +3962,9 @@ impl eframe::App for OneumApp {
     /// Runs for every pass, also while the window is hidden or fully covered (then
     /// without a UI pass): the close button, Finder opens and menu commands must not
     /// wait for the window to become visible again.
-    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync(ctx);
         self.run_automation(ctx);
-        // The UI framework's OpenGL renderer does not say when the driver refused
-        // something while the frame before was drawn: it is asked here.
-        #[cfg(target_os = "android")]
-        if let Some(gl) = frame.gl() {
-            renderer::note_gl_errors(gl, memory::frames());
-        }
-        #[cfg(not(target_os = "android"))]
-        let _ = frame;
         // The frame before is waited for, so that what was made for it is given back
         // now and not when drawing pauses (see the function: a phone's driver).
         #[cfg(target_os = "android")]
@@ -4209,14 +4110,6 @@ impl eframe::App for OneumApp {
         self.perf.frames += 1;
     }
 
-    // (The framework hands its OpenGL context along where that renderer is built
-    // in, which is on Android.)
-    #[cfg(target_os = "android")]
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.shutdown();
-    }
-
-    #[cfg(not(target_os = "android"))]
     fn on_exit(&mut self) {
         self.shutdown();
     }

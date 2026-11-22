@@ -10,9 +10,9 @@
 #   scripts/dev/smoke-android.sh
 #
 #   ONEUM_ANDROID_SERIAL   the emulator to use (as `adb devices` names it); default: the only one
-#   ONEUM_GRAPHICS         gl, vulkan or glow: what every start of the app draws through
-#                          (default: the app's own choice, Vulkan first; glow is the
-#                          UI framework's OpenGL renderer, without wgpu)
+#   ONEUM_GRAPHICS         gl or vulkan: what every start of the app draws through
+#                          (default: as the app does by itself, Vulkan; gl is what a
+#                          phone without Vulkan gets)
 #
 # The app and its data on that emulator are removed first and again at the end, and so
 # is the folder the test puts there. It refuses to run on a real phone (which has an
@@ -132,10 +132,10 @@ echo "== first run, without the right to read files"
 start
 ui 'volume 0' 'wait 500' 'dump a.json'
 # With an interface asked for, the app says that it draws through that one (else a run
-# "on OpenGL ES" could pass on Vulkan). The adapter ends "(<interface>, <kind>)", or
-# "; glow)" under the UI framework's OpenGL renderer.
+# "on OpenGL ES" could pass on Vulkan). The adapter ends "(<interface>, <kind>)".
+# Left to itself the app draws through Vulkan.
 case "${ONEUM_GRAPHICS:-}" in
-  glow) check a.json 'd["adapter"].endswith("; glow)")' "the screen is drawn by the OpenGL renderer that was asked for (glow)" ;;
+  "") check a.json 'd["adapter"].rsplit("(", 1)[1].startswith("Vulkan,")' "the screen is drawn through Vulkan" ;;
   gl) check a.json 'd["adapter"].rsplit("(", 1)[1].startswith("Gl,")' "the screen is drawn through OpenGL ES, as asked" ;;
   vulkan) check a.json 'd["adapter"].rsplit("(", 1)[1].startswith("Vulkan,")' "the screen is drawn through Vulkan, as asked" ;;
 esac
@@ -480,21 +480,9 @@ PY
 then echo "  ok   the app knows how far the device's clock is from UTC"
 else echo "  FAIL the app's offset from UTC is not the device's"; exit 1
 fi
-lose=device
-if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
-  # That no error was told means something only if the driver is really asked: OpenGL
-  # is given a call that it refuses, and the refusal is to stand in the log.
-  ui 'fail gl' 'wait 1000' 'dump g2.json'
-  holds "OpenGL is asked what it refused: a call it refuses stands in the log" log_has 'graphics: OpenGL: invalid enum (0x0500)'
-  check g2.json 'd["graphics_errors"] == 1' "and is counted, once"
-  # A driver that gives up under that renderer does so when a frame is to be shown:
-  # the surface is taken away, the framework cannot show the frame and stops, and the
-  # app is to open again all the same.
-  lose=surface
-fi
 before=$(pid)
 panics_before=$(panics)
-ui "fail $lose"
+ui 'fail device'
 i=0; after=$(pid)
 while { [ -z "$after" ] || [ "$after" = "$before" ]; } && [ $i -lt 75 ]; do
   sleep 0.2; i=$((i + 1)); after=$(pid)
@@ -502,18 +490,6 @@ done
 sleep 4
 holds "the app opened again in a new process" opened_again
 holds "its log says that it started anew, and that music was playing" log_has 'graphics: started anew after the device was lost playing=true'
-if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
-  # That renderer is a choice of its own, with no other interface to turn to: the note
-  # of the loss names none (the run that follows goes by the settings).
-  names_no_interface() { $ADB shell "run-as $PKG cat files/data/relaunch.txt" </dev/null | tr -d '\r' | grep -q ' -$'; }
-  holds "the loss names no interface to turn from" names_no_interface
-else
-  # While the settings leave the choice to the app, the new run draws through the other
-  # interface than the one the device was lost on.
-  other=gl; [ "${ONEUM_GRAPHICS:-}" != gl ] || other=vulkan
-  holds "the new run draws through the other interface ($other)" log_has "graphics: this interface is tried first interface=.$other."
-  holds "which has shown that it works" log_has 'graphics: the interface on trial works'
-fi
 holds "the music goes on: the system's media session says it is playing" session_is PLAYING
 holds "nothing ended in a panic" no_new_panic
 # The same again within a minute: what failed twice in a row is not tried a third time.
@@ -522,10 +498,6 @@ ui 'volume 0' 'wait 500' 'fail device'
 sleep 6
 holds "a second loss right after closes the app instead of opening it once more" app_gone
 holds "and the log says why" log_has 'graphics: lost again right after a new start'
-if [ "${ONEUM_GRAPHICS:-}" = glow ]; then
-  holds "the surface was taken away for the first loss" log_has 'graphics: the surface was taken away by a verification run destroyed=true'
-  holds "which ended the framework's event loop: the frame could not be shown" log_has 'event loop failed'
-fi
 
 echo "== a crash of the native side"
 # What the system kept of it (the signal, where the thread was) is written beside the
@@ -540,11 +512,10 @@ holds "the crash is in the list of how earlier runs ended" exits_have 'crash (na
 holds "with the signal" exits_have "^$(printf '\t')SIGSEGV"
 holds "and where the thread was" exits_have "^$(printf '\t')#00 "
 
-echo "== glow chosen in the settings"
-# The way a user reaches the UI framework's OpenGL renderer: the settings name it (what
-# the fourth choice of Settings → About writes), and the start that follows draws with
-# it on trial. (ONEUM_GRAPHICS, which the rest of a run may go by, passes the settings
-# and the trial by: this start is made without it.)
+echo "== settings of a build that had a choice of what to draw through"
+# Earlier builds kept that choice in the settings ("graphics"), and a note of the
+# interface a device was lost on: both are passed over, and the app draws as it does
+# by itself.
 $ADB shell am force-stop $PKG
 $ADB exec-out run-as $PKG cat files/data/settings.json > "$OUT/settings.json" </dev/null
 python3 - "$OUT/settings.json" <<'PY'
@@ -554,13 +525,13 @@ settings["graphics"] = "Glow"
 json.dump(settings, open(sys.argv[1], "w"))
 PY
 $ADB shell "run-as $PKG sh -c 'cat > files/data/settings.json'" < "$OUT/settings.json"
-no_trial_left() { ! $ADB shell "run-as $PKG test -f files/data/graphics-trying.txt" </dev/null; }
-GRAPHICS=
+$ADB shell "run-as $PKG sh -c 'echo \"5 0 1 vulkan\" > files/data/relaunch.txt; echo glow > files/data/graphics-trying.txt'"
 start
 ui 'volume 0' 'wait 500' 'dump s1.json'
-check s1.json 'd["adapter"].endswith("; glow)")' "the app draws with the renderer the settings name"
-holds "which was tried first, as a choice of the settings is" log_has 'graphics: this interface is tried first interface=.glow.'
-holds "and has shown that it works: its trial is over" no_trial_left
+case "${ONEUM_GRAPHICS:-}" in
+  gl) check s1.json 'd["adapter"].rsplit("(", 1)[1].startswith("Gl,")' "the old choice is passed over: the app draws as it was started to" ;;
+  *) check s1.json 'd["adapter"].rsplit("(", 1)[1].startswith("Vulkan,")' "the old choice is passed over: the app draws through Vulkan" ;;
+esac
 check s1.json 'd["library_tracks"] > 0 and d["graphics_errors"] == 0' "the library is there, and nothing is told of an error"
 
 echo "== TalkBack"

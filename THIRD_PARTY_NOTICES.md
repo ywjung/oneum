@@ -6,17 +6,17 @@ own license. The full license texts come with the app in the file
 `THIRD_PARTY_LICENSES.txt` (on a Mac inside the app, under Contents/Resources; on Windows
 next to the program; on Android inside the APK, under assets).
 
-Crates: 335
+Crates: 330
 
 ## License summary
 
-- `MIT OR Apache-2.0` — 150
-- `MIT` — 55
+- `MIT OR Apache-2.0` — 149
+- `MIT` — 54
 - `Zlib OR Apache-2.0 OR MIT` — 26
 - `Apache-2.0 OR MIT` — 22
 - `MPL-2.0` — 17
 - `MIT/Apache-2.0` — 11
-- `Apache-2.0` — 9
+- `Apache-2.0` — 7
 - `ISC` — 5
 - `MIT OR Apache-2.0 OR Zlib` — 5
 - `Unlicense OR MIT` — 4
@@ -40,7 +40,6 @@ Crates: 335
 - `BSD-3-Clause` — 1
 - `CC0-1.0` — 1
 - `CDLA-Permissive-2.0` — 1
-- `MIT / Apache-2.0` — 1
 - `Zlib OR MIT OR Apache-2.0` — 1
 
 Notes:
@@ -85,7 +84,6 @@ Notes:
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | https://github.com/image-rs/byteorder-lite |
 | bytes | 1.12.1 | MIT | https://github.com/tokio-rs/bytes |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
-| cgl | 0.3.2 | MIT / Apache-2.0 | https://github.com/servo/cgl-rs |
 | codespan-reporting | 0.13.1 | Apache-2.0 | https://github.com/brendanzab/codespan |
 | color | 0.3.3 | Apache-2.0 OR MIT | https://github.com/linebender/color |
 | combine | 4.6.9 | MIT | https://github.com/Marwes/combine |
@@ -115,7 +113,6 @@ Notes:
 | egui-wgpu | 0.37.0 | MIT OR Apache-2.0 | https://github.com/emilk/egui/tree/main/crates/egui-wgpu |
 | egui-winit | 0.37.0 | MIT OR Apache-2.0 | https://github.com/emilk/egui/tree/main/crates/egui-winit |
 | egui_extras | 0.37.0 | MIT OR Apache-2.0 | https://github.com/emilk/egui |
-| egui_glow | 0.37.0 | MIT OR Apache-2.0 | https://github.com/emilk/egui/tree/main/crates/egui_glow |
 | egui_system_font_provider | 0.37.0 | MIT OR Apache-2.0 | https://github.com/emilk/egui/tree/main/crates/egui_system_font_provider |
 | either | 1.19.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/either |
 | emath | 0.37.0 | MIT OR Apache-2.0 | https://github.com/emilk/egui/tree/main/crates/emath |
@@ -146,9 +143,6 @@ Notes:
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | glifo | 0.3.0 | Apache-2.0 OR MIT | https://github.com/linebender/vello |
 | glow | 0.17.0 | MIT OR Apache-2.0 OR Zlib | https://github.com/grovesNL/glow |
-| glutin | 0.32.3 | Apache-2.0 | https://github.com/rust-windowing/glutin |
-| glutin-winit | 0.5.0 | MIT | https://github.com/rust-windowing/glutin |
-| glutin_egl_sys | 0.7.1 | Apache-2.0 | https://github.com/rust-windowing/glutin |
 | gpu-allocator | 0.28.0 | MIT OR Apache-2.0 | https://github.com/Traverse-Research/gpu-allocator |
 | guillotiere | 0.7.0 | MIT/Apache-2.0 | https://github.com/nical/guillotiere |
 | half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |

@@ -25,9 +25,8 @@ const ERRORS_WRITTEN: u32 = 20;
 /// The device: asked about its memory ([`gpu_memory`]), and taken away by a
 /// verification run ([`lose_device`]).
 static DEVICE: OnceLock<wgpu::Device> = OnceLock::new();
-/// What the window is drawn with: the adapter in words, and its interface as the note
-/// of a run that lost its device names it ([`backend_word`]).
-static ADAPTER: OnceLock<(String, Option<&'static str>)> = OnceLock::new();
+/// What the window is drawn with: the adapter in words.
+static ADAPTER: OnceLock<String> = OnceLock::new();
 /// A verification run asked for the loss not to be told ([`lose_device`]).
 static UNTOLD: AtomicBool = AtomicBool::new(false);
 
@@ -44,7 +43,7 @@ pub fn watch(state: &egui_wgpu::RenderState) {
     let info = state.adapter.get_info();
     let adapter = summary(&info);
     tracing::info!(%adapter, "graphics: the window is drawn with this adapter");
-    let _ = ADAPTER.set((adapter.clone(), interface_word(info.backend)));
+    let _ = ADAPTER.set(adapter.clone());
     let _ = DEVICE.set(state.device.clone());
     state
         .device
@@ -84,155 +83,10 @@ pub fn errors() -> u32 {
     ERRORS.load(Ordering::Relaxed)
 }
 
-/// What the window is drawn with, in words (once [`watch`] or [`note_glow`] was
-/// called).
+/// What the window is drawn with, in words (once [`watch`] was called).
 pub fn adapter() -> Option<&'static str> {
-    ADAPTER.get().map(|(words, _)| words.as_str())
+    ADAPTER.get().map(String::as_str)
 }
-
-/// The window is not drawn through wgpu but by the UI framework's OpenGL renderer:
-/// what OpenGL says of itself is kept for [`adapter`]. There is no device to watch
-/// and no count of its memory; what the driver refuses is asked about after every
-/// frame instead ([`note_gl_errors`]).
-#[cfg(target_os = "android")]
-pub fn note_glow(gl: &eframe::glow::Context) {
-    use eframe::glow::HasContext as _;
-    // SAFETY: the context is current on this thread (the framework made it so before
-    // it called the app), and these are plain queries.
-    let (renderer, version) = unsafe {
-        (
-            gl.get_parameter_string(eframe::glow::RENDERER),
-            gl.get_parameter_string(eframe::glow::VERSION),
-        )
-    };
-    let adapter = format!("{renderer} ({version}; glow)");
-    tracing::info!(%adapter, "graphics: the window is drawn with OpenGL, without wgpu");
-    // (No interface is named for a lost device: there is no other one to turn to
-    // while the settings say "glow".)
-    let _ = ADAPTER.set((adapter, None));
-}
-
-/// OpenGL's errors by their numbers (the bindings themselves are only in the Android
-/// build).
-#[cfg(any(target_os = "android", test))]
-const GL_OUT_OF_MEMORY: u32 = 0x0505;
-#[cfg(any(target_os = "android", test))]
-const GL_CONTEXT_LOST: u32 = 0x0507;
-/// OpenGL keeps one flag for each kind of error: this many questions empty them.
-#[cfg(target_os = "android")]
-const GL_ERRORS_ASKED: usize = 8;
-/// How many passes of the UI there had been when OpenGL was last asked
-/// ([`note_gl_errors`]).
-#[cfg(target_os = "android")]
-static GL_ASKED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// A verification run asked for a call that OpenGL refuses ([`ask_for_gl_mistake`]).
-#[cfg(target_os = "android")]
-static GL_MISTAKE: AtomicBool = AtomicBool::new(false);
-
-#[cfg(any(target_os = "android", test))]
-fn gl_error_words(code: u32) -> &'static str {
-    match code {
-        0x0500 => "invalid enum",
-        0x0501 => "invalid value",
-        0x0502 => "invalid operation",
-        0x0503 => "stack overflow",
-        0x0504 => "stack underflow",
-        GL_OUT_OF_MEMORY => "out of memory",
-        0x0506 => "invalid framebuffer operation",
-        GL_CONTEXT_LOST => "the context is lost",
-        _ => "an error without a name",
-    }
-}
-
-/// Whether an error of OpenGL leaves nothing to draw with: after "out of memory" the
-/// state of the context is undefined, and a lost context takes no more calls. (A lost
-/// context is told this way only by a context that was made to tell of it, which the
-/// UI framework's is not: its loss shows when the frame cannot be shown, which ends
-/// the event loop, see `ui::lost_after_drawing`.)
-#[cfg(any(target_os = "android", test))]
-fn gl_error_is_a_loss(code: u32) -> bool {
-    matches!(code, GL_OUT_OF_MEMORY | GL_CONTEXT_LOST)
-}
-
-/// Asks OpenGL what went wrong while the last frame was drawn (`drawn`: how many
-/// passes of the UI there have been, each of which is followed by a frame). The UI
-/// framework's OpenGL renderer asks only in a debug build, so in the app as it is
-/// installed nothing would tell of a driver that refuses something. Each error goes in
-/// the log under "graphics:", as the errors of a wgpu device do ([`watch`]); one that
-/// leaves nothing to draw with is a lost device ([`device_lost`]).
-#[cfg(target_os = "android")]
-pub fn note_gl_errors(gl: &eframe::glow::Context, drawn: u64) {
-    use eframe::glow::HasContext as _;
-    // Once after every pass of the UI, not in every call: where a pass without a UI
-    // follows another (a window that is covered), nothing was drawn between the two.
-    // The context is this thread's here: the framework makes it so before every pass
-    // that has a UI, and calls nothing of the app while Android has taken the window.
-    if GL_ASKED_AT.swap(drawn, Ordering::Relaxed) == drawn {
-        return;
-    }
-    if GL_MISTAKE.swap(false, Ordering::Relaxed) {
-        // SAFETY: a number that names no capability: OpenGL refuses the call ("invalid
-        // enum") and changes nothing.
-        unsafe { gl.enable(0) };
-    }
-    for _ in 0..GL_ERRORS_ASKED {
-        // SAFETY: a plain query on the context the frame before was drawn with.
-        let code = unsafe { gl.get_error() };
-        if code == eframe::glow::NO_ERROR {
-            break;
-        }
-        let words = gl_error_words(code);
-        if gl_error_is_a_loss(code) {
-            if !LOST.swap(true, Ordering::AcqRel) {
-                tracing::error!("graphics: the device is lost: OpenGL: {words} (0x{code:04X})");
-            }
-            // (A lost context answers every question with the same.)
-            break;
-        }
-        note_error(format_args!("OpenGL: {words} (0x{code:04X})"));
-    }
-}
-
-/// For a verification run: before OpenGL is next asked what went wrong
-/// ([`note_gl_errors`]), it is given a call that it refuses and that changes nothing.
-/// That the refusal then stands in the log shows that the question reaches the driver
-/// (a log without errors says nothing otherwise). Nothing comes of it where the window
-/// is not drawn by the UI framework's OpenGL renderer.
-pub fn ask_for_gl_mistake() {
-    #[cfg(target_os = "android")]
-    GL_MISTAKE.store(true, Ordering::Relaxed);
-}
-
-/// For a verification run under the UI framework's OpenGL renderer: the surface the
-/// window is drawn on is taken away behind the framework's back, as a driver does that
-/// gives up. The frame that follows cannot be shown, which ends the event loop (see
-/// `ui::lost_after_drawing`). Only where the verification channel is built in.
-#[cfg(all(target_os = "android", feature = "automation"))]
-pub fn lose_surface() {
-    use std::ffi::c_void;
-    #[link(name = "EGL")]
-    unsafe extern "C" {
-        fn eglGetCurrentDisplay() -> *mut c_void;
-        fn eglGetCurrentSurface(readdraw: i32) -> *mut c_void;
-        fn eglDestroySurface(display: *mut c_void, surface: *mut c_void) -> u32;
-    }
-    const EGL_DRAW: i32 = 0x3059;
-    // SAFETY: plain calls of EGL on what is current on this thread (nothing, under
-    // another renderer: the call then fails and changes nothing). The framework finds
-    // its surface gone at the next frame, which is what the step is for.
-    let destroyed = unsafe {
-        let display = eglGetCurrentDisplay();
-        let surface = eglGetCurrentSurface(EGL_DRAW);
-        eglDestroySurface(display, surface) != 0
-    };
-    tracing::error!(
-        destroyed,
-        "graphics: the surface was taken away by a verification run"
-    );
-}
-
-#[cfg(not(all(target_os = "android", feature = "automation")))]
-pub fn lose_surface() {}
 
 /// How many objects of each kind the graphics device holds at the moment, as the
 /// graphics library counts them. Something that is made for every frame and never
@@ -315,14 +169,8 @@ pub fn lose_device(told: bool) {
             // What is under way is finished first; then the device says that it is gone.
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
         }
-        // The UI framework's OpenGL renderer has no device that could be taken away:
-        // the loss is said as [`note_gl_errors`] says it of a driver that gave up.
-        None if told => {
-            tracing::error!("graphics: the device is lost: taken away by a verification run");
-            LOST.store(true, Ordering::Release);
-        }
-        // Not told, there is nothing to show: no device is gone, and the app draws on.
-        // (Nothing is marked lost: a real loss later in the run must still be seen.)
+        // (Before the window is there: no device is gone, and nothing is marked lost,
+        // so that a real loss later in the run is still seen.)
         None => {
             UNTOLD.store(false, Ordering::Relaxed);
             tracing::warn!("graphics: there is no device to take away; nothing was done");
@@ -331,7 +179,8 @@ pub fn lose_device(told: bool) {
 }
 
 /// Which interface to the graphics hardware is tried first, where a system has more
-/// than one that works (Android: Vulkan and OpenGL ES).
+/// than one that works (Android: Vulkan and OpenGL ES). The app goes by the system's
+/// order; a verification run may name one (`platform::android::entry`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Prefer {
     /// The order of [`rank`].
@@ -339,49 +188,14 @@ pub enum Prefer {
     System,
     Vulkan,
     OpenGl,
-    /// Not wgpu at all: the UI framework's OpenGL renderer (Android, see
-    /// `GraphicsChoice::Glow`). For the choice of a wgpu adapter it is as `System`.
-    Glow,
 }
 
 impl Prefer {
-    /// The choice of the settings, and for "automatic" the interface a run lost its
-    /// device on (`lost_on`, as [`backend_word`] names it): the other one comes first.
-    pub fn from_choice(
-        choice: crate::app::settings::GraphicsChoice,
-        lost_on: Option<&str>,
-    ) -> Self {
-        use crate::app::settings::GraphicsChoice;
-        match (choice, lost_on) {
-            (GraphicsChoice::Vulkan, _) => Self::Vulkan,
-            (GraphicsChoice::OpenGl, _) => Self::OpenGl,
-            (GraphicsChoice::Glow, _) => Self::Glow,
-            (GraphicsChoice::Auto, Some("vulkan")) => Self::OpenGl,
-            (GraphicsChoice::Auto, Some("gl")) => Self::Vulkan,
-            (GraphicsChoice::Auto, _) => Self::System,
-        }
-    }
-
     fn wants(self, backend: wgpu::Backend) -> bool {
         matches!(
             (self, backend),
             (Self::Vulkan, wgpu::Backend::Vulkan) | (Self::OpenGl, wgpu::Backend::Gl)
         )
-    }
-}
-
-/// The interface the window is drawn through, as the note of a run that lost its
-/// device names it: "vulkan", "gl", or nothing for the others (which have no
-/// alternative to go to).
-pub fn backend_word() -> Option<&'static str> {
-    ADAPTER.get()?.1
-}
-
-fn interface_word(backend: wgpu::Backend) -> Option<&'static str> {
-    match backend {
-        wgpu::Backend::Vulkan => Some("vulkan"),
-        wgpu::Backend::Gl => Some("gl"),
-        _ => None,
     }
 }
 
@@ -582,50 +396,12 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_and_a_lost_device_decide_which_interface_comes_first() {
-        use crate::app::settings::GraphicsChoice::{Auto, OpenGl, Vulkan};
-        assert_eq!(Prefer::from_choice(Auto, None), Prefer::System);
-        // "Automatic" turns away from the interface a run lost its device on.
-        assert_eq!(Prefer::from_choice(Auto, Some("vulkan")), Prefer::OpenGl);
-        assert_eq!(Prefer::from_choice(Auto, Some("gl")), Prefer::Vulkan);
-        assert_eq!(Prefer::from_choice(Auto, Some("metal")), Prefer::System);
-        // A choice that was made is kept, whatever was lost.
-        assert_eq!(Prefer::from_choice(Vulkan, Some("vulkan")), Prefer::Vulkan);
-        assert_eq!(Prefer::from_choice(OpenGl, Some("gl")), Prefer::OpenGl);
-        assert_eq!(
-            Prefer::from_choice(crate::app::settings::GraphicsChoice::Glow, Some("vulkan")),
-            Prefer::Glow
-        );
-        assert!(
-            !Prefer::Glow.wants(wgpu::Backend::Gl),
-            "no wgpu adapter is preferred for it"
-        );
-
+    fn an_interface_that_is_named_comes_first() {
         assert!(Prefer::OpenGl.wants(wgpu::Backend::Gl));
         assert!(!Prefer::OpenGl.wants(wgpu::Backend::Vulkan));
         assert!(Prefer::Vulkan.wants(wgpu::Backend::Vulkan));
         assert!(!Prefer::System.wants(wgpu::Backend::Vulkan));
-
-        // What a lost device is written down as: only the two there is a choice between.
-        assert_eq!(interface_word(wgpu::Backend::Vulkan), Some("vulkan"));
-        assert_eq!(interface_word(wgpu::Backend::Gl), Some("gl"));
-        assert_eq!(interface_word(wgpu::Backend::Metal), None);
-    }
-
-    /// Under the UI framework's OpenGL renderer the driver is asked about errors: two
-    /// of them leave nothing to draw with, the others are mistakes that are written
-    /// down and lived with.
-    #[test]
-    fn of_opengls_errors_only_lost_memory_and_a_lost_context_are_a_lost_device() {
-        assert!(gl_error_is_a_loss(GL_OUT_OF_MEMORY));
-        assert!(gl_error_is_a_loss(GL_CONTEXT_LOST));
-        for code in [0x0500, 0x0501, 0x0502, 0x0503, 0x0504, 0x0506, 0x9999] {
-            assert!(!gl_error_is_a_loss(code), "0x{code:04X}");
-        }
-        assert_eq!(gl_error_words(GL_OUT_OF_MEMORY), "out of memory");
-        assert_eq!(gl_error_words(GL_CONTEXT_LOST), "the context is lost");
-        assert_eq!(gl_error_words(0x0502), "invalid operation");
-        assert_eq!(gl_error_words(0x9999), "an error without a name");
+        assert!(!Prefer::System.wants(wgpu::Backend::Gl));
     }
 
     /// On this machine: an adapter is found and a device is made with what is asked.

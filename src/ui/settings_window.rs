@@ -1830,51 +1830,6 @@ impl OneumApp {
             }
         }
 
-        // Android has two interfaces to its graphics hardware (and the UI framework a
-        // second renderer for one of them), and drivers that fail on one of them: what
-        // the screen is drawn through can be seen and chosen here, and what the
-        // app holds of memory is shown (a phone ran out of it, and nothing told why).
-        if cfg!(target_os = "android") {
-            use crate::app::settings::GraphicsChoice;
-            ui.add_space(14.0);
-            widgets::section_title(ui, s.graphics_section);
-            let before = self.settings.graphics;
-            widgets::card(ui, |ui| {
-                widgets::setting_row(
-                    ui,
-                    s.graphics_choice,
-                    Some(s.graphics_choice_desc),
-                    true,
-                    |ui| {
-                        widgets::segmented(
-                            ui,
-                            "graphics",
-                            &mut self.settings.graphics,
-                            &[
-                                (GraphicsChoice::Auto, s.graphics_auto),
-                                (GraphicsChoice::Vulkan, "Vulkan"),
-                                (GraphicsChoice::OpenGl, "OpenGL ES"),
-                                (GraphicsChoice::Glow, "glow"),
-                            ],
-                        );
-                    },
-                );
-                if let Some(adapter) = super::renderer::adapter() {
-                    ui.add_space(4.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("{}: {adapter}", s.graphics_now))
-                                .small()
-                                .color(super::theme::dim(ui)),
-                        )
-                        .wrap(),
-                    );
-                }
-            });
-            if self.settings.graphics != before {
-                self.restart_for_graphics();
-            }
-        }
         if let Some(reading) = super::memory::latest() {
             ui.add_space(14.0);
             widgets::section_title(ui, s.memory_section);
@@ -1890,6 +1845,19 @@ impl OneumApp {
                         .add(egui::Button::new(s.copy_short).min_size(egui::vec2(0.0, 26.0)))
                         .clicked();
                 });
+                // What the screen is drawn with (a phone's driver has been the cause
+                // of what this card was made to show).
+                if let Some(adapter) = super::renderer::adapter() {
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{}: {adapter}", s.graphics_now))
+                                .small()
+                                .color(super::theme::dim(ui)),
+                        )
+                        .wrap(),
+                    );
+                }
                 ui.add_space(6.0);
                 ui.add(
                     egui::Label::new(

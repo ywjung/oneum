@@ -14,22 +14,6 @@ pub enum ThemeChoice {
     Dark,
 }
 
-/// What the screen is drawn through, where a system has more than one interface to its
-/// graphics hardware that works (Android: Vulkan and OpenGL ES).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum GraphicsChoice {
-    /// The system's first interface, or the other one after a run lost its graphics
-    /// device on that.
-    #[default]
-    Auto,
-    Vulkan,
-    OpenGl,
-    /// OpenGL ES called directly by the UI framework's other renderer ("glow"), with
-    /// no wgpu between (Android; a trial for a phone whose Vulkan driver runs out of
-    /// memory). Elsewhere it is "automatic".
-    Glow,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RightPanel {
     #[default]
@@ -127,8 +111,6 @@ pub struct Settings {
     /// not kept: they are found again).
     #[serde(deserialize_with = "lenient_list")]
     pub network_servers: Vec<SavedServer>,
-    /// What the screen is drawn through (see [`GraphicsChoice`]).
-    pub graphics: GraphicsChoice,
     pub right_panel: RightPanel,
     /// Show the VU meter deck above the player bar.
     pub show_meter: bool,
@@ -430,7 +412,6 @@ impl Default for Settings {
             list_columns: ListColumns::default(),
             smart_playlists: Vec::new(),
             network_servers: Vec::new(),
-            graphics: GraphicsChoice::Auto,
             right_panel: RightPanel::Hidden,
             show_meter: false,
             window_size: None,
@@ -445,34 +426,6 @@ impl Default for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The settings file names the way of drawing by these words: a build that wrote
-    /// one must read it again as the same choice. (A word a build does not know is
-    /// read as the default, and the rest of the file is kept: see below.)
-    #[test]
-    fn the_way_of_drawing_is_kept_under_its_word() {
-        for (choice, word) in [
-            (GraphicsChoice::Auto, "Auto"),
-            (GraphicsChoice::Vulkan, "Vulkan"),
-            (GraphicsChoice::OpenGl, "OpenGl"),
-            (GraphicsChoice::Glow, "Glow"),
-        ] {
-            let settings = Settings {
-                graphics: choice,
-                ..Settings::default()
-            };
-            let json = serde_json::to_value(&settings).expect("serializes");
-            assert_eq!(json["graphics"], word);
-            let text = format!(r#"{{"graphics":"{word}"}}"#);
-            let read: Settings = serde_json::from_str(&text).expect("parses");
-            assert_eq!(read.graphics, choice);
-        }
-        // What the renderer makes of the choice that is on trial.
-        assert_eq!(
-            crate::ui::renderer::Prefer::from_choice(GraphicsChoice::Glow, None),
-            crate::ui::renderer::Prefer::Glow
-        );
-    }
 
     #[test]
     fn unknown_and_missing_fields_fall_back_to_defaults() {
@@ -753,7 +706,6 @@ mod tests {
             ..Settings::default()
         };
         let mut json = serde_json::to_value(&kept).expect("serializes");
-        json["graphics"] = "Later".into();
         json["theme"] = 7.into();
         json["replaygain"] = serde_json::json!({ "mode": "Loudest" });
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
@@ -764,7 +716,6 @@ mod tests {
         assert_eq!(read.pinned, kept.pinned);
         // What could not be read is as it is in a new installation.
         let fresh = Settings::default();
-        assert_eq!(read.graphics, fresh.graphics);
         assert_eq!(read.theme, fresh.theme);
         assert_eq!(read.replaygain, fresh.replaygain);
         assert!(dir.path().join("settings.json.partial").exists());

@@ -57,13 +57,6 @@ pub(super) enum AppStep {
     LoseDevice {
         told: bool,
     },
-    /// `fail gl`: OpenGL is given a call that it refuses (only the UI framework's
-    /// OpenGL renderer has one to give it to): the refusal is to stand in the log.
-    GlMistake,
-    /// `fail surface`: the surface the window is drawn on is taken away behind the UI
-    /// framework's back (its OpenGL renderer, Android), as a driver does that gives up
-    /// while a frame is shown.
-    LoseSurface,
     /// The network view, by words instead of clicks ("add <address>", "open <n>", "up",
     /// "reload", "saved <n>", "forget <n>").
     Network(String),
@@ -371,12 +364,6 @@ impl Automation {
             }
             Some("fail") if words.get(1) == Some(&"meters") => {
                 self.steps.push_back(Step::App(AppStep::FailMeters));
-            }
-            Some("fail") if words.get(1) == Some(&"gl") => {
-                self.steps.push_back(Step::App(AppStep::GlMistake));
-            }
-            Some("fail") if words.get(1) == Some(&"surface") => {
-                self.steps.push_back(Step::App(AppStep::LoseSurface));
             }
             Some("fail") if words.get(1) == Some(&"device") => {
                 let told = words.get(2) != Some(&"untold");

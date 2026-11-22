@@ -20,71 +20,12 @@ pub struct Note {
     pub playing: bool,
     /// The run that followed has read this.
     pub taken: bool,
-    /// The interface to the graphics hardware the device was lost on ("vulkan", "gl"),
-    /// where there is another one to go to. The runs that follow try that one first
-    /// while the settings leave the choice to the app.
-    pub lost_on: Option<&'static str>,
 }
 
 impl Note {
     /// Whether the run that wrote this ended only a moment before `now`.
     pub fn recent(&self, now: u64) -> bool {
         now.saturating_sub(self.at) < NOT_AGAIN_WITHIN_SECS
-    }
-}
-
-/// Present while a run is trying to draw through an interface that is not the
-/// system's first choice (see [`begin_trial`]).
-const TRIAL_FILE: &str = "graphics-trying.txt";
-/// Set when this run found the trial of the run before unfinished ([`begin_trial`]).
-static GAVE_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Before a run draws through an interface that is not the system's first choice
-/// (because the settings say so, or because a run lost its device on the first): the
-/// trial is written down, and [`end_trial`] takes it back once the run has drawn for
-/// a while. A run that finds the trial of the one before still there knows that that
-/// one did not get far (it crashed, or showed nothing and was ended), and must not
-/// try the same again: nobody could reach the settings to change it. Returns whether
-/// the trial may be made.
-pub fn begin_trial(data_dir: &Path, interface: &str) -> bool {
-    let file = data_dir.join(TRIAL_FILE);
-    if file.exists() {
-        let _ = std::fs::remove_file(&file);
-        GAVE_UP.store(true, std::sync::atomic::Ordering::Release);
-        return false;
-    }
-    // A trial that cannot be written down is not made: it could not be given up.
-    std::fs::write(&file, interface).is_ok()
-}
-
-/// Whether this run is trying an interface ([`begin_trial`] wrote it down).
-pub fn on_trial(data_dir: &Path) -> bool {
-    data_dir.join(TRIAL_FILE).exists()
-}
-
-/// The run has drawn for a while: its interface works well enough to reach the settings.
-pub fn end_trial(data_dir: &Path) {
-    let _ = std::fs::remove_file(data_dir.join(TRIAL_FILE));
-}
-
-/// Whether this run gave up the interface it was to try ([`begin_trial`]).
-pub fn gave_up() -> bool {
-    GAVE_UP.load(std::sync::atomic::Ordering::Acquire)
-}
-
-/// Forgets which interface a device was lost on: "automatic" is the system's order
-/// again.
-pub fn forget_lost_interface(data_dir: &Path) {
-    if let Some(note) = read(data_dir)
-        && note.lost_on.is_some()
-    {
-        let _ = write(
-            data_dir,
-            Note {
-                lost_on: None,
-                ..note
-            },
-        );
     }
 }
 
@@ -100,18 +41,14 @@ pub enum Loss {
 }
 
 /// A run ends because it cannot draw any more: the note for the run that follows is
-/// written (`lost_on`: the interface it happened on, where there is another one to go
-/// to), and the answer says whether a new start may follow.
-pub fn note_loss(data_dir: &Path, playing: bool, lost_on: Option<&'static str>, now: u64) -> Loss {
+/// written, and the answer says whether a new start may follow.
+pub fn note_loss(data_dir: &Path, playing: bool, now: u64) -> Loss {
     // A new start a moment ago that ends the same way is not followed by another.
     let again = read(data_dir).is_some_and(|note| note.recent(now));
-    // The interface is written down either way: while the settings leave the choice
-    // to the app, the next start tries the other one.
     let note = Note {
         at: now,
         playing,
         taken: again,
-        lost_on,
     };
     let written = write(data_dir, note).is_ok();
     match (again, written) {
@@ -199,11 +136,10 @@ pub fn read(data_dir: &Path) -> Option<Note> {
 
 pub fn write(data_dir: &Path, note: Note) -> io::Result<()> {
     let text = format!(
-        "{} {} {} {}\n",
+        "{} {} {}\n",
         note.at,
         u8::from(note.playing),
-        u8::from(note.taken),
-        note.lost_on.unwrap_or("-")
+        u8::from(note.taken)
     );
     std::fs::write(data_dir.join(FILE), text)
 }
@@ -218,18 +154,9 @@ fn parse(text: &str) -> Option<Note> {
     };
     let playing = flag()?;
     let taken = flag()?;
-    // (Notes of the first build that wrote them end here.)
-    let lost_on = match words.next() {
-        Some("vulkan") => Some("vulkan"),
-        Some("gl") => Some("gl"),
-        _ => None,
-    };
-    Some(Note {
-        at,
-        playing,
-        taken,
-        lost_on,
-    })
+    // (Builds that could draw through more than one interface wrote a fourth word
+    // here, the interface a device was lost on: it is passed over.)
+    Some(Note { at, playing, taken })
 }
 
 #[cfg(test)]
@@ -245,19 +172,16 @@ mod tests {
                 at: 1_800_000_000,
                 playing: true,
                 taken: false,
-                lost_on: Some("vulkan"),
             },
             Note {
                 at: 7,
                 playing: false,
                 taken: true,
-                lost_on: None,
             },
             Note {
                 at: 8,
                 playing: false,
                 taken: false,
-                lost_on: Some("gl"),
             },
         ] {
             write(dir.path(), note).unwrap();
@@ -281,97 +205,57 @@ mod tests {
     }
 
     #[test]
-    fn a_trial_that_was_not_ended_is_not_made_again() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!on_trial(dir.path()));
-        assert!(begin_trial(dir.path(), "gl"), "the first trial is made");
-        assert!(on_trial(dir.path()));
-        end_trial(dir.path());
-        assert!(!on_trial(dir.path()));
-        assert!(
-            begin_trial(dir.path(), "gl"),
-            "one that ended well may be repeated"
-        );
-        // That run ended without saying that it drew: the next one does not try again…
-        assert!(!begin_trial(dir.path(), "gl"));
-        assert!(gave_up());
-        // …and the one after it may, with a clean slate.
-        assert!(begin_trial(dir.path(), "gl"));
-    }
-
-    #[test]
-    fn the_interface_a_device_was_lost_on_can_be_forgotten() {
-        let dir = tempfile::tempdir().unwrap();
-        forget_lost_interface(dir.path()); // no note: nothing to forget
-        assert_eq!(read(dir.path()), None);
-        let note = Note {
-            at: 9,
-            playing: true,
-            taken: true,
-            lost_on: Some("vulkan"),
-        };
-        write(dir.path(), note).unwrap();
-        forget_lost_interface(dir.path());
-        assert_eq!(
-            read(dir.path()),
-            Some(Note {
-                lost_on: None,
-                ..note
-            })
-        );
-    }
-
-    #[test]
-    fn a_note_of_the_first_build_is_still_read() {
+    fn a_note_of_an_earlier_build_is_still_read() {
         assert_eq!(
             parse("1794739841 1 1\n"),
             Some(Note {
                 at: 1_794_739_841,
                 playing: true,
                 taken: true,
-                lost_on: None,
             })
         );
-        // A word that names no interface is no interface.
-        assert_eq!(parse("5 0 0 metal").unwrap().lost_on, None);
+        // The interface a device was lost on, which earlier builds wrote, is passed over.
+        assert_eq!(
+            parse("5 0 1 vulkan"),
+            Some(Note {
+                at: 5,
+                playing: false,
+                taken: true,
+            })
+        );
     }
 
     #[test]
     fn a_loss_is_followed_by_one_new_start_and_not_by_a_second_within_a_minute() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            note_loss(dir.path(), true, Some("vulkan"), 1000),
-            Loss::StartAnew
-        );
+        assert_eq!(note_loss(dir.path(), true, 1000), Loss::StartAnew);
         assert_eq!(
             read(dir.path()),
             Some(Note {
                 at: 1000,
                 playing: true,
                 taken: false,
-                lost_on: Some("vulkan"),
             })
         );
         // The run that followed lost its device too, a moment later: no third start,
         // and the note is not one a later run would take for news.
-        assert_eq!(note_loss(dir.path(), false, None, 1030), Loss::Again);
+        assert_eq!(note_loss(dir.path(), false, 1030), Loss::Again);
         assert_eq!(
             read(dir.path()),
             Some(Note {
                 at: 1030,
                 playing: false,
                 taken: true,
-                lost_on: None,
             })
         );
         // Long after, a loss is the first again.
         assert_eq!(
-            note_loss(dir.path(), true, Some("gl"), 1030 + NOT_AGAIN_WITHIN_SECS),
+            note_loss(dir.path(), true, 1030 + NOT_AGAIN_WITHIN_SECS),
             Loss::StartAnew
         );
         // Where the note cannot be written, the run that followed would know nothing.
         let nowhere = dir.path().join("no-such-folder");
-        assert_eq!(note_loss(&nowhere, true, None, 5000), Loss::Unwritten);
+        assert_eq!(note_loss(&nowhere, true, 5000), Loss::Unwritten);
     }
 
     #[test]
@@ -380,7 +264,6 @@ mod tests {
             at: 1000,
             playing: false,
             taken: false,
-            lost_on: None,
         };
         assert!(note.recent(1000));
         assert!(note.recent(1000 + NOT_AGAIN_WITHIN_SECS - 1));

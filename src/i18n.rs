@@ -134,12 +134,7 @@ strings! {
     copy_record_desc: "버전, 그리는 장치, 지난 실행이 끝난 이유, 로그의 경고와 오류, 메모리를 한꺼번에 복사합니다. 문제를 알릴 때 붙여 넣어 주세요.", "Copies the version, what the screen is drawn with, how earlier runs ended, the warnings and errors of the log and the memory, all at once. Paste it when you report a problem.";
     copy_short: "복사", "Copy";
     copied: "복사했습니다.", "Copied.";
-    graphics_gave_up: "고른 그리기 방식으로는 시작하지 못해 자동으로 되돌렸습니다.", "The app did not start with the chosen way of drawing: it is back on Automatic.";
-    graphics_section: "화면 그리기", "Drawing the Screen";
-    graphics_choice: "그리는 방식", "Drawn Through";
-    graphics_choice_desc: "바꾸면 앱이 다시 시작됩니다. 자동은 폰의 기본 방식을 쓰고, 그 방식에서 화면을 그리는 장치를 잃으면 다른 방식으로 바꿉니다. glow는 OpenGL ES를 다른 그리기 라이브러리로 쓰는 시험용입니다.", "Changing it starts the app anew. Automatic uses the phone's first choice, and the other one after the graphics device was lost on that. glow is a trial: OpenGL ES through another drawing library.";
-    graphics_auto: "자동", "Automatic";
-    graphics_now: "지금", "Now";
+    graphics_now: "화면을 그리는 장치", "Drawn With";
     memory_section: "메모리", "Memory";
     memory_desc: "앱이 지금 쓰는 메모리입니다. 문제를 알릴 때 이 숫자도 함께 알려 주세요.", "What the app holds of memory right now. Please pass these numbers on, too, when you report a problem.";
     network_open: "네트워크의 미디어 서버", "Media Servers on the Network";

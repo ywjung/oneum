@@ -26,18 +26,12 @@ fn android_main(app: AndroidApp) {
     };
     let core = startup.core.clone();
     let _ = CORE.set(core.clone());
-    let prefer = graphics_preference(&startup);
-    let lang = startup.lang;
     let options = eframe::NativeOptions {
         android_app: Some(app),
-        // The framework's OpenGL renderer where that was chosen, else wgpu.
-        renderer: if prefer == crate::ui::renderer::Prefer::Glow {
-            eframe::Renderer::Glow
-        } else {
-            eframe::Renderer::Wgpu
-        },
-        // Every graphics adapter that can show the window is tried, not only the first.
-        wgpu_options: crate::ui::renderer::wgpu_options(prefer),
+        // Drawn through Vulkan, and through OpenGL ES only on a phone without a
+        // Vulkan that can show the window (`renderer::wgpu_options`). There is no
+        // choice of it: what was measured and mended on a real phone is Vulkan.
+        wgpu_options: crate::ui::renderer::wgpu_options(graphics_for_verification()),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -48,19 +42,10 @@ fn android_main(app: AndroidApp) {
     match result {
         Err(error) => {
             tracing::error!("event loop failed: {error}");
-            // Under the framework's OpenGL renderer this is how a run ends whose
-            // driver gives up while a frame is shown (a wgpu device says that it is
-            // lost instead, and the app acts on that before the frame). Once the
-            // window had been drawn that is a lost device: the app opens again, as it
-            // does for the other.
-            let lost = prefer == crate::ui::renderer::Prefer::Glow
-                && crate::ui::lost_after_drawing(&core.paths.data_dir, lang, &error);
-            if !lost {
-                super::fatal_alert(
-                    "OnEum",
-                    &format!("{error}\n\n{}", crate::app::log_dir_hint()),
-                );
-            }
+            super::fatal_alert(
+                "OnEum",
+                &format!("{error}\n\n{}", crate::app::log_dir_hint()),
+            );
         }
         // The framework ends its loop, and says nothing, when something about the
         // window is told before the window is there: the screen turns, or a split
@@ -69,8 +54,6 @@ fn android_main(app: AndroidApp) {
         // opened once more, as after a lost device.
         Ok(()) if crate::ui::nothing_drawn() => {
             let dir = &core.paths.data_dir;
-            // No failure of an interface that was on trial either.
-            crate::app::relaunch::end_trial(dir);
             let again = crate::app::relaunch::note_early_end(dir, crate::app::relaunch::now())
                 && super::open_again_after_exit();
             tracing::warn!(again, "the window's loop ended before the window was there");
@@ -83,44 +66,20 @@ fn android_main(app: AndroidApp) {
     std::process::exit(0);
 }
 
-/// Which interface to the graphics hardware this run tries first: what the settings
-/// say, and while they leave it to the app, the other one than a run lost its device
-/// on. An interface that is not the system's first choice is tried on probation (see
-/// `app::relaunch::begin_trial`): if the run before was trying it and did not get far,
-/// this run goes by the system's order.
-fn graphics_preference(startup: &crate::app::Startup) -> crate::ui::renderer::Prefer {
-    use crate::app::relaunch;
+/// A verification run may name the interface to the graphics hardware (`ONEUM_GRAPHICS`:
+/// "vulkan" or "gl"), so that the app can be run on the one a phone without Vulkan
+/// would get. Only where the verification channel is built in; otherwise the order of
+/// `renderer::rank` holds.
+fn graphics_for_verification() -> crate::ui::renderer::Prefer {
     use crate::ui::renderer::Prefer;
-    let dir = &startup.core.paths.data_dir;
-    let lost_on = relaunch::read(dir).and_then(|note| note.lost_on);
-    // A verification run may name the interface, so that all of it can be run on
-    // either (not on trial: such a run is ended and started again at any moment).
     if cfg!(feature = "automation") {
         match std::env::var("ONEUM_GRAPHICS").as_deref() {
             Ok("gl") => return Prefer::OpenGl,
             Ok("vulkan") => return Prefer::Vulkan,
-            Ok("glow") => return Prefer::Glow,
             _ => {}
         }
     }
-    let prefer = Prefer::from_choice(startup.settings.graphics, lost_on);
-    let word = match prefer {
-        Prefer::System => return prefer,
-        Prefer::Vulkan => "vulkan",
-        Prefer::OpenGl => "gl",
-        Prefer::Glow => "glow",
-    };
-    if relaunch::begin_trial(dir, word) {
-        tracing::info!(interface = word, "graphics: this interface is tried first");
-        prefer
-    } else {
-        tracing::error!(
-            interface = word,
-            "graphics: the last start with this interface did not get far; \
-             the system's order is used"
-        );
-        Prefer::System
-    }
+    Prefer::System
 }
 
 /// The activity is gone: the session is saved and the process ends. `finishing`: for
@@ -132,8 +91,6 @@ fn graphics_preference(startup: &crate::app::Startup) -> crate::ui::renderer::Pr
 pub(super) fn end(finishing: bool) {
     tracing::info!(finishing, "the activity is gone: ending");
     if let Some(core) = CORE.get() {
-        // An end of this kind is no failure of an interface that was on trial.
-        crate::app::relaunch::end_trial(&core.paths.data_dir);
         if !finishing {
             let playing = matches!(
                 core.player.snapshot().state,

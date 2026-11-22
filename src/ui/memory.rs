@@ -157,6 +157,7 @@ pub fn note_frame(atlas: [usize; 2], rows_used: usize) {
 }
 
 /// Frames drawn in this run.
+#[cfg(target_os = "android")]
 pub fn frames() -> u64 {
     FRAMES.load(Ordering::Relaxed)
 }
