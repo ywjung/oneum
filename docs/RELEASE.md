@@ -106,7 +106,7 @@ scripts/package-android.sh
 
 연결된 기기나 에뮬레이터에 설치: `scripts/android-device.sh`(USB 디버깅을 켠 기기). `--automation`으로 만든 빌드는 검증 채널이 들어 있으므로 배포하지 않는다.
 
-"모든 파일에 대한 접근"(`MANAGE_EXTERNAL_STORAGE`) 권한을 쓰므로 지금 형태로는 Play 스토어의 심사 대상이 아니다(직접 설치용). 스토어에 올리려면 저장소 접근을 `READ_MEDIA_AUDIO`와 폴더 선택기로 바꿔야 한다([ANDROID_PLAN.md](ANDROID_PLAN.md)).
+음악은 "음악 및 오디오" 권한(`READ_MEDIA_AUDIO`)으로 읽는다. "모든 파일에 대한 접근"(`MANAGE_EXTERNAL_STORAGE`)은 설정에서 고르는 선택으로 남아 있고 매니페스트에 선언되어 있으므로, Play 스토어에 올리려면 그 권한의 사용 목적을 신고하거나 선언을 빼야 한다(빼면 WavPack · APE · DSD 파일과 옆의 표지 · 가사 · CUE를 못 읽는다, [ANDROID_PLAN.md](ANDROID_PLAN.md) 4.1).
 
 ## 4. Developer ID 서명 (자격 증명 필요)
 필요한 것: Apple Developer Program의 **Developer ID Application** 인증서(키체인에 설치).

@@ -103,7 +103,7 @@ scripts/android-device.sh
 
 The folder `android/` can also be opened in Android Studio (the script above builds the app's library first).
 
-Android uses the same phone screens as the iPhone. Allow "All files access" on the first start and the phone's Music folder is read where it is; other folders (also on a card) can be added.
+Android uses the same phone screens as the iPhone. Allow access to "music and audio" when the system asks on the first start and the phone's Music folder is read where it is; other folders (also on a card) can be added. WavPack, Monkey's Audio and DSD files, and cover pictures, lyrics and CUE files, are read once "All files access" is allowed as well, in the settings. It can be used with TalkBack (swiping from item to item, double taps).
 Music plays on with the screen off (controls in the notification and on the lock screen) and pauses for a call. The system's Back works throughout.
 The shortcuts of a keyboard that is plugged in or paired (Space, Ctrl+→ …), opening single music files without adding their folder, showing a song's folder in the Files app, and saving the log are there.
 Not there: screen-reader (TalkBack) support, choosing an output device, matching a USB DAC's sample rate, exclusive output, and screens made for tablets.

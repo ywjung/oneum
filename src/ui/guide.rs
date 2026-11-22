@@ -511,15 +511,11 @@ mod tests {
                 false,
                 ["On My iPhone", "Playlists", "lock screen"],
             ),
-            (
-                Lang::Ko,
-                true,
-                ["모든 파일에 대한 접근", "플레이리스트", "알림"],
-            ),
+            (Lang::Ko, true, ["음악 및 오디오", "플레이리스트", "알림"]),
             (
                 Lang::En,
                 true,
-                ["All files access", "Playlists", "notification"],
+                ["music and audio", "Playlists", "notification"],
             ),
         ] {
             let blocks = parse(phone_guide_markdown(lang, android));

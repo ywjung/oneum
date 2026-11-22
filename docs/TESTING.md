@@ -1047,6 +1047,24 @@ scripts/dev/smoke-android.sh
 - 키보드의 키를 단축키가 읽는 키 사건으로 바꾸기: Android의 키 코드 → egui의 키, Ctrl이 단축키의 "command"가 되고 Shift·Alt가 함께 전해짐, 쓰지 않는 키(Tab)는 버림(`ui::hardkeys`의 테스트 2개. Android 전용 코드 밖에 두어 모든 시스템에서 돎).
 - 앱 안의 사용 안내: Android용 글 한·영이 같은 구성(절 8개, 항목 수 같음)이고, 마크업이 남지 않으며, iPhone을 말하지 않음(`ui::guide`의 폰 안내 테스트가 iPhone 글과 Android 글을 모두 확인).
 
+## 배포 전 개선 · 위젯의 재생 표시 (2026-11-22)
+배포 전에 받은 개선 제안 여덟 가지와 위젯 요청(CHANGELOG "배포 전 개선 · 위젯의 재생 표시")을 반영한 뒤 확인한 것.
+
+자동 테스트로 고정한 것:
+- 백업 복원: 빈 "Drive"를 내보내 빈 "Drive (Live)"가 있는 보관함에 가져오면 "Drive"가 만들어지고, 다시 가져와도 늘지 않음. "Drive"가 다른 곡을 가진 보관함에서는 "Drive (2)"로 들어오고 다시 가져와도 늘지 않음(`tests/library_playlists.rs`의 `library_data_keeps_a_list_beside_one_named_with_brackets`). 앱이 붙이는 표기만 같은 목록의 이름으로 봄: "(2)", "(17)", "(Apple Music)", "(Apple Music 3)"은 그렇고 "(Live)", "(1)", "(02)", "()", "Drive 2"는 아님(`library::tests`).
+- NAS: `http://`의 Basic만 받는 서버에는 옳은 비밀번호 · 틀린 비밀번호 · 이름 없음 모두 `PasswordInTheOpen`으로 끝나고, 서버가 받은 요청 4개 가운데 어느 것에도 `Authorization`이 없음(`tests/net_folders.rs`의 `basic_over_plain_http_is_never_answered`). Digest와 Basic을 함께 내놓는 서버에는 Digest로 답하고, 같은 서버의 `https://`에는 Basic으로 답하며, TLS 주소에서 기억한 답을 평문 연결에 미리 주지 않음(`net::auth`의 테스트). 나머지 네트워크 폴더 테스트는 평문 연결에서는 Digest로, Basic은 TLS로 돌게 고침.
+- 대비: 두 테마의 본문 글자는 모든 바탕(패널 · 창 · 입력 칸 · 줄무늬 · 사이드바와 재생 막대)에서 7:1 이상, 보조 글자는 4.5:1 이상, 본문이 보조 글자보다 1.4배 넘게 뚜렷함(`ui::theme`의 테스트, WCAG의 공식). 고치기 전 값으로 계산하면 보조 글자가 2.5~3.0:1이라 통과하지 못한다.
+- Android 접근성 트리: 읽는 순서, 픽셀 좌표(루트의 배율), 클래스 · 상태 비트 · 힌트, 노드 번호가 프레임 사이에 유지되고 사라진 노드는 잊음, 숨은 노드는 뺌, 경계가 없는 묶음 노드는 안에 든 것의 경계를 받음, 버튼 위에 같은 글자로 그린 글자 노드는 빼되 다른 곳의 같은 글자는 남김, 체크 상자와 슬라이더의 상태(`ui::accessible`의 테스트 6개).
+
+손으로 확인한 것 (볼륨 0):
+- Android 에뮬레이터(Android 16): 파일 종류마다 하나씩(FLAC · MP3 · M4A · Ogg · Opus · WAV · AIFF · MP2 · WavPack · APE · DSF · DFF · MKA, 표지 · 가사 · CUE · M3U8)을 Music 폴더에 넣고, "음악 및 오디오" 권한만으로 9곡, 모든 파일 접근을 더하면 13곡. MediaStore가 WavPack · APE · DSD를 `application/octet-stream`으로 봄. 새로 설치하고 권한 없이 시작 → 빈 보관함의 **Allow Access** → 시스템의 질문 → **Allow** → 다시 시작하지 않고 9곡. **Don't allow**를 두 번 누른 뒤 세 번째 누르기는 앱의 시스템 설정 화면을 열고, 거기서 허용하고 돌아오면 9곡이 들어오고 "더 묻지 않음" 기록이 지워짐. 설정 → 보관함의 **모든 파일 접근 (선택)** 행과 **설정 열기**(시스템 설정 화면이 열림).
+- 같은 에뮬레이터에서 TalkBack을 켜고: 시스템의 접근성 트리(`uiautomator dump`)에 보관함의 목록 · 탭이 제자리 좌표로 한 번씩 나옴. 앱을 열면 TalkBack이 스스로 "Library"(제목)에 머묾. TalkBack이 보내는 요청과 같은 길(`a11y tap`)로 **Search** 탭 → 검색 칸(키보드가 올라오고 `adb shell input text`가 들어감) → 결과의 곡 → 재생, 플레이어의 **Pause** → 일시정지. TalkBack의 몸짓 자체는 adb로 넣을 수 없었다(설정 앱에서도 주입한 밀기와 키 조합이 TalkBack의 초점을 옮기지 못함).
+- 세 Android 단계는 스모크 테스트에 넣었다("the right to music and audio is asked for, and given", "TalkBack").
+
+돌린 것(모두 볼륨 0): (실행 뒤 채움)
+
+확인하지 못한 것: 실제 Android 폰에서 TalkBack으로 쓰는 것(몸짓, 음성, 실제 사용자의 흐름), 실제 iPhone에서 위젯의 재생 표시와 앱이 말없이 꺼진 뒤 표시가 거둬지는 것, iPhone에서 바깥 폴더의 북마크를 저장하지 못하는 경우(만들어 낼 방법이 없어 코드와 린트만), 플레이리스트가 많은 보관함에서 프레임 시간을 전후로 재는 것, CI의 Android 작업(푸시하기 전에는 돌지 않음), Basic만 받는 실제 NAS.
+
 ## 백업 복원 · 휴대폰 저장 · 셔플 반복 (2026-11-19)
 코드 리뷰와 깊은 테스트에서 나온 여섯 가지(CHANGELOG "백업 복원 · 휴대폰 저장 · 셔플 반복")를 고친 뒤 확인한 것.
 

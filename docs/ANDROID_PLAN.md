@@ -18,7 +18,7 @@
 | 6 기기와 배포 | APK 빌드 스크립트(`scripts/android-build.sh`)와 Gradle 프로젝트(`android/`), 릴리스 APK(디버그 키 서명)를 에뮬레이터에 설치해 시작(`scripts/android-device.sh`), 아이콘, 오픈 소스 고지의 Android 분, 사용 안내(한/영, 앱 안에서도 Android용 글)까지. 실제 기기 설치, 배포용 키 서명, CI의 Android 빌드는 남음 |
 
 계획과 달라진 것:
-- **액티비티는 NativeActivity, 껍데기는 Java**로 했다(계획은 GameActivity와 Kotlin). 한글 입력은 어느 쪽이든 직접 만든 입력 뷰가 맡으므로 GameActivity의 글자 입력이 필요 없었고, NativeActivity는 AndroidX 라이브러리 없이 Android에 든 클래스만으로 된다. Kotlin 플러그인도 받지 않아도 된다. 대가는 접근성: eframe의 `accesskit`이 NativeActivity에서는 컴파일되지 않아 Android에서만 껐다. **TalkBack은 지원하지 않는다.**
+- **액티비티는 NativeActivity, 껍데기는 Java**로 했다(계획은 GameActivity와 Kotlin). 한글 입력은 어느 쪽이든 직접 만든 입력 뷰가 맡으므로 GameActivity의 글자 입력이 필요 없었고, NativeActivity는 AndroidX 라이브러리 없이 Android에 든 클래스만으로 된다. Kotlin 플러그인도 받지 않아도 된다. 대가는 접근성: eframe의 `accesskit`이 NativeActivity에서는 컴파일되지 않아 Android에서만 껐다. 2026-11-22부터는 UI 라이브러리가 만드는 접근성 트리(egui에 늘 들어 있는 AccessKit의 것)를 플러그인이 프레임마다 받아(`platform::android::a11y`) 펼친 뒤(`ui::accessible`) 화면 크기의 빈 Java 뷰(`A11yHost`)에 넘기고, 그 뷰가 노드마다 가상 뷰를 시스템에 보여 준다. TalkBack이 항목 사이를 밀어서 옮기고 두 번 눌러 실행하는 것은 된다(에뮬레이터에서 TalkBack을 켜고, TalkBack이 보내는 요청을 같은 길로 보내 확인). **터치하여 탐색은 안 된다**: TalkBack이 보내는 hover 사건을 winit이 처리하지 않고 삼켜서 Java 뷰에 닿지 않는다. TalkBack의 초점 테두리도 안 보인다(시스템이 앱 창의 뷰 표면에 그리는데, 그 표면은 NativeActivity가 가져갔다).
 - **한글 입력**: 액티비티에 보이지 않는 입력 뷰(`InputView`)를 두고, 입력기가 쥐고 있는 글자 전체를 바뀔 때마다 앱에 알린다. 앱은 앞서 받은 것과의 차이(지울 글자 수와 새 글자)를 키 입력으로 바꿔 넣는다(`platform::typed`, 모든 시스템에서 테스트). 화면을 누르면 입력기 상태를 비운다(칸을 버튼으로 지우거나 커서를 옮긴 경우). 사용자가 자판을 내리면 입력 칸도 포커스를 놓는다.
 - **에뮬레이터의 Vulkan 드라이버가 객체에 이름을 붙일 때 죽는다**(디버그 빌드에서 wgpu가 붙이는 이름). Android에서는 그 기능을 끈다(`ui::renderer::instance_flags`).
 - **기본 출력 장치**: cpal은 Android에서 시스템 기본 출력을 장치 목록에 없는 별도의 장치로 준다. 장치를 ID로 찾던 코드와 "장치가 아직 있는지" 확인하던 코드가 그것을 없는 장치로 봤다(재생이 1초 뒤 멈춤). 기본 장치를 따로 인정하게 고쳤다(`audio::output`).
@@ -114,6 +114,7 @@ Android 11부터 앱은 공유 저장소의 파일을 마음대로 읽지 못한
 
 - **본인 기기에 직접 설치한다면 "가"를 권한다.** 데스크톱처럼 폴더를 추가해 쓰고 CUE·가사·표지가 모두 된다.
 - **Play 스토어에 올린다면 "나"로 시작하고**, 빠지는 기능을 감수하거나 "다"를 5단계 이후에 한다.
+- **2026-11-22: "나"를 기본으로, "가"를 선택으로 바꿨다.** 첫 화면의 **접근 허용**은 시스템의 "음악 및 오디오" 질문을 띄우고(두 번 거절한 뒤에는 앱 설정 화면), 설정 → 보관함의 **모든 파일 접근 (선택)**이 "가"의 설정 화면을 연다. 에뮬레이터(Android 16)의 MediaStore가 오디오로 보는 것: FLAC · MP3 · M4A(AAC · ALAC) · Ogg · Opus · WAV · AIFF · MP2 · MKA. WavPack · Monkey's Audio · DSD(.dsf · .dff)는 오디오로 보지 않아 "나"만으로는 보이지 않는다. 경로로 읽으므로 "다"의 큰 변경은 하지 않았다.
 - 어느 쪽이든 앱 자신의 폴더(`Android/data/<패키지>/files`)는 권한 없이 읽고 쓸 수 있다. PC에서 케이블로 넣을 수 있는지는 확인 필요.
 - 위 표의 권한 동작은 Android 버전마다 다르다. 0단계에서 에뮬레이터(Android 15·16)로 실제로 읽히는지 확인한다.
 - 폴더 감시: 공유 저장소에서는 파일 변경 알림을 믿을 수 없다고 보고 iPhone처럼 앞에 있는 동안 30초마다 다시 스캔한다(`library::watch`의 `POLLED_ONLY`에 Android를 더함).
