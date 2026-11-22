@@ -983,17 +983,13 @@ impl OneumApp {
     /// Follows what the rest of the app did to `nav` (a playlist was made or imported:
     /// it is shown; one was deleted: its page goes).
     fn phone_follow_nav(&mut self) {
-        let playlists: Vec<i64> = self.playlists.iter().map(|p| p.id).collect();
-        let smart: Vec<&str> = self
-            .settings
-            .smart_playlists
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
+        // (Every frame: the few pages of the stacks are looked up in the lists as they
+        // are, nothing is made anew.)
+        let (playlists, smart) = (&self.playlists, &self.settings.smart_playlists);
         for stack in &mut self.phone.stacks {
             stack.retain(|page| match page {
-                Page::List(Nav::Playlist(id)) => playlists.contains(id),
-                Page::List(Nav::Smart(name)) => smart.contains(&name.as_str()),
+                Page::List(Nav::Playlist(id)) => playlists.iter().any(|p| p.id == *id),
+                Page::List(Nav::Smart(name)) => smart.iter().any(|p| p.name == *name),
                 _ => true,
             });
         }
@@ -2472,9 +2468,11 @@ impl OneumApp {
     /// The playlists tab.
     fn phone_playlists(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let s = self.s();
-        let playlists = self.playlists.clone();
-        let smart = self.settings.smart_playlists.clone();
-        if playlists.is_empty() && smart.is_empty() {
+        // (Only the rows on the screen are drawn, and only what they show is taken
+        // from the lists: a library with thousands of playlists is not copied every
+        // frame.)
+        let (lists, smart_lists) = (self.playlists.len(), self.settings.smart_playlists.len());
+        if lists == 0 && smart_lists == 0 {
             widgets::empty_state(
                 ui,
                 Icon::Playlist,
@@ -2488,37 +2486,48 @@ impl OneumApp {
             .auto_shrink(false)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                virtual_rows(ui, "playlists", playlists.len(), MENU_ROW, |ui, index| {
-                    let playlist = &playlists[index];
+                virtual_rows(ui, "playlists", lists, MENU_ROW, |ui, index| {
+                    let Some((id, name, items)) = self
+                        .playlists
+                        .get(index)
+                        .map(|p| (p.id, p.name.clone(), p.item_count))
+                    else {
+                        return;
+                    };
                     let rect = ui.max_rect();
-                    let count = self.lang.song_count(playlist.item_count);
-                    let tapped =
-                        self.phone_menu_row(ui, Icon::Playlist, &playlist.name, Some(&count), true);
+                    let count = self.lang.song_count(items);
+                    let tapped = self.phone_menu_row(ui, Icon::Playlist, &name, Some(&count), true);
                     // A long press offers what the page's own "more" does.
                     let held = ui
                         .interact(rect, ui.scope_id().with("menu"), Sense::click())
                         .long_touched();
                     if held {
-                        self.phone.sheet = Some(Sheet::Playlist(playlist.id));
+                        self.phone.sheet = Some(Sheet::Playlist(id));
                     } else if tapped {
-                        actions.push(Action::Go(Nav::Playlist(playlist.id)));
+                        actions.push(Action::Go(Nav::Playlist(id)));
                     }
                 });
-                if !smart.is_empty() {
+                if smart_lists > 0 {
                     ui.add_space(8.0);
                     small_heading(ui, s.phone_smart);
-                    virtual_rows(ui, "smart", smart.len(), MENU_ROW, |ui, index| {
-                        let playlist = &smart[index];
+                    virtual_rows(ui, "smart", smart_lists, MENU_ROW, |ui, index| {
+                        let Some(name) = self
+                            .settings
+                            .smart_playlists
+                            .get(index)
+                            .map(|p| p.name.clone())
+                        else {
+                            return;
+                        };
                         let rect = ui.max_rect();
-                        let tapped =
-                            self.phone_menu_row(ui, Icon::Search, &playlist.name, None, true);
+                        let tapped = self.phone_menu_row(ui, Icon::Search, &name, None, true);
                         let pressed = ui
                             .interact(rect, ui.scope_id().with("menu"), Sense::click())
                             .long_touched();
                         if pressed {
-                            self.phone.sheet = Some(Sheet::Smart(playlist.name.clone()));
+                            self.phone.sheet = Some(Sheet::Smart(name));
                         } else if tapped {
-                            actions.push(Action::Go(Nav::Smart(playlist.name.clone())));
+                            actions.push(Action::Go(Nav::Smart(name)));
                         }
                     });
                 }
