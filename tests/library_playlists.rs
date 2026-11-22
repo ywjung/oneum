@@ -450,19 +450,7 @@ fn m3u8_import_tolerates_real_world_files() {
     // A file that exists but is not audio the library can read.
     fs::write(lists.join("extra/broken.mp3"), noise(2000, 21)).unwrap();
 
-    let file_url = format!(
-        "file://{}",
-        path_of(2)
-            .to_str()
-            .unwrap()
-            .bytes()
-            .map(|b| match b {
-                b'/' | b'.' | b'-' | b'_' => (b as char).to_string(),
-                b if b.is_ascii_alphanumeric() => (b as char).to_string(),
-                b => format!("%{b:02X}"),
-            })
-            .collect::<String>()
-    );
+    let file_url = file_url(path_of(2).to_str().unwrap());
     let relative_to_music = "../music/앨범/곡 4.wav";
     let mut text = String::from("\u{feff}#EXTM3U\r\n");
     text.push_str("#EXTINF:1,아이유 - T1\r\n");
@@ -638,6 +626,26 @@ fn m3u8_import_refuses_files_too_large_to_be_playlists() {
     );
 }
 
+/// The path as a `file://` address, as other programs write one: everything but
+/// letters, digits and a few signs as %XX. On Windows `C:\\Music\\a.mp3` is
+/// `file:///C:/Music/a.mp3`.
+fn file_url(path: &str) -> String {
+    let path = if cfg!(windows) {
+        format!("/{}", path.replace('\\', "/"))
+    } else {
+        path.to_string()
+    };
+    let mut url = String::from("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.:".contains(&byte) {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
 /// An Apple Music library export: counts, dates and loved songs are merged into the
 /// library's songs (matched by file, whatever the Unicode form of the path), the user's
 /// playlists are made, and importing again changes nothing.
@@ -654,15 +662,7 @@ fn an_apple_music_library_export_is_taken_over() {
         } else {
             text.nfc().collect()
         };
-        let mut url = String::from("file://");
-        for byte in text.bytes() {
-            if byte.is_ascii_alphanumeric() || b"/-_.".contains(&byte) {
-                url.push(byte as char);
-            } else {
-                url.push_str(&format!("%{byte:02X}"));
-            }
-        }
-        url
+        file_url(&text)
     };
     library.record_play(ids[0]);
     let before = library.track(ids[0]).unwrap();

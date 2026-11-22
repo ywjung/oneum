@@ -845,9 +845,14 @@ fn rapid_seeks_and_track_changes_end_in_the_last_requested_state() {
     assert!(s.position_ms >= 500, "position {}", s.position_ms);
     // Nothing of the final request has been heard yet (it was paused right away).
     // Resuming must play B from 500 ms — never audio of an earlier request.
+    // (At the pace of a clock, and until some of it was heard: the half second that
+    // is left of the song is over in a moment at the rig's usual pace, before a slow
+    // machine gets to pause it.)
+    rig.pace_ms.store(12, Ordering::Relaxed);
     rig.send(Command::Play);
-    rig.wait("playing", |s| s.state == PlayState::Playing);
-    std::thread::sleep(Duration::from_millis(40));
+    rig.wait("some of it is heard", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 650
+    });
     rig.send(Command::Pause);
     rig.wait("paused", |s| s.state == PlayState::Paused);
     let heard = rig.last_feed_audio();
@@ -2718,6 +2723,9 @@ fn songs_of_different_albums_are_crossfaded_and_songs_of_one_album_are_not() {
 #[test]
 fn songs_go_faster_at_another_speed_and_are_counted_as_before() {
     let rig = Rig::start(TestHost::new());
+    // (At the pace of a clock: the beginning of the second song is to be seen, and at
+    // the rig's usual pace half of that song is over in a few hundredths of a second.)
+    rig.pace_ms.store(12, Ordering::Relaxed);
     rig.send(Command::SetSpeed(200));
     rig.wait("the speed is set", |s| s.speed_percent == 200);
     rig.send(play(&[A, B], 0));
