@@ -1047,6 +1047,41 @@ scripts/dev/smoke-android.sh
 - 키보드의 키를 단축키가 읽는 키 사건으로 바꾸기: Android의 키 코드 → egui의 키, Ctrl이 단축키의 "command"가 되고 Shift·Alt가 함께 전해짐, 쓰지 않는 키(Tab)는 버림(`ui::hardkeys`의 테스트 2개. Android 전용 코드 밖에 두어 모든 시스템에서 돎).
 - 앱 안의 사용 안내: Android용 글 한·영이 같은 구성(절 8개, 항목 수 같음)이고, 마크업이 남지 않으며, iPhone을 말하지 않음(`ui::guide`의 폰 안내 테스트가 iPhone 글과 Android 글을 모두 확인).
 
+## Android: 삼성 폰이 화면을 그리다 끝나던 원인 (📱 실제 폰, 2026-11-22)
+사용자의 폰을 USB로 연결해(USB 디버깅) 처음으로 실제 Android 폰에서 재고 고쳤다(CHANGELOG "Android: 삼성 폰에서 화면을 그리다 몇 초 만에 끝나던 문제"). 폰: Samsung, 그래픽 `Samsung Xclipse 960 (Vulkan, IntegratedGpu)`, Android 17(SDK 37), arm64. MediaStore의 오디오 파일 6,043개, 앱의 보관함은 Music 폴더의 19곡. 곡은 재생하지 않았다(소리 없음).
+
+재현(빌드 133 설치용 APK, 새로 설치):
+- 시작 → "음악 및 오디오" 허용 → 곡을 읽는 동안, 허용 12초 뒤 종료.
+- 다시 시작 → 1분 동안 그대로 두면 멀쩡함(`dumpsys meminfo`의 native heap · GL mtrack · VmSize 그대로) → 사용자가 목록을 밀기 시작하고 2~3초 뒤 종료.
+- 두 번 모두 logcat에 `scudo: Can't populate more pages for size class 23056`, `… 29456`, `Scudo ERROR: internal map failure (error desc=Out of memory)`, 그리고 `android_main` 스레드의 abort. 호출 자리 `posix_memalign ← vulkan.samsung.so ← vkAllocateCommandBuffers ← wgpu_hal begin_encoding ← wgpu_core Queue::present ← egui_wgpu Painter::paint_and_update_textures`. 2026-11-15에 사진으로 받은 기록과 같다.
+
+검증 채널이 든 디버그 빌드를 같은 키로 덮어 설치하고(보관함 유지) 앱의 로그를 `run-as`로 읽었다. 고치기 전 실행들의 `memory:` 줄: 프레임마다 버퍼 약 2개, 텍스처 보기 2개, 명령 인코더 3개가 늘고 줄지 않음. 프레임 499에서 버퍼 1,020 · 인코더 1,483 · 매핑 64,586(한도 65,530), 다음 할당에서 종료. 스크롤은 `adb shell input swipe`로 넣었다.
+
+원인을 가른 측정(임시 측정 코드, 커밋하지 않음):
+
+| 측정 | 결과 |
+|---|---|
+| 2초마다 `device.poll(Poll)`(묻기만)과 이어서 `poll(Wait, 100ms)` | 스크롤 중 묻기만 하면 "아직 일하는 중"인데, 곧이어 기다리면 1.1ms 만에 "다 끝남". GPU는 끝냈고 wgpu가 읽는 값만 늦다 |
+| 그 실행의 인코더 수 | 스크롤이 이어지는 동안(약 150프레임) 하나도 돌아오지 않다가 기다림이나 멈춤 뒤에 한꺼번에 돌아옴. 돌아온 인코더는 다시 쓰이므로 수는 가장 긴 연속 구간만큼에서 멎음(737) |
+| 인코더 하나의 값 | 드라이버의 매핑 약 41개(인코더 267개에 매핑 11,020개) |
+| 에뮬레이터 | 같은 코드에서 쌓이지 않음(2026-11-15, 3,500프레임): 드라이버의 차이 |
+
+wgpu는 프레임을 보낼 때마다 `vkGetSemaphoreCounterValue`로 장치가 어디까지 끝냈는지 읽고 그만큼만 돌려받는다(wgpu-core 30의 `Queue::submit` → `Device::maintain`). 이 드라이버는 프레임이 이어지는 동안 그 값을 늦게 준다. `vkWaitSemaphores`(wgpu의 `PollType::Wait`)를 부른 뒤에는 바른 값이 나온다. wgpu-hal은 시간 0의 기다림도 드라이버에 그대로 넘기고, wgpu-core는 기다림이 끝나지 않았어도 그 뒤에 읽은 값만큼 돌려받는다.
+
+고침: Android에서 프레임마다(`logic`) `device.poll(Wait { 시간 0 })`(`renderer::settle_finished_frames`).
+
+고친 뒤 그 폰에서:
+
+| 확인 | 결과 |
+|---|---|
+| 고친 디버그 빌드(측정 코드는 수만 읽음), 13초 스크롤 | 1,571프레임, 인코더 88~97, 매핑 약 7,900, 종료 없음 |
+| 디버그 빌드, 1분 연속 스크롤 | 6,650프레임(초당 약 112), 인코더 최대 76, 매핑 약 7,400에서 그대로, 오류 줄 없음 |
+| 설치용 빌드, 1분 연속 스크롤 | 같은 프로세스 유지, native heap 33.7MB · PSS · VmSize 그대로, logcat에 scudo 줄 없음 |
+
+돌린 것: `scripts/check.sh` 852개 통과(Android 타깃의 린트 포함), Android 에뮬레이터 스모크 134항목 통과(폰을 연결한 채 `ONEUM_ANDROID_SERIAL`로 에뮬레이터만).
+
+확인하지 못한 것: 곡을 재생하며 VU 미터 · 스펙트럼을 오래 띄우는 것(그 폰에서 소리를 내지 않으려 재생하지 않음; 같은 길이지만 따로 보지 않음), 처음 설치해 곡을 읽는 동안(이번 확인은 이미 읽은 보관함), 그 폰에서 OpenGL ES · glow로 그리는 경우, 다른 폰의 드라이버, 몇 시간 쓰는 것.
+
 ## 배포 전 개선 · 위젯의 재생 표시 (2026-11-22)
 배포 전에 받은 개선 제안 여덟 가지와 위젯 요청(CHANGELOG "배포 전 개선 · 위젯의 재생 표시")을 반영한 뒤 확인한 것.
 
