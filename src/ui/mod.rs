@@ -3133,6 +3133,11 @@ impl OneumApp {
                         self.pick_data_export();
                         continue;
                     }
+                    // Play or pause, as the player's button does.
+                    if id == "play_pause" {
+                        self.core.player.send(Command::TogglePlayPause);
+                        continue;
+                    }
                     // The button of the phone's empty library that adds the sample music.
                     if id == "sample_music" {
                         self.add_sample_music();

@@ -2,8 +2,13 @@
 //!
 //! A widget is drawn by a process of its own, which the system starts when it wants
 //! the widget drawn; it cannot ask the app anything. So the app leaves the song that
-//! plays (title, artist, and a small copy of the cover) where both may read it, and
-//! tells the system that the widgets are out of date.
+//! plays (title, artist, a small copy of the cover, and whether it plays) where both
+//! may read it, and tells the system that the widgets are out of date.
+//!
+//! "Plays" is told with a time: when the song would end as it goes now. The app can
+//! be ended without a word (the system ends it, or it fails), and a widget that said
+//! "playing" would then say so for good; past that time it no longer does. The next
+//! song, a pause or a seek tells the widgets anew.
 //!
 //! That place is the keychain: a group of its items that the app and its widgets
 //! share. The place made for this, a folder of an App Group, has to be registered on
@@ -22,11 +27,48 @@ use security_framework::passwords::{
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// The song as the widgets are told it: title, artist, the file of its cover.
-type Song = (String, String, Option<PathBuf>);
+/// The song as the widgets are told it.
+#[derive(Debug, Clone, PartialEq)]
+struct Song {
+    title: String,
+    artist: String,
+    /// The file of its cover.
+    art: Option<PathBuf>,
+    /// It plays, and until when it would (seconds since 1970): see the module.
+    /// `None`: paused.
+    playing_until: Option<u64>,
+}
+
+impl Song {
+    /// Whether the widgets, told `self`, need not be told `other`: the same song in
+    /// the same state, with an end that moved by no more than a few seconds (the
+    /// position as it is read wanders that much from one telling to the next).
+    fn tells_as_much_as(&self, other: &Song) -> bool {
+        let ends_alike = match (self.playing_until, other.playing_until) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.abs_diff(b) <= END_SLACK_S,
+            _ => false,
+        };
+        ends_alike
+            && self.title == other.title
+            && self.artist == other.artist
+            && self.art == other.art
+    }
+}
+
+/// How far the end of the song may move before the widgets are told again.
+const END_SLACK_S: u64 = 5;
+/// What the end that is told lies after the song's: the next song takes a moment to
+/// begin, and tells the widgets itself.
+const END_GRACE_S: u64 = 15;
+/// How long a song whose length is not known is said to play without a new word.
+const UNKNOWN_LENGTH_S: u64 = 30 * 60;
 
 /// What the widgets were last told: nothing is written twice.
 static TOLD: Mutex<Option<Song>> = Mutex::new(None);
+/// The cover that lies in the shared group now (the file it was made from; `None`
+/// inside: none lies there). A pause or a seek leaves the song again, not its cover.
+static COVER_LEFT: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
 
 /// The items of the shared group: under this service, the song (JSON) and its cover
 /// (a JPEG). ios/Widget/OnEumWidget.swift reads them by the same names.
@@ -61,20 +103,71 @@ fn shared_group() -> Option<String> {
     (!name.is_empty() && !name.contains("$(")).then_some(name)
 }
 
+/// Until when (seconds since 1970) the song of `info` would play as it goes now
+/// (`None`: it is paused). `now`: seconds since 1970.
+fn playing_until(info: &NowPlayingInfo, now: u64) -> Option<u64> {
+    if !info.playing {
+        return None;
+    }
+    let left = if info.duration_s > 0.0 {
+        let left = (info.duration_s - info.position_s).max(0.0) / info.rate.max(0.1);
+        // (A length that is no number is no length.)
+        if left.is_finite() {
+            left.ceil().min(u64::MAX as f64 / 2.0) as u64
+        } else {
+            UNKNOWN_LENGTH_S
+        }
+    } else {
+        UNKNOWN_LENGTH_S
+    };
+    Some(now.saturating_add(left).saturating_add(END_GRACE_S))
+}
+
+fn now_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
 /// The app says what plays (`None`: nothing). Any thread.
 pub fn update(info: Option<&NowPlayingInfo>) {
     let Some(info) = info else {
         // Nothing plays any more: the widgets keep the song that was on last.
         return;
     };
-    let song: Song = (
-        info.title.clone(),
-        info.artist.clone(),
-        info.art_path.clone(),
-    );
+    tell(Song {
+        title: info.title.clone(),
+        artist: info.artist.clone(),
+        art: info.art_path.clone(),
+        playing_until: playing_until(info, now_s()),
+    });
+}
+
+/// The app is ending: a song that the widgets were told plays is told paused (the
+/// next start brings it back paused). Waits until that is written.
+pub fn app_ending() {
+    let song = {
+        let told = told();
+        match told.as_ref() {
+            Some(song) if song.playing_until.is_some() => Song {
+                playing_until: None,
+                ..song.clone()
+            },
+            _ => return,
+        }
+    };
+    *told() = Some(song.clone());
+    if let Some(group) = shared_group() {
+        leave(&group, &song);
+    }
+}
+
+/// Tells the widgets `song`, unless they were told as much.
+fn tell(song: Song) {
     {
         let mut told = told();
-        if told.as_ref() == Some(&song) {
+        if told.as_ref().is_some_and(|before| before.tells_as_much_as(&song)) {
             return;
         }
         *told = Some(song.clone());
@@ -103,23 +196,35 @@ fn leave(group: &str, song: &Song) {
     if told().as_ref() != Some(song) {
         return;
     }
-    let (title, artist, art) = song;
     // The cover first, the song last: a widget that is drawn in between shows the
     // song before with a wrong cover at worst, and is drawn again right after.
     // A cover that cannot be made (its file is being written again, say) is a song
     // without one: the title and the artist are told all the same.
-    let cover = art.as_deref().and_then(small_cover);
-    let has_cover = match &cover {
-        Some(jpeg) => put(group, COVER, jpeg).is_ok(),
-        None => {
-            remove(group, COVER);
-            false
+    let has_cover = {
+        let mut left = COVER_LEFT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match left.as_ref() {
+            Some(lying) if *lying == song.art => lying.is_some(),
+            _ => {
+                let cover = song.art.as_deref().and_then(small_cover);
+                let kept = match &cover {
+                    Some(jpeg) => put(group, COVER, jpeg).is_ok(),
+                    None => {
+                        remove(group, COVER);
+                        false
+                    }
+                };
+                *left = Some(song.art.clone().filter(|_| kept));
+                kept
+            }
         }
     };
     let told = serde_json::json!({
-        "title": title,
-        "artist": artist,
+        "title": song.title,
+        "artist": song.artist,
         "cover": has_cover,
+        "playing_until": song.playing_until,
     });
     if let Err(error) = put(group, SONG, told.to_string().as_bytes()) {
         tracing::warn!("the widgets cannot be told what plays: {error}");

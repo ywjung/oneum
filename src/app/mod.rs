@@ -239,6 +239,9 @@ pub fn install_media_session(core: &Arc<Core>) {
 /// Unregisters the media session. Main thread.
 pub fn remove_media_session() {
     set_media(None);
+    // The widgets of an iPhone would go on saying that a song plays.
+    #[cfg(target_os = "ios")]
+    platform::ios::widget::app_ending();
 }
 
 pub struct Startup {

@@ -1,4 +1,5 @@
-// The home and lock screen widgets: the song that plays, or the one that was on last.
+// The home and lock screen widgets: the song that plays, or the one that was on last,
+// and whether it plays.
 //
 // A widget is drawn by this extension, a process of its own that the system starts
 // when it wants a widget drawn. It cannot ask the app anything: the app leaves the
@@ -36,11 +37,24 @@ enum Left {
     }
 }
 
-/// What the app left: the song, and its cover if it has one.
+/// Whether the song plays, as far as the widgets can tell.
+enum Playing {
+    case playing
+    case paused
+    /// Not told (an earlier version of the app), or it played until a time that has
+    /// passed: the app may have been ended without a word.
+    case unknown
+}
+
+/// What the app left: the song, its cover if it has one, and whether it plays.
 struct Song {
     let title: String
     let artist: String
     let cover: UIImage?
+    /// The app says it plays until then (where it says nothing more); `nil` with
+    /// `paused`: it said the song is paused.
+    let playingUntil: Date?
+    let paused: Bool
 
     static func load() -> Song? {
         guard let data = Left.read("song"),
@@ -48,7 +62,23 @@ struct Song {
             let title = told["title"] as? String, !title.isEmpty
         else { return nil }
         let cover = (told["cover"] as? Bool) == true ? Left.read("cover").flatMap(small) : nil
-        return Song(title: title, artist: told["artist"] as? String ?? "", cover: cover)
+        let until = (told["playing_until"] as? NSNumber).map {
+            Date(timeIntervalSince1970: $0.doubleValue)
+        }
+        // (A key that is there with nothing in it says "paused"; none at all says
+        // nothing.)
+        let paused = until == nil && told.keys.contains("playing_until")
+        return Song(
+            title: title, artist: told["artist"] as? String ?? "", cover: cover,
+            playingUntil: until, paused: paused)
+    }
+
+    /// Whether it plays at `date`.
+    func playing(at date: Date) -> Playing {
+        if let until = playingUntil {
+            return date < until ? .playing : .unknown
+        }
+        return paused ? .paused : .unknown
     }
 
     /// The picture in `data`, no larger than a widget shows it. The system does not
@@ -70,25 +100,79 @@ struct Song {
 struct SongEntry: TimelineEntry {
     let date: Date
     let song: Song?
+    let playing: Playing
 }
 
-/// One entry, and no time at which another is due: the app says when the song changed.
+/// The song now, and where it is said to play, the same song no longer playing from
+/// the time the app named on. Nothing more is due: the app says when anything changed.
 struct SongProvider: TimelineProvider {
     func placeholder(in context: Context) -> SongEntry {
-        SongEntry(date: Date(), song: nil)
+        SongEntry(date: Date(), song: nil, playing: .unknown)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (SongEntry) -> Void) {
-        completion(SongEntry(date: Date(), song: Song.load()))
+        let now = Date()
+        let song = Song.load()
+        completion(SongEntry(date: now, song: song, playing: song?.playing(at: now) ?? .unknown))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<SongEntry>) -> Void) {
-        completion(Timeline(entries: [SongEntry(date: Date(), song: Song.load())], policy: .never))
+        let now = Date()
+        let song = Song.load()
+        var entries = [SongEntry(date: now, song: song, playing: song?.playing(at: now) ?? .unknown)]
+        if let until = song?.playingUntil, until > now {
+            entries.append(SongEntry(date: until, song: song, playing: .unknown))
+        }
+        completion(Timeline(entries: entries, policy: .never))
     }
 }
 
 private let korean = Locale.preferredLanguages.first?.hasPrefix("ko") ?? false
 private let nothing = korean ? "재생 중인 곡 없음" : "Nothing playing"
+private let playingWord = korean ? "재생 중" : "Playing"
+private let pausedWord = korean ? "일시정지" : "Paused"
+/// The app's accent on its dark ground (src/ui/theme.rs).
+private let accent = Color(red: 0.604, green: 0.592, blue: 0.961)
+
+extension Playing {
+    /// The symbol that says it, where there is something to say.
+    var symbol: String? {
+        switch self {
+        case .playing: return "waveform"
+        case .paused: return "pause.fill"
+        case .unknown: return nil
+        }
+    }
+
+    var word: String? {
+        switch self {
+        case .playing: return playingWord
+        case .paused: return pausedWord
+        case .unknown: return nil
+        }
+    }
+}
+
+/// Whether the song plays, in a symbol and a word (nothing where that is not known).
+struct PlayingView: View {
+    let playing: Playing
+    /// With the word, or the symbol alone (where there is no room).
+    var worded = true
+
+    var body: some View {
+        if let symbol = playing.symbol, let word = playing.word {
+            HStack(spacing: 4) {
+                Image(systemName: symbol).font(.caption2.weight(.bold))
+                if worded {
+                    Text(word).font(.caption2.weight(.semibold)).lineLimit(1)
+                }
+            }
+            .foregroundColor(playing == .playing ? accent : .white.opacity(0.6))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(word)
+        }
+    }
+}
 
 /// The cover, or a note where a song has none.
 struct CoverView: View {
@@ -116,15 +200,25 @@ struct SongView: View {
     var body: some View {
         switch family {
         case .accessoryInline:
-            Text(entry.song.map { "♪ \($0.title)" } ?? "♪ OnEum")
+            // (One line of the system's: a symbol and the title.)
+            Text("\(Image(systemName: entry.playing.symbol ?? "music.note")) \(title)")
+                .accessibilityLabel([entry.playing.word, title].compactMap { $0 }.joined(separator: ", "))
         case .accessoryCircular:
             ZStack {
                 AccessoryWidgetBackground()
-                Image(systemName: "music.note").font(.title3)
+                Image(systemName: entry.playing.symbol ?? "music.note").font(.title3)
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([entry.playing.word, title].compactMap { $0 }.joined(separator: ", "))
         case .accessoryRectangular:
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.headline).lineLimit(1)
+                HStack(spacing: 4) {
+                    if let symbol = entry.playing.symbol {
+                        Image(systemName: symbol).font(.caption.weight(.bold))
+                            .accessibilityLabel(entry.playing.word ?? "")
+                    }
+                    Text(title).font(.headline).lineLimit(1)
+                }
                 Text(artist).font(.subheadline).lineLimit(1).opacity(0.8)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -133,15 +227,23 @@ struct SongView: View {
                 CoverView(cover: entry.song?.cover)
                     .frame(width: 104, height: 104)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                words(titleFont: .headline, lines: 2)
+                VStack(alignment: .leading, spacing: 8) {
+                    words(titleFont: .headline, lines: 2)
+                    PlayingView(playing: entry.playing)
+                }
                 Spacer(minLength: 0)
             }
             .padding(16)
         default:
             VStack(alignment: .leading, spacing: 8) {
-                CoverView(cover: entry.song?.cover)
-                    .frame(width: 64, height: 64)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                HStack(alignment: .top) {
+                    CoverView(cover: entry.song?.cover)
+                        .frame(width: 64, height: 64)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Spacer(minLength: 4)
+                    // (Beside the cover: below the words there is no room for it.)
+                    PlayingView(playing: entry.playing, worded: false)
+                }
                 words(titleFont: .subheadline.weight(.semibold), lines: 1)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -175,7 +277,7 @@ struct NowPlayingWidget: Widget {
             }
         }
         .configurationDisplayName(korean ? "재생 중인 곡" : "Now Playing")
-        .description(korean ? "재생 중인 곡, 또는 마지막으로 들은 곡." : "The song that is playing, or the one that was on last.")
+        .description(korean ? "재생 중인 곡과 그 상태, 또는 마지막으로 들은 곡." : "The song that is playing and whether it plays, or the one that was on last.")
         .supportedFamilies([
             .systemSmall, .systemMedium, .accessoryRectangular, .accessoryInline, .accessoryCircular,
         ])

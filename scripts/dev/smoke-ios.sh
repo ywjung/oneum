@@ -368,7 +368,7 @@ echo "== the widgets"
 # reads what the app left in the group of keychain items both may reach. The app reads
 # it back the way the extension does. (That the system draws the widgets with it is
 # seen by hand: docs/TESTING.md.)
-ui 'wait 600' 'dump wg.json'
+ui 'wait 600' 'dump wg.json' 'menu play_pause' 'wait 900' 'dump wg2.json' 'menu play_pause' 'wait 900' 'dump wg3.json'
 if python3 - "$PROFILE/wg.json" <<'PY'
 import json, sys
 state = json.load(open(sys.argv[1]))
@@ -378,6 +378,23 @@ assert left.get("artist"), left
 PY
 then echo "  ok   the song that plays is left for the widgets, in the keychain group they share with the app"
 else echo "  FAIL the widgets are not told the song that plays"; exit 1
+fi
+# Whether it plays, with the time until which it is said to: past that the widgets no
+# longer say "playing" (an app that was ended without a word).
+if python3 - "$PROFILE/wg.json" "$PROFILE/wg2.json" "$PROFILE/wg3.json" <<'PY'
+import json, sys, time
+playing, paused, again = (json.load(open(path)) for path in sys.argv[1:])
+song = lambda state: (state.get("widgets") or {}).get("song") or {}
+assert playing["state"] == "Playing" and paused["state"] == "Paused" and again["state"] == "Playing"
+now = time.time()
+until = song(playing).get("playing_until")
+left_ms = playing["duration_ms"] - playing["position_ms"]
+assert until and now < until <= now + left_ms / 1000 + 30, (until, now, left_ms)
+assert "playing_until" in song(paused) and song(paused)["playing_until"] is None, song(paused)
+assert song(again).get("playing_until"), song(again)
+PY
+then echo "  ok   the widgets are told that the song plays (until about its end), and that it was paused"
+else echo "  FAIL the widgets are not told whether the song plays"; exit 1
 fi
 [ -d "$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE" app)/PlugIns/OnEumWidget.appex" ] \
   && echo "  ok   the widget extension is inside the installed app" \
