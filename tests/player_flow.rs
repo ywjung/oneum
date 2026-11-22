@@ -281,14 +281,16 @@ impl Rig {
                         _ => audio.push((epoch_after, data.to_vec())),
                     }
                 }
-                due += Duration::from_millis(pace2.load(Ordering::Relaxed));
+                let pace = Duration::from_millis(pace2.load(Ordering::Relaxed));
+                due += pace;
                 let now = Instant::now();
                 if due > now {
                     std::thread::sleep(due - now);
-                } else if now - due > Duration::from_millis(100) {
-                    // (Far behind, after the machine stood still: not made up for
-                    // in one burst.)
-                    due = now;
+                } else if now - due > pace * 2 {
+                    // Behind by more than two blocks: only two are made up for. A
+                    // long sleep must not be followed by a burst that plays a short
+                    // song to its end before the test has looked once.
+                    due = now - pace * 2;
                 }
             }
         });
@@ -309,7 +311,9 @@ impl Rig {
     }
 
     fn wait(&self, what: &str, cond: impl Fn(&PlayerSnapshot) -> bool) -> PlayerSnapshot {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // (Long enough for a twelve-second song on a machine where the rig plays no
+        // faster than a clock; what is waited for comes in a moment elsewhere.)
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let snap = self.player.snapshot();
             if cond(&snap) {
@@ -325,7 +329,7 @@ impl Rig {
 
     /// Waits for something that is not part of the snapshot (play counts, saves).
     fn wait_host(&self, what: &str, cond: impl Fn(&TestHost) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(40);
         while !cond(&self.host) {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(2));
@@ -1589,7 +1593,9 @@ fn the_published_queue_follows_a_shuffled_wrap() {
     rig.send(play(&[A, B, MONO, FLAC_A], 0));
     // Every wrap reshuffles the queue. What is published must always be the order that
     // is being played: the current index points at the current item.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // (Twenty-six songs of a second each: long enough for a machine on which the rig
+    // plays no faster than a clock.)
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut orders = std::collections::HashSet::new();
     while rig.host.plays().len() < 26 {
         assert!(Instant::now() < deadline, "playback stalled");
@@ -1727,9 +1733,10 @@ fn changing_output_settings_keeps_the_position() {
     rig.pace_ms.store(12, Ordering::Relaxed);
     rig.send(play(&[LONG], 0));
     rig.wait("playing for a while", |s| {
-        // The shown position runs on the clock and is a little ahead of this rig's
-        // audio; ask for clearly more than what is checked below.
-        s.state == PlayState::Playing && s.position_now_ms() >= 600
+        // The shown position runs on the clock and is ahead of this rig's audio (far
+        // ahead on a machine where the rig plays slowly): it is the audio's own
+        // position that is asked for, and clearly more than what is checked below.
+        s.state == PlayState::Playing && s.position_ms >= 600
     });
     let feeds = rig.feeds();
     rig.send(Command::SetOutput(OutputSettings {
@@ -2281,7 +2288,11 @@ fn sleep_timer_pauses_and_leaves_the_volume_alone() {
     let rig = Rig::start(long_host(&dir));
     rig.pace_ms.store(12, Ordering::Relaxed); // real time
     rig.send(play(&[LONG], 0));
-    rig.wait("playing", |s| s.state == PlayState::Playing);
+    // (Well into the song before the timer is set: where it stands when the timer is
+    // up must not depend on how fast this machine lets the rig play.)
+    rig.wait("playing", |s| {
+        s.state == PlayState::Playing && s.position_ms >= 800
+    });
     rig.send(Command::SetSleepTimer(Some(Duration::from_millis(1500))));
     let set = rig.wait("the timer is set", |s| s.sleep_at.is_some());
     assert_eq!(set.state, PlayState::Playing);
@@ -2290,7 +2301,7 @@ fn sleep_timer_pauses_and_leaves_the_volume_alone() {
     assert_eq!(asleep.volume, 1.0, "the volume setting was not changed");
     assert_eq!(Rig::track(&asleep), Some(LONG));
     assert!(
-        (800..6000).contains(&asleep.position_ms),
+        (800..8000).contains(&asleep.position_ms),
         "paused where the song was: {} ms",
         asleep.position_ms
     );
@@ -2527,8 +2538,19 @@ fn a_marked_section_is_played_over_and_over_until_it_is_given_up() {
     // Left alone for longer than the rest of the song lasts (the rig plays several
     // times as fast as a clock): the song has not ended and stands inside the section,
     // and more of it was heard than lies between the mark and the song's end.
+    // (Waited for by what was heard, not by the clock: how fast the rig plays is a
+    // matter of the machine, and one whose sleeps run long plays slower.)
     let heard = rig.total_frames();
-    std::thread::sleep(Duration::from_secs(4));
+    let rate = u64::from(marked.output_sample_rate.unwrap_or(44_100));
+    let to_the_end = (12_000 - from) * rate / 1000;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while (rig.total_frames() - heard) as u64 <= to_the_end {
+        assert!(
+            Instant::now() < deadline,
+            "the section was played more than once"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     // (Going back to the beginning is a seek: for a moment of every round the state
     // says so.)
     let later = rig.wait("playing, between two goings back", |s| {
@@ -2539,12 +2561,6 @@ fn a_marked_section_is_played_over_and_over_until_it_is_given_up() {
         later.position_ms + 100 >= from && later.position_ms <= to + 600,
         "inside the section: {} ({from} to {to})",
         later.position_ms
-    );
-    let rate = u64::from(later.output_sample_rate.unwrap_or(44_100));
-    let to_the_end = (12_000 - from) * rate / 1000;
-    assert!(
-        (rig.total_frames() - heard) as u64 > to_the_end,
-        "the section was played more than once"
     );
     assert_eq!(
         rig.host.plays(),

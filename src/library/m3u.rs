@@ -207,21 +207,43 @@ fn percent_decode(text: &str) -> Vec<u8> {
 }
 
 /// Removes `.` components and resolves `..` without touching the file system.
+///
+/// The path is put together as text, not name by name with `PathBuf::push`: on Windows
+/// a name such as `C:` in the middle of a path would be taken for a drive when it is
+/// pushed, and throw away everything before it (a line that began as a share on
+/// another machine came out as a path on this one's drive).
 pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
+    use std::ffi::{OsStr, OsString};
+    use std::path::MAIN_SEPARATOR_STR;
+    let mut out = OsString::new();
+    let mut rooted = false;
+    let mut names: Vec<&OsStr> = Vec::new();
     for component in path.components() {
         match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => {
+                out.push(MAIN_SEPARATOR_STR);
+                rooted = true;
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 // `..` at the root stays at the root; in a relative path it is kept.
-                if !out.pop() && !out.has_root() {
-                    out.push("..");
+                if names.last().is_some_and(|name| *name != "..") {
+                    names.pop();
+                } else if !rooted {
+                    names.push(OsStr::new(".."));
                 }
             }
-            other => out.push(other.as_os_str()),
+            Component::Normal(name) => names.push(name),
         }
     }
-    out
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            out.push(MAIN_SEPARATOR_STR);
+        }
+        out.push(name);
+    }
+    PathBuf::from(out)
 }
 
 /// Renders tracks as extended M3U with absolute paths.
@@ -390,6 +412,33 @@ mod tests {
     fn decode_strips_bom_and_tolerates_bad_bytes() {
         assert_eq!(decode(b"\xef\xbb\xbf#EXTM3U\n"), "#EXTM3U\n");
         assert_eq!(decode(b"a\xffb"), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn a_path_is_made_plain_without_asking_the_disk() {
+        let plain = |path: &str| lexical_normalize(Path::new(path));
+        assert_eq!(plain("/a/./b/../c"), Path::new("/a/c"));
+        assert_eq!(plain("/../a"), Path::new("/a"));
+        assert_eq!(plain("a/../../b"), Path::new("../b"));
+        assert_eq!(plain("../../a"), Path::new("../../a"));
+        assert_eq!(plain("a/b/.."), Path::new("a"));
+        assert_eq!(plain(""), Path::new(""));
+        // A name that looks like a drive stays a name where it stands.
+        assert_eq!(plain("/a/C:/b"), Path::new("/a/C:/b"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_name_like_a_drive_inside_a_path_does_not_become_the_drive() {
+        let plain = lexical_normalize(Path::new(r"\\server\share\x\C:\y"));
+        assert!(is_remote(&plain), "{plain:?}");
+        let base = Path::new(r"C:\Lists");
+        let path_of = |line: &str| parse(line, base).into_iter().next().and_then(|e| e.path);
+        assert_eq!(path_of(r"\\server\share\x\C:\y.mp3"), None);
+        assert_eq!(
+            path_of(r"sub\C:\y.mp3"),
+            Some(PathBuf::from(r"C:\Lists\sub\C:\y.mp3"))
+        );
     }
 
     #[cfg(windows)]
