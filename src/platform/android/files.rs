@@ -159,3 +159,12 @@ pub fn reach_linked_folders() -> bool {
 }
 
 pub fn forget_linked_folder(_folder: &Path) {}
+
+/// Folders linked for this run only: an iPhone's.
+pub fn links_not_kept() -> usize {
+    0
+}
+
+pub fn keep_links_again() -> bool {
+    true
+}

@@ -829,6 +829,9 @@ strings! {
     phone_link_folder_desc: "복사하지 않고 있는 자리에서 읽습니다. iCloud Drive의 폴더나 꽂은 저장 장치의 폴더에 씁니다.", "Reads a folder where it is, without copying: one in iCloud Drive or on a drive that is plugged in.";
     phone_linked_folders: "연결한 폴더", "Linked Folders";
     phone_link_failed: "폴더를 연결하지 못했습니다.", "Could not link the folder.";
+    phone_link_not_kept: "폴더는 연결했지만 연결 정보를 저장하지 못했습니다. 이번 실행에서만 읽을 수 있고, 앱을 다시 열면 다시 연결해야 합니다.", "The folder is linked, but its link could not be kept: it can be read until the app is closed, and has to be linked again after that.";
+    phone_link_keep_again: "다시 시도", "Try Again";
+    phone_link_kept: "폴더 연결을 저장했습니다.", "The folder's link is kept.";
     phone_unlink: "연결 해제", "Unlink";
     phone_linked_hint: "연결한 폴더는 그 자리에 있는 동안 읽습니다. 저장 장치를 뺐다가 다시 꽂았으면 다시 읽기를 누르세요. iCloud Drive의 곡은 iPhone에 내려받은 것만 읽습니다. 연결을 해제해도 파일은 그대로입니다.", "A linked folder is read while it is where it was. After plugging a drive in again, press Rescan. Of the songs in iCloud Drive only those downloaded to the iPhone are read. Unlinking leaves the files as they are.";
     phone_search_here: "이 목록에서 검색", "Search This List";

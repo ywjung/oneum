@@ -1292,6 +1292,7 @@ impl OneumApp {
                 });
             });
         if let Some(action) = run {
+            let mut run_left_a_toast = false;
             match action {
                 ToastAction::RetryOutput => self.core.player.send(Command::RetryOutput),
                 ToastAction::OpenPlaybackSettings => {
@@ -1299,8 +1300,14 @@ impl OneumApp {
                     self.settings_tab = super::settings_window::Tab::Playback;
                 }
                 ToastAction::RestorePlaylist(id, tracks) => self.restore_playlist(id, tracks),
+                ToastAction::KeepLinks => {
+                    // (What comes of it takes the strip's place.)
+                    self.toast = None;
+                    self.keep_links_again();
+                    run_left_a_toast = true;
+                }
             }
-            dismiss = true;
+            dismiss = !run_left_a_toast;
         }
         if dismiss {
             if showing_transient {

@@ -206,6 +206,8 @@ enum ToastAction {
     OpenPlaybackSettings,
     /// Puts a playlist back the way it was before items were removed.
     RestorePlaylist(i64, Vec<TrackId>),
+    /// Tries again to keep the links of folders that are linked for this run only.
+    KeepLinks,
 }
 
 /// Results of background work started by the UI.
@@ -1485,6 +1487,30 @@ impl OneumApp {
         });
     }
 
+    /// Says so where a folder that was just linked is read in this run only (an
+    /// iPhone could not keep its link), with a button that tries again.
+    fn tell_links_not_kept(&mut self) {
+        if files::links_not_kept() == 0 {
+            return;
+        }
+        let s = self.s();
+        self.toast = Some(Toast {
+            text: s.phone_link_not_kept.into(),
+            warning: true,
+            action: Some((s.phone_link_keep_again.into(), ToastAction::KeepLinks)),
+            expires: None,
+        });
+    }
+
+    /// The button of [`Self::tell_links_not_kept`].
+    fn keep_links_again(&mut self) {
+        if files::keep_links_again() {
+            self.info_toast(self.s().phone_link_kept);
+        } else {
+            self.tell_links_not_kept();
+        }
+    }
+
     fn warn_toast(&mut self, text: impl Into<String>) {
         self.toast = Some(Toast {
             text: text.into(),
@@ -1617,6 +1643,7 @@ impl OneumApp {
                 for folder in paths {
                     self.add_folder(folder);
                 }
+                self.tell_links_not_kept();
             }
             PickFor::Open => self.open_paths(paths),
             PickFor::Correction => {

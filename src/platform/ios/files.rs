@@ -362,9 +362,10 @@ fn load_links() -> Vec<LinkedFolder> {
         .unwrap_or_default()
 }
 
-fn save_links(links: &[LinkedFolder]) {
+/// Writes the list of links. An error says the links are not kept for later runs.
+fn save_links(links: &[LinkedFolder]) -> std::io::Result<()> {
     let Some(file) = links_file() else {
-        return;
+        return Err(std::io::Error::other("the app's data folder is not known"));
     };
     let written = serde_json::to_vec_pretty(links)
         .map_err(std::io::Error::other)
@@ -377,9 +378,10 @@ fn save_links(links: &[LinkedFolder]) {
             std::fs::write(&scratch, bytes)?;
             std::fs::rename(&scratch, &file)
         });
-    if let Err(error) = written {
+    if let Err(error) = &written {
         tracing::warn!("cannot keep the linked folders: {error}");
     }
+    written
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -416,8 +418,46 @@ fn bookmark_of(url: &NSURL) -> Option<String> {
     }
 }
 
+/// Folders linked in this run whose link could not be kept for later runs (no
+/// bookmark could be made, or the list of links could not be written): they are read
+/// now, and are gone at the next start unless [`keep_links_again`] keeps them.
+static NOT_KEPT: Mutex<Vec<Retained<NSURL>>> = Mutex::new(Vec::new());
+
+/// How many folders are linked for this run only (see [`NOT_KEPT`]).
+pub fn links_not_kept() -> usize {
+    lock(&NOT_KEPT).len()
+}
+
+/// Tries again to keep the links of the folders that are linked for this run only.
+/// Says whether all of them are kept now.
+pub fn keep_links_again() -> bool {
+    let urls: Vec<Retained<NSURL>> = std::mem::take(&mut *lock(&NOT_KEPT));
+    for url in urls {
+        if keep_link(&url).is_err() {
+            lock(&NOT_KEPT).push(url);
+        }
+    }
+    links_not_kept() == 0
+}
+
+/// Keeps the link to the folder at `url` (which the app may read just now) for later
+/// runs: its bookmark, in the list of links.
+fn keep_link(url: &NSURL) -> Result<(), ()> {
+    let path = PathBuf::from(url.path().ok_or(())?.to_string());
+    let bookmark = bookmark_of(url).ok_or(())?;
+    let mut links = load_links();
+    links.retain(|link| !same_place(Path::new(&link.path), &path));
+    links.push(LinkedFolder {
+        path: path.to_string_lossy().into_owned(),
+        bookmark,
+    });
+    save_links(&links).map_err(|_| ())
+}
+
 /// Links the folder at `url`: the app goes on reading it where it is, now and (by the
-/// bookmark kept for it) on later runs. A folder of the app's own needs no link.
+/// bookmark kept for it) on later runs. A folder of the app's own needs no link. A
+/// link that cannot be kept for later runs leaves the folder read in this one (see
+/// [`links_not_kept`]).
 fn link(url: &NSURL) -> Option<PathBuf> {
     let path = PathBuf::from(url.path()?.to_string());
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
@@ -433,16 +473,15 @@ fn link(url: &NSURL) -> Option<PathBuf> {
             path.display()
         );
     }
-    let bookmark = bookmark_of(url)?;
-    let mut links = load_links();
-    links.retain(|link| !same_place(Path::new(&link.path), &path));
-    let spelled = path.to_string_lossy().into_owned();
-    lock(&REACHED).push(spelled.clone());
-    links.push(LinkedFolder {
-        path: spelled,
-        bookmark,
-    });
-    save_links(&links);
+    lock(&REACHED).push(path.to_string_lossy().into_owned());
+    {
+        let mut not_kept = lock(&NOT_KEPT);
+        let spelled = url.path().map(|p| p.to_string());
+        not_kept.retain(|earlier| earlier.path().map(|p| p.to_string()) != spelled);
+    }
+    if keep_link(url).is_err() {
+        lock(&NOT_KEPT).push(objc2::Message::retain(url));
+    }
     Some(path)
 }
 
@@ -522,7 +561,7 @@ pub fn restore_linked_folders(data_dir: &Path) -> Vec<(PathBuf, Option<PathBuf>)
         found.push((was, Some(now)));
     }
     if changed {
-        save_links(&links);
+        let _ = save_links(&links);
     }
     found
 }
@@ -579,8 +618,12 @@ pub fn forget_linked_folder(folder: &Path) {
     let before = links.len();
     links.retain(|link| !same_place(Path::new(&link.path), folder));
     if links.len() != before {
-        save_links(&links);
+        let _ = save_links(&links);
     }
+    lock(&NOT_KEPT).retain(|url| {
+        url.path()
+            .is_none_or(|path| !same_place(Path::new(&path.to_string()), folder))
+    });
 }
 
 /// Whether `path` lies in `folder` (both as the system resolves them: the container is

@@ -71,3 +71,12 @@ pub fn reach_linked_folders() -> bool {
 
 /// Forgets the right to read a linked folder (see [`restore_linked_folders`]).
 pub fn forget_linked_folder(_folder: &std::path::Path) {}
+
+/// Folders linked for this run only: an iPhone's (a desk reads folders where they are).
+pub fn links_not_kept() -> usize {
+    0
+}
+
+pub fn keep_links_again() -> bool {
+    true
+}
