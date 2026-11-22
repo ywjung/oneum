@@ -14,7 +14,8 @@
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
-| 소스 공개 준비 | 준비됨(2026-11-14) — 원격 `github`(https://github.com/ywjung/oneum, 비어 있는 공개 저장소). 추적 파일과 지난 커밋의 내용에 비밀 값·개인 주소·홈 경로·서명 팀 ID·기기 식별자가 없음을 확인, 저장소 크기 약 5MB(가장 큰 파일 1MB), 오픈 소스 고지가 iPhone 빌드까지 포함, CI에 iPhone 린트 추가. 커밋 기록의 작성자는 모두 한 이름과 한 e-mail 주소로 통일했다(이 저장소의 git 설정도 같음). 이 Mac의 로컬 계정 이름은 기록에 남지 않고, 그 e-mail 주소는 push하면 공개된다. 새 클론에서 빌드와 테스트 562개가 통과함을 확인. push와 CI 첫 실행은 **아직 하지 않음** |
+| 소스 공개 | 공개됨(2026-11-22) — https://github.com/ywjung/oneum (`github` 원격, `main`만 올림). 올리기 전에 추적 파일과 커밋에 비밀 값 · 개인 주소 · 홈 경로 · 서명 팀 ID · 기기 식별자가 없음을 확인했다. 커밋의 작성자는 모두 한 이름과 한 e-mail 주소다. CI는 여섯 번의 실행에 걸쳐 고친 뒤 네 작업(macOS · Windows · Android · 의존성 권고) 모두 통과(docs/TESTING.md "GitHub에 올린 뒤의 CI"). 올라간 커밋은 다시 쓰지 않는다 |
+| 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 서명 · 공증이 없어 시험판으로 표시했다(아래 "공개") |
 | Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
 | iPhone: App Store용 아카이브 | 서명 없는 아카이브와 그 검사까지 완료(2026-11-22, `scripts/ios-archive.sh --unsigned`). 서명 · `.ipa` 내보내기 · 업로드는 **검증 대기** — 유료 Apple Developer Program 계정 필요([APP_STORE.md](APP_STORE.md)) |
