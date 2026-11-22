@@ -47,6 +47,9 @@ pub enum NetError {
     Untrusted {
         fingerprint: String,
     },
+    /// The server asks for the password itself (Basic) over a connection that is not
+    /// encrypted (`http://`): it is not sent there.
+    PasswordInTheOpen,
 }
 
 impl std::fmt::Display for NetError {
@@ -62,6 +65,10 @@ impl std::fmt::Display for NetError {
             NetError::BadResponse(what) => write!(f, "unexpected answer: {what}"),
             NetError::Upnp(description) => write!(f, "the server reported: {description}"),
             NetError::Untrusted { .. } => write!(f, "the server's certificate is not trusted"),
+            NetError::PasswordInTheOpen => write!(
+                f,
+                "the server wants the password sent unencrypted; use its https:// address"
+            ),
         }
     }
 }

@@ -34,7 +34,9 @@ fn to_io(error: crate::net::NetError) -> io::Error {
     use crate::net::NetError;
     let kind = match &error {
         NetError::Status(404 | 410) => io::ErrorKind::NotFound,
-        NetError::Status(401 | 403) | NetError::Untrusted { .. } => io::ErrorKind::PermissionDenied,
+        NetError::Status(401 | 403) | NetError::Untrusted { .. } | NetError::PasswordInTheOpen => {
+            io::ErrorKind::PermissionDenied
+        }
         NetError::Timeout => io::ErrorKind::TimedOut,
         NetError::Connect(_) => io::ErrorKind::ConnectionRefused,
         _ => io::ErrorKind::Other,

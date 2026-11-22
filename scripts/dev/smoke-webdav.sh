@@ -5,10 +5,11 @@
 #
 #   webdav_checks <host the app reaches this computer at> <host to listen on>
 #
-# Two stand-ins for a NAS share the test library (scripts/dev/fake-webdav.py): one over
+# Three stand-ins for a NAS share the test library (scripts/dev/fake-webdav.py): one over
 # http:// that asks for a name and a password by Digest, one over https:// with a
-# certificate of its own making that asks by Basic. The app is given their addresses:
-# nothing is asked of the real network. The password is one made for the test.
+# certificate of its own making that asks by Basic, and one over http:// that asks by
+# Basic (which is never answered there). The app is given their addresses: nothing is
+# asked of the real network. The password is one made for the test.
 DAV_PIDS=
 webdav_checks() {
   dav_host=$1
@@ -22,13 +23,17 @@ webdav_checks() {
   python3 scripts/dev/fake-webdav.py "$MUSIC" --host "$dav_listen" --user tester --password "$dav_word" --auth basic \
     --tls "$WORK/dav-cert.pem" "$WORK/dav-key.pem" > "$WORK/davs.out" 2>&1 &
   DAV_PIDS="$DAV_PIDS $!"
+  python3 scripts/dev/fake-webdav.py "$MUSIC" --host "$dav_listen" --user tester --password "$dav_word" --auth basic > "$WORK/davb.out" 2>&1 &
+  DAV_PIDS="$DAV_PIDS $!"
   i=0
-  until grep -q '^listening ' "$WORK/dav.out" 2>/dev/null && grep -q '^listening ' "$WORK/davs.out" 2>/dev/null; do
+  until grep -q '^listening ' "$WORK/dav.out" 2>/dev/null && grep -q '^listening ' "$WORK/davs.out" 2>/dev/null \
+      && grep -q '^listening ' "$WORK/davb.out" 2>/dev/null; do
     sleep 0.2; i=$((i + 1))
     [ $i -lt 50 ] || { echo "the stand-in network folders did not start" >&2; exit 1; }
   done
   dav=$(sed -n "s/^listening \(https*:\/\/\)[^:]*:/\1$dav_host:/p" "$WORK/dav.out")
   davs=$(sed -n "s/^listening \(https*:\/\/\)[^:]*:/\1$dav_host:/p" "$WORK/davs.out")
+  davb=$(sed -n "s/^listening \(https*:\/\/\)[^:]*:/\1$dav_host:/p" "$WORK/davb.out")
 
   ui "net folder-add $dav tester wrong-word" 'wait 2000' 'dump w1.json' "net folder-add $dav tester $dav_word" 'wait 2500' 'dump w2.json'
   check w1.json 'd["network"]["share_failed"] == "refused" and d["network"]["shares"] == []' "a network folder is not added with the wrong password"
@@ -48,6 +53,8 @@ webdav_checks() {
   check w7.json 'd["network"]["shares"][1]["pinned"] == "'"$dav_print"'" and d["network"]["shares"][0]["pinned"] is None' "what is trusted is that one certificate, by its fingerprint"
   ui "net open $(entry w7.json 아이유)" 'wait 1500' 'net open 0' 'wait 1500' 'net open 2' 'wait 3000' 'dump w8.json'
   check w8.json 'd["state"] == "Playing" and d["queue_index"] == 2 and d["current_path"].startswith("'"$davs"'") and d["underruns"] == 0' "a song is read over the encrypted connection"
+  ui 'net up' 'wait 400' 'net up' 'wait 400' 'net up' 'wait 400' "net folder-add $davb tester $dav_word" 'wait 2500' 'dump w10.json'
+  check w10.json 'd["network"]["share_failed"] == "plain password" and len(d["network"]["shares"]) == 2' "a server that takes the password only as it is, at an http:// address, is not given it (and the folder is not added)"
   ui 'net secret-selftest' 'wait 1000' 'net up' 'wait 400' 'net up' 'wait 400' 'net up' 'wait 400' 'net folder-forget 1' 'wait 300' \
      'net folder-forget 0' 'wait 500' 'dump w9.json'
   check w9.json 'd["network"]["shares"] == [] and d["network"]["server"] is None' "the folders are taken off the list (and their passwords forgotten)"

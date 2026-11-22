@@ -54,6 +54,9 @@ pub(super) enum Why {
     NotAFolder,
     /// An `https://` address whose port does not speak TLS.
     NotTls,
+    /// An `http://` address whose server wants the password itself, which is not
+    /// sent over such a connection.
+    PlainPassword,
     /// Anything else, in the words of what went wrong.
     Other(String),
 }
@@ -69,6 +72,7 @@ fn why_of(error: NetError) -> Why {
         NetError::Status(200 | 405 | 501) => Why::NotAFolder,
         NetError::BadResponse(what) if what == dav::NOT_A_LISTING => Why::NotAFolder,
         NetError::BadResponse(what) if what == crate::net::tls::NOT_TLS => Why::NotTls,
+        NetError::PasswordInTheOpen => Why::PlainPassword,
         other => Why::Other(other.to_string()),
     }
 }
@@ -323,9 +327,6 @@ impl Browser {
                     // server may send a request on to another of its addresses):
                     // what is in the folder lies under that one.
                     folder.url = listing.place;
-                    // And by how its server asked who is there: what it is held to
-                    // from now on where the connection does not tell who answers.
-                    folder.sign_in = crate::net::folders::asked_way(&folder.url, &folder.user);
                 })
                 .map_err(why_of);
             let _ = tx.send(Event::Tried {
@@ -998,6 +999,7 @@ impl OneumApp {
                             Some(Why::Untrusted(_)) => s.folder_untrusted_later,
                             Some(Why::NoPassword) => s.folder_no_password,
                             Some(Why::NotFound) => s.folder_not_found,
+                            Some(Why::PlainPassword) => s.folder_plain_password_later,
                             _ => s.network_failed,
                         };
                         ui.label(RichText::new(words).color(theme::dim(ui)));
@@ -1125,7 +1127,6 @@ impl OneumApp {
                     url: super::network_folders::folder_address(argument),
                     user: user.to_string(),
                     pinned,
-                    sign_in: String::new(),
                 }
                 .sanitized();
                 match folder {
@@ -1227,6 +1228,7 @@ impl OneumApp {
                 Why::NotFound => "not found".to_string(),
                 Why::NotAFolder => "not a folder".to_string(),
                 Why::NotTls => "not tls".to_string(),
+                Why::PlainPassword => "plain password".to_string(),
                 Why::Other(reason) => format!("other: {reason}"),
             }),
             "secret_selftest": network.secret_selftest.clone().map(|r| match r {

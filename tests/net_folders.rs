@@ -206,7 +206,9 @@ fn names(entries: &[dav::Entry]) -> Vec<(&str, bool)> {
 
 #[test]
 fn a_folder_is_listed_and_read_by_who_gives_the_right_name_and_password() {
-    for asks in [Asks::Basic, Asks::Digest] {
+    // (Basic over a connection that is not encrypted is never answered: see
+    // `basic_over_plain_http_is_never_answered`; over TLS, see the tests below.)
+    for asks in [Asks::Digest] {
         let (server, seen) = serve(asks);
         let root = server.url("/dav/");
         // Nobody, and the wrong password: refused, and the refusal says so.
@@ -250,42 +252,64 @@ fn a_folder_is_listed_and_read_by_who_gives_the_right_name_and_password() {
         let seen = seen.lock().unwrap();
         let first = &seen[0];
         assert_eq!(first.header("authorization"), None);
-        if asks == Asks::Digest {
-            for request in seen.iter() {
-                let given = request.header("authorization").unwrap_or("");
-                assert!(
-                    !given.contains(WORD) && !given.contains("bGlzdGVuZXI6"),
-                    "{given}"
-                );
-            }
+        for request in seen.iter() {
+            let given = request.header("authorization").unwrap_or("");
+            assert!(
+                !given.contains(WORD) && !given.contains("bGlzdGVuZXI6"),
+                "{given}"
+            );
         }
         // Once the server has asked, it is answered with the request: the two
         // listings and the file took one request each, not two. (Before them: one
         // request as nobody, and two with the wrong password, the second of which
-        // was the answer to the server's question.) That holds for an answer that
-        // does not carry the password. Basic carries it, and this connection is not
-        // encrypted: the password is never sent before the server asked for it, so
-        // every request is made twice as before.
+        // was the answer to the server's question.)
         let given: Vec<Option<&str>> = seen.iter().map(|r| r.header("authorization")).collect();
-        if asks == Asks::Digest {
-            assert_eq!(given.len(), 6, "{given:?}");
-            assert!(given[..2].iter().all(Option::is_none));
-            assert!(given[2..].iter().all(Option::is_some));
-            // Each answer to the same question is counted, as a server may demand.
-            let counts: Vec<&str> = given[2..]
-                .iter()
-                .map(|given| field(given.unwrap(), "nc").unwrap())
-                .collect();
-            assert_eq!(counts, ["00000001", "00000002", "00000003", "00000004"]);
-        } else {
-            let asked_first: Vec<bool> = given.iter().map(Option::is_none).collect();
-            assert_eq!(
-                asked_first,
-                [true, true, false, true, false, true, false, true, false],
-                "{given:?}"
-            );
-        }
+        assert_eq!(given.len(), 6, "{given:?}");
+        assert!(given[..2].iter().all(Option::is_none));
+        assert!(given[2..].iter().all(Option::is_some));
+        // Each answer to the same question is counted, as a server may demand.
+        let counts: Vec<&str> = given[2..]
+            .iter()
+            .map(|given| field(given.unwrap(), "nc").unwrap())
+            .collect();
+        assert_eq!(counts, ["00000001", "00000002", "00000003", "00000004"]);
     }
+}
+
+/// A server at an `http://` address that takes nothing but the password itself
+/// (Basic) is never given it: not the right one, not a wrong one. Whoever asks is
+/// told so (and the listener to use the server's `https://` address), with no request
+/// made twice.
+#[test]
+fn basic_over_plain_http_is_never_answered() {
+    let (server, seen) = serve(Asks::Basic);
+    let root = server.url("/dav/");
+    let wrong = Access {
+        account: Some((USER, "wrong")),
+        fresh: true,
+        ..Access::default()
+    };
+    for access in [account(), wrong, Access::default()] {
+        assert!(matches!(
+            dav::list(&root, &access),
+            Err(NetError::PasswordInTheOpen)
+        ));
+    }
+    assert!(matches!(
+        http::open_web(
+            &server.url("/dav/song%202.flac"),
+            0,
+            &Limits::new(u64::MAX),
+            &account()
+        ),
+        Err(NetError::PasswordInTheOpen)
+    ));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 4, "one request each");
+    assert!(
+        seen.iter().all(|r| r.header("authorization").is_none()),
+        "nothing of the password was sent"
+    );
 }
 
 /// A name and password the server refuses are given to it once, not with every
@@ -293,7 +317,7 @@ fn a_folder_is_listed_and_read_by_who_gives_the_right_name_and_password() {
 /// requests. The listener trying them anew, or another password, is not held back.
 #[test]
 fn a_refused_password_is_not_given_again_and_again() {
-    for asks in [Asks::Basic, Asks::Digest] {
+    for asks in [Asks::Digest] {
         let (server, seen) = serve(asks);
         let root = server.url("/dav/");
         let wrong = |fresh: bool| Access {
@@ -435,8 +459,8 @@ fn name_and_password_do_not_follow_to_another_server() {
     let (other, other_seen) = serve(Asks::Nobody);
     let elsewhere = other.url("/dav/");
     let first = HttpServer::start(move |request| {
-        if !allowed(request, Asks::Basic) {
-            return Reply::Bytes(refusal(Asks::Basic));
+        if !allowed(request, Asks::Digest) {
+            return Reply::Bytes(refusal(Asks::Digest));
         }
         Reply::Bytes(response(
             307,
@@ -650,7 +674,6 @@ fn a_song_of_a_folder_plays_with_the_folders_account() {
         url: server.url("/dav/"),
         user: USER.into(),
         pinned: Some(tls::fingerprint(&server.certificate)),
-        ..Folder::default()
     }
     .sanitized()
     .expect("a folder");

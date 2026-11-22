@@ -369,15 +369,12 @@ impl Limits {
 #[derive(Clone, Copy, Default)]
 pub struct Access<'a> {
     /// Name and password. They are given only to a server that asks for them, only to
-    /// the server the request was made to (not to one it sends on to), and where the
-    /// server offers it in a way that does not send the password itself (`auth`).
+    /// the server the request was made to (not to one it sends on to), and over a
+    /// connection that is not TLS only in a way that does not send the password
+    /// itself (`auth`).
     pub account: Option<(&'a str, &'a str)>,
     /// The fingerprint of a certificate that is trusted as it is (see `tls`).
     pub pinned: Option<&'a str>,
-    /// How the folder's server asked who is there when the folder was added
-    /// (`auth::how_asked`), when that is known: over a connection that is not TLS
-    /// the password itself is then given only to a server that asks in that way.
-    pub sign_in: Option<&'a str>,
     /// The listener is trying this name and password now: that the server refused
     /// them a while ago does not keep them from it.
     pub fresh: bool,
@@ -389,7 +386,6 @@ impl std::fmt::Debug for Access<'_> {
         f.debug_struct("Access")
             .field("account", &self.account.map(|(user, _)| user))
             .field("pinned", &self.pinned)
-            .field("sign_in", &self.sign_in)
             .field("fresh", &self.fresh)
             .finish()
     }
@@ -702,12 +698,6 @@ fn fetch(
     {
         auth::try_anew(&server, user);
     }
-    // Over a connection that is not TLS, the password itself goes only to a server
-    // that asks as the folder's server did.
-    let kept = match access.sign_in {
-        Some(way) if !first.secure => auth::Kept::Only(way),
-        _ => auth::Kept::Any,
-    };
     let mut authorization: Option<String> = ahead(&url);
     let mut asked = false;
     loop {
@@ -720,6 +710,16 @@ fn fetch(
             limits,
             pinned,
         )?;
+        // A server that takes nothing but the password itself, over a connection
+        // that is not encrypted: it is not given, and whoever asked is told why (the
+        // server's https:// address is the way).
+        if here
+            && head.status == 401
+            && !url.secure
+            && auth::wants_the_password_itself(&head.challenges)
+        {
+            return Err(NetError::PasswordInTheOpen);
+        }
         if here && let Some((user, password)) = access.account {
             if head.status != 401 {
                 if authorization.is_some() {
@@ -741,7 +741,6 @@ fn fetch(
                     password,
                     request.method(),
                     &url.path,
-                    kept,
                 ) {
                     // (The very words it has just refused are not said twice.)
                     Some(answer) if authorization.as_deref() == Some(answer.as_str()) => {

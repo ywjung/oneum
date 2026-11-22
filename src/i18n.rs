@@ -161,7 +161,7 @@ strings! {
     folder_user_hint: "사용자 이름 (없으면 비워 둠)", "User name (empty if none is asked for)";
     folder_password_hint: "비밀번호", "Password";
     folder_password_note: "비밀번호는 이 기기의 비밀번호 보관소(키체인 · 자격 증명 관리자 · Android Keystore)에만 저장됩니다. 설정 파일과 로그에는 남지 않습니다.", "The password is kept only in this device's own store for passwords (the keychain, the Credential Manager, the Android Keystore). It is in neither the settings file nor the log.";
-    folder_plain_warning: "http:// 주소는 암호화되지 않습니다. 서버가 Digest 인증을 쓰지 않으면 비밀번호가 그대로 전송되고, 같은 네트워크의 다른 기기가 볼 수 있습니다. 가능하면 https:// 주소를 쓰세요.", "An http:// address is not encrypted. Unless the server uses Digest authentication the password is sent as it is, where other devices on the network can see it. Use an https:// address if you can.";
+    folder_plain_warning: "http:// 주소는 암호화되지 않습니다. 이 연결로는 비밀번호를 그대로 보내지 않고 Digest 인증으로만 로그인하므로, 서버가 Digest를 쓰지 않으면 연결되지 않습니다. https:// 주소를 쓰세요.", "An http:// address is not encrypted. Over it the password is never sent as it is: only Digest authentication is used, so a server without Digest cannot be reached this way. Use an https:// address.";
     folder_trying: "서버에 물어보는 중…", "Asking the server…";
     folder_connect: "연결", "Connect";
     folder_trust: "신뢰하고 연결", "Trust and Connect";
@@ -173,6 +173,8 @@ strings! {
     folder_moved: "서버가 이 주소를 다른 주소로 넘기는데, 그 주소는 따라가지 않습니다. https:// 로 시작하는 주소(와 그 포트)를 넣어 보세요.", "The server sends this address on to another one, which is not followed. Try the address that begins with https:// (and its port).";
     folder_not_found: "서버에 그 폴더가 없습니다. 주소의 경로를 확인하세요.", "The server has no folder at that path. Check the path of the address.";
     folder_not_webdav: "이 주소는 공유 폴더(WebDAV)가 아닙니다. NAS의 WebDAV 주소를 포트와 폴더 경로까지 넣으세요.", "That address is not a shared folder (WebDAV). Enter your NAS's WebDAV address, with its port and the folder's path.";
+    folder_plain_password: "이 서버는 비밀번호를 그대로 보내는 방식(Basic 인증)만 받습니다. 암호화되지 않은 http:// 연결로는 비밀번호를 보내지 않습니다. NAS 설정에서 WebDAV의 HTTPS를 켜고, https:// 로 시작하는 주소와 그 포트를 넣으세요.", "This server takes the password only as it is (Basic authentication), and it is never sent over an unencrypted http:// connection. Switch on HTTPS for WebDAV in your NAS's settings, then enter the address that begins with https:// and its port.";
+    folder_plain_password_later: "이 서버는 비밀번호를 그대로 보내는 방식(Basic 인증)만 받는데, 이 폴더는 암호화되지 않은 http:// 주소라 비밀번호를 보내지 않았습니다. NAS에서 WebDAV의 HTTPS를 켠 뒤, 목록에서 이 폴더를 지우고 https:// 주소로 다시 추가하세요.", "This server takes the password only as it is (Basic authentication), and this folder's address is unencrypted http://, so the password was not sent. Switch on HTTPS for WebDAV on your NAS, then remove the folder from the list and add it again with its https:// address.";
     folder_not_tls: "이 포트는 암호화된 연결(https)을 받지 않습니다. 주소를 http:// 로 시작하게 적거나, 서버의 https 포트를 넣으세요.", "This port does not take encrypted connections (https). Begin the address with http://, or use the server's https port.";
     folder_no_password: "이 폴더의 비밀번호를 시스템의 보관소에서 읽지 못했습니다. 기기의 잠금을 풀고 다시 열어 보세요. 계속 안 되면 목록에서 지우고 다시 추가하세요.",
         "The password of this folder could not be read from the system's store. Unlock the device and open the folder again; if that does not help, remove it from the list and add it again.";

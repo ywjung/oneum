@@ -102,7 +102,6 @@ impl OneumApp {
             url: folder_address(&form.address),
             user: form.user.trim().to_string(),
             pinned: trusted,
-            sign_in: String::new(),
         }
         .sanitized();
         // (A folder that is on the list already is replaced, not added.)
@@ -302,6 +301,9 @@ impl OneumApp {
                             }
                             Why::NotAFolder => {
                                 ui.label(RichText::new(s.folder_not_webdav).color(warn));
+                            }
+                            Why::PlainPassword => {
+                                ui.label(RichText::new(s.folder_plain_password).color(warn));
                             }
                             Why::NotTls => {
                                 ui.label(RichText::new(s.folder_not_tls).color(warn));

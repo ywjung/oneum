@@ -35,11 +35,9 @@ pub struct Folder {
     /// The fingerprint of the server's certificate, when the listener said to trust
     /// one that no authority stands behind (see `net::tls`).
     pub pinned: Option<String>,
-    /// How the server asked who is there when the folder was added (see
-    /// [`asked_way`]): `digest`, `basic` and the realm it named, or `none` when a
-    /// name was given and the server did not ask for it. Empty: not known (the
-    /// folder has no name to be there as, or was added by an earlier version).
-    pub sign_in: String,
+    // (Earlier versions kept here how the server asked who is there, `sign_in`, to
+    // hold an `http://` server to it. The password itself is never given over such
+    // a connection now, and a file that has it is read without it.)
 }
 
 impl Folder {
@@ -74,11 +72,6 @@ impl Folder {
             self.name = url.host.clone();
         }
         self.user = tidy(&self.user, 128);
-        self.sign_in = tidy(&self.sign_in, 256);
-        if !matches!(self.sign_in.as_str(), "digest" | "none") && !self.sign_in.starts_with("basic")
-        {
-            self.sign_in.clear();
-        }
         self.pinned = self
             .pinned
             .map(|print| print.to_ascii_lowercase())
@@ -95,26 +88,6 @@ impl Folder {
         // it was typed here, and the entries of its listing come as it writes them.)
         own.origin() == url.origin() && url.place().starts_with(&own.place())
     }
-}
-
-/// How the server of `address` asked `user` who is there, the last time it did in
-/// this run, in the words [`Folder::sign_in`] keeps; empty when it did not ask. Read
-/// right after a folder was tried and found: what its server is held to from then on
-/// over a connection that is not TLS, where nothing else tells that it is the same
-/// server that answers (the device may be on another network, with another device
-/// at that address).
-///
-/// A server that was given a name and did not ask for it is kept as `none`: one
-/// that asks at that address later is given the password only in a way that does
-/// not send it.
-pub fn asked_way(address: &str, user: &str) -> String {
-    if user.is_empty() {
-        return String::new();
-    }
-    Url::parse_web(address)
-        .ok()
-        .and_then(|url| super::auth::how_asked(&url.server(), user))
-        .unwrap_or_else(|| "none".to_string())
 }
 
 /// A new id for a folder: nothing is told by it (not the server, not the name).
@@ -197,8 +170,6 @@ pub struct Credentials {
     /// The folder has a name to sign in with, and the system's store did not hand
     /// its password out: the request is made as nobody.
     lacks_password: bool,
-    /// See [`Folder::sign_in`]; `None` when nothing is known.
-    sign_in: Option<String>,
     /// The listener is trying these now (a folder's form).
     fresh: bool,
 }
@@ -211,7 +182,6 @@ impl Credentials {
             password: password.clone(),
             pinned: pinned.map(str::to_string),
             lacks_password: false,
-            sign_in: None,
             fresh: true,
         }
     }
@@ -227,7 +197,6 @@ impl Credentials {
         Access {
             account: (!self.user.is_empty()).then(|| (self.user.as_str(), self.password.reveal())),
             pinned: self.pinned.as_deref(),
-            sign_in: self.sign_in.as_deref(),
             fresh: self.fresh,
         }
     }
@@ -249,7 +218,6 @@ pub fn credentials_for(url: &str) -> Credentials {
             password,
             pinned: folder.pinned,
             lacks_password: false,
-            sign_in: Some(folder.sign_in).filter(|way| !way.is_empty()),
             fresh: false,
         },
         // The system's store does not hand the password out (locked, or the person
@@ -265,7 +233,6 @@ pub fn credentials_for(url: &str) -> Credentials {
                 password: Secret::default(),
                 pinned: folder.pinned,
                 lacks_password: true,
-                sign_in: None,
                 fresh: false,
             }
         }
@@ -283,7 +250,6 @@ mod tests {
             url: url.into(),
             user: user.into(),
             pinned: None,
-            sign_in: String::new(),
         }
     }
 
