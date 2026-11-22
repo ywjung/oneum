@@ -145,14 +145,14 @@ scripts/ios-archive.sh --check <.xcarchive 또는 .ipa>
 | 연령 등급 | | 예 | 설문에 답하면 정해짐 |
 | 가격 · 배포 국가 | | 예 | 프랑스는 10절을 보고 |
 
-설명의 재료: [README.md](../README.md)와 홈페이지(`site/index.html`, `site/en/index.html`)의 소개, [USER_GUIDE_IOS.md](USER_GUIDE_IOS.md). iPhone에 없는 기능(출력 장치 선택, 메뉴와 단축키)을 설명에 넣지 않도록 README의 "없는 것"을 대조하세요.
+**부제 · 홍보 문구 · 키워드 · 설명의 한국어와 영어 초안은 [APP_STORE_LISTING.md](APP_STORE_LISTING.md)에 있습니다**(길이 검사: `python3 scripts/dev/check-listing.py`). 재료는 [README.md](../README.md), 홈페이지, [USER_GUIDE_IOS.md](USER_GUIDE_IOS.md)이고, iPhone에 없는 기능(출력 장치 선택, 메뉴와 단축키)과 실제 기기에서 확인하지 못한 기능(USB DAC)은 넣지 않았습니다.
 
 ### 스크린샷
 - 한 크기에 1~10장, `.png` 또는 `.jpg`, 투명도 없음.
 - **큰 화면(Dynamic Island, large)** 크기로 준비합니다: 세로 1320×2868, 1290×2796, 1260×2736 중 하나(가로는 뒤집은 값). 이것이 없으면 Face ID 큰 화면(1284×2778 또는 1242×2688)이 필수입니다. 다른 iPhone 크기는 큰 것에서 줄여 씁니다.
 - iPad 칸은 "앱이 iPad에서 실행되면 필수"라고 되어 있습니다. OnEum은 iPhone 전용(기기군 1)이라 요구되지 않을 것으로 보지만 **확인 못 함**: App Store Connect의 화면에서 확인하세요.
 - **iPhone Duo**(접는 iPhone): 2027년 4월부터 iOS 27.1 SDK 이상으로 만든 앱은 Duo 스크린샷이 필수가 된다고 되어 있습니다(바깥 1398×2034, 안쪽 2007×2853). OnEum은 iOS 27.2 SDK로 빌드하므로 해당합니다. Duo에서의 화면은 **확인한 적이 없습니다**.
-- 찍는 법: 시뮬레이터(큰 화면 기종, `ONEUM_IOS_DEVICE`로 고름)에서 `scripts/ios-sim.sh <프로필 폴더>`로 띄우고 검증 채널의 `shot`으로 찍습니다(앱 볼륨 0). 앱이 그린 화면이 그 기종의 픽셀 크기로 나오는지 확인하세요. 보관함은 지어낸 음악가의 것(`python3 scripts/dev/gen-demo-library.py <폴더>`)을 씁니다. **실제 음악가의 이름과 표지를 스크린샷에 넣지 마세요**(저작권, 심사).
+- 찍는 법: `scripts/dev/appstore-shots.sh`가 큰 화면 시뮬레이터에서 두 언어로 일곱 장씩 찍어 `dist/appstore/`에 둡니다(1320×2868, 소리 없이). 어떤 화면인지와 알아 둘 것은 [APP_STORE_LISTING.md](APP_STORE_LISTING.md) "스크린샷". 보관함은 지어낸 음악가의 것(`python3 scripts/dev/gen-demo-library.py <폴더>`)을 씁니다. **실제 음악가의 이름과 표지를 스크린샷에 넣지 마세요**(저작권, 심사).
 
 ## 9. 앱 개인정보 — [결정]
 
