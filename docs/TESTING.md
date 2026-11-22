@@ -1059,9 +1059,10 @@ scripts/dev/smoke-android.sh
 손으로 확인한 것 (볼륨 0):
 - Android 에뮬레이터(Android 16): 파일 종류마다 하나씩(FLAC · MP3 · M4A · Ogg · Opus · WAV · AIFF · MP2 · WavPack · APE · DSF · DFF · MKA, 표지 · 가사 · CUE · M3U8)을 Music 폴더에 넣고, "음악 및 오디오" 권한만으로 9곡, 모든 파일 접근을 더하면 13곡. MediaStore가 WavPack · APE · DSD를 `application/octet-stream`으로 봄. 새로 설치하고 권한 없이 시작 → 빈 보관함의 **Allow Access** → 시스템의 질문 → **Allow** → 다시 시작하지 않고 9곡. **Don't allow**를 두 번 누른 뒤 세 번째 누르기는 앱의 시스템 설정 화면을 열고, 거기서 허용하고 돌아오면 9곡이 들어오고 "더 묻지 않음" 기록이 지워짐. 설정 → 보관함의 **모든 파일 접근 (선택)** 행과 **설정 열기**(시스템 설정 화면이 열림).
 - 같은 에뮬레이터에서 TalkBack을 켜고: 시스템의 접근성 트리(`uiautomator dump`)에 보관함의 목록 · 탭이 제자리 좌표로 한 번씩 나옴. 앱을 열면 TalkBack이 스스로 "Library"(제목)에 머묾. TalkBack이 보내는 요청과 같은 길(`a11y tap`)로 **Search** 탭 → 검색 칸(키보드가 올라오고 `adb shell input text`가 들어감) → 결과의 곡 → 재생, 플레이어의 **Pause** → 일시정지. TalkBack의 몸짓 자체는 adb로 넣을 수 없었다(설정 앱에서도 주입한 밀기와 키 조합이 TalkBack의 초점을 옮기지 못함).
-- 세 Android 단계는 스모크 테스트에 넣었다("the right to music and audio is asked for, and given", "TalkBack").
+- 두 Android 단계는 스모크 테스트에 넣었다("the right to music and audio is asked for, and given", "TalkBack").
+- iPhone 17 Pro 시뮬레이터: 샘플 음악을 넣고 곡을 재생한 채(볼륨 0) 홈 화면의 위젯 갤러리를 열면, 작은 위젯의 표지 옆에 파형 기호가, 중간 위젯의 제목 · 아티스트 아래에 파형 기호와 "재생 중"이 보임. 일시정지의 모습과 표시가 시각에 맞춰 거둬지는 것은 화면으로 보지 않았다(스모크가 앱이 남기는 값만 확인).
 
-돌린 것(모두 볼륨 0): (실행 뒤 채움)
+돌린 것(모두 볼륨 0): `scripts/check.sh` 852개 통과(모든 대상의 린트 포함), Android 에뮬레이터 스모크 134항목(권한 질문과 TalkBack 단계 포함), iPhone 시뮬레이터 스모크 136항목(위젯의 재생 · 일시정지 값 포함). 네트워크 폴더 스모크의 새 항목(평문 연결의 Basic 서버는 비밀번호를 받지 못하고 폴더가 추가되지 않음)은 두 휴대폰 스모크에서 통과. Android 스모크의 첫 실행은 TalkBack 단계에서 멈췄다: 스크립트가 앱의 단계가 끝나기를 기다리지 않고 adb로 글자를 넣었다(스크립트의 잘못, 각 단계 끝에 상태 기록을 두어 고침). check.sh의 첫 실행은 휴대폰 안내서의 테스트가 옛 권한 이름을 찾아 실패했다(테스트를 고침). **macOS 앱 스모크는 이번에 돌리지 못했다**: Mac에 10분 넘게 입력이 없어 화면이 잠들어 있었다(창을 다시 그리는 검사가 화면이 깨어 있어야 통과). 데스크톱에 닿는 변경(대비 · NAS · 백업 복원)은 단위 · 통합 테스트로만 확인했다.
 
 확인하지 못한 것: 실제 Android 폰에서 TalkBack으로 쓰는 것(몸짓, 음성, 실제 사용자의 흐름), 실제 iPhone에서 위젯의 재생 표시와 앱이 말없이 꺼진 뒤 표시가 거둬지는 것, iPhone에서 바깥 폴더의 북마크를 저장하지 못하는 경우(만들어 낼 방법이 없어 코드와 린트만), 플레이리스트가 많은 보관함에서 프레임 시간을 전후로 재는 것, CI의 Android 작업(푸시하기 전에는 돌지 않음), Basic만 받는 실제 NAS.
 
