@@ -631,6 +631,13 @@ public final class MainActivity extends NativeActivity {
         });
     }
 
+    /** Where it is kept that music was chosen in the system's picker before. */
+    private android.content.SharedPreferences picker() {
+        return getSharedPreferences("picker", MODE_PRIVATE);
+    }
+
+    private static final String PICKED_MUSIC = "picked_music";
+
     /** Shows the system's picker: 0 a folder, 1 music files, 2 one file of any kind. */
     public void pick(int kind, int id) {
         runOnUiThread(() -> {
@@ -642,6 +649,16 @@ public final class MainActivity extends NativeActivity {
                         .addCategory(Intent.CATEGORY_OPENABLE)
                         .setType(kind == 1 ? "audio/*" : "*/*")
                         .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, kind == 1);
+                // Asked for music the first time, the picker opens on its "Recent"
+                // page, which lists nothing that is music to it and shows no way on:
+                // it is opened in the Music folder instead. Once music was chosen the
+                // picker opens where it was left, which it remembers by itself.
+                if (kind == 1 && !picker().getBoolean(PICKED_MUSIC, false)) {
+                    intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                            DocumentsContract.buildDocumentUri(
+                                    "com.android.externalstorage.documents",
+                                    "primary:" + Environment.DIRECTORY_MUSIC));
+                }
             }
             try {
                 picking.put(PICK_BASE + id, kind);
@@ -792,6 +809,9 @@ public final class MainActivity extends NativeActivity {
             // Music that was chosen is kept; a file that is read once (a playlist, a
             // correction file) is not.
             boolean keep = kind == 1;
+            if (keep) {
+                picker().edit().putBoolean(PICKED_MUSIC, true).apply();
+            }
             new Thread(() -> {
                 String paths = pathsOf(chosen, keep);
                 if (paths.isEmpty()) {

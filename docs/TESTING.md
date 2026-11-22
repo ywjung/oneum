@@ -1047,6 +1047,18 @@ scripts/dev/smoke-android.sh
 - 키보드의 키를 단축키가 읽는 키 사건으로 바꾸기: Android의 키 코드 → egui의 키, Ctrl이 단축키의 "command"가 되고 Shift·Alt가 함께 전해짐, 쓰지 않는 키(Tab)는 버림(`ui::hardkeys`의 테스트 2개. Android 전용 코드 밖에 두어 모든 시스템에서 돎).
 - 앱 안의 사용 안내: Android용 글 한·영이 같은 구성(절 8개, 항목 수 같음)이고, 마크업이 남지 않으며, iPhone을 말하지 않음(`ui::guide`의 폰 안내 테스트가 iPhone 글과 Android 글을 모두 확인).
 
+## Android: 음악 파일 열기의 파일 화면 (📱 실제 폰 · 에뮬레이터, 2026-11-22)
+사용자의 말("음악 파일 열기 클릭 후 앱으로 돌아오는 방법이 없는 것 같다")을 폰에서 확인하고 고친 것(CHANGELOG "Android: 음악 파일 열기가 빈 화면에서 열리던 것").
+
+| 확인 | 결과 |
+|---|---|
+| 폰(빌드 135): 설정 → 보관함 → 음악 파일 열기 | 시스템의 파일 화면(DocumentsUI)이 "최근 · 항목 없음"으로 열림. 뒤로 가기 키 한 번에 앱의 같은 화면으로 돌아옴, 앱은 살아 있음 |
+| 폰(고친 빌드) | Music 폴더에서 열리고 곡들이 보임. 뒤로 가기 두 번(저장소의 맨 위 → 앱)에 돌아옴. 곡을 고르는 것은 폰에서 하지 않음(소리가 남) |
+| 에뮬레이터(Android 16, 볼륨 0, 고친 빌드) | 처음에는 Music에서 열림 → Music/test의 곡을 고르면 앱으로 돌아와 재생 → 다시 열면 Music/test에서 열림(마지막 폴더) → 뒤로 가기 세 번에 앱으로 |
+| 에뮬레이터(고치기 전) | "Recent · No items"로 열림, 뒤로 가기 한 번에 앱으로, 곡을 고르면 돌아와 재생 |
+
+키와 누르기는 `adb shell input`으로 넣었다(사용자의 손으로 누른 것이 아님). 돌린 것: `scripts/check.sh` 852개, Gradle `lintRelease`.
+
 ## Android: 삼성 폰이 화면을 그리다 끝나던 원인 (📱 실제 폰, 2026-11-22)
 사용자의 폰을 USB로 연결해(USB 디버깅) 처음으로 실제 Android 폰에서 재고 고쳤다(CHANGELOG "Android: 삼성 폰에서 화면을 그리다 몇 초 만에 끝나던 문제"). 폰: Samsung, 그래픽 `Samsung Xclipse 960 (Vulkan, IntegratedGpu)`, Android 17(SDK 37), arm64. MediaStore의 오디오 파일 6,043개, 앱의 보관함은 Music 폴더의 19곡. 곡은 재생하지 않았다(소리 없음).
 
