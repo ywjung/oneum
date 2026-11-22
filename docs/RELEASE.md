@@ -171,7 +171,7 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
 | 암호화 수출 | `ITSAppUsesNonExemptEncryption = false`로 되어 있음. 앱은 시스템의 것이 아닌 TLS 구현(rustls · ring)을 담고 있어, 프랑스에 배포하려면 신고가 필요한 분류로 보임 — **결정 필요** |
 | 서버 자동 찾기 | iPhone에서 SSDP 멀티캐스트는 Apple의 `com.apple.developer.networking.multicast` 승인이 필요하고 프로젝트에 없음. 승인 전에는 자동 찾기가 막히고 주소로 추가는 됨 — **결정 필요** |
 | 인터넷 가사(LRCLIB) | 꺼져 있는 선택 기능. 저작권 있는 가사를 제3자에게서 가져오므로 심사에서 문제 삼을 수 있음 — **결정 필요** |
-| 계정 · 주소 | 유료 Apple Developer Program, 개인정보 처리방침 URL, 지원 URL, 앱 이름 확인 — **제출하는 사람의 일** |
+| 계정 · 주소 | 유료 Apple Developer Program, 지원 URL, 앱 이름 확인 — **제출하는 사람의 일**. 개인정보 처리방침은 초안이 `site/privacy.html` · `site/en/privacy.html`에 있음(2026-11-22) |
 
 심사 메모(App Review Information → Notes)에 쓸 글의 초안:
 
@@ -184,7 +184,7 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
 - 마이크, 카메라, 전체 디스크 접근, 네트워크 권한을 요구하지 않습니다. 앱은 네트워크에 접속하지 않습니다.
 
 ## 홈페이지 (GitHub Pages)
-프로그램을 소개하는 페이지가 `site/`에 있습니다. 한국어(`site/index.html`)와 영어(`site/en/index.html`) 두 장이고, 같은 스타일시트(`site/style.css`)와 스크립트(`site/meters.js`, 움직이는 VU 미터)를 씁니다.
+프로그램을 소개하는 페이지가 `site/`에 있습니다. 한국어(`site/index.html`)와 영어(`site/en/index.html`) 두 장이고, 같은 스타일시트(`site/style.css`)와 스크립트(`site/meters.js`, 움직이는 VU 미터)를 씁니다. 개인정보 처리방침(`site/privacy.html`, `site/en/privacy.html`)도 여기 있습니다: 앱이 기기 밖으로 보내는 것이나 묻는 권한이 바뀌면 두 언어의 페이지와 날짜를 함께 고칩니다.
 외부 글꼴·스크립트·추적 코드를 불러오지 않으며, 쿠키도 쓰지 않습니다.
 
 게시하는 방법:

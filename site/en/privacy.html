@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy · OnEum</title>
+  <meta name="description" content="OnEum collects no personal data. It has no accounts, no server of its own, and no advertising, analytics or tracking. What stays on the device and what leaves it.">
+  <link rel="canonical" href="https://ywjung.github.io/oneum/en/privacy.html">
+  <link rel="alternate" hreflang="ko" href="https://ywjung.github.io/oneum/privacy.html">
+  <link rel="alternate" hreflang="en" href="https://ywjung.github.io/oneum/en/privacy.html">
+  <link rel="icon" href="../img/favicon.png">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the text</a>
+
+  <header class="wrap top">
+    <a class="name" href="./"><img src="../img/icon-256.png" alt="" width="34" height="34">OnEum</a>
+    <nav aria-label="Site">
+      <a href="./">About</a>
+      <a href="../privacy.html" lang="ko" hreflang="ko">한국어</a>
+      <a href="https://github.com/ywjung/oneum">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <article class="wrap policy">
+      <h1>Privacy Policy</h1>
+      <p class="dated">In effect from 22 November 2026 · applies to OnEum on macOS, Windows, iPhone and Android</p>
+
+      <p class="lead">OnEum collects no personal data. It has no accounts, no server of its own, and no advertising, analytics or tracking code. Your music, your library and your settings stay on your device.</p>
+
+      <h2>What stays on the device</h2>
+      <p>All of the following is kept in the app’s own folders on the device. None of it is sent to the maker of OnEum or to anyone else.</p>
+      <ul>
+        <li>What was read from your music files (title, artist, album, cover and the like) and your library: play counts, favourites, ratings, playlists and saved searches.</li>
+        <li>Settings, the play queue and the position you were at.</li>
+        <li>A cache of cover pictures and lyrics, and a log to look at when something goes wrong. The log can contain file names and folder paths; it stays on the device unless you take a copy out yourself with <strong>Save the Log</strong> in Settings.</li>
+        <li>Passwords of network folders: only in the place the system has for secrets (the keychain on a Mac and an iPhone, the Credential Manager on Windows, and on Android a file of the app’s own encrypted with a key in the Android Keystore). They are never written to the settings, the log or a library data file.</li>
+      </ul>
+      <p>Music files are only read, never changed. Exporting the library’s data or a playlist only makes a file where you choose.</p>
+      <p>To remove it: on an iPhone and on Android, deleting the app deletes its data. On Windows the uninstaller asks whether to delete the data too (if you used the zip: <code>%APPDATA%\OnEum</code> and <code>%LOCALAPPDATA%\OnEum</code>). On a Mac, delete <code>Application Support/OnEum</code>, <code>Caches/OnEum</code> and <code>Logs/OnEum</code> under <code>~/Library</code>, and remove saved passwords in Keychain Access (“OnEum network folders”).</p>
+
+      <h2>What leaves the device</h2>
+      <p>Only the two things below, and each only when you have switched it on or added it yourself.</p>
+      <h3>Lyrics from the internet (off until you switch it on)</h3>
+      <ul>
+        <li>When it is on and you open the lyrics of a song whose file has no timed lyrics, OnEum asks <a href="https://lrclib.net">LRCLIB (lrclib.net)</a> for them.</li>
+        <li>What is sent is that song’s <strong>title, artist, album and length</strong>. No file path, nothing about your library, nothing about your device.</li>
+        <li>As with any request on the internet, the service can see the address (IP) it came from, and the request carries the app’s name and version (such as “OnEum/0.1.0”).</li>
+        <li>LRCLIB is a service that has nothing to do with OnEum. How it handles the requests it receives is for that service to say.</li>
+        <li>Lyrics that came back are kept on the device, so the same song is not asked for again. While the setting is off, nothing is asked.</li>
+      </ul>
+      <h3>Media servers (DLNA) and network folders (WebDAV)</h3>
+      <ul>
+        <li>Opening the Network screen sends a search for media servers on your own network. That happens only when you open that screen or add a server.</li>
+        <li>OnEum connects to the servers and folders you added, at their addresses, to get their listings and music. A user name and password you entered are sent only to that server.</li>
+        <li>Those servers are yours, or ones you chose. No server of OnEum’s stands in between.</li>
+      </ul>
+      <p>Apart from these, OnEum does not connect to the internet. It does not check for updates and sends no usage statistics and no error reports.</p>
+
+      <h2>What the system and a store do</h2>
+      <ul>
+        <li>OnEum tells the system the title, artist and cover of the song that plays, so that the lock screen, Control Center, notifications and widgets can show it. This stays on the device.</li>
+        <li>If you installed OnEum through an app store, that store (Apple, for one) may gather statistics about installs and crashes under its own policy, and may show them to the developer without names where you have allowed sharing with developers on your device. OnEum sends nothing of this itself.</li>
+        <li>This website uses no cookies and keeps no record of visits. GitHub Pages, which serves it, may keep access logs under GitHub’s policy.</li>
+      </ul>
+
+      <h2>Permissions the app asks for</h2>
+      <ul>
+        <li><strong>iPhone</strong>: Local Network (to find media servers on your network). It reads only the files you put in its folder or chose yourself.</li>
+        <li><strong>Android</strong>: Music and audio (to read the music on the device) and Notifications (the playback notification). “All files access” is used only if you switch it on in Settings (to read cover and lyrics files that lie beside the songs).</li>
+        <li><strong>Mac and Windows</strong>: it reads the music folders you added.</li>
+      </ul>
+      <p>It does not use the microphone, the camera, your location, your contacts or your photos.</p>
+
+      <h2>Children</h2>
+      <p>OnEum collects nothing from anyone, and so nothing from children.</p>
+
+      <h2>Changes</h2>
+      <p>If this policy changes, this page is changed and the date above with it. Earlier versions can be seen in <a href="https://github.com/ywjung/oneum/commits/main/site/en/privacy.html">the repository’s history</a>.</p>
+
+      <h2>Contact</h2>
+      <p>Questions and requests go to <a href="https://github.com/ywjung/oneum/issues">the issues on GitHub</a>. The source is public, so you can <a href="https://github.com/ywjung/oneum">check for yourself</a> that what is written here is so.</p>
+    </article>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>OnEum is open-source software under the 0BSD license. <a href="https://github.com/ywjung/oneum">github.com/ywjung/oneum</a></p>
+      <p>This page uses no cookies and keeps no record of visits.</p>
+    </div>
+  </footer>
+</body>
+</html>

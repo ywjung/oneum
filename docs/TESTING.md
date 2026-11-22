@@ -1181,6 +1181,8 @@ wgpu는 프레임을 보낼 때마다 `vkGetSemaphoreCounterValue`로 장치가 
 - ★ 처음 판은 검증 채널 검사가 늘 "없음"이라고 했다: `strings … | grep -q`가 첫 일치에서 끝나 `strings`가 끊기고, `pipefail`이 그것을 실패로 셌다. 채널이 든 실행 파일을 넣은 사본으로 찾았고, 파일을 직접 `grep -a`로 보게 고쳤다.
 - 검증 채널이 든 빌드에만 있는 이름(`oneum-verification-channel`, `src/ui/automation.rs`의 `MARK`)을 넣었다: iPhone용으로 `--features automation`을 주고 만든 실행 파일에 1건, 아카이브의 것에 0건.
 
+- 개인정보 처리방침 페이지(`site/privacy.html`, `site/en/privacy.html`): 로컬 서버로 열어 넓은 화면(1024px, 어두운 화면)과 좁은 화면(375px, 밝은 화면)에서 넘침 없이 그려지고, 사이트 안의 링크(홈, 다른 언어의 방침, 두 홈페이지 아래쪽의 방침 링크)가 모두 열림. 적은 내용은 코드와 대조: 요청에 붙는 앱 이름과 버전(`net::http::USER_AGENT`), 가사 요청에 담기는 것(`net::lyrics`), 비밀번호가 놓이는 곳(`platform::secrets`), Android의 권한(매니페스트), Mac의 데이터 폴더(`app::paths`), Windows의 폴더와 제거 프로그램(사용 안내, docs/RELEASE.md), 업데이트 확인 · 통계 · 오류 보고가 없음. **게시된 주소에서 본 적은 없다.**
+
 확인하지 못한 것(유료 Apple Developer Program 계정과 Xcode 로그인이 필요): 자동 서명의 아카이브, `xcodebuild -exportArchive`와 업로드(스크립트의 이 부분은 실행된 적이 없음), 배포 서명에서 위젯이 키체인 그룹을 읽는지, Apple의 업로드 자동 검사와 심사.
 
 ## 공개 전 검토와 스크린샷 교체 (2026-11-18)

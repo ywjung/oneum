@@ -499,6 +499,70 @@ pre code {
   font-size: inherit;
 }
 
+/* ----- a page of text (the privacy policy) ------------------------------------------- */
+
+.policy {
+  padding-block: 2.5rem 4rem;
+}
+
+.policy > * {
+  max-width: var(--measure);
+}
+
+.policy h1 {
+  margin: 0 0 0.6rem;
+  font-size: clamp(2rem, 4.4vw, 2.9rem);
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+
+.policy .dated {
+  margin: 0 0 2rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.policy .lead {
+  margin: 0 0 1rem;
+  padding: 1.1rem 1.3rem;
+  border-left: 4px solid var(--brand);
+  border-radius: 0 0.6rem 0.6rem 0;
+  background: var(--surface);
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.policy h2 {
+  margin: 2.8rem 0 0.8rem;
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+}
+
+.policy h3 {
+  margin: 1.6rem 0 0.5rem;
+  font-size: 1.08rem;
+  font-weight: 800;
+}
+
+.policy p {
+  margin: 0 0 1rem;
+}
+
+.policy ul {
+  margin: 0 0 1rem;
+  padding-left: 1.2rem;
+}
+
+.policy li {
+  margin-bottom: 0.5rem;
+}
+
+.policy li::marker {
+  color: var(--brand);
+}
+
 /* ----- the end ----------------------------------------------------------------------- */
 
 footer {
