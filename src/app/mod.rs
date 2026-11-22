@@ -570,12 +570,20 @@ pub fn start() -> Result<Startup, Box<dyn std::error::Error>> {
     // when it comes back.
     let (leaving_player, leaving_core) = (player.clone(), core.clone());
     let returning = library.clone();
+    let marker = core.paths.data_dir.join("music-folder-added");
     platform::lifecycle::observe(
         move || {
             leaving_player.send(Command::SaveSession);
             leaving_core.save_unsaved_settings();
         },
-        move || returning.rescan(),
+        move || {
+            // The phone's Music folder could not be read at the start (the right to
+            // read music was given since): it is added now, not at the next start.
+            if platform::PHONE {
+                add_phone_music_folder(&returning, &marker);
+            }
+            returning.rescan();
+        },
     );
     let sleep_player = player;
     platform::power::observe_sleep(move || sleep_player.send(Command::SystemWillSleep));

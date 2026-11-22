@@ -55,13 +55,20 @@ pub fn add_sample_music(_name: &str) -> std::io::Result<std::path::PathBuf> {
     ))
 }
 
-/// Whether music folders can be read at all: always on a desk. (Android needs a right
-/// the user gives in the system's settings.)
+/// Whether music folders can be read at all: always on a desk. (Android needs the right to
+/// music and audio, which the system asks for.)
 pub fn has_storage_access() -> bool {
     true
 }
 
 pub fn ask_storage_access() {}
+
+/// All of shared storage: an Android phone's (see `platform::android::files`).
+pub fn has_all_files_access() -> bool {
+    true
+}
+
+pub fn ask_all_files_access() {}
 
 /// Tries again to reach linked folders that could not be reached: nothing to do on a
 /// desk.

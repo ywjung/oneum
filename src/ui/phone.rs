@@ -2680,6 +2680,23 @@ impl OneumApp {
         let copies = crate::platform::COPIES_MUSIC_IN;
         let access = self.storage_access();
         let mut allow = false;
+        let mut allow_all = false;
+        // (Asked about once a second, as `storage_access` is: the right is given on a
+        // page of the system's settings, and the user comes back.)
+        let all_files_access = || {
+            thread_local! {
+                static ASKED: std::cell::Cell<Option<(Instant, bool)>> =
+                    const { std::cell::Cell::new(None) };
+            }
+            ASKED.with(|asked| match asked.get() {
+                Some((at, all)) if at.elapsed() < Duration::from_secs(1) => all,
+                _ => {
+                    let all = crate::platform::files::has_all_files_access();
+                    asked.set(Some((Instant::now(), all)));
+                    all
+                }
+            })
+        };
         let own = copies
             .then(crate::app::paths::AppPaths::phone_music_dir)
             .flatten();
@@ -2717,6 +2734,26 @@ impl OneumApp {
                                     true,
                                     |ui| {
                                         allow = ui.button(s.phone_storage_allow).clicked();
+                                    },
+                                );
+                                widgets::row_divider(ui);
+                            } else if crate::platform::STORAGE_NEEDS_ACCESS {
+                                // More than music, for who wants it (Android).
+                                let all = all_files_access();
+                                widgets::setting_row(
+                                    ui,
+                                    s.phone_all_files_row,
+                                    Some(s.phone_all_files_desc),
+                                    true,
+                                    |ui| {
+                                        if all {
+                                            ui.label(
+                                                RichText::new(s.phone_all_files_on)
+                                                    .color(theme::dim(ui)),
+                                            );
+                                        } else {
+                                            allow_all = ui.button(s.phone_all_files_open).clicked();
+                                        }
                                     },
                                 );
                                 widgets::row_divider(ui);
@@ -2950,6 +2987,9 @@ impl OneumApp {
         }
         if allow {
             crate::platform::files::ask_storage_access();
+        }
+        if allow_all {
+            crate::platform::files::ask_all_files_access();
         }
         if let Some((id, path)) = unlink {
             self.dialog = Some(super::dialogs::Dialog::RemoveFolder(id, path));

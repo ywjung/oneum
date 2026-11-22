@@ -255,6 +255,22 @@ pub(super) fn ask_all_files_access() {
     ask(jni_str!("askAllFilesAccess"), "askAllFilesAccess");
 }
 
+/// Whether music can be read by its path: the system's right to music and audio, or
+/// all files access.
+pub(super) fn has_music_access() -> bool {
+    with_activity("hasMusicAccess", |env, activity| {
+        env.call_method(activity, jni_str!("hasMusicAccess"), jni_sig!("()Z"), &[])?
+            .z()
+    })
+    .unwrap_or(false)
+}
+
+/// Asks for the right to music and audio (the system's dialog, or the app's page of
+/// its settings where the system no longer asks).
+pub(super) fn ask_music_access() {
+    ask(jni_str!("askMusicAccess"), "askMusicAccess");
+}
+
 /// Shows the system's picker: `kind` 0 a folder, 1 files, 2 one file. The answer comes
 /// to `natives` under `id`.
 pub(super) fn pick(kind: i32, id: i32) {

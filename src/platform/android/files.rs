@@ -138,13 +138,26 @@ pub fn add_sample_music(_name: &str) -> std::io::Result<std::path::PathBuf> {
     ))
 }
 
-/// Whether the app may read all of shared storage.
+/// Whether the app may read music by its path: the system's right to music and audio
+/// (what the app asks for), or all files access.
 pub fn has_storage_access() -> bool {
+    super::java::has_music_access()
+}
+
+/// Asks for the right to music and audio.
+pub fn ask_storage_access() {
+    super::java::ask_music_access();
+}
+
+/// Whether the app may read all of shared storage ("all files access"): what lies
+/// beside the music too (cover pictures, lyrics, CUE files) and files of kinds Android
+/// does not count as audio. Not needed; given on a page of the system's settings.
+pub fn has_all_files_access() -> bool {
     super::java::has_all_files_access()
 }
 
-/// Shows the page of the system's settings where that right is given.
-pub fn ask_storage_access() {
+/// Shows the page of the system's settings where all files access is given.
+pub fn ask_all_files_access() {
     super::java::ask_all_files_access();
 }
 

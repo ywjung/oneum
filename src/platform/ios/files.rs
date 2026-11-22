@@ -605,12 +605,19 @@ pub fn add_sample_music(name: &str) -> std::io::Result<PathBuf> {
 }
 
 /// Whether music folders can be read at all: the app's own folder always can. (Android
-/// needs a right the user gives in the system's settings.)
+/// needs the right to music and audio, which the system asks for.)
 pub fn has_storage_access() -> bool {
     true
 }
 
 pub fn ask_storage_access() {}
+
+/// All of shared storage: an Android phone's (see `platform::android::files`).
+pub fn has_all_files_access() -> bool {
+    true
+}
+
+pub fn ask_all_files_access() {}
 
 /// Forgets the link to `folder` (it was taken out of the library).
 pub fn forget_linked_folder(folder: &Path) {

@@ -818,10 +818,14 @@ strings! {
     phone_search_tips: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y\n파일 검사 결과로: check:damaged · dr:<8\n여러 낱말을 하나로: \"let it be\"\n곡을 검색한 뒤 ＋를 누르면 그 검색이 스마트 플레이리스트로 저장됩니다.",
         "A search can be narrowed to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac\nBy what was listened to: plays:>=5 · fav:yes · added:30d · played:1y\nBy what the file check found: check:damaged · dr:<8\nSeveral words as one: \"let it be\"\nSearch for songs, then press ＋ to keep the search as a smart playlist.";
     phone_empty_body_folders: "휴대폰의 Music 폴더에 있는 음악이 여기에 나타납니다. 다른 폴더는 아래에서 추가할 수 있습니다.", "Music in the phone's Music folder appears here. Other folders can be added below.";
-    phone_storage_needed: "음악 파일을 읽으려면 ‘모든 파일에 대한 접근’을 허용해야 합니다. 아래 버튼이 여는 설정 화면에서 OnEum을 허용해 주세요.", "To read music files OnEum needs “All files access”. The button below opens the settings page where it is allowed.";
+    phone_storage_needed: "음악 파일을 읽으려면 ‘음악 및 오디오’ 접근을 허용해야 합니다. 아래 버튼을 누르면 시스템이 허용할지 묻습니다.", "To read music files OnEum needs access to music and audio. The button below has the system ask you.";
     phone_storage_allow: "접근 허용", "Allow Access";
     phone_storage_row: "파일 접근", "File Access";
     phone_storage_missing: "허용되지 않아 음악을 읽을 수 없습니다.", "Not allowed: music cannot be read.";
+    phone_all_files_row: "모든 파일 접근 (선택)", "All Files Access (Optional)";
+    phone_all_files_desc: "Android가 오디오로 보지 않는 WavPack(.wv) · Monkey's Audio(.ape) · DSD(.dsf · .dff) 파일과, 음악 옆의 커버 그림 · 가사(.lrc) · CUE 파일까지 읽습니다. 시스템 설정 화면에서 허용합니다.", "Lets OnEum read the files Android does not count as audio, WavPack (.wv), Monkey's Audio (.ape) and DSD (.dsf, .dff), and what lies beside the music: cover pictures, lyrics (.lrc) and CUE files. It is allowed on a page of the system's settings.";
+    phone_all_files_open: "설정 열기", "Open Settings";
+    phone_all_files_on: "허용됨", "Allowed";
     phone_add_folder: "폴더 추가", "Add Folder";
     phone_music_folders: "음악 폴더", "Music Folders";
     phone_folders_hint: "폴더는 있는 자리에서 읽습니다. SD 카드나 꽂은 저장 장치의 폴더도 추가할 수 있습니다. 제거해도 파일은 그대로입니다.", "Folders are read where they are. A folder on a card or a plugged-in drive can be added too. Removing one leaves its files as they are.";

@@ -1,7 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Reading music folders by their paths, as on a desk ("all files access"). -->
+    <!-- Reading music by its path, as on a desk: the system's right to music and audio
+         (Android 13 on; "files and media" before), asked for in a dialog of its own. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- Not needed, given on a page of the system's settings if the user wants it
+         ("all files access"): what lies beside the music too (cover pictures, lyrics
+         and CUE files), and files of kinds Android does not count as audio. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <!-- Playing on with the app off screen: a foreground service and its notification. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

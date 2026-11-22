@@ -62,6 +62,7 @@ import java.util.concurrent.TimeoutException;
 public final class MainActivity extends NativeActivity {
     private static final String TAG = "OnEum";
     private static final int ASK_NOTIFICATIONS = 2;
+    private static final int ASK_MUSIC = 3;
     /** What became of a file that was offered (Native.onHandedOut). */
     private static final int HANDED_OUT_KEPT = 0;
     private static final int HANDED_OUT_PUT_AWAY = 1;
@@ -324,6 +325,11 @@ public final class MainActivity extends NativeActivity {
     @Override
     protected void onStart() {
         super.onStart();
+        // The right to read music was given in the settings meanwhile: when it is taken
+        // away again there, the system asks anew, and so does the app.
+        if (checkSelfPermission(musicPermission()) == PackageManager.PERMISSION_GRANTED) {
+            asked().edit().remove(musicPermission()).apply();
+        }
         Native.onForeground(1);
     }
 
@@ -331,6 +337,27 @@ public final class MainActivity extends NativeActivity {
     protected void onStop() {
         Native.onForeground(0);
         super.onStop();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        // The right to read music was given: the library reads its folders again, as
+        // when the app comes back (the system's question does not stop the activity,
+        // so onStart does not say so).
+        if (request != ASK_MUSIC || results.length == 0) {
+            return;
+        }
+        String permission = musicPermission();
+        boolean given = results[0] == PackageManager.PERMISSION_GRANTED;
+        // Said no, and the system would not explain again: it does not ask any more
+        // (the second no), and the next ask goes to the settings instead.
+        asked().edit()
+                .putBoolean(permission, !given && !shouldShowRequestPermissionRationale(permission))
+                .apply();
+        if (given) {
+            Native.onForeground(1);
+        }
     }
 
     @Override
@@ -516,6 +543,45 @@ public final class MainActivity extends NativeActivity {
 
     public boolean hasAllFilesAccess() {
         return Environment.isExternalStorageManager();
+    }
+
+    /** The system's right to read music and audio, by Android's version. */
+    private static String musicPermission() {
+        return Build.VERSION.SDK_INT >= 33
+                ? Manifest.permission.READ_MEDIA_AUDIO
+                : Manifest.permission.READ_EXTERNAL_STORAGE;
+    }
+
+    /** Whether music can be read by its path: with that right, or with all files access. */
+    public boolean hasMusicAccess() {
+        return Environment.isExternalStorageManager()
+                || checkSelfPermission(musicPermission()) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Where it is kept that the system no longer asks for the right to read music. */
+    private android.content.SharedPreferences asked() {
+        return getSharedPreferences("asked", MODE_PRIVATE);
+    }
+
+    /**
+     * Asks for the right to read music and audio. Where the system no longer asks (the
+     * user said no to it twice), the app's page of the system's settings is shown.
+     */
+    public void askMusicAccess() {
+        runOnUiThread(() -> {
+            String permission = musicPermission();
+            if (asked().getBoolean(permission, false)
+                    && !shouldShowRequestPermissionRationale(permission)) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:" + getPackageName())));
+                } catch (RuntimeException error) {
+                    Log.w(TAG, "no settings page of the app", error);
+                }
+                return;
+            }
+            requestPermissions(new String[] {permission}, ASK_MUSIC);
+        });
     }
 
     public void askAllFilesAccess() {
