@@ -4,23 +4,41 @@
 #   scripts/package.sh              release build, ad-hoc signed app bundle
 #   scripts/package.sh --debug      debug build (faster, for development)
 #   scripts/package.sh --dmg        also create the disk image and checksums
+#   scripts/package.sh --dmg --notarize
+#                                   also have Apple notarize the app (needs ONEUM_MAC_TEAM)
 #
-# Signing: set ONEUM_SIGN_IDENTITY to a "Developer ID Application: …" identity to sign
-# with it. Without it the bundle is ad-hoc signed (runs locally, is not notarizable).
-# Both ways the hardened runtime is on. See docs/RELEASE.md.
+# Signing, one of three ways (the hardened runtime is on in all of them, docs/RELEASE.md):
+#   nothing set           ad-hoc signed: runs on this Mac, another Mac's Gatekeeper stops it
+#   ONEUM_MAC_TEAM        the team's identifier: signed with Developer ID through the Apple
+#                         account Xcode is signed in to (scripts/mac-developer-id.sh), and
+#                         with --notarize notarized, with the ticket stapled to the app
+#   ONEUM_SIGN_IDENTITY   a "Developer ID Application: …" identity of the keychain: signed
+#                         with it, the disk image too (notarizing is then done by hand)
 set -eu
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 PROFILE=release
 MAKE_DMG=0
+NOTARIZE=0
 for arg in "$@"; do
   case "$arg" in
     --debug) PROFILE=debug ;;
     --dmg) MAKE_DMG=1 ;;
+    --notarize) NOTARIZE=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+# Said before anything is built: what cannot be signed for giving out.
+if [ -n "${ONEUM_MAC_TEAM:-}" ]; then
+  [ -z "${ONEUM_SIGN_IDENTITY:-}" ] \
+    || { echo "ONEUM_MAC_TEAM and ONEUM_SIGN_IDENTITY are two ways of signing: set one" >&2; exit 2; }
+  [ "$PROFILE" = release ] && [ "${ONEUM_AUTOMATION:-0}" != 1 ] \
+    || { echo "only a release build without the verification channel is signed with Developer ID" >&2; exit 2; }
+elif [ "$NOTARIZE" = 1 ]; then
+  echo "--notarize needs ONEUM_MAC_TEAM (the team whose Developer ID signs the app)" >&2
+  exit 2
+fi
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
@@ -81,6 +99,14 @@ else
   # switches off (injected libraries, code made at run time, being debugged).
   codesign --force --options runtime --sign - "$APP"
   echo "ad-hoc signed with the hardened runtime (no Developer ID identity given)"
+fi
+if [ -n "${ONEUM_MAC_TEAM:-}" ]; then
+  # Signed anew with Developer ID by Xcode (and notarized), with its own checks.
+  if [ "$NOTARIZE" = 1 ]; then
+    scripts/mac-developer-id.sh "$APP" --notarize
+  else
+    scripts/mac-developer-id.sh "$APP"
+  fi
 fi
 codesign --verify --strict "$APP"
 echo "built $APP  (version $VERSION, build $BUILD, $ARCH, $PROFILE)"
