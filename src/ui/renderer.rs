@@ -250,31 +250,40 @@ pub fn gpu_objects() -> Option<super::memory::Objects> {
     })
 }
 
-/// Lets the graphics library see which of the frames drawn so far the device has
-/// finished, so that what it made for them (command encoders with the driver's memory
-/// behind them, staging buffers, views of the screen's pictures) is given back or used
-/// again.
+/// Waits for the device to finish the frame before, so that the graphics library takes
+/// back what it made for the frames drawn so far (command encoders with the driver's
+/// memory behind them, staging buffers, views of the screen's pictures).
 ///
-/// The library asks after every frame it sends, with `vkGetSemaphoreCounterValue`. The
-/// Vulkan driver of Samsung's Xclipse phones answers that with an old value for as
-/// long as frames keep coming: nothing was given back until drawing paused, and a few
+/// The library asks after every frame it sends how far the device got
+/// (`vkGetSemaphoreCounterValue`) and takes back that much. The Vulkan driver of
+/// Samsung's Xclipse phones answers with an old value for as long as frames keep
+/// coming and nothing waits: nothing was given back until drawing paused, and a few
 /// seconds of scrolling left every frame's encoders behind (about 40 memory mappings of
 /// the driver each) until the process had no mapping left and the driver's next
-/// allocation ended the app (docs/TESTING.md, 2026-11-22). A wait that does not wait
-/// (`vkWaitSemaphores` with no time) is answered with the true value, and the library
-/// takes back whatever that value says is done.
+/// allocation ended the app (docs/TESTING.md, 2026-11-22). After a wait that the device
+/// answered (`vkWaitSemaphores`) the value is true. Asking with a wait of no time is
+/// not enough: on a screen with more to draw the frame before is never done at that
+/// moment, the wait is not answered, and the value stays old.
+///
+/// The wait takes what is left of the frame before (about 6 ms at 120 frames a second
+/// on that phone, where the screen still got its 120). A device that does not answer
+/// in [`FRAME_WAIT`] is let be for this frame.
 #[cfg(target_os = "android")]
 pub fn settle_finished_frames() {
     let Some(device) = DEVICE.get() else {
         return;
     };
-    // (A timeout only says the latest frame is not done yet: what is done is taken all
-    // the same. A lost device is told of by the callback of `watch`.)
+    // (A lost device is told of by the callback of `watch`.)
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
-        timeout: Some(std::time::Duration::ZERO),
+        timeout: Some(FRAME_WAIT),
     });
 }
+
+/// How long a frame waits at most for the frame before ([`settle_finished_frames`];
+/// the longest seen on the phone was 16 ms).
+#[cfg(target_os = "android")]
+const FRAME_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The graphics memory as the graphics library's allocator counts it. `None` where it
 /// keeps no such count (Metal) or before a device exists.

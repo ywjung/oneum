@@ -4064,8 +4064,8 @@ impl eframe::App for OneumApp {
         }
         #[cfg(not(target_os = "android"))]
         let _ = frame;
-        // What the device finished of the frames before is given back now, not when
-        // drawing pauses (see the function: a phone's driver answers late otherwise).
+        // The frame before is waited for, so that what was made for it is given back
+        // now and not when drawing pauses (see the function: a phone's driver).
         #[cfg(target_os = "android")]
         renderer::settle_finished_frames();
         // Asked last, right before this pass is drawn: a device that went while the
