@@ -1,6 +1,6 @@
 # 릴리스 절차
 
-기본 배포 형태는 직접 내려받는 `.dmg`(안에 `OnEum.app`)입니다. App Store·자동 업데이트는 범위 밖입니다.
+기본 배포 형태는 직접 내려받는 `.dmg`(안에 `OnEum.app`)입니다. Mac App Store·자동 업데이트는 범위 밖입니다. iPhone 앱을 App Store에 내는 절차는 [APP_STORE.md](APP_STORE.md)에 있습니다.
 
 ## 현재 상태 (0.1.0)
 | 단계 | 상태 |
@@ -16,7 +16,8 @@
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 준비 | 준비됨(2026-11-14) — 원격 `github`(https://github.com/ywjung/oneum, 비어 있는 공개 저장소). 추적 파일과 지난 커밋의 내용에 비밀 값·개인 주소·홈 경로·서명 팀 ID·기기 식별자가 없음을 확인, 저장소 크기 약 5MB(가장 큰 파일 1MB), 오픈 소스 고지가 iPhone 빌드까지 포함, CI에 iPhone 린트 추가. 커밋 기록의 작성자는 모두 한 이름과 한 e-mail 주소로 통일했다(이 저장소의 git 설정도 같음). 이 Mac의 로컬 계정 이름은 기록에 남지 않고, 그 e-mail 주소는 push하면 공개된다. 새 클론에서 빌드와 테스트 562개가 통과함을 확인. push와 CI 첫 실행은 **아직 하지 않음** |
 | Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
-| iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기**. TestFlight·App Store는 범위 밖 |
+| iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
+| iPhone: App Store용 아카이브 | 서명 없는 아카이브와 그 검사까지 완료(2026-11-22, `scripts/ios-archive.sh --unsigned`). 서명 · `.ipa` 내보내기 · 업로드는 **검증 대기** — 유료 Apple Developer Program 계정 필요([APP_STORE.md](APP_STORE.md)) |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
 
@@ -48,7 +49,7 @@ scripts/package.sh --dmg
 결과물:
 - `dist/OnEum.app` — 번들(`Info.plist`, 아이콘, 고지와 라이선스 전문 포함. 사용 안내는 실행 파일에 내장)
 
-배포용 빌드(Mac · Windows · Android · iPhone)에는 빌드한 컴퓨터의 경로가 들어가지 않습니다: Rust가 오류 메시지용으로 넣는 소스 경로의 홈 폴더와 프로젝트 폴더 부분을 `scripts/release-paths.sh`가 `home` · `cargo` · `rustup` · `oneum`으로 바꿉니다. 공개 전에 `strings <프로그램> | grep -c /Users/`가 0인지 확인합니다.
+배포용 빌드(Mac · Windows · Android · iPhone)에는 빌드한 컴퓨터의 경로가 들어가지 않습니다: Rust가 오류 메시지용으로 넣는 소스 경로의 홈 폴더와 프로젝트 폴더 부분을 `scripts/release-paths.sh`가 `home` · `cargo` · `rustup` · `oneum`으로 바꿉니다. 공개 전에 `grep -a -c /Users/ <프로그램>`이 0인지 확인합니다(macOS의 `strings`는 `-` 없이 쓰면 프로그램의 섹션만 읽어서, 벗겨 내지 않은 프로그램의 기호 표에 남은 경로를 놓칩니다).
 
 `scripts/package.sh`는 검증 채널(`ONEUM_SCRIPT`)이 없는 빌드를 만듭니다. 그 채널이 든 빌드는 `scripts/dev/run.sh`(`ONEUM_AUTOMATION=1`)가 `dist/dev`에만 만듭니다. **`dist/dev`의 앱을 배포하지 마세요.**
 - `dist/OnEum-<버전>-arm64.dmg` — 앱과 `/Applications` 바로가기
@@ -159,7 +160,7 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
 - 판매·공개 전 남은 일: Developer ID 서명과 공증(4·5절), Windows 실제 실행 확인(docs/TESTING.md "Windows"), 그리고 가능하면 Windows 코드 서명(없으면 SmartScreen 경고).
 
 ## iPhone: App Store 제출 준비 (2026-11-18 점검)
-서명 전까지 확인하고 고친 것과, 제출하는 사람이 할 일입니다. 서명 없는 아카이브(`xcodebuild … archive CODE_SIGNING_ALLOWED=NO`)는 앱과 위젯 확장이 같은 버전 · 빌드 번호로 들어간 정상 구조이고, 안에 아래 파일들이 있습니다.
+**가입부터 심사까지의 순서, 아카이브 스크립트(`scripts/ios-archive.sh`), 스토어 정보 점검표는 [APP_STORE.md](APP_STORE.md)에 있습니다.** 아래는 서명 전까지 확인하고 고친 것과, 제출하는 사람이 할 일입니다. 서명 없는 아카이브(`xcodebuild … archive CODE_SIGNING_ALLOWED=NO`)는 앱과 위젯 확장이 같은 버전 · 빌드 번호로 들어간 정상 구조이고, 안에 아래 파일들이 있습니다.
 
 | 항목 | 상태 |
 |---|---|

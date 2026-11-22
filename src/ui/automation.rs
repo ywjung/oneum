@@ -161,6 +161,12 @@ fn of_a_real_pointer(event: &Event) -> bool {
 /// that is given to users must not listen for one, whatever its environment says.
 pub(super) const AVAILABLE: bool = cfg!(any(debug_assertions, feature = "automation"));
 
+/// A name that is in the program only where the channel is: what checks an app before
+/// it is given out looks for it there (`scripts/ios-archive.sh`).
+#[cfg(any(debug_assertions, feature = "automation"))]
+#[used]
+static MARK: [u8; 26] = *b"oneum-verification-channel";
+
 impl Automation {
     pub(super) fn from_env() -> Option<Self> {
         if !AVAILABLE {

@@ -1171,6 +1171,18 @@ wgpu는 프레임을 보낼 때마다 `vkGetSemaphoreCounterValue`로 장치가 
 
 확인하지 못한 것: App Store Connect에 실제로 올리는 것(유료 계정과 서명이 필요), 실제 iPad, 매니페스트의 디스크 공간 사유가 심사에서 받아들여지는지, 영어 안내문이 시스템 권한 창에 실제로 쓰이는지(시뮬레이터에서 권한 창을 띄워 보지 않음).
 
+## App Store용 아카이브와 그 검사 (2026-11-22)
+`scripts/ios-archive.sh`를 만들고 계정 없이 할 수 있는 데까지 확인한 것(절차는 docs/APP_STORE.md).
+
+- `scripts/ios-archive.sh --unsigned`(Xcode 27.2, iOS 27.2 SDK): 아카이브가 만들어지고 검사를 통과. 앱과 위젯 확장이 0.1.0 · 빌드 141(커밋 수), 식별자 `app.oneum.OnEum` · `app.oneum.OnEum.widget`, 두 Info.plist의 키체인 그룹 이름이 같음, 매니페스트 · 두 언어의 안내문 · 샘플 음악 · 아이콘, arm64.
+- 이 Mac의 경로: 아카이브의 모든 파일을 바이트 단위로 찾아(`grep -a`) `/Users/` 0건. `build` 동작으로 만든 위젯 실행 파일에는 기호 표에 경로가 남고(`nm -a`의 SO · OSO 항목), `archive`는 벗겨 낸다. ★ `strings -a`는 이 경로를 보여 주지 않는다(섹션만 읽음): 같은 파일에서 `strings -a`는 0건, `strings -`와 `grep -a`는 찾음. 그래서 검사는 `grep -a`로 한다. Mac · Windows · iPhone의 배포용 실행 파일도 같은 방법으로 다시 보아 0건.
+- 권한 안내문이 필요한 API: 앱 실행 파일의 기호와 문자열에 마이크 · 카메라 · 위치 · 사진 · 연락처 · 블루투스 · Apple Music 보관함 · 추적 · `NSUserDefaults`가 없음.
+- 검사가 틀린 것을 잡는지(사본을 고쳐서): 위젯의 빌드 번호 · 식별자 · 키체인 그룹 이름이 다름, 매니페스트와 샘플이 없음, 홈 경로가 든 파일, `0.1.0-beta` 같은 버전, 검증 채널이 든 실행 파일(`--features automation`으로 만든 것), `build` 동작의 위젯 실행 파일, 서명 뒤에 바뀐 파일, 위젯이 다른 키체인 그룹에 서명됨, 서명 없는 `.ipa`, 개발용 서명에 프로파일이 없는 `.ipa` — 모두 실패. 배포용처럼 서명한 `.ipa`는 통과. 서명 검사는 임시(ad-hoc) 서명으로 만든 사본으로 했다.
+- ★ 처음 판은 검증 채널 검사가 늘 "없음"이라고 했다: `strings … | grep -q`가 첫 일치에서 끝나 `strings`가 끊기고, `pipefail`이 그것을 실패로 셌다. 채널이 든 실행 파일을 넣은 사본으로 찾았고, 파일을 직접 `grep -a`로 보게 고쳤다.
+- 검증 채널이 든 빌드에만 있는 이름(`oneum-verification-channel`, `src/ui/automation.rs`의 `MARK`)을 넣었다: iPhone용으로 `--features automation`을 주고 만든 실행 파일에 1건, 아카이브의 것에 0건.
+
+확인하지 못한 것(유료 Apple Developer Program 계정과 Xcode 로그인이 필요): 자동 서명의 아카이브, `xcodebuild -exportArchive`와 업로드(스크립트의 이 부분은 실행된 적이 없음), 배포 서명에서 위젯이 키체인 그룹을 읽는지, Apple의 업로드 자동 검사와 심사.
+
 ## 공개 전 검토와 스크린샷 교체 (2026-11-18)
 GitHub에 올리기 전에 추적되는 파일 508개와 `main`의 커밋 117개 전체(추가된 모든 줄, 10.4MB)를 검사했다: 키 · 토큰 · 비밀번호 대입 · 서명 파일, 이메일 주소, 홈 경로와 계정 · 컴퓨터 이름, 팀 · 기기 식별자, 공인 IP. 나온 것은 예제 주소(example.org 등)와 지어낸 기기 UUID뿐이다. 커밋의 작성자 · 커미터는 117개 모두 같은 한 사람이다.
 
