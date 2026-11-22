@@ -508,6 +508,37 @@ pub(crate) fn unix_now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// Whether `known` is `name` as a list that came in is named here: the name itself,
+/// or the name with the mark it gets where the name is taken (see
+/// `Library::take_over`): `mark` a number, "Drive (2)", "Drive (3)"; `mark` a word,
+/// "Drive (Apple Music)", "Drive (Apple Music 2)". Nothing else in brackets: those
+/// are names the listener gave.
+fn is_marked_name(known: &str, name: &str, mark: &str) -> bool {
+    if known == name {
+        return true;
+    }
+    let Some(inside) = known
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix(" ("))
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return false;
+    };
+    // A count as the app writes it: 2 and on, no leading zero.
+    let counted = |text: &str| {
+        !text.starts_with('0') && text.parse::<u32>().is_ok_and(|number| number >= 2)
+    };
+    if mark.parse::<u32>().is_ok() {
+        counted(inside)
+    } else {
+        inside == mark
+            || inside
+                .strip_prefix(mark)
+                .and_then(|rest| rest.strip_prefix(' '))
+                .is_some_and(counted)
+    }
+}
+
 /// `path` with symbolic links resolved and in its on-disk spelling; `path` itself if it
 /// cannot be resolved (e.g. the folder is offline).
 pub(crate) fn resolve_dir(path: &Path) -> PathBuf {
@@ -2848,18 +2879,12 @@ impl Library {
             if tracks.is_empty() && !empty_there {
                 continue;
             }
-            // The list is here already, under its name or a marked one: passed over.
-            let its_names = |known: &str| {
-                known == name
-                    || known
-                        .strip_prefix(name.as_str())
-                        .and_then(|rest| rest.strip_prefix(" ("))
-                        .and_then(|rest| rest.strip_suffix(')'))
-                        .is_some_and(|mark| !mark.is_empty())
-            };
+            // The list is here already, under its name or one marked as below:
+            // passed over. (A name the listener gave, "Drive (Live)" beside "Drive",
+            // is another list, whatever its songs.)
             if existing
                 .iter()
-                .any(|(known, items)| its_names(known) && items == tracks)
+                .any(|(known, items)| items == tracks && is_marked_name(known, name, mark))
             {
                 continue;
             }
@@ -3032,6 +3057,24 @@ impl Drop for Library {
 mod tests {
     use super::*;
     use crate::model::ReplayGainTags;
+
+    #[test]
+    fn only_the_apps_own_marks_name_a_list_that_came_in() {
+        // What the app writes where a name is taken.
+        assert!(is_marked_name("Drive", "Drive", "2"));
+        assert!(is_marked_name("Drive (2)", "Drive", "2"));
+        assert!(is_marked_name("Drive (17)", "Drive", "2"));
+        assert!(is_marked_name("Drive (Apple Music)", "Drive", "Apple Music"));
+        assert!(is_marked_name("Drive (Apple Music 3)", "Drive", "Apple Music"));
+        // What the listener writes.
+        for own in ["Drive (Live)", "Drive (1)", "Drive (02)", "Drive ()", "Drive 2", "Drive(2)"] {
+            assert!(!is_marked_name(own, "Drive", "2"), "{own}");
+        }
+        assert!(!is_marked_name("Drive (2)", "Drive", "Apple Music"));
+        assert!(!is_marked_name("Drive (Apple Music)", "Drive", "2"));
+        assert!(!is_marked_name("Drive (Apple Musical)", "Drive", "Apple Music"));
+        assert!(!is_marked_name("Driveway", "Drive", "2"));
+    }
 
     /// A library in a temporary directory with one scanned, untagged WAV file named
     /// `old name.wav`.

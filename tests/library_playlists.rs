@@ -1018,6 +1018,60 @@ fn library_data_does_not_take_one_song_for_another() {
     assert_eq!(library.track(id("First")).unwrap().rating, 0);
 }
 
+/// A list the listener named with brackets of their own ("Drive (Live)") is not taken
+/// for one the app marked where a name was taken ("Drive (2)"): a list of the same
+/// songs that comes in by the bare name is made beside it, and only once.
+#[test]
+fn library_data_keeps_a_list_beside_one_named_with_brackets() {
+    let env = TestEnv::new();
+    let music = env.dir.path().join("Music");
+    write_tagged_wav(&music.join("Album/01.wav"), 300, "First", "X", "Album");
+    let library = env.open();
+    library.add_folder(&music).unwrap();
+    wait_scan(&library);
+    library.create_playlist("Drive").unwrap();
+    let file = env.dir.path().join("OnEum Library.json");
+    let written = library.export_data(&file, &[]).expect("writes");
+    assert_eq!(written.playlists, 1);
+
+    let there = TestEnv::new();
+    let music = there.dir.path().join("Music");
+    write_tagged_wav(&music.join("Album/01.wav"), 300, "First", "X", "Album");
+    let other = there.open();
+    other.add_folder(&music).unwrap();
+    wait_scan(&other);
+    let live = other.create_playlist("Drive (Live)").unwrap();
+    let result = other.import_data(&file).expect("takes in");
+    assert_eq!(result.playlists, 1, "the empty list came in beside the listener's");
+    let names = |library: &Library| {
+        let mut names: Vec<String> = library.playlists().into_iter().map(|p| p.name).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&other), ["Drive", "Drive (Live)"]);
+    assert!(track_ids(&other, live).is_empty());
+    // Again: nothing more.
+    assert_eq!(other.import_data(&file).expect("takes in").playlists, 0);
+    assert_eq!(names(&other), ["Drive", "Drive (Live)"]);
+
+    // Where "Drive" holds other songs, the list comes in marked, and that one is
+    // known for it from then on.
+    let third = TestEnv::new();
+    let music = third.dir.path().join("Music");
+    write_tagged_wav(&music.join("Album/01.wav"), 300, "First", "X", "Album");
+    let last = third.open();
+    last.add_folder(&music).unwrap();
+    wait_scan(&last);
+    let own = last.create_playlist("Drive").unwrap();
+    let song = last.snapshot().tracks[0].id;
+    last.add_to_playlist(own, &[song]).unwrap();
+    last.create_playlist("Drive (Live)").unwrap();
+    assert_eq!(last.import_data(&file).expect("takes in").playlists, 1);
+    assert_eq!(names(&last), ["Drive", "Drive (2)", "Drive (Live)"]);
+    assert_eq!(last.import_data(&file).expect("takes in").playlists, 0);
+    assert_eq!(last.playlists().len(), 3);
+}
+
 /// The listener's stars: kept in the database, found by search and by sorting, left
 /// alone by a rescan, and carried to another device by the library data file.
 #[test]
