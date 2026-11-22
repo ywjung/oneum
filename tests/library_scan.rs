@@ -1668,7 +1668,10 @@ fn watcher_picks_up_changes_and_folder_availability() {
     wait_until("deleted file to be removed", TIMEOUT, || {
         library.track(fresh.id).is_none()
     });
-    assert_eq!(titles(&library), ["Initial"]);
+    // (The list that is shown is published a moment after the track is gone.)
+    wait_until("the list to be published without it", TIMEOUT, || {
+        titles(&library) == ["Initial"]
+    });
 
     // The folder disappears and comes back: noticed by the periodic check.
     let away = env.dir.path().join("music-away");
