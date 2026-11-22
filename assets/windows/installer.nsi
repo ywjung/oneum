@@ -48,7 +48,7 @@ VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "FileDescription" "${APP} Setup"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
-VIAddVersionKey "LegalCopyright" "MIT License"
+VIAddVersionKey "LegalCopyright" "BSD Zero Clause License (0BSD)"
 
 ; ----- pages ---------------------------------------------------------------------------
 

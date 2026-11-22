@@ -237,7 +237,7 @@ roon.app의 소개(음질, 음악 경험, 호환성)를 놓고 OnEum의 원칙(�
 - **Opus**: `symphonia-opus`(MPL-2.0)를 Symphonia의 코덱 등록부에 더한다(`audio::decoder::codecs`; Symphonia의 Ogg · Matroska · MP4 리더가 패킷을 넘겨주지만 디코더는 없다). 이 디코더는 리더가 알려 주는 앞쪽 여분(pre-skip)과 마지막 패킷의 패딩을 스스로 자르지 않으므로, Ogg에서는 AAC와 같은 장치(`Trim`)로 자른다: 리더가 적은 지연과 전체 길이에서 음악 구간을 정한다. Matroska의 리더는 둘 다 알려 주지 않아 앞뒤로 수 밀리초가 남는다. 헤더의 출력 게인은 디코더가 적용하고, `R128_*_GAIN` 태그는 ReplayGain 값으로 바꿔 읽는다(기준이 5dB 다르다).
 - **WavPack · Monkey's Audio**: Symphonia 바깥의 디코더(`wavicle`, `ape-decoder`; 둘 다 MIT/Apache-2.0)를 `audio::blocks`가 블록 단위로 부른다. `TrackDecoder`의 세 번째 갈래다(`Inner::Blocks`; 파일의 첫 바이트로 가른다: `wvpk`, `MAC `). WavPack은 블록마다 따로 디코드되므로 블록을 하나씩 읽어 넘기고, 탐색은 위치를 추정해 그 근처에서 블록 머리를 찾아 좁혀 간다(파일을 처음부터 읽지 않는다: 네트워크의 파일에서도 싸다). 손상된 블록은 그 길이만큼의 무음이 되고(연속 8개까지) 파일 검사에 손상으로 잡힌다. Monkey's Audio는 프레임 하나가 수 초에서 27초이므로 손상된 프레임에서 곡을 끝낸다.
 - 재생하지 않는 것은 열 때 이유와 함께 거부하고 스캔은 "지원하지 않는 파일"로 센다(`tags::playable`): WavPack의 손실(hybrid) 모드 · DSD · 3채널 이상, 부동소수 Monkey's Audio.
-- GPL인 WavPack 크레이트(`symphonia-codec-wavpack`)는 MIT인 이 프로젝트에 쓸 수 없어 쓰지 않았다.
+- GPL인 WavPack 크레이트(`symphonia-codec-wavpack`)는 조건 없는 라이선스(0BSD, 2026-11-22까지 MIT)인 이 프로젝트에 쓸 수 없어 쓰지 않았다.
 - **한 번에 내놓는 양**: `TrackDecoder::next`는 형식과 상관없이 1/4초(최대 4,096프레임)까지만 내놓는다(`piece`). 디코드 스레드와 출력 사이의 버퍼는 1초이고, 출력은 한 덩어리가 그 버퍼에 다 들어간 뒤에야(`written`) 재생을 시작하므로, 더 긴 덩어리(Monkey's Audio의 프레임, WavPack의 큰 블록, 블록이 65,535프레임인 FLAC)는 서로를 기다리며 멈췄다.
 
 ### Matroska·WebM, ADPCM

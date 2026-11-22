@@ -1,6 +1,6 @@
 # OnEum
 
-**한국어** · [English](README.en.md)
+**한국어** · [English](README.en.md) · [홈페이지](https://ywjung.github.io/oneum/)
 
 [![CI](https://github.com/ywjung/oneum/actions/workflows/ci.yml/badge.svg)](https://github.com/ywjung/oneum/actions/workflows/ci.yml)
 
@@ -154,4 +154,4 @@ cargo build --release --locked
 
 ## 라이선스
 
-MIT ([LICENSE](LICENSE)). 사용한 오픈 소스와 데이터(기본 헤드폰 보정 프로필은 AutoEq의 값): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[0BSD](LICENSE)(BSD Zero Clause): 조건 없이 누구나 어떤 목적으로든 쓰고, 고치고, 다시 배포하고, 팔 수 있습니다. 출처를 밝히지 않아도 됩니다(보증은 없습니다). OnEum이 쓰는 오픈 소스와 데이터는 각자의 라이선스를 따르며, 그것들이 든 설치 파일을 다시 배포할 때는 그 고지를 함께 두어야 합니다. 사용한 오픈 소스와 데이터(기본 헤드폰 보정 프로필은 AutoEq의 값): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,6 +1,6 @@
 # OnEum
 
-[한국어](README.md) · **English**
+[한국어](README.md) · **English** · [Homepage](https://ywjung.github.io/oneum/en/)
 
 [![CI](https://github.com/ywjung/oneum/actions/workflows/ci.yml/badge.svg)](https://github.com/ywjung/oneum/actions/workflows/ci.yml)
 
@@ -162,4 +162,4 @@ The user guides are in Korean and English; the other documents are in Korean.
 
 ## License
 
-MIT ([LICENSE](LICENSE)). The open-source software and data used (the built-in headphone correction profiles are AutoEq's values): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[0BSD](LICENSE) (BSD Zero Clause): anyone may use, change, redistribute and sell it for any purpose, with no conditions and no need to give credit (and with no warranty). The open-source software and data OnEum uses stay under their own licenses, and their notices have to go along when a package that contains them is passed on. The open-source software and data used (the built-in headphone correction profiles are AutoEq's values): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

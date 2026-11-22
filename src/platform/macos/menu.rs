@@ -98,7 +98,7 @@ impl AppMenu {
         let about = AboutMetadata {
             name: Some(s.app_name.to_string()),
             version: Some(version.to_string()),
-            copyright: Some("MIT License".to_string()),
+            copyright: Some("BSD Zero Clause License (0BSD)".to_string()),
             ..Default::default()
         };
         let sep = PredefinedMenuItem::separator;

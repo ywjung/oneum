@@ -25,7 +25,7 @@ BEGIN
             VALUE "FileDescription", "OnEum"
             VALUE "FileVersion", ONEUM_VERSION
             VALUE "InternalName", "oneum"
-            VALUE "LegalCopyright", "MIT License"
+            VALUE "LegalCopyright", "BSD Zero Clause License (0BSD)"
             VALUE "OriginalFilename", "OnEum.exe"
             VALUE "ProductName", "OnEum"
             VALUE "ProductVersion", ONEUM_VERSION
