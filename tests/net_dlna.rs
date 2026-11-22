@@ -673,13 +673,19 @@ fn nobody_listening_is_a_connect_error() {
         listener.local_addr().unwrap().port()
     };
     let url = format!("http://127.0.0.1:{port}/desc.xml");
-    assert_is!(http::get(&url, &impatient(300)), Err(NetError::Connect(_)));
+    // (Windows tries a port that refuses twice more, half a second apart, before it
+    // says so: there the answer needs more patience than elsewhere.)
+    let patience = if cfg!(windows) { 5000 } else { 300 };
     assert_is!(
-        http::post(&url, &[], b"", &impatient(300)),
+        http::get(&url, &impatient(patience)),
         Err(NetError::Connect(_))
     );
     assert_is!(
-        http::open(&url, 0, &impatient(300)).err(),
+        http::post(&url, &[], b"", &impatient(patience)),
+        Err(NetError::Connect(_))
+    );
+    assert_is!(
+        http::open(&url, 0, &impatient(patience)).err(),
         Some(NetError::Connect(_))
     );
     assert_is!(upnp::describe(&url), Err(NetError::Connect(_)));

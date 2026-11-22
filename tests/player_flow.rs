@@ -482,9 +482,17 @@ fn pause_resume_next_previous_and_seek() {
     // Seeking while prepared just moves the start position.
     rig.send(Command::SeekTo(700));
     rig.wait("seek stored", |s| s.position_ms == 700);
+    // (At the pace of a clock from here: the three tenths of a second that are left
+    // of the song are over in a moment at the rig's usual pace, before a machine with
+    // slow sleeps has seen it play.)
+    rig.pace_ms.store(12, Ordering::Relaxed);
+    let before = rig.total_frames();
     rig.send(Command::Play);
+    // (Until a tenth of a second of it was heard: what was heard is compared below.)
     rig.wait("playing B", |s| {
-        s.state == PlayState::Playing && Rig::track(s) == Some(B)
+        s.state == PlayState::Playing
+            && Rig::track(s) == Some(B)
+            && rig.total_frames() >= before + 4410
     });
     rig.send(Command::Pause);
     let s = rig.wait("paused again", |s| s.state == PlayState::Paused);
@@ -849,9 +857,10 @@ fn rapid_seeks_and_track_changes_end_in_the_last_requested_state() {
     // is left of the song is over in a moment at the rig's usual pace, before a slow
     // machine gets to pause it.)
     rig.pace_ms.store(12, Ordering::Relaxed);
+    let before = rig.total_frames();
     rig.send(Command::Play);
     rig.wait("some of it is heard", |s| {
-        s.state == PlayState::Playing && s.position_ms >= 650
+        s.state == PlayState::Playing && rig.total_frames() >= before + 4410
     });
     rig.send(Command::Pause);
     rig.wait("paused", |s| s.state == PlayState::Paused);
@@ -951,6 +960,7 @@ fn random_command_storm_keeps_invariants() {
 // ----- long tracks, play counts, devices and stalls ---------------------------------------
 
 const LONG: TrackId = 60; // generated, 12 s
+#[cfg(unix)]
 const STUCK: TrackId = 61; // a path whose open() never returns
 
 /// Writes a quiet 16-bit stereo 44.1 kHz WAV of `seconds` and returns its path.
@@ -1457,6 +1467,8 @@ fn position_and_volume_changed_while_paused_are_saved() {
     assert_eq!(saved(&rig).volume, 0.25);
 }
 
+// (Where there are FIFOs: Windows has no file that can be made to hang this way.)
+#[cfg(unix)]
 #[test]
 fn a_file_that_never_opens_is_skipped_after_the_stall_timeout() {
     let dir = tempfile::tempdir().expect("tempdir");
