@@ -1042,7 +1042,10 @@ fn library_data_keeps_a_list_beside_one_named_with_brackets() {
     wait_scan(&other);
     let live = other.create_playlist("Drive (Live)").unwrap();
     let result = other.import_data(&file).expect("takes in");
-    assert_eq!(result.playlists, 1, "the empty list came in beside the listener's");
+    assert_eq!(
+        result.playlists, 1,
+        "the empty list came in beside the listener's"
+    );
     let names = |library: &Library| {
         let mut names: Vec<String> = library.playlists().into_iter().map(|p| p.name).collect();
         names.sort();

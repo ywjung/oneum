@@ -525,9 +525,8 @@ fn is_marked_name(known: &str, name: &str, mark: &str) -> bool {
         return false;
     };
     // A count as the app writes it: 2 and on, no leading zero.
-    let counted = |text: &str| {
-        !text.starts_with('0') && text.parse::<u32>().is_ok_and(|number| number >= 2)
-    };
+    let counted =
+        |text: &str| !text.starts_with('0') && text.parse::<u32>().is_ok_and(|number| number >= 2);
     if mark.parse::<u32>().is_ok() {
         counted(inside)
     } else {
@@ -3064,15 +3063,34 @@ mod tests {
         assert!(is_marked_name("Drive", "Drive", "2"));
         assert!(is_marked_name("Drive (2)", "Drive", "2"));
         assert!(is_marked_name("Drive (17)", "Drive", "2"));
-        assert!(is_marked_name("Drive (Apple Music)", "Drive", "Apple Music"));
-        assert!(is_marked_name("Drive (Apple Music 3)", "Drive", "Apple Music"));
+        assert!(is_marked_name(
+            "Drive (Apple Music)",
+            "Drive",
+            "Apple Music"
+        ));
+        assert!(is_marked_name(
+            "Drive (Apple Music 3)",
+            "Drive",
+            "Apple Music"
+        ));
         // What the listener writes.
-        for own in ["Drive (Live)", "Drive (1)", "Drive (02)", "Drive ()", "Drive 2", "Drive(2)"] {
+        for own in [
+            "Drive (Live)",
+            "Drive (1)",
+            "Drive (02)",
+            "Drive ()",
+            "Drive 2",
+            "Drive(2)",
+        ] {
             assert!(!is_marked_name(own, "Drive", "2"), "{own}");
         }
         assert!(!is_marked_name("Drive (2)", "Drive", "Apple Music"));
         assert!(!is_marked_name("Drive (Apple Music)", "Drive", "2"));
-        assert!(!is_marked_name("Drive (Apple Musical)", "Drive", "Apple Music"));
+        assert!(!is_marked_name(
+            "Drive (Apple Musical)",
+            "Drive",
+            "Apple Music"
+        ));
         assert!(!is_marked_name("Driveway", "Drive", "2"));
     }
 

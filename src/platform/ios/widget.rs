@@ -167,7 +167,10 @@ pub fn app_ending() {
 fn tell(song: Song) {
     {
         let mut told = told();
-        if told.as_ref().is_some_and(|before| before.tells_as_much_as(&song)) {
+        if told
+            .as_ref()
+            .is_some_and(|before| before.tells_as_much_as(&song))
+        {
             return;
         }
         *told = Some(song.clone());
