@@ -51,6 +51,24 @@ pub fn dim(ui: &egui::Ui) -> Color32 {
     ui.visuals().weak_text_color()
 }
 
+/// The colour of text, and of the secondary lines beside it (an artist and an
+/// album, counts, notes). Those are read too: both stand out from every ground they
+/// lie on by at least 4.5:1 (WCAG's least for text of normal size; the secondary lines
+/// are small), the secondary ones a step below the text itself.
+pub fn text_colors(dark: bool) -> (Color32, Color32) {
+    if dark {
+        (
+            Color32::from_rgb(0xD2, 0xD2, 0xD7),
+            Color32::from_rgb(0x9C, 0x9C, 0xA3),
+        )
+    } else {
+        (
+            Color32::from_rgb(0x2E, 0x2E, 0x33),
+            Color32::from_rgb(0x63, 0x63, 0x6A),
+        )
+    }
+}
+
 pub fn apply_choice(ctx: &egui::Context, choice: ThemeChoice) {
     // What the system draws for the app (the status bar's text, the file picker)
     // follows the same choice.
@@ -414,13 +432,20 @@ pub fn install(ctx: &egui::Context, phone: bool) {
                 v.extreme_bg_color = Color32::from_rgb(0xFF, 0xFF, 0xFF);
                 v.faint_bg_color = Color32::from_rgb(0xF2, 0xF2, 0xF5);
             }
+            let (text, weak) = text_colors(dark);
+            v.widgets.noninteractive.fg_stroke.color = text;
+            v.weak_text_color = Some(weak);
         });
     }
 }
 
 /// Background of the sidebar and the player bar (slightly set off from the content).
 pub fn chrome_fill(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
+    chrome_fill_of(ui.visuals().dark_mode)
+}
+
+fn chrome_fill_of(dark: bool) -> Color32 {
+    if dark {
         Color32::from_rgb(0x16, 0x16, 0x1A)
     } else {
         Color32::from_rgb(0xF0, 0xF0, 0xF3)
@@ -430,6 +455,49 @@ pub fn chrome_fill(ui: &egui::Ui) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WCAG's contrast ratio of two opaque colours.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let luminance = |c: Color32| {
+            let channel = |v: u8| {
+                let v = f32::from(v) / 255.0;
+                if v <= 0.040_45 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The text and the secondary lines stand out from every ground of both themes:
+    /// the panels, windows and fields, the striped rows, the sidebar and player bar.
+    #[test]
+    fn text_and_secondary_lines_can_be_read_on_every_ground() {
+        let ctx = egui::Context::default();
+        install(&ctx, false);
+        for theme in [Theme::Dark, Theme::Light] {
+            let dark = theme == Theme::Dark;
+            let v = ctx.style_of(theme).visuals.clone();
+            let grounds = [
+                v.panel_fill,
+                v.window_fill,
+                v.extreme_bg_color,
+                v.faint_bg_color,
+                chrome_fill_of(dark),
+            ];
+            for ground in grounds {
+                let text = contrast(v.text_color(), ground);
+                let weak = contrast(v.weak_text_color(), ground);
+                assert!(text >= 7.0, "{theme:?}: text {text:.2} on {ground:?}");
+                assert!(weak >= 4.5, "{theme:?}: secondary {weak:.2} on {ground:?}");
+                assert!(text > weak * 1.4, "{theme:?}: the two are told apart");
+            }
+        }
+    }
 
     #[test]
     fn the_likely_korean_fonts_are_looked_into_first() {
