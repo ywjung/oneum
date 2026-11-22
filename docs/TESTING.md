@@ -1209,7 +1209,17 @@ wgpu는 프레임을 보낼 때마다 `vkGetSemaphoreCounterValue`로 장치가 
 - ★ 처음 판은 그림 두 장이 한 화면 앞의 것이었다: 명령을 보내고 앱이 그것을 다 하기 전에 화면을 찍었다. 명령 묶음마다 끝에 상태를 받아 기다리게 고쳤다. 시뮬레이터의 화면 캡처에는 투명도가 들어 있어(RGBA) 스크립트가 빼고 저장한다.
 - 스토어 글 초안의 길이(`scripts/dev/check-listing.py`): 여덟 칸 모두 한도 안. 한도를 넘긴 글, 다른 운영체제의 이름, 중복된 키워드, 쉼표 뒤의 빈칸을 넣은 사본은 실패.
 
-확인하지 못한 것(유료 Apple Developer Program 계정과 Xcode 로그인이 필요): 자동 서명의 아카이브, `xcodebuild -exportArchive`와 업로드(스크립트의 이 부분은 실행된 적이 없음), 배포 서명에서 위젯이 키체인 그룹을 읽는지, Apple의 업로드 자동 검사와 심사.
+이때 확인하지 못한 것(유료 Apple Developer Program 계정과 Xcode 로그인이 필요): 자동 서명의 아카이브, `xcodebuild -exportArchive`와 업로드, 배포 서명에서 위젯이 키체인 그룹을 읽는지, Apple의 업로드 자동 검사와 심사. 앞의 둘은 아래에서 했다.
+
+### 서명 · 내보내기 · 업로드 (2026-11-22 ~ 23, 유료 팀)
+사용자가 개인으로 가입하고 Xcode에 로그인한 뒤, 사용자의 요청으로 실행한 것.
+
+- `scripts/ios-archive.sh`(0.1.0 · 빌드 147): ★ 첫 실행은 실패 — `Build input file cannot be found: '…/Provisioning Profiles/….mobileprovision'`(자동 서명이 앱의 프로파일을 방금 만들었고 아직 디스크에 없었음). 같은 명령의 두 번째 실행은 `ARCHIVE SUCCEEDED` · `EXPORT SUCCEEDED`, 아카이브와 `.ipa`의 검사 모두 통과. 식별자 두 개가 계정에 등록됨. iPhone을 연결하거나 등록하지 않고 됨.
+- `.ipa`(14MB)를 풀어 본 것: 앱과 위젯 모두 Apple Distribution 인증서, App Store용 프로파일(1년), `get-task-allow` 꺼짐, `beta-reports-active` 켜짐, `keychain-access-groups`에 `<팀>.app.oneum.OnEum.nowplaying`이 둘 다 있음. 이 Mac의 경로 0건.
+- 업로드(검사한 아카이브를 `destination=upload`로 다시 내보냄): App Store Connect에 앱이 없을 때 exit 70 — `App record with bundle identifier "app.oneum.OnEum" not found on App Store Connect`(올라간 것 없음). 사용자가 앱을 만든 뒤 같은 명령: `Upload succeeded` · `EXPORT SUCCEEDED`, 경고 둘(`Upload Symbols Failed … did not include a dSYM`, 앱과 위젯).
+- 그 뒤 스크립트에 `--upload <.xcarchive>`를 넣음(있는 아카이브를 검사하고 그대로 보냄, 버전과 빌드 번호는 아카이브의 것). `xcodebuild` 대역을 PATH 앞에 두고 확인: 아카이브를 검사하고, `ExportOptions.plist`의 `destination`이 `upload`이고, `-exportArchive -archivePath <준 것>`으로 부르며, 아카이브를 새로 만들지 않음. 없는 아카이브는 실패(1), `.xcarchive`가 아닌 인자는 사용법(2). 실제 업로드를 이 길로 다시 하지는 않았다(같은 빌드 번호는 한 번만 받는다): 실제로 올린 것은 같은 인자의 손으로 한 실행이다.
+
+확인하지 못한 것: 올린 빌드를 Apple이 처리한 결과(TestFlight에 나오는지, 자동 검사 e-mail), TestFlight로 설치한 앱의 위젯에 곡이 나오는지, 심사. 계정의 화면과 메일은 사용자만 볼 수 있다.
 
 ## 공개 전 검토와 스크린샷 교체 (2026-11-18)
 GitHub에 올리기 전에 추적되는 파일 508개와 `main`의 커밋 117개 전체(추가된 모든 줄, 10.4MB)를 검사했다: 키 · 토큰 · 비밀번호 대입 · 서명 파일, 이메일 주소, 홈 경로와 계정 · 컴퓨터 이름, 팀 · 기기 식별자, 공인 IP. 나온 것은 예제 주소(example.org 등)와 지어낸 기기 UUID뿐이다. 커밋의 작성자 · 커미터는 117개 모두 같은 한 사람이다.

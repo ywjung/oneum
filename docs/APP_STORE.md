@@ -28,7 +28,7 @@ Apple의 요구 사항은 2026-11-22에 Apple의 공개 문서에서 확인한 �
 | 11 | 심사 정보 입력 | 본인(메모 초안 있음) | |
 | 12 | 제출 → 심사 → 출시 | 본인 | [동의] |
 
-지금 상태(2026-11-22): 1 · 2가 되어 있지 않습니다. 이 Mac의 Xcode에는 로그인된 Apple 계정이 없어서 `xcodebuild -allowProvisioningUpdates`가 "No Accounts"로 끝납니다. 지금까지 본인 iPhone에 넣은 것은 무료 개인 팀 서명(7일짜리 프로파일)이고, 그것으로는 TestFlight와 App Store에 올릴 수 없습니다. 6의 스크립트와 검사는 서명 없는 아카이브로 확인해 두었습니다(14절).
+지금 상태(2026-11-23): 1~6이 되어 있습니다. 개인으로 가입했고, 자동 서명이 식별자 두 개와 인증서 · 프로파일을 만들었고, App Store Connect에 앱이 만들어졌고, **0.1.0 (빌드 147)이 올라갔습니다**(Apple의 답: "Upload succeeded", 처리 중). 다음은 7(TestFlight)부터입니다. 실제로 해 본 결과는 14절에 있습니다.
 
 ## 1. Apple Developer Program 가입 — [결제] [인증] [동의]
 
@@ -69,7 +69,7 @@ security find-identity -v -p codesigning
 - 식별자 등록은 자동 서명이 합니다. **번들 ID는 전 세계에서 하나뿐**이라, 다른 사람이 `app.oneum.OnEum`을 이미 등록했으면 실패합니다. 그때는 본인 소유의 도메인을 뒤집은 것 등으로 바꿔 `ONEUM_IOS_BUNDLE_ID`에 줍니다. **App Store Connect에 한 번 올린 뒤에는 번들 ID를 바꿀 수 없습니다.**
 - 지금 본인 iPhone에 있는 앱은 개인 팀용 식별자(끝에 팀 ID가 붙은 것)라서 App Store용과 **다른 앱**입니다. 둘이 따로 설치되고 보관함과 설정은 넘어가지 않습니다. 옮기려면 설정의 보관함 데이터 내보내기 · 가져오기를 씁니다.
 - 켜야 하는 기능(Capabilities)은 없습니다. 키체인 그룹은 팀의 접두어만 있으면 되고 App Group을 쓰지 않습니다. 스크립트가 서명된 앱과 위젯이 같은 그룹에 서명되었는지 검사합니다.
-- **기기 등록**: 자동 서명의 아카이브는 개발용 프로파일로 서명되는데, 팀에 등록된 기기가 하나도 없으면 Xcode가 그 프로파일을 만들지 못할 수 있습니다(유료 팀으로 해 본 적이 없어 확인 못 함). 그 오류가 나오면 iPhone을 연결하고 유료 팀으로 한 번 설치합니다.
+- **기기 등록**: 필요하지 않았습니다. 새로 가입한 팀에서 iPhone을 연결하거나 등록하지 않은 채 서명된 아카이브와 App Store용 `.ipa`가 만들어졌습니다(2026-11-22). 기기가 없다는 오류가 나오는 경우에는 iPhone을 연결하고 유료 팀으로 한 번 설치합니다.
 ```bash
 scripts/ios-device.sh
 ```
@@ -82,7 +82,9 @@ appstoreconnect.apple.com ▸ Apps ▸ **+** ▸ New App.
 - **이름**은 2~30자이고 App Store 전체에서 하나뿐입니다. "OnEum"을 쓸 수 있는지는 만들어 봐야 압니다. — [결정]
 - 기본 언어를 고릅니다(한국어 또는 영어). 앱은 두 언어를 지원하므로 스토어 정보도 두 언어로 넣을 수 있습니다.
 
-번들 ID가 목록에 나오지 않으면 4의 등록이 아직 안 된 것입니다. 서명된 아카이브를 한 번 만들면(6절) 등록됩니다.
+번들 ID가 목록에 나오지 않으면 4의 등록이 아직 안 된 것입니다. 서명된 아카이브를 한 번 만들면(6절) 등록됩니다. 목록에는 위젯의 것(`….widget`)도 나오는데, 앱의 것을 고릅니다.
+
+**순서**: 서명된 아카이브(식별자가 등록됨) → 여기서 앱 만들기 → 업로드. 앱을 만들기 전에 올리면 Apple이 받지 않습니다(`App record with bundle identifier "…" not found on App Store Connect`). 올라간 것은 없으므로 앱을 만든 뒤 같은 아카이브를 다시 보내면 됩니다(6절).
 
 ## 6. 아카이브 · 검사 · 업로드
 
@@ -96,9 +98,13 @@ scripts/ios-archive.sh --unsigned
 ```bash
 scripts/ios-archive.sh
 ```
-App Store Connect로 바로 보내기:
+App Store Connect로 바로 보내기(아카이브를 새로 만들어 보냄):
 ```bash
 scripts/ios-archive.sh --upload
+```
+이미 만들어 검사한 아카이브를 그대로 보내기(다시 빌드하지 않음):
+```bash
+scripts/ios-archive.sh --upload target/xcode/OnEum.xcarchive
 ```
 Xcode가 만든 아카이브나 다른 곳의 `.ipa`를 검사만 하기:
 ```bash
@@ -114,11 +120,12 @@ scripts/ios-archive.sh --check <.xcarchive 또는 .ipa>
 - `.ipa`는 서명과 프로비저닝 프로파일이 있고 개발용 서명(`get-task-allow`)이 아닌지.
 
 알아 둘 것:
+- **새 식별자의 첫 서명된 아카이브는 한 번 실패할 수 있습니다**: `Build input file cannot be found: '…/Provisioning Profiles/….mobileprovision'`. Xcode가 프로파일을 방금 만들었는데 아직 이 Mac에 내려받지 않은 것입니다. 같은 명령을 다시 실행하면 지나갑니다(2026-11-22에 그랬습니다).
 - **빌드 번호는 한 버전에서 한 번만 쓸 수 있습니다.** 같은 커밋을 다시 올리려면 더 큰 번호를 줍니다: `ONEUM_IOS_BUILD=<번호>`.
 - 팀 ID가 든 `ExportOptions.plist`는 `target/xcode/`에 만들어지고 저장소에 들어가지 않습니다.
 - 올리는 다른 방법: Xcode에서 `target/xcode/OnEum.xcarchive`를 열어 Organizer ▸ Distribute App, 또는 Mac App Store의 Transporter 앱에 `.ipa`를 끌어다 놓기.
 - 업로드 조건(2026-04-28부터 Xcode 26 이상과 iOS 26 SDK 이상, 2026-09-09부터 최소 iOS 13 이상)은 충족합니다: Xcode 27.2, iOS 27.2 SDK, 최소 iOS 16.0.
-- 디버그 기호 파일(dSYM)은 만들지 않습니다(Rust 실행 파일은 디버그 정보를 뺀 것). 업로드 때 기호가 없다는 경고가 나올 수 있고, 그 경우 App Store Connect의 충돌 보고서에 함수 이름이 덜 나옵니다.
+- 디버그 기호 파일(dSYM)은 만들지 않습니다(Rust 실행 파일은 디버그 정보를 뺀 것). 업로드 때 앱과 위젯마다 경고가 하나씩 나옵니다(`Upload Symbols Failed. The archive did not include a dSYM …`). 업로드는 그대로 성공하고, App Store Connect의 충돌 보고서에 함수 이름이 덜 나옵니다.
 - 올린 뒤 Apple이 자동 검사 결과를 e-mail로 보냅니다(`ITMS-…`). 무엇이 올지는 올려 봐야 압니다.
 
 ## 7. TestFlight
@@ -221,17 +228,22 @@ App Store Connect ▸ 버전 ▸ App Review Information.
 | 서버 자동 찾기 | Apple에 멀티캐스트 권한 신청 / 지금대로 | 승인 전에는 주소로 추가만 됨 |
 | 인터넷 가사 | 그대로(기본 꺼짐) / iPhone판에서 뺌 | 심사에서 문제 삼을 수 있음 |
 
-## 14. 확인한 것과 확인하지 못한 것 (2026-11-22)
+## 14. 확인한 것과 확인하지 못한 것 (2026-11-23)
 
-확인한 것(이 Mac, Xcode 27.2, 계정 없이):
+확인한 것(유료 팀으로, 2026-11-22 ~ 23):
+- **서명된 아카이브와 App Store용 `.ipa`**(`scripts/ios-archive.sh`, 0.1.0 · 빌드 147): 자동 서명이 식별자 두 개(`app.oneum.OnEum`, `app.oneum.OnEum.widget`)를 등록하고 인증서와 프로파일을 만들었습니다. 첫 실행은 방금 만들어진 프로파일을 찾지 못해 실패했고 두 번째 실행에서 끝까지 갔습니다. 등록된 기기는 필요하지 않았습니다.
+- `.ipa`의 서명: 앱과 위젯 모두 Apple Distribution 인증서와 App Store용 프로파일, 개발용 서명 아님(`get-task-allow` 꺼짐), TestFlight용 권한(`beta-reports-active`) 있음, **둘 다 같은 키체인 그룹에 서명됨**. 스크립트의 검사는 아카이브와 `.ipa` 모두 통과.
+- **업로드**(`xcodebuild -exportArchive`, `destination=upload`, 검사한 그 아카이브를 그대로): App Store Connect에 앱이 없을 때는 거절(`App record … not found`), 앱을 만든 뒤에는 "Upload succeeded". dSYM이 없다는 경고 두 개가 함께 나왔습니다.
+- 스크립트의 `--upload <.xcarchive>`(있는 아카이브를 보내는 길)는 업로드 뒤에 넣었습니다: 검사와 `xcodebuild`에 넘기는 인자를 `xcodebuild` 대역으로 확인했고, 같은 인자의 실제 업로드는 위의 것(손으로 실행)입니다.
+
+확인한 것(이 Mac, Xcode 27.2, 계정 없이, 2026-11-22):
 - `scripts/ios-archive.sh --unsigned`가 아카이브를 만들고 검사를 통과: 앱과 위젯 확장이 0.1.0 · 같은 빌드 번호, 식별자 `app.oneum.OnEum` · `app.oneum.OnEum.widget`, 두 곳의 키체인 그룹 이름이 같음, 개인정보 매니페스트 · 두 언어의 안내문 · 샘플 음악 · 아이콘이 들어 있음, arm64.
 - **아카이브에는 이 Mac의 경로가 없음**: 앱(Rust)과 위젯(Swift) 실행 파일을 포함해 아카이브의 모든 파일을 바이트 단위로 찾아 `/Users/`가 0건. 위젯 실행 파일은 `build` 동작(`scripts/ios-device.sh`)으로 만들면 기호 표에 소스 폴더와 목적 파일의 경로가 남지만(디버그 지도 항목 세 개), `archive` 동작은 설치 단계에서 기호를 벗겨 내므로 남지 않습니다. App Store에는 아카이브만 올라가고, 스크립트가 매번 검사합니다. (`strings -a`로는 이 경로가 보이지 않습니다: 섹션만 읽기 때문입니다. 검사는 `grep -a`로 합니다.)
 - 앱이 권한 안내문이 필요한 API(마이크, 카메라, 위치, 사진, 연락처, 블루투스, Apple Music 보관함, 추적)를 참조하지 않음(실행 파일의 기호와 문자열로 확인). `NSUserDefaults`도 쓰지 않아 매니페스트에 더할 사유가 없음.
 - 검사가 틀린 것을 잡는지: 위젯의 빌드 번호가 다름, 식별자가 다름, 키체인 그룹 이름이 다름, 매니페스트 · 샘플이 없음, 파일에 홈 경로가 있음, 버전 형식이 틀림, 검증 채널이 든 실행 파일, 서명 뒤에 바뀐 파일, 위젯이 다른 키체인 그룹에 서명됨, 서명 없는 `.ipa`, 개발용 서명이고 프로파일이 없는 `.ipa`, `build` 동작으로 만든(벗겨 내지 않은) 위젯 실행 파일 — 모두 실패로 끝남. 서명 검사는 임시(ad-hoc) 서명으로 만든 사본으로 확인했습니다.
 
-확인하지 못한 것(유료 계정과 로그인이 필요):
-- 자동 서명으로 아카이브가 만들어지는지, 식별자 두 개가 등록되는지, 등록된 기기 없이 되는지.
-- `xcodebuild -exportArchive`(App Store용 다시 서명)와 `--upload`. 스크립트의 이 부분은 **실행된 적이 없습니다.**
-- 배포 서명에서 위젯이 키체인 그룹을 읽는지(TestFlight로 확인).
-- Apple의 업로드 자동 검사와 심사 결과, 매니페스트의 디스크 공간 사유(E174.1)가 받아들여지는지.
+확인하지 못한 것:
+- 올린 빌드의 처리 결과: Apple이 처리한 뒤 TestFlight에 나오는지, 자동 검사의 e-mail(`ITMS-…`)에 무엇이 오는지. App Store Connect와 본인의 메일에서 봅니다.
+- 배포 서명에서 위젯이 키체인 그룹을 읽는지(서명에 그룹이 들어간 것까지 확인. 위젯에 곡이 나오는지는 TestFlight로 설치해 봐야 압니다).
+- 심사 결과, 매니페스트의 디스크 공간 사유(E174.1)가 받아들여지는지.
 - 실제 iPad, iPhone Duo.

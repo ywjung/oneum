@@ -5,6 +5,9 @@
 #                                          needs no Apple account, cannot be uploaded
 #   scripts/ios-archive.sh                 a signed archive and dist/ios/OnEum-<version>-<build>.ipa
 #   scripts/ios-archive.sh --upload        a signed archive, sent to App Store Connect
+#   scripts/ios-archive.sh --upload <.xcarchive>
+#                                          a signed archive that is there (the one an
+#                                          earlier run made and checked), sent as it is
 #   scripts/ios-archive.sh --check <path>  only the checks, of an .xcarchive or an .ipa
 #                                          that is there (one that Xcode made, say)
 #
@@ -26,15 +29,24 @@ set -o pipefail 2>/dev/null || true
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: ios-archive.sh [--unsigned | --upload | --check <.xcarchive or .ipa>]" >&2
+  echo "usage: ios-archive.sh [--unsigned | --upload [<.xcarchive>] | --check <.xcarchive or .ipa>]" >&2
   exit 2
 }
 MODE=export
 CHECK_PATH=""
+GIVEN=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --unsigned) MODE=unsigned ;;
-    --upload) MODE=upload ;;
+    --upload)
+      MODE=upload
+      case "${2:-}" in
+        *.xcarchive)
+          GIVEN=$2
+          shift
+          ;;
+      esac
+      ;;
     --check)
       MODE=check
       CHECK_PATH=${2:-}
@@ -237,7 +249,7 @@ if [ "$MODE" != unsigned ] && [ -z "$TEAM" ]; then
   exit 1
 fi
 # What is uploaded should be what a commit says: the build number is counted from them.
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+if [ -z "$GIVEN" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   echo "warning: there are changes that are not committed; the build number $BUILD is of the last commit" >&2
 fi
 
@@ -260,9 +272,22 @@ if [ "$MODE" = unsigned ]; then
   exit 0
 fi
 
-ARCHIVE=target/xcode/OnEum.xcarchive
-archive "$ARCHIVE" -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM"
-check_path "$ARCHIVE" "$VERSION" "$BUILD"
+if [ -n "$GIVEN" ]; then
+  # An archive that is there is sent as it is: its version and build number are its
+  # own (those of the commit it was made from), not those of the checkout now.
+  ARCHIVE=$GIVEN
+  [ -d "$ARCHIVE" ] || { echo "there is no $ARCHIVE" >&2; exit 1; }
+  VERSION=$(value "$ARCHIVE/Products/Applications/OnEum.app/Info.plist" CFBundleShortVersionString)
+  BUILD=$(value "$ARCHIVE/Products/Applications/OnEum.app/Info.plist" CFBundleVersion)
+  check_path "$ARCHIVE" "$VERSION" "$BUILD"
+else
+  # (The first signed archive of a new identifier can stop at "Build input file cannot
+  # be found: …mobileprovision": Xcode has made the profile and not yet fetched it.
+  # A second run finds it.)
+  ARCHIVE=target/xcode/OnEum.xcarchive
+  archive "$ARCHIVE" -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM"
+  check_path "$ARCHIVE" "$VERSION" "$BUILD"
+fi
 
 # How the archive is signed anew for the App Store and what is done with it. Written
 # where builds go (it names the team): not a file of the repository.
