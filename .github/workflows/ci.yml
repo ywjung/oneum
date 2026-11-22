@@ -1,5 +1,6 @@
-# Checks on the systems the app is made for (macOS, Windows, and the iPhone build's
-# lints), and the dependencies' advisories.
+# Checks on the systems the app is made for (macOS, Windows, the iPhone build's lints,
+# and Android: the library, the APK and Android's own lint), and the dependencies'
+# advisories.
 # What this cannot cover (sound through a real device, VoiceOver/Narrator, a USB DAC,
 # signing and notarisation) is checked by hand before a release: docs/RELEASE.md.
 name: CI
@@ -60,6 +61,23 @@ jobs:
           $state = Get-Content $dump -Raw | ConvertFrom-Json
           if ($state.state -ne "Idle") { throw "unexpected state: $($state.state)" }
           if (-not $app.WaitForExit(30000)) { Stop-Process -Id $app.Id -Force; throw "the app did not quit" }
+
+  # The Android app is the same crate built as a shared library, inside a Java shell
+  # (android/): a change on either side that the other does not follow shows up here,
+  # before the APK is put together by hand. The runner has the Android SDK, an NDK
+  # and a JDK 17.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add aarch64-linux-android
+      - name: Lints (Android)
+        run: . scripts/android-env.sh && cargo clippy --locked --lib --target aarch64-linux-android -- -D warnings
+      - name: The library and the release APK
+        run: scripts/android-build.sh --release
+      - name: Android lint (an error fails the job)
+        run: cd android && ./gradlew --quiet lintRelease
 
   advisories:
     runs-on: ubuntu-latest

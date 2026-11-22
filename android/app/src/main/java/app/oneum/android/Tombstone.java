@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -189,7 +190,7 @@ final class Tombstone {
                 if (build == null && library.equals("liboneum.so") && id != null) {
                     build = id;
                 }
-                String place = String.format("#%02d %s+0x%x", places.size(), library, offset);
+                String place = String.format(Locale.ROOT, "#%02d %s+0x%x", places.size(), library, offset);
                 if (function != null && !function.isEmpty()) {
                     place += " (" + function + "+" + into + ")";
                 }

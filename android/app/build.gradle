@@ -57,8 +57,10 @@ android {
         }
     }
 
+    // Android's own checks of the Java shell and its resources: an error stops the
+    // build (a release build too); warnings are reported.
     lint {
-        abortOnError false
-        checkReleaseBuilds false
+        abortOnError true
+        checkReleaseBuilds true
     }
 }

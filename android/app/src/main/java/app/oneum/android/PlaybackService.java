@@ -20,7 +20,6 @@ import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
-import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -469,12 +468,8 @@ public final class PlaybackService extends Service {
 
     private void goForeground(Notification notification) {
         try {
-            if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(NOTIFICATION, notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-            } else {
-                startForeground(NOTIFICATION, notification);
-            }
+            startForeground(NOTIFICATION, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
             foreground = true;
         } catch (RuntimeException error) {
             // Not allowed from the background on newer Androids unless the user or a
