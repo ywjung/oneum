@@ -673,22 +673,32 @@ fn nobody_listening_is_a_connect_error() {
         listener.local_addr().unwrap().port()
     };
     let url = format!("http://127.0.0.1:{port}/desc.xml");
-    // (Windows tries a port that refuses twice more, half a second apart, before it
-    // says so: there the answer needs more patience than elsewhere.)
-    let patience = if cfg!(windows) { 5000 } else { 300 };
+    // (Windows tries a port that refuses twice more before it says so, about two
+    // seconds in all: the usual two seconds to connect in are over first, and the
+    // answer would be "no answer in time". It is given ten here.)
+    let patient = Limits {
+        connect: Duration::from_secs(10),
+        ..impatient(300)
+    };
+    assert_is!(http::get(&url, &patient), Err(NetError::Connect(_)));
     assert_is!(
-        http::get(&url, &impatient(patience)),
+        http::post(&url, &[], b"", &patient),
         Err(NetError::Connect(_))
     );
     assert_is!(
-        http::post(&url, &[], b"", &impatient(patience)),
-        Err(NetError::Connect(_))
-    );
-    assert_is!(
-        http::open(&url, 0, &impatient(patience)).err(),
+        http::open(&url, 0, &patient).err(),
         Some(NetError::Connect(_))
     );
-    assert_is!(upnp::describe(&url), Err(NetError::Connect(_)));
+    // (With the usual three seconds to connect in: on Windows the refusal comes at
+    // about two, and a slow machine may have it later than three.)
+    if cfg!(windows) {
+        assert_is!(
+            upnp::describe(&url),
+            Err(NetError::Connect(_) | NetError::Timeout)
+        );
+    } else {
+        assert_is!(upnp::describe(&url), Err(NetError::Connect(_)));
+    }
     assert_is!(
         http::get("https://127.0.0.1/desc.xml", &impatient(300)),
         Err(NetError::BadAddress)
@@ -746,9 +756,10 @@ fn a_head_that_trickles_in_is_given_up_on() {
 
 #[test]
 fn a_body_that_trickles_in_ends_a_get_but_not_a_stream() {
-    // 80 bytes, one every 15 ms: 1.2 s in all, each byte far within the read timeout
-    // of 150 ms. A whole body gets six read timeouts (0.9 s); a stream is read for as
-    // long as it plays.
+    // 80 bytes, one every 40 ms: 3.2 s in all, each byte far within the read timeout
+    // of 400 ms. A whole body gets six read timeouts (2.4 s); a stream is read for as
+    // long as it plays. (The times are generous: on a CI machine the server's thread
+    // once stood still for longer than a read timeout of 150 ms.)
     let body = pattern(80, 3);
     let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
     let server = {
@@ -756,15 +767,15 @@ fn a_body_that_trickles_in_ends_a_get_but_not_a_stream() {
         HttpServer::start(move |_| Reply::Drip {
             first: head.clone(),
             rest: body.clone(),
-            every: Duration::from_millis(15),
+            every: Duration::from_millis(40),
         })
     };
-    let slow = impatient(150);
+    let slow = impatient(400);
     let took = timed_out(|| http::get(&server.url("/"), &slow));
-    assert!(took >= Duration::from_millis(800), "{took:?}");
-    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert!(took >= Duration::from_millis(2000), "{took:?}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
     let took = timed_out(|| http::post(&server.url("/"), &[], b"", &slow));
-    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
 
     let mut stream = http::open(&server.url("/"), 0, &slow).unwrap();
     let mut read = Vec::new();
