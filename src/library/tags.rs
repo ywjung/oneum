@@ -1097,14 +1097,18 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        // A sparse file of a hundred gigabytes, the same.
-        let path = dir.path().join("sparse.flac");
-        let file = std::fs::File::create(&path).unwrap();
-        std::io::Write::write_all(&mut &file, &header).unwrap();
-        file.set_len(100 * 1024 * 1024 * 1024).unwrap();
-        let started = std::time::Instant::now();
-        assert!(read_tags(&path, false).is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // A sparse file of a hundred gigabytes, the same. (Not on Windows, where a
+        // file that is made longer takes the space unless it is marked sparse first.)
+        #[cfg(unix)]
+        {
+            let path = dir.path().join("sparse.flac");
+            let file = std::fs::File::create(&path).unwrap();
+            std::io::Write::write_all(&mut &file, &header).unwrap();
+            file.set_len(100 * 1024 * 1024 * 1024).unwrap();
+            let started = std::time::Instant::now();
+            assert!(read_tags(&path, false).is_err());
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        }
         // The real file still reads.
         let real = dir.path().join("real.flac");
         std::fs::write(&real, &flac).unwrap();

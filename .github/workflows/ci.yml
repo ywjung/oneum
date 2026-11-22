@@ -30,7 +30,8 @@ jobs:
       - run: cargo clippy --locked --lib --bin oneum --target aarch64-apple-ios-sim -- -D warnings
         env:
           IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-      - run: cargo test --locked
+      # (The player's tests one at a time: see the script.)
+      - run: scripts/ci-test.sh
 
   windows:
     runs-on: windows-latest
@@ -38,7 +39,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: scripts/ci-test.sh
+        shell: bash
       # The program has to come up on a machine without a graphics card (the runner
       # draws with Windows' software renderer) and report its state.
       - name: Start-up check
@@ -65,13 +67,15 @@ jobs:
   # The Android app is the same crate built as a shared library, inside a Java shell
   # (android/): a change on either side that the other does not follow shows up here,
   # before the APK is put together by hand. The runner has the Android SDK, an NDK
-  # and a JDK 17.
+  # and several JDKs; the one it uses by default is newer than Gradle's Android plugin
+  # reads ("Unsupported class file major version"), so 21 is named.
   android:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: rustup target add aarch64-linux-android
+      - run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - name: Lints (Android)
         run: . scripts/android-env.sh && cargo clippy --locked --lib --target aarch64-linux-android -- -D warnings
       - name: The library and the release APK

@@ -188,6 +188,10 @@ impl FileInMemory {
 
     /// [`FileInMemory::start`] within the given budget.
     pub fn start_within(path: &Path, budget: &Arc<Budget>) -> io::Result<Option<Self>> {
+        // (Asked before it is opened: Windows refuses to open a folder as a file.)
+        if std::fs::metadata(path)?.is_dir() {
+            return Ok(None);
+        }
         let file = File::open(path)?;
         let meta = file.metadata()?;
         if !meta.is_file() {

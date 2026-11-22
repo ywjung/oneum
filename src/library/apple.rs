@@ -250,9 +250,12 @@ fn file_url_to_path(url: &str) -> Option<PathBuf> {
     let text = String::from_utf8(bytes).ok()?;
     #[cfg(windows)]
     {
-        // file:///C:/Users/… → C:\Users\…
-        let text = text.strip_prefix('/').unwrap_or(&text).replace('/', "\\");
-        Some(PathBuf::from(text))
+        // file:///C:/Users/… → C:\Users\…; a path without a drive (a library that
+        // was exported on a Mac) keeps its root: /Users/… → \Users\…
+        let bytes = text.as_bytes();
+        let before_drive = bytes.len() >= 3 && bytes[1].is_ascii_alphabetic() && bytes[2] == b':';
+        let text = if before_drive { &text[1..] } else { &text[..] };
+        Some(PathBuf::from(text.replace('/', "\\")))
     }
     #[cfg(not(windows))]
     Some(PathBuf::from(text))

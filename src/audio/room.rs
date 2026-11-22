@@ -324,8 +324,18 @@ fn trim_of(left: &[f32], right: &[f32]) -> f32 {
         true => loudest(left),
         false => loudest(left).max(loudest(right)),
     };
-    if peak > 1.0 { 1.0 / peak } else { 1.0 }
+    // (What the transform's rounding adds to a response that raises nothing is not
+    // turned down for: such a peak came out as 1.0000001 on one processor.)
+    if peak > 1.0 + ROUNDING {
+        1.0 / peak
+    } else {
+        1.0
+    }
 }
+
+/// How far above 1.0 the loudest frequency of a filter may be found and still be the
+/// rounding of the transform that looked for it (a ten-thousandth of a decibel).
+const ROUNDING: f32 = 1e-5;
 
 /// How much the filter with these taps raises the frequency it raises most (1.0:
 /// nothing is louder than it was).

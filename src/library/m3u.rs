@@ -131,6 +131,13 @@ fn resolve(line: &str, base_dir: &Path) -> Option<PathBuf> {
             strip_slash_before_drive(&mut bytes);
         }
         let decoded = crate::platform::path_from_bytes(bytes);
+        // (On Windows a path with a root and no drive is not a whole path yet: it
+        // is on the drive the list is on.)
+        let decoded = if decoded.is_absolute() {
+            decoded
+        } else {
+            base_dir.join(decoded)
+        };
         return local_only(lexical_normalize(&decoded), base_dir);
     }
     if is_url(line) {
@@ -387,18 +394,16 @@ mod tests {
                     file://server/share/c.mp3\r\n\
                     http://example.com/stream.mp3\r\n";
         let entries = parse(text, base);
-        let paths: Vec<Option<&str>> = entries
-            .iter()
-            .map(|e| e.path.as_deref().and_then(Path::to_str))
-            .collect();
+        // (Compared as paths: Windows writes them with the other slash.)
+        let paths: Vec<Option<&Path>> = entries.iter().map(|e| e.path.as_deref()).collect();
         assert_eq!(
             paths,
             [
-                Some("/music/아이유/밤편지.flac"),
-                Some("/lists/sub/track 02.mp3"),
-                Some("/other/x.m4a"),
-                Some("/music/My Song 아.mp3"),
-                Some("/music/b.mp3"),
+                Some(Path::new("/music/아이유/밤편지.flac")),
+                Some(Path::new("/lists/sub/track 02.mp3")),
+                Some(Path::new("/other/x.m4a")),
+                Some(Path::new("/music/My Song 아.mp3")),
+                Some(Path::new("/music/b.mp3")),
                 None,
                 None,
             ]
