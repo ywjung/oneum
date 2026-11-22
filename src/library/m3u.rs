@@ -98,6 +98,13 @@ fn local_only(path: PathBuf, base_dir: &Path) -> Option<PathBuf> {
     (!is_remote(&path) || path.starts_with(base_dir)).then_some(path)
 }
 
+/// True for a path that names a drive and no place on it (`C:song.mp3` on Windows):
+/// the system reads it from wherever the program happens to stand on that drive, which
+/// is nowhere a playlist can mean. Such a line names no file.
+fn on_a_drive_without_a_root(path: &Path) -> bool {
+    matches!(path.components().next(), Some(Component::Prefix(_))) && !path.has_root()
+}
+
 /// True for extended-M3U directives such as `#EXTM3U`, `#EXTINF:…`, `#EXT-X-…`.
 fn is_directive(line: &str) -> bool {
     line.get(..4)
@@ -138,12 +145,18 @@ fn resolve(line: &str, base_dir: &Path) -> Option<PathBuf> {
         } else {
             base_dir.join(decoded)
         };
+        if on_a_drive_without_a_root(&decoded) {
+            return None;
+        }
         return local_only(lexical_normalize(&decoded), base_dir);
     }
     if is_url(line) {
         return None;
     }
     let path = Path::new(line);
+    if on_a_drive_without_a_root(path) {
+        return None;
+    }
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -377,6 +390,28 @@ mod tests {
     fn decode_strips_bom_and_tolerates_bad_bytes() {
         assert_eq!(decode(b"\xef\xbb\xbf#EXTM3U\n"), "#EXTM3U\n");
         assert_eq!(decode(b"a\xffb"), "a\u{fffd}b");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_without_a_place_on_it_names_no_file() {
+        let base = Path::new(r"C:\Lists");
+        let path_of = |line: &str| parse(line, base).into_iter().next().and_then(|e| e.path);
+        assert_eq!(path_of("C:song.mp3"), None);
+        assert_eq!(path_of("file:///D:song.mp3"), None);
+        assert_eq!(
+            path_of(r"D:\Music\a.mp3"),
+            Some(PathBuf::from(r"D:\Music\a.mp3"))
+        );
+        // A root without a drive is on the drive of the list.
+        assert_eq!(
+            path_of("/Music/a.mp3"),
+            Some(PathBuf::from(r"C:\Music\a.mp3"))
+        );
+        assert_eq!(
+            path_of("file:///Music/a%20b.mp3"),
+            Some(PathBuf::from(r"C:\Music\a b.mp3"))
+        );
     }
 
     #[test]

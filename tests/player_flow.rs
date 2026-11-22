@@ -250,9 +250,15 @@ impl Rig {
         let pump = std::thread::spawn(move || {
             const BLOCK: usize = 512;
             let mut out = vec![0f32; BLOCK * 2];
+            // When the next block is due. The pace is kept by the clock and not by the
+            // length of each sleep: a machine whose sleeps run long (a CI runner's took
+            // several times what was asked) would play far slower than the test means,
+            // and time out waiting for a song to end.
+            let mut due = Instant::now();
             while !stop2.load(Ordering::Relaxed) {
                 if frozen2.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(2));
+                    due = Instant::now();
                     continue;
                 }
                 let (epoch_before, before) = renderer.shared().position();
@@ -275,7 +281,15 @@ impl Rig {
                         _ => audio.push((epoch_after, data.to_vec())),
                     }
                 }
-                std::thread::sleep(Duration::from_millis(pace2.load(Ordering::Relaxed)));
+                due += Duration::from_millis(pace2.load(Ordering::Relaxed));
+                let now = Instant::now();
+                if due > now {
+                    std::thread::sleep(due - now);
+                } else if now - due > Duration::from_millis(100) {
+                    // (Far behind, after the machine stood still: not made up for
+                    // in one burst.)
+                    due = now;
+                }
             }
         });
         Self {
