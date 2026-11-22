@@ -87,6 +87,10 @@ public final class MainActivity extends NativeActivity {
     static volatile boolean up;
 
     private InputView input;
+    /** What TalkBack sees of the app (A11yHost), and the system's word whether it is on. */
+    private A11yHost accessibility;
+    private android.view.accessibility.AccessibilityManager.AccessibilityStateChangeListener
+            accessibilityOn;
     /** Which kind of picker was shown under which request code. */
     private final SparseIntArray picking = new SparseIntArray();
     /** Which file is offered under which request code. */
@@ -119,6 +123,16 @@ public final class MainActivity extends NativeActivity {
         input = new InputView(this);
         addContentView(input, new ViewGroup.LayoutParams(1, 1));
         input.requestFocus();
+        // (The text bridge is no field the user knows of: TalkBack leaves it out.)
+        input.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        accessibility = new A11yHost(this);
+        addContentView(accessibility, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        android.view.accessibility.AccessibilityManager manager =
+                getSystemService(android.view.accessibility.AccessibilityManager.class);
+        accessibilityOn = on -> Native.onAccessibility(on ? 1 : 0);
+        manager.addAccessibilityStateChangeListener(accessibilityOn);
+        Native.onAccessibility(manager.isEnabled() ? 1 : 0);
 
         window.getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
             tellInsets(insets);
@@ -534,6 +548,23 @@ public final class MainActivity extends NativeActivity {
     public void notice(String text) {
         runOnUiThread(() -> android.widget.Toast.makeText(
                 getApplicationContext(), text, android.widget.Toast.LENGTH_LONG).show());
+    }
+
+    /** The app's accessibility tree (src/platform/android/a11y.rs), for A11yHost. */
+    public void accessibilityTree(String json) {
+        runOnUiThread(() -> accessibility.update(json));
+    }
+
+    /**
+     * For verification (debuggable builds): asks of the node that says {@code said} what
+     * TalkBack would, 1 moving onto it, 2 a double tap. What came of it is logged.
+     */
+    public void accessibilityAsk(String said, int what) {
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
+            return;
+        }
+        runOnUiThread(() -> Log.i(TAG, "a11y ask " + what + ": "
+                + (accessibility.ask(said, what) ? "done" : "no such node")));
     }
 
     /** Leaves the app without ending it: it goes behind what was there before. */

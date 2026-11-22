@@ -232,6 +232,35 @@ pub(super) fn notice(text: &str) {
     });
 }
 
+/// The accessibility tree, flattened (`ui::accessible`), for A11yHost.java.
+pub(super) fn accessibility_tree(json: &str) {
+    with_activity("accessibilityTree", |env, activity| {
+        let json = env.new_string(json)?;
+        env.call_method(
+            activity,
+            jni_str!("accessibilityTree"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[JValue::Object(&json)],
+        )?;
+        Ok(())
+    });
+}
+
+/// For verification: asks A11yHost.java to do to a node what TalkBack would.
+#[cfg(any(debug_assertions, feature = "automation"))]
+pub(super) fn accessibility_ask(said: &str, what: i32) {
+    with_activity("accessibilityAsk", |env, activity| {
+        let said = env.new_string(said)?;
+        env.call_method(
+            activity,
+            jni_str!("accessibilityAsk"),
+            jni_sig!("(Ljava/lang/String;I)V"),
+            &[JValue::Object(&said), JValue::Int(what)],
+        )?;
+        Ok(())
+    });
+}
+
 pub(super) fn move_to_back() {
     ask(jni_str!("moveToBack"), "moveToBack");
 }

@@ -3,6 +3,9 @@
 //! The UI thread only draws and handles input: it reads immutable snapshots of the
 //! library and the player and sends commands. Decoding, scanning and image processing
 //! happen on other threads.
+/// The accessibility tree, flattened for TalkBack (Android only; tested everywhere).
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod accessible;
 mod art;
 mod automation;
 mod background;
@@ -516,6 +519,9 @@ impl OneumApp {
         let phone_mode = crate::platform::PHONE
             || (automation::AVAILABLE && std::env::var_os("ONEUM_PHONE").is_some());
         theme::install(&ctx, phone_mode);
+        // TalkBack is told the screen by the app itself (see the module).
+        #[cfg(target_os = "android")]
+        ctx.add_plugin(crate::platform::android::a11y::Bridge::default());
         theme::apply_choice(&ctx, settings.theme);
         // The zoom the listener left the window at (a desktop's keys for it).
         if !phone_mode && settings.zoom_percent != 100 {
@@ -3160,6 +3166,12 @@ impl OneumApp {
                         self.pick_data_export();
                         continue;
                     }
+                    // The button of a phone's empty library that asks for the right to
+                    // read music (Android: the system's question).
+                    if id == "storage_allow" {
+                        files::ask_storage_access();
+                        continue;
+                    }
                     // Play or pause, as the player's button does.
                     if id == "play_pause" {
                         self.core.player.send(Command::TogglePlayPause);
@@ -3259,6 +3271,18 @@ impl OneumApp {
                     }
                 }
                 automation::AppStep::Network(words) => self.network_script(&words),
+                automation::AppStep::Accessibility { tap, said } => {
+                    #[cfg(all(
+                        target_os = "android",
+                        any(debug_assertions, feature = "automation")
+                    ))]
+                    crate::platform::android::a11y::ask(&said, tap);
+                    #[cfg(not(all(
+                        target_os = "android",
+                        any(debug_assertions, feature = "automation")
+                    )))]
+                    let _ = (tap, said);
+                }
                 automation::AppStep::FailMeters => self.phone.fail_meters(),
                 automation::AppStep::RestoreRemoved => self.core.library.restore_removed(),
                 automation::AppStep::CopyReport => {
@@ -3499,6 +3523,13 @@ impl OneumApp {
                 "full": [full.left(), full.top(), full.right(), full.bottom()],
                 "safe": [safe.left(), safe.top(), safe.right(), safe.bottom()],
             });
+        }
+        // Where TalkBack is (Android): what the node it is on says.
+        #[cfg(target_os = "android")]
+        {
+            state["talkback_on"] = serde_json::json!(crate::platform::android::a11y::talkback_on());
+            state["talkback_tree"] =
+                serde_json::json!(crate::platform::android::a11y::told_texts());
         }
         // What an iPhone's widgets would read now (the song the app left for them).
         #[cfg(all(target_os = "ios", any(debug_assertions, feature = "automation")))]

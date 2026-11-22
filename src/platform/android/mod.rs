@@ -16,6 +16,7 @@
 //!   app is told (`sound`).
 //! - Text comes from an input method that composes it (Korean): a view of the activity
 //!   hands the composed text over (`text_input`).
+pub mod a11y;
 pub mod app_hooks;
 mod entry;
 pub mod files;

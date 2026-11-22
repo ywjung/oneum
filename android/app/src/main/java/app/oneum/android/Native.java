@@ -16,6 +16,18 @@ final class Native {
     /** The activity came to the screen (1) or left it (0). */
     static native void onForeground(int foreground);
 
+    /** Whether an accessibility service (TalkBack) is on: 1, or 0. */
+    static native void onAccessibility(int on);
+
+    /**
+     * Something asked of a node of the accessibility tree (by its number): 0 click,
+     * 1 focus, 2 scroll forward, 3 scroll back.
+     */
+    static native void onAccessibilityAction(int id, int action);
+
+    /** What the node TalkBack is on says (null: it is on none of the app's). */
+    static native void onAccessibilityFocus(String said);
+
     /** The text the input method holds for the field that is typed into. */
     static native void onText(String held);
 

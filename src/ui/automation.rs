@@ -67,6 +67,12 @@ pub(super) enum AppStep {
     /// The network view, by words instead of clicks ("add <address>", "open <n>", "up",
     /// "reload", "saved <n>", "forget <n>").
     Network(String),
+    /// `a11y on <words>` / `a11y tap <words>`: asks of the accessibility node that says
+    /// the words what TalkBack would: to move onto it, or a double tap (Android).
+    Accessibility {
+        tap: bool,
+        said: String,
+    },
 }
 
 enum Step {
@@ -378,6 +384,11 @@ impl Automation {
                     .push_back(Step::App(AppStep::LoseDevice { told }));
             }
             Some("net") => self.steps.push_back(Step::App(AppStep::Network(rest(1)))),
+            Some("a11y") => {
+                let tap = words.get(1) == Some(&"tap");
+                self.steps
+                    .push_back(Step::App(AppStep::Accessibility { tap, said: rest(2) }));
+            }
             Some("oskey") => {
                 let Some(code) = words.get(1).and_then(|w| w.parse::<u16>().ok()) else {
                     return;

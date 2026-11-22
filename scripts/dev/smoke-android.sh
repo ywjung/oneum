@@ -44,6 +44,9 @@ cleanup() {
   $ADB shell am force-stop $PKG >/dev/null 2>&1 || true
   $ADB uninstall $PKG >/dev/null 2>&1 || true
   $ADB shell rm -rf "$REMOTE" "$REMOTE-room" >/dev/null 2>&1 || true
+  # (TalkBack, if the run got as far as switching it on, is switched off again.)
+  $ADB shell settings delete secure enabled_accessibility_services >/dev/null 2>&1 || true
+  $ADB shell settings put secure accessibility_enabled 0 >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -166,12 +169,29 @@ print(f"RIGHT={w - 28:.0f} VIEW_METERS={w - 70:.0f} VIEW_LYRICS={w - 112:.0f}")
 PY
 )"
 
-echo "== the right to read files is given"
-$ADB shell appops set $PKG MANAGE_EXTERNAL_STORAGE allow
-start
-ui 'volume 0' 'wait 2500' 'dump b.json'
-check b.json 'd["library_tracks"] == 20 and not d["scan_running"]' "20 tracks read from the music folder (1 unreadable file skipped)"
+echo "== the right to music and audio is asked for, and given"
+# What the button of the empty library does: the system asks, and "Allow" is pressed
+# in its dialog. The music folder, which could not be read at the start, is read then,
+# without another start.
+ui 'menu storage_allow' 'wait 2000'
+$ADB shell uiautomator dump /sdcard/oneum-ui.xml >/dev/null 2>&1
+allow=$($ADB exec-out cat /sdcard/oneum-ui.xml | python3 -c '
+import re, sys
+for node in re.findall(r"<node [^>]*>", sys.stdin.read()):
+    if "permissioncontroller" in node and re.search(r"text=\"Allow\"", node):
+        l, t, r, b = map(int, re.findall(r"\d+", re.search(r"bounds=\"([^\"]*)\"", node).group(1)))
+        print((l + r) // 2, (t + b) // 2)
+        break
+')
+holds "the system asks for the right to read music and audio" test -n "$allow"
+# shellcheck disable=SC2086
+$ADB shell input tap $allow
+ui 'wait 3500' 'dump b.json'
+check b.json 'd["library_tracks"] == 20 and not d["scan_running"]' "20 tracks read from the music folder with that right alone (1 unreadable file skipped)"
 check b.json 'd["albums"] == 7' "albums grouped"
+# All files access besides, as the library settings offer it: what lies beside the
+# music (lyrics files, a room's correction) is read later in the run.
+$ADB shell appops set $PKG MANAGE_EXTERNAL_STORAGE allow
 
 echo "== lists and the system's Back"
 ui "tap 200 $MENU0" 'wait 700' 'dump c1.json'
@@ -542,5 +562,35 @@ check s1.json 'd["adapter"].endswith("; glow)")' "the app draws with the rendere
 holds "which was tried first, as a choice of the settings is" log_has 'graphics: this interface is tried first interface=.glow.'
 holds "and has shown that it works: its trial is over" no_trial_left
 check s1.json 'd["library_tracks"] > 0 and d["graphics_errors"] == 0' "the library is there, and nothing is told of an error"
+
+echo "== TalkBack"
+# The screen as TalkBack is told it (src/platform/android/a11y.rs), and what it asks of
+# it: a search typed into the field it is on, a song played from the results and
+# paused by the player's button, each by the words the node says ("a11y tap", the
+# requests TalkBack makes for a double tap). TalkBack's own gestures cannot be given
+# on the emulator: the system takes those that adb injects for touches.
+$ADB shell pm grant com.google.android.marvin.talkback android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+$ADB shell settings put secure enabled_accessibility_services com.google.android.marvin.talkback/com.google.android.marvin.talkback.TalkBackService
+$ADB shell settings put secure accessibility_enabled 1
+sleep 3
+start
+ui 'volume 0' 'wait 1500' 'dump t1.json'
+check t1.json 'all(w in d["talkback_tree"] for w in ("Songs", "Albums", "Search", "Settings")) and "Songs" not in d["talkback_tree"][d["talkback_tree"].index("Songs") + 1:][:1]' "TalkBack is told the library's lists and the tabs, each once"
+check t1.json 'd["talkback_on"] in d["talkback_tree"]' "and TalkBack has gone to one of them by itself"
+# (`ui` waits for its dumps only: one ends each step that adb's typing must follow.)
+ui 'a11y tap Search' 'wait 900' 'a11y tap Search title, artist, album' 'wait 1500' 'dump t2a.json'
+check t2a.json 'p["tab"] == "Search" and d["talkback_on"] == "Search title, artist, album"' "a double tap on the search tab opens it, and one on its field is taken"
+$ADB shell input text 48k
+ui 'wait 1500' 'dump t2b.json'
+check t2b.json 'p["query"] == "48k"' "what is typed goes into the field"
+$ADB shell input keyevent KEYCODE_BACK
+ui 'wait 1200' 'dump t2.json'
+check t2.json '"48k Test Tone" in d["talkback_tree"] and "48k" in d["talkback_tree"]' "the search finds the song, and TalkBack is told it"
+ui 'a11y tap 48k Test Tone' 'wait 1500' 'dump t3.json'
+check t3.json 'd["state"] == "Playing" and d["current"] == "48k Test Tone" and "Pause" in d["talkback_tree"]' "a double tap on it plays it, and the player's button says Pause"
+ui 'a11y tap Pause' 'wait 900' 'dump t4.json'
+check t4.json 'd["state"] == "Paused" and "Play" in d["talkback_tree"]' "a double tap on Pause pauses"
+$ADB shell settings delete secure enabled_accessibility_services >/dev/null
+$ADB shell settings put secure accessibility_enabled 0
 
 echo "SMOKE TEST PASSED (Android emulator)"

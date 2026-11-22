@@ -1,7 +1,7 @@
 //! Calls from Java into Rust: the `native` methods of the class `Native` in `android/`.
 //! They arrive on Java's main thread (or a binder thread), never on the app's own, so
 //! each only notes what happened and wakes the app.
-use super::{app_hooks, lifecycle, nowplaying, sound, text_input, window};
+use super::{a11y, app_hooks, lifecycle, nowplaying, sound, text_input, window};
 use crate::platform::SoundEvent;
 use jni::EnvUnowned;
 use jni::errors::LogErrorAndDefault;
@@ -62,6 +62,39 @@ pub extern "system" fn Java_app_oneum_android_Native_onForeground<'caller>(
     } else {
         lifecycle::entered_background();
     }
+}
+
+/// Whether an accessibility service (TalkBack) is on.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_oneum_android_Native_onAccessibility<'caller>(
+    _env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    on: jint,
+) {
+    a11y::set_on(on != 0);
+}
+
+/// TalkBack asked something of a node of the accessibility tree: its number, and 0
+/// click, 1 focus, 2 scroll forward, 3 scroll back.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_oneum_android_Native_onAccessibilityAction<'caller>(
+    _env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    id: jint,
+    action: jint,
+) {
+    a11y::asked(id, action);
+}
+
+/// What the node TalkBack is on says (null: none of the app's).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_oneum_android_Native_onAccessibilityFocus<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    said: JString<'caller>,
+) {
+    let said = (!said.is_null()).then(|| text(&mut env, &said));
+    a11y::focused(said);
 }
 
 /// The text the input method holds for the field that is being typed into.
