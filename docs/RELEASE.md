@@ -13,7 +13,7 @@
 | 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
-| Windows 코드 서명 | 서명하는 길과 검사는 준비됨(2026-11-23, `scripts/windows-sign.sh`, 시험용 인증서로 확인). **인증서가 없어 배포물은 서명되지 않음**. 무료 서명(SignPath Foundation) 신청 준비: 정책 페이지와 GitHub 러너 빌드 워크플로(한 번도 돌지 않음), **신청은 아직** — 아래 "Windows 코드 서명" |
+| Windows 코드 서명 | 서명하는 길과 검사는 준비됨(2026-11-23, `scripts/windows-sign.sh`, 시험용 인증서로 확인). **인증서가 없어 배포물은 서명되지 않음**. 무료 서명(SignPath Foundation) 신청 준비: 정책 페이지(게시됨)와 GitHub 러너 빌드 워크플로(2026-11-23 세 번째 실행에서 통과), **신청은 아직** — 아래 "Windows 코드 서명" |
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 | 공개됨(2026-11-22) — https://github.com/ywjung/oneum (`github` 원격, `main`만 올림). 올리기 전에 추적 파일과 커밋에 비밀 값 · 개인 주소 · 홈 경로 · 서명 팀 ID · 기기 식별자가 없음을 확인했다. 커밋의 작성자는 모두 한 이름과 한 e-mail 주소다. CI는 여섯 번의 실행에 걸쳐 고친 뒤 네 작업(macOS · Windows · Android · 의존성 권고) 모두 통과(docs/TESTING.md "GitHub에 올린 뒤의 CI"). 올라간 커밋은 다시 쓰지 않는다 |
 | 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
@@ -90,7 +90,7 @@ scripts/package-windows.sh
 패키징 스크립트는 실행 파일에 아이콘이 들어 있는지 검사하고, 없으면 실패합니다.
 (mac에서 `makensis`는 로케일이 설정되지 않은 셸에서 메모리 오류로 끝나므로 스크립트가 UTF-8 로케일로 실행합니다.)
 - 서명에 쓸 것을 주지 않으면 실행 파일도 설치 프로그램도 서명하지 않으므로 Windows SmartScreen 경고가 나옵니다(아래 "Windows 코드 서명").
-- 스크립트는 실행 파일이 컴파일러 런타임 DLL을 필요로 하지 않는지만 검사합니다. **Windows에서 실행해 보는 단계는 없습니다** — 배포 전에 실제 Windows에서
+- 스크립트는 실행 파일이 컴파일러 런타임 DLL을 필요로 하지 않는지와 범용 C 런타임(UCRT)을 쓰는지만 검사합니다. **Windows에서 실행해 보는 단계는 없습니다** — 배포 전에 실제 Windows에서
   docs/TESTING.md "Windows"의 항목을 확인해야 합니다.
 - **설치 프로그램은 만들어지는 것까지만 확인했습니다.** Windows에서 설치·실행·제거해 본 적이 없습니다(docs/TESTING.md "Windows").
 
@@ -115,23 +115,32 @@ scripts/package-windows.sh
 
 준비해 둔 것:
 - **코드 서명 정책 페이지**: `site/code-signing.html`(한국어), `site/en/code-signing.html`(영어). 재단이 요구하는 것(용어 "Code signing policy", 정해진 문구, 역할과 사람, 개인정보 문구)을 담았고, **아직 신청 전이며 지금의 파일은 서명되지 않았다**고 적었습니다. 두 홈페이지의 "받기"와 아래쪽, 두 README에서 연결됩니다. 받아들여지면 첫 문단과 "서명하는 곳"의 조건문을 고칩니다.
-- **GitHub 러너에서 패키지를 만드는 워크플로**: `.github/workflows/windows-package.yml`. 버전 태그(`v*`)를 올리거나 Actions 탭에서 직접 실행하면 Ubuntu 러너에서 `scripts/package-windows.sh`로 zip과 설치 프로그램을 만들어 실행의 아티팩트로 남깁니다(서명 없음). 재단은 서명할 파일이 GitHub이 운영하는 러너의 워크플로에서 만들어져 아티팩트로 올라가 있을 것을 요구합니다 — 이 Mac에서 만든 파일은 서명해 주지 않습니다.
+- **GitHub 러너에서 패키지를 만드는 워크플로**: `.github/workflows/windows-package.yml`. 버전 태그(`v*`)를 올리거나 Actions 탭에서 직접 실행하면 GitHub의 macOS 러너에서 Homebrew의 mingw-w64와 NSIS로(릴리스를 만들어 온 Mac과 같은 도구) `scripts/package-windows.sh`를 돌려 zip과 설치 프로그램을 실행의 아티팩트로 남깁니다(서명 없음). 재단은 서명할 파일이 GitHub이 운영하는 러너의 워크플로에서 만들어져 아티팩트로 올라가 있을 것을 요구합니다 — 이 Mac에서 만든 파일은 서명해 주지 않습니다.
 
 직접 하셔야 하는 일(순서대로):
 1. 실제 Windows PC에서 지금의 설치 프로그램과 zip을 실행해 봅니다(docs/TESTING.md "Windows").
 2. GitHub 계정에 2단계 인증을 켭니다(조건: 팀 전원이 저장소와 SignPath 계정에 2단계 인증).
-3. 이 브랜치를 `main`에 합쳐 올려 정책 페이지가 게시되고 워크플로가 저장소에 있게 한 뒤, Actions 탭에서 "Windows package"를 한 번 실행해 통과하는지 봅니다.
+3. (끝남, 2026-11-23) `main`에 합쳐 올려 정책 페이지가 게시되었고(https://ywjung.github.io/oneum/code-signing.html), "Windows package"가 GitHub에서 통과했습니다.
 4. https://signpath.org/apply 의 양식을 채워 신청합니다(로봇 확인이 있습니다). 조건은 https://signpath.org/terms.
 5. 받아들여지면 SignPath의 계정 · 프로젝트 · 서명 정책을 만들고, API 토큰을 저장소의 secret(`SIGNPATH_API_TOKEN`)으로 넣고, 릴리스 때마다 서명 요청을 승인합니다.
 
 받아들여진 뒤에 할 일(아직 만들지 않음 — 조직 ID와 프로젝트 이름이 정해져야 쓸 수 있습니다):
 - 워크플로에 서명 단계를 넣습니다: `actions/upload-artifact`(v4 이상)로 올린 아티팩트의 ID를 `signpath/github-action-submit-signing-request@v3`에 넘깁니다(`organization-id`, `project-slug`, `signing-policy-slug`, `github-artifact-id`, `wait-for-completion`, `output-artifact-directory`; 승인을 기다리는 시간의 기본값은 600초).
 - 설치 프로그램 안의 `OnEum.exe`도 서명되어야 하므로 요청은 두 번입니다: `OnEum.exe` → 서명된 것을 받아 zip과 설치 프로그램을 만듦 → 설치 프로그램. `scripts/package-windows.sh`가 이미 서명된 `OnEum.exe`를 받아 쓰는 길은 그때 넣습니다. 이 길에서는 제거 프로그램에 서명하지 않습니다(요청이 한 번 더 필요해서).
-- 마지막 검사는 지금의 `scripts/windows-sign.sh verify`를 그대로 씁니다(러너에서는 `apt-get install osslsigncode`).
+- 마지막 검사는 지금의 `scripts/windows-sign.sh verify`를 그대로 씁니다(러너에서도 `brew install osslsigncode`).
 
-확인한 것: 두 정책 페이지와 고친 두 홈페이지를 로컬 서버로 열어 넓은 화면(1280px, 밝은 화면)과 좁은 화면(375px, 어두운 화면)에서 넘침 없이 그려지는 것, 페이지가 가리키는 사이트 안의 파일이 모두 있는 것, 다른 서버로 가는 요청이 없는 것, 정해진 두 문구가 글자 그대로 들어 있는 것. 워크플로 파일은 YAML로 읽히는 것까지.
+확인한 것: 두 정책 페이지와 고친 두 홈페이지를 로컬 서버로 열어 넓은 화면(1280px, 밝은 화면)과 좁은 화면(375px, 어두운 화면)에서 넘침 없이 그려지는 것, 페이지가 가리키는 사이트 안의 파일이 모두 있는 것, 다른 서버로 가는 요청이 없는 것, 정해진 두 문구가 글자 그대로 들어 있는 것. 올린 뒤 두 정책 페이지가 공개 주소에서 열리는 것(HTTP 200)과 홈페이지에 그 연결이 있는 것.
 
-확인하지 못한 것: **워크플로는 한 번도 돌지 않았습니다.** Ubuntu의 mingw-w64와 NSIS로 `scripts/package-windows.sh`가 끝까지 가는지(지금까지는 Mac에서만 돌렸습니다), 러너의 경로가 파일에 남지 않는지는 처음 실행해 봐야 압니다. 신청 양식의 항목, 심사 기간과 결과, SignPath 쪽 설정 전부.
+워크플로의 실행(2026-11-23, 직접 실행 세 번):
+| 실행 | 러너 | 결과 |
+|---|---|---|
+| 1 | Ubuntu 26.04, `mingw-w64` | **링크 실패**: `_get_timezone`을 찾지 못함. Ubuntu의 `x86_64-w64-mingw32-gcc`는 옛 C 런타임(`msvcrt.dll`)으로 링크하는데, 프로그램(`src/platform/clock.rs`)과 Homebrew의 mingw-w64는 범용 C 런타임(UCRT)을 씀 |
+| 2 | Ubuntu 26.04, `gcc-mingw-w64-ucrt64` | **설치 실패**: 그 패키지가 이 Ubuntu에 없음 |
+| 3 | macOS(`macos-26-arm64`), Homebrew의 mingw-w64 14.0.0_3 · makensis 3.13 | **통과**(약 9분): zip과 설치 프로그램이 만들어지고, 스크립트의 검사(아이콘, 런타임 DLL, UCRT)와 러너의 경로가 파일에 없는지의 검사를 지나, 아티팩트 `OnEum-windows-x86_64`(약 26MB)로 올라감 |
+
+이 일로 `scripts/package-windows.sh`에 검사 하나를 더했습니다: 만든 프로그램이 UCRT를 쓰지 않으면(`msvcrt.dll`로 링크되었거나 `api-ms-win-crt-*`가 없으면) 실패합니다.
+
+확인하지 못한 것: 러너가 만든 아티팩트를 내려받아 보지 않았고 Windows에서 실행해 보지도 않았습니다. 버전 태그로 시작되는 실행(직접 실행만 해 봄). 신청 양식의 항목, 심사 기간과 결과, SignPath 쪽 설정 전부.
 
 #### 서명해서 패키징하기 (이 Mac에서, 인증서가 있을 때)
 ```bash

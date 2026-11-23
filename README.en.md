@@ -63,7 +63,7 @@ scripts/package-windows.sh
 Cross-compiles on a Mac and makes `dist/OnEum-<version>-windows-x86_64.zip` (unzip and run) and the setup program `dist/OnEum-<version>-windows-x86_64-setup.exe` (needs `rustup target add x86_64-pc-windows-gnu` and `brew install mingw-w64`; the setup program is made when `brew install makensis` is there).
 The setup program installs for the user who runs it, without administrator rights, and adds a Start menu shortcut and an entry in "Installed apps" for removing it. `OnEum.exe` carries its icon and version details.
 **The Windows build has only been compiled and linked. It has not been run on a real Windows machine, and the setup program has only been built, not run.** (The CI workflow builds, tests and starts it on a Windows runner; that has not run yet.)
-The files for Windows on the releases page are not signed yet; the plan and the procedure are in the [Code signing policy](https://ywjung.github.io/oneum/en/code-signing.html). A workflow (`.github/workflows/windows-package.yml`) builds the packages with the same script on a GitHub runner; it has not run yet.
+The files for Windows on the releases page are not signed yet; the plan and the procedure are in the [Code signing policy](https://ywjung.github.io/oneum/en/code-signing.html). A workflow (`.github/workflows/windows-package.yml`) builds the packages with the same script on a GitHub runner.
 What differs there (a menu bar inside the window, Ctrl shortcuts, features that are missing) is in the [Windows user guide](docs/USER_GUIDE_WINDOWS.en.md), and in "플랫폼" of [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and "Windows" of [docs/TESTING.md](docs/TESTING.md) (Korean).
 
 ## iPhone
