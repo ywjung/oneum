@@ -19,7 +19,7 @@
 | 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
 | Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
-| iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리가 끝나 사용자가 TestFlight로 본인 iPhone에 설치했고 위젯에 곡이 나옴. 실제 iPhone에서 볼 나머지 항목, 스토어 정보와 심사는 **남음**([APP_STORE.md](APP_STORE.md)) |
+| iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리가 끝나 사용자가 TestFlight로 본인 iPhone에 설치했고 위젯에 곡이 나옴. 스토어 정보를 넣고 **2026-11-24에 심사에 제출**(무료, 147개 국가, 수동 출시, 상태 "심사 대기 중"). 심사 결과와 출시는 **남음**([APP_STORE.md](APP_STORE.md)) |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
 
