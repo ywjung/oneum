@@ -194,7 +194,7 @@ App Review Information ▸ Notes에 넣을 글은 [RELEASE.md](RELEASE.md) "iPho
 ```bash
 scripts/dev/appstore-shots.sh
 ```
-큰 화면 시뮬레이터(기본 iPhone 18 Pro Max, `ONEUM_IOS_DEVICE`로 바꿈)에서 두 언어의 스크린샷을 `dist/appstore/ko`와 `dist/appstore/en`에 만듭니다. 1320×2868, 투명도 없는 PNG이고 저장소에는 넣지 않습니다. 음악과 가사는 지어낸 것입니다(`scripts/dev/gen-demo-library.py`와 스크립트 안의 가사). 처음에는 음악을 만드는 데 몇 분이 걸리고 `target/demo-library`에 남겨 다음에 다시 씁니다. ffmpeg와 Pillow가 필요합니다. **그 시뮬레이터에 깔려 있던 OnEum과 그 데이터는 지워집니다.**
+큰 화면 시뮬레이터(기본 iPhone 18 Pro Max, `ONEUM_IOS_DEVICE`로 바꿈)에서 두 언어의 스크린샷을 `dist/appstore/ko`와 `dist/appstore/en`에 만듭니다. 1320×2868, 투명도 없는 PNG이고 저장소에는 넣지 않습니다. **App Store Connect의 필수 칸(중형 디스플레이)에는 `dist/appstore/medium/ko`와 `dist/appstore/medium/en`의 것(1206×2622, 큰 것을 줄인 그림)을 넣습니다.** 큰 것은 선택 칸("대형 디스플레이")에 넣을 수 있습니다. 음악과 가사는 지어낸 것입니다(`scripts/dev/gen-demo-library.py`와 스크립트 안의 가사). 처음에는 음악을 만드는 데 몇 분이 걸리고 `target/demo-library`에 남겨 다음에 다시 씁니다. ffmpeg와 Pillow가 필요합니다. **그 시뮬레이터에 깔려 있던 OnEum과 그 데이터는 지워집니다.**
 
 | 파일 | 화면 |
 |---|---|

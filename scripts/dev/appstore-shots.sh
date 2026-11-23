@@ -1,8 +1,9 @@
 #!/bin/sh
 # Makes the pictures of the iPhone app for the App Store, in Korean and in English:
 # the albums, an album, the player, lyrics, the meters, the equalizer and a search,
-# taken from the large-screen iPhone of the Simulator (1320 × 2868, the size the store
-# asks for). They go to dist/appstore/ko and dist/appstore/en, not into the repository.
+# taken from the large-screen iPhone of the Simulator (1320 × 2868), and made
+# smaller to the size the store requires (1206 × 2622). They go to dist/appstore/ko and
+# dist/appstore/en, the smaller ones to dist/appstore/medium, not into the repository.
 #
 #   scripts/dev/appstore-shots.sh
 #   ONEUM_IOS_DEVICE    the simulator, by name or identifier (default "iPhone 18 Pro Max";
@@ -248,21 +249,32 @@ pictures ko ko_KR 2 'ㄷㅂ'
 pictures en en_US 0 'light'
 
 echo "== checking the pictures"
-# The store takes no picture with transparency, and only its own sizes.
+# The store takes no picture with transparency, and only its own sizes. The size it
+# requires (App Store Connect, 2026-11-24) is the medium iPhone with a Dynamic Island,
+# 1206 x 2622; the large one, which these are taken at, is optional there. The medium
+# pictures are the large ones made smaller (the two screens differ in shape by less
+# than a thousandth), into medium/<language>.
 python3 - "$OUT" <<'PY'
 import sys
 from pathlib import Path
 from PIL import Image
 
+LARGE, MEDIUM = (1320, 2868), (1206, 2622)
+out = Path(sys.argv[1])
 wrong = 0
-for path in sorted(Path(sys.argv[1]).glob("*/*.png")):
+for path in sorted(out.glob("[a-z][a-z]/*.png")):
     image = Image.open(path)
     if image.mode != "RGB":
         image = image.convert("RGB")
         image.save(path)
-    ok = image.size == (1320, 2868)
+    ok = image.size == LARGE
     wrong += not ok
     print(("  ok   " if ok else "  FAIL ") + f"{path} {image.size[0]}x{image.size[1]}")
+    if ok:
+        small = out / "medium" / path.parent.name / path.name
+        small.parent.mkdir(parents=True, exist_ok=True)
+        image.resize(MEDIUM, Image.LANCZOS).save(small)
+        print(f"  ok   {small} {MEDIUM[0]}x{MEDIUM[1]}")
 sys.exit(1 if wrong else 0)
 PY
-echo "the pictures are in $OUT"
+echo "the pictures are in $OUT (the required size in $OUT/medium)"
