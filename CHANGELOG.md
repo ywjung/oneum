@@ -23,6 +23,8 @@
 - zip의 `README.txt`는 서명된 빌드에서 "서명되어 있으나 SmartScreen이 여전히 물을 수 있다"고 적습니다.
 - docs/RELEASE.md "Windows 코드 서명": 개인이 인증서를 구하는 방법의 비교(비용 · 조건 · 한국의 개인이 되는지), 명령, 확인한 것과 못 한 것.
 - 시험용 인증서로만 확인했습니다. **진짜 인증서가 없어 배포물은 아직 서명되지 않고**, USB 토큰 · 클라우드 서명과 Windows에서의 서명 확인은 해 보지 못했습니다.
+- **무료 서명 신청 준비**(사용자의 결정: 인증서를 사지 않음): 오픈 소스 프로젝트에 무료로 서명해 주는 SignPath Foundation에 신청할 수 있게, 홈페이지에 **코드 서명 정책** 페이지(`site/code-signing.html`, `site/en/code-signing.html`)를 넣고 두 홈페이지와 README에서 연결했습니다. 페이지는 지금의 파일이 서명되지 않았고 신청 전이라고 적습니다.
+- **`.github/workflows/windows-package.yml`**: 버전 태그를 올리거나 직접 실행하면 GitHub의 Ubuntu 러너에서 `scripts/package-windows.sh`로 zip과 설치 프로그램을 만들어 아티팩트로 남깁니다(서명 없음; 재단이 요구하는 빌드 방식). **아직 한 번도 돌지 않았습니다.** 신청 · 심사와 서명 단계는 남아 있습니다.
 
 ### iPhone: App Store용 아카이브 스크립트와 절차 문서 (2026-11-22)
 - **`scripts/ios-archive.sh`**: App Store에 올릴 아카이브를 만들고, 검사하고, `.ipa`로 내보내거나 App Store Connect로 보냅니다. 팀과 번들 ID는 환경 변수로만 받습니다. `--unsigned`는 계정 없이 아카이브와 검사까지, `--check`는 있는 아카이브나 `.ipa`의 검사만 합니다. 검사: 앱과 위젯의 식별자 · 버전 · 빌드 번호, 함께 쓰는 키체인 그룹, 심사에 필요한 파일, 이 Mac의 경로가 없는지, 검증 채널이 없는지, 서명.
