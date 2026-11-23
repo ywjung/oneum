@@ -13,6 +13,7 @@
 | 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
+| Windows 코드 서명 | 서명하는 길과 검사는 준비됨(2026-11-23, `scripts/windows-sign.sh`, 시험용 인증서로 확인). **인증서가 없어 배포물은 서명되지 않음** — 아래 "Windows 코드 서명" |
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 | 공개됨(2026-11-22) — https://github.com/ywjung/oneum (`github` 원격, `main`만 올림). 올리기 전에 추적 파일과 커밋에 비밀 값 · 개인 주소 · 홈 경로 · 서명 팀 ID · 기기 식별자가 없음을 확인했다. 커밋의 작성자는 모두 한 이름과 한 e-mail 주소다. CI는 여섯 번의 실행에 걸쳐 고친 뒤 네 작업(macOS · Windows · Android · 의존성 권고) 모두 통과(docs/TESTING.md "GitHub에 올린 뒤의 CI"). 올라간 커밋은 다시 쓰지 않는다 |
 | 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
@@ -88,10 +89,74 @@ scripts/package-windows.sh
 아이콘 파일은 `python3 scripts/gen-windows-icon.py`로 `assets/icon-1024.png`에서 만듭니다(Pillow 필요, 결과는 저장소에 들어 있음).
 패키징 스크립트는 실행 파일에 아이콘이 들어 있는지 검사하고, 없으면 실패합니다.
 (mac에서 `makensis`는 로케일이 설정되지 않은 셸에서 메모리 오류로 끝나므로 스크립트가 UTF-8 로케일로 실행합니다.)
-- 실행 파일도 설치 프로그램도 서명하지 않으므로 Windows SmartScreen 경고가 나옵니다(코드 서명 인증서가 필요합니다).
+- 서명에 쓸 것을 주지 않으면 실행 파일도 설치 프로그램도 서명하지 않으므로 Windows SmartScreen 경고가 나옵니다(아래 "Windows 코드 서명").
 - 스크립트는 실행 파일이 컴파일러 런타임 DLL을 필요로 하지 않는지만 검사합니다. **Windows에서 실행해 보는 단계는 없습니다** — 배포 전에 실제 Windows에서
   docs/TESTING.md "Windows"의 항목을 확인해야 합니다.
 - **설치 프로그램은 만들어지는 것까지만 확인했습니다.** Windows에서 설치·실행·제거해 본 적이 없습니다(docs/TESTING.md "Windows").
+
+### Windows 코드 서명
+**상태(2026-11-23)**: 서명하는 길과 검사는 스크립트에 들어 있고 시험용 인증서로 확인했습니다. **진짜 인증서는 없습니다.** 인증서를 구하는 일(신청 · 결제 · 본인 확인)은 배포하는 사람이 직접 해야 합니다. `ONEUM_WIN_SIGN`을 주지 않은 `scripts/package-windows.sh`는 전과 같은 서명 없는 파일을 만듭니다.
+
+서명해도 SmartScreen 경고가 바로 사라지지는 않습니다. Microsoft의 문서(code-signing-options, 2026-11-10 갱신)에 따르면 평판은 내려받기가 쌓이면서 생기고, EV 인증서가 주던 "즉시 통과"는 2024년에 없어졌으며, OV 인증서와 Azure Artifact Signing은 SmartScreen에서 같은 대접을 받습니다. 서명이 주는 것은 게시자 이름이 표시되는 것, 파일이 바뀌지 않았다는 확인, 그리고 같은 인증서로 계속 서명하면 평판이 다음 버전으로 이어진다는 것입니다.
+
+#### 인증서를 구하는 방법 (2026-11-23에 각 공식 페이지에서 확인한 것)
+| 방법 | 비용 | 한국의 개인 | 게시자로 표시되는 이름 | 걸리는 점 |
+|---|---|---|---|---|
+| **Certum Open Source Code Signing** (클라우드형, SimplySign) | €49 (카드+리더 세트 €69, 가진 카드에 넣는 코드만 €25) | 개인에게만 발급. 국가 제한은 페이지에 없음 | "Open Source Developer, 〈본인 실명〉" | 본인 확인(자동 확인, 또는 신분증을 든 사진, 또는 공증), 본인 이름의 공과금 고지서, 공개된 프로젝트 주소(신청자와 프로젝트의 관계가 드러나야 함). **상업적으로 배포하는 소프트웨어에 쓰면 폐기**. 클라우드형은 한 달 5,000번까지 |
+| **SignPath Foundation** (오픈 소스 무료 서명) | 무료 | 조건에 국가 제한이 적혀 있지 않음 | "SignPath Foundation" | OSI 승인 라이선스, 독점 구성 요소 없음, 유지되고 있고 이미 릴리스된 프로젝트, 팀 전원 2단계 인증, 홈페이지에 "Code signing policy" 페이지(정해진 문구 · 역할 · 개인정보 문구), 릴리스마다 사람이 승인. **빌드는 GitHub Actions의 GitHub 러너에서 해야 함** — 이 Mac에서 만든 파일은 서명해 주지 않음. 프로젝트의 평판을 심사함(기준은 적혀 있지 않음) |
+| 일반 OV 인증서 (CA나 재판매처) | 재판매처 기준 한 해 $200~$330쯤에 USB 토큰 값, CA 직판은 $129~$529 (검색으로 본 값, 사기 전에 확인) | 개인 검증으로 가능 | 본인 실명 | 키는 USB 토큰이나 클라우드 HSM에만 둘 수 있음(2023-06부터). 신분 서류 |
+| Azure Artifact Signing (전 Trusted Signing) | 한 달 약 $9.99 (5,000번), 계정을 만든 때부터 과금 | **개인은 미국 · 캐나다만** — 안 됨. 조직은 한국 포함(quickstart 문서; 같은 날 본 다른 Microsoft 문서는 미국 · 캐나다 · EU · 영국만 적음) | 검증된 조직 이름 | 사업자로 신청할 때만 해당. 종량제 Azure 구독 필요 |
+| Microsoft Store 배포 | 개인 개발자 등록 무료(2026) | "약 200개 시장"(한국이 적혀 있지는 않음) | — | 서명이 아니라 다른 배포 길. Store가 패키지에 서명해 주는지, 지금의 설치 프로그램을 그대로 올릴 수 있는지는 **확인하지 않음** |
+
+확인하지 못한 것: Certum 인증서의 유효 기간(검색 결과의 요약에는 1년, 상점 페이지에는 없음)과 한국에서의 발급 사례, SimplySign Desktop이 macOS에서 내어 주는 PKCS #11 라이브러리의 위치, SignPath Foundation의 신청 양식 · 대기 기간(신청 페이지가 읽히지 않음), EV 인증서의 지금 조건(개인에게는 발급되지 않는 것으로 알고 있으나 오늘 확인하지 않음).
+
+#### 서명해서 패키징하기
+```bash
+brew install osslsigncode
+```
+무엇으로 서명할지는 환경 변수로만 줍니다(저장소에는 인증서 · 키 · PIN · 계정이 없습니다). 변수의 뜻은 `scripts/windows-sign.sh`의 머리말에 있습니다.
+
+- **USB 토큰이나 클라우드 HSM** (`ONEUM_WIN_SIGN=pkcs11`): 키가 든 장치의 PKCS #11 라이브러리로 서명합니다.
+  ```bash
+  ONEUM_WIN_SIGN=pkcs11 ONEUM_WIN_SIGN_PKCS11_MODULE=<라이브러리 경로> ONEUM_WIN_SIGN_KEY='pkcs11:<키>' ONEUM_WIN_SIGN_CERT=<인증서와 체인.pem> scripts/package-windows.sh
+  ```
+  PIN을 주지 않으면 파일마다(세 번) 터미널에서 묻습니다. 이 Mac의 osslsigncode(OpenSSL 4)는 PKCS #11을 쓸 때 `pkcs11prov`라는 OpenSSL provider를 찾는데 이 Mac에는 없습니다(없어서 실패하는 것까지 확인). 토큰을 쓰려면 그 provider나, `ONEUM_WIN_SIGN_PROVIDER`로 가리킬 다른 PKCS #11 provider를 설치해야 합니다. **이 길은 토큰이 없어 서명까지 가 보지 못했습니다.**
+- **자기 서명 도구가 있는 서비스** (`ONEUM_WIN_SIGN=command`): `ONEUM_WIN_SIGN_COMMAND`에 적은 명령을 파일마다 실행합니다(`"$1"`이 파일). 그 명령이 그 파일에 타임스탬프까지 넣어 서명해야 합니다. 예를 들어 jsign(7.6, Java)은 Azure Artifact Signing · DigiCert ONE · SSL.com eSigner · Certum 카드 같은 것을 직접 다룹니다(jsign으로 서명해 본 적은 없습니다).
+  ```bash
+  ONEUM_WIN_SIGN=command ONEUM_WIN_SIGN_COMMAND='jsign --storetype <종류> <그 서비스의 옵션> --tsaurl <타임스탬프 서버> "$1"' scripts/package-windows.sh
+  ```
+- **파일로 된 인증서** (`ONEUM_WIN_SIGN=pkcs12`, `ONEUM_WIN_SIGN_PKCS12`, 암호는 `ONEUM_WIN_SIGN_PASS_FILE`): 공인 CA는 이제 키를 파일로 주지 않으므로 시험용입니다.
+
+그 밖에: 타임스탬프 서버는 `ONEUM_WIN_SIGN_TS`(기본 `http://timestamp.digicert.com`, RFC 3161; CA가 자기 서버를 쓰라고 하면 바꿉니다), 검사가 믿는 루트는 `ONEUM_WIN_SIGN_CAFILE` · `ONEUM_WIN_SIGN_TSA_CAFILE`(기본은 osslsigncode의 목록 `/etc/ssl/cert.pem`; Microsoft의 루트로 끝나는 인증서는 그 목록에 없을 수 있어 그때는 루트 파일을 줍니다), 서명한 인증서의 이름 확인은 `ONEUM_WIN_SIGN_SUBJECT`.
+
+서명을 청하면 스크립트가 하는 일:
+1. 빌드하기 전에 필요한 것(도구, 변수, 읽을 수 있는 파일)이 다 있는지 봅니다.
+2. `OnEum.exe`에 한 번 서명합니다. zip과 설치 프로그램에 같은 서명된 파일이 들어갑니다.
+3. 설치 프로그램을 만드는 중에 제거 프로그램(`Uninstall.exe`)에 서명하고(NSIS의 `!uninstfinalize`), 다 만들어진 설치 프로그램에 서명합니다.
+4. `dist`에 놓인 그대로 다시 검사합니다: zip에서 꺼낸 `OnEum.exe`와 설치 프로그램. 서명이 없거나, 파일과 맞지 않거나, 체인이 믿는 루트로 끝나지 않거나, 검증되는 타임스탬프가 없으면 실패합니다(osslsigncode는 타임스탬프가 없어도 성공으로 끝나므로 따로 봅니다).
+5. 어디서든 실패하면 `dist`에 이 이름의 파일을 남기지 않습니다(서명 안 된 파일이나 지난 실행의 파일이 섞여 나가지 않게).
+
+이미 만든 파일만 검사할 때:
+```bash
+scripts/windows-sign.sh verify dist/OnEum-<버전>-windows-x86_64-setup.exe
+```
+
+#### 확인한 것 (2026-11-23, osslsigncode 2.16 · OpenSSL 4.1.0 · makensis 3.12)
+스크래치 폴더에 만든 시험용 루트와 그 루트가 발급한 코드 서명 인증서(이틀짜리)로 했고, 끝난 뒤 지웠습니다. 어느 신뢰 저장소에도 넣지 않았습니다.
+- **서명 없는 빌드가 그대로인지**: 전의 스크립트와 새 스크립트로 각각 패키징해 zip의 내용이 같음(파일 다섯 개 모두). 같은 재료로 전의 `installer.nsi`와 새 것이 만든 설치 프로그램이 바이트 단위로 같음. 두 파일 모두 검사에서 "서명 없음".
+- **서명한 패키징**(`pkcs12`, 타임스탬프는 실제 DigiCert 서버): `OnEum.exe`, 제거 프로그램, 설치 프로그램 순으로 서명되고 `dist`의 두 파일이 검사를 통과. 체크섬 파일이 서명된 파일과 맞음. zip에서 달라진 것은 `OnEum.exe`와 `README.txt`의 한 문장뿐. 서명된 실행 파일에 아이콘과 버전 정보가 그대로 있고, 두 파일에 `/Users/`가 0건. 기본 루트 목록으로 검사하면 실패(시험용 인증서이므로 맞는 결과).
+- **실패해야 하는 경우**(전체 패키징): 변수가 빠지면 빌드 전에 멈춤. 서명 명령이 아무것도 하지 않으면 `OnEum.exe`에서, 제거 프로그램만 서명하지 않으면 makensis가, 설치 프로그램만 서명하지 않으면 마지막에 실패하고, 세 경우 모두 `dist`가 비워짐. `command`로 세 파일을 모두 서명하면 통과.
+- **스크립트 단독**: 틀린 암호, 없는 암호 파일, 암호도 터미널도 없는 경우, 닿지 않는 타임스탬프 서버, 타임스탬프 없이 서명한 파일, 다른 인증서로 서명한 파일(`ONEUM_WIN_SIGN_SUBJECT`), 서명 뒤 한 바이트가 바뀐 파일은 모두 실패. 이미 서명된 파일에 다시 서명하면 서명이 하나로 남음. 이름에 빈칸이 있는 파일도 됨.
+- 전체 패키징 한 묶음에서 시험용 서명 명령이 인증서 파일의 암호를 읽지 못해 세 번 실패한 일이 한 번 있었습니다. 같은 순서로 네 번 다시 돌리고 같은 명령을 600번 돌려도 다시 나오지 않아 **원인을 찾지 못했습니다**(실패 때 패키징은 실패로 끝나고 `dist`는 비워졌습니다).
+
+#### 확인하지 못한 것
+- **진짜 인증서로 서명하는 것 전부**: 공인 CA의 체인과 폐기 목록 확인, 토큰 · 클라우드(`pkcs11`), jsign 같은 다른 도구.
+- **Windows가 이 서명을 받아들이는지**: 실제 Windows에서 아래를 봐야 합니다. 서명된 설치 프로그램이 설치 · 제거되는지도 본 적이 없습니다(서명 없는 것도 마찬가지 — docs/TESTING.md "Windows").
+  ```powershell
+  Get-AuthenticodeSignature .\OnEum-<버전>-windows-x86_64-setup.exe | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+  ```
+  (`Status`가 `Valid`여야 합니다. Windows SDK가 있으면 `signtool verify /pa /v <파일>`도 같은 것을 봅니다.) 파일의 속성 → 디지털 서명 탭, 그리고 브라우저로 내려받아 실행할 때 SmartScreen이 보이는 게시자 이름도 확인합니다.
+- 설치된 뒤의 `Uninstall.exe`의 서명: 서명한 파일이 설치 프로그램에 들어가는 것까지 보았고, 설치되어 나온 파일은 Windows에서 봐야 합니다.
 
 ### Android판
 ```bash
