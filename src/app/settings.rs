@@ -148,8 +148,9 @@ pub const MIN_ZOOM_PERCENT: u16 = 50;
 pub const MAX_ZOOM_PERCENT: u16 = 300;
 /// How many things can be pinned to the sidebar.
 pub const MAX_PINS: usize = 12;
-/// The longest crossfade between songs that can be set, in seconds.
-pub const MAX_CROSSFADE_SECS: u8 = 12;
+/// The longest crossfade between songs that can be set, in seconds (the decode thread
+/// reckons with no longer one while it does not know what follows a song).
+pub const MAX_CROSSFADE_SECS: u8 = (crate::audio::feed::LONGEST_CROSSFADE_MS / 1000) as u8;
 
 /// How many equalizer presets of the user's own are kept (the equalizer sheet offers
 /// no way to save more) and how long a preset's name may be.

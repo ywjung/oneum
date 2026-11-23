@@ -78,16 +78,21 @@ impl NextSlot {
             *slot = next;
         }
     }
-    /// What is announced right now, without taking it.
-    /// For how long the track that is to follow is mixed with the end of the current
-    /// one (0: not at all, or nothing is known to follow).
-    fn crossfade_ms(&self) -> u32 {
+    /// How much of the end of the current track is to be held back for the track that
+    /// follows, in milliseconds: for as long as that one is mixed with it (0: not at
+    /// all, or nothing follows). While the controller has not said what follows (it
+    /// says so when it hears that a track has started, and the decode thread has gone
+    /// on by then), as much as the longest crossfade takes: whatever the answer is,
+    /// the audio it is about has not gone by.
+    fn hold_ms(&self) -> u32 {
         match self.0.lock().as_deref() {
             Ok(NextTrack::Track(next)) => next.crossfade_ms,
+            Ok(NextTrack::Pending) => LONGEST_CROSSFADE_MS,
             _ => 0,
         }
     }
 
+    /// What is announced right now, without taking it.
     fn peek(&self) -> NextTrack {
         match self.0.lock() {
             Ok(slot) => slot.clone(),
@@ -661,7 +666,9 @@ impl Worker {
         // current one, that end is not known until the track is over: the last so many
         // milliseconds of what the current track gives (after its gain and the rate
         // conversion, before the stages that run over the joined stream) are held back
-        // here, and go on as later audio pushes them out.
+        // here, and go on as later audio pushes them out. So they are while it is not
+        // known yet what follows (see `NextSlot::hold_ms`): the controller's answer
+        // must not come too late for a track that is decoded faster than it is told.
         let mut held: VecDeque<f32> = VecDeque::new();
         // The held end of the track before, while it is mixed into the beginning of
         // the current one: its samples, and how many of its frames are mixed already.
@@ -672,42 +679,49 @@ impl Worker {
         macro_rules! stages {
             ($block:expr) => {{
                 let block: &mut Vec<f32> = $block;
-                // (The last use of the stages reads the versions no more.)
-                let version = self.params.eq.version();
-                if version != eq_version {
-                    #[allow(unused_assignments)]
-                    {
-                        eq_version = version;
+                // In pieces the ring has room for at once: what was held back of a
+                // track is seconds of audio when it is let go, and the count of what
+                // is written (which the engine waits for before it plays a feed, and
+                // by which a reader may take no more than was written) moves on only
+                // when a piece is in the ring.
+                for piece in block.chunks_mut(self.refill) {
+                    // (The last use of the stages reads the versions no more.)
+                    let version = self.params.eq.version();
+                    if version != eq_version {
+                        #[allow(unused_assignments)]
+                        {
+                            eq_version = version;
+                        }
+                        eq.set(self.params.eq.get());
                     }
-                    eq.set(self.params.eq.get());
-                }
-                // A sample that the gain or the rate conversion pushed out of the
-                // number range must not get into the filters (it would stay in
-                // them), and what leaves them must be numbers.
-                sanitize(block);
-                eq.process(block);
-                let version = self.params.peq.version();
-                if version != peq_version {
-                    #[allow(unused_assignments)]
-                    {
-                        peq_version = version;
+                    // A sample that the gain or the rate conversion pushed out of the
+                    // number range must not get into the filters (it would stay in
+                    // them), and what leaves them must be numbers.
+                    sanitize(piece);
+                    eq.process(piece);
+                    let version = self.params.peq.version();
+                    if version != peq_version {
+                        #[allow(unused_assignments)]
+                        {
+                            peq_version = version;
+                        }
+                        corrector.set(self.params.peq.get().as_deref());
                     }
-                    corrector.set(self.params.peq.get().as_deref());
+                    corrector.process(piece);
+                    crossfeed.set(crossfeed_now(&self.params));
+                    crossfeed.process(piece);
+                    // The room's correction is for what comes out of the speakers: the
+                    // last thing done to the sound.
+                    if let Some(room) = room.as_mut() {
+                        room.process(piece);
+                    }
+                    sanitize(piece);
+                    match self.push_limited(&mut limiter, piece, &mut limited) {
+                        Some(frames) => written += frames,
+                        None => return false,
+                    }
+                    self.written.store(written, Ordering::Relaxed);
                 }
-                corrector.process(block);
-                crossfeed.set(crossfeed_now(&self.params));
-                crossfeed.process(block);
-                // The room's correction is for what comes out of the speakers: the
-                // last thing done to the sound.
-                if let Some(room) = room.as_mut() {
-                    room.process(block);
-                }
-                sanitize(block);
-                match self.push_limited(&mut limiter, block, &mut limited) {
-                    Some(frames) => written += frames,
-                    None => return false,
-                }
-                self.written.store(written, Ordering::Relaxed);
             }};
         }
 
@@ -741,7 +755,7 @@ impl Worker {
                 // mixed with it (not that of a DSD track, whose last frames are
                 // made with the next track's first ones).
                 let hold_ms = match $info.dsd_rate {
-                    None => self.params.next.crossfade_ms(),
+                    None => self.params.next.hold_ms(),
                     Some(_) => 0,
                 };
                 // Only the end is held. Far from it (where the track's length is
@@ -759,7 +773,8 @@ impl Worker {
                         ready.extend(held.drain(..held.len() - keep));
                     }
                 } else if !held.is_empty() {
-                    // Not to be mixed after all: what was held goes on, in its place.
+                    // Not to be mixed after all (or what follows is known now, and is
+                    // not to be mixed in): what was held goes on, in its place.
                     held.extend(ready.iter());
                     ready.clear();
                     ready.extend(held.drain(..));
@@ -1068,6 +1083,12 @@ impl Worker {
         true
     }
 }
+
+/// The longest crossfade a track is asked to be mixed in with (the setting goes no
+/// further: `app::settings::MAX_CROSSFADE_SECS`). As much of a track's end is held back
+/// while it is not known yet what follows it; a longer crossfade than this, announced
+/// only after the track's end was decoded, would be cut to this.
+pub const LONGEST_CROSSFADE_MS: u32 = 12_000;
 
 /// How much earlier than a crossfade's length before a track's end the holding back
 /// of that end begins: what is still on its way through the rate conversion and the
@@ -1393,6 +1414,93 @@ mod tests {
             .expect("finished event");
         assert_eq!(read, total * 2);
         assert!(total > 0);
+    }
+
+    /// Three songs of a second each, each mixed into the one before it for a tenth of
+    /// a second, read as fast as they are decoded; what follows a song is announced
+    /// `late` after the song has started, as the player announces it when it hears of
+    /// the start. Returns the samples and where each song began.
+    fn three_crossfaded_songs_announced(late: Duration) -> (Vec<f32>, Vec<(u64, u64)>) {
+        let song = |item_id: u64, name: &str| TrackRequest {
+            item_id,
+            track_id: item_id as TrackId,
+            path: fixture(name),
+            replaygain: ReplayGainTags::default(),
+            crossfade_ms: 100,
+        };
+        let (tx, rx) = channel();
+        let mut p = params(1, tx);
+        // (What follows the first song is announced as the feed is started.)
+        p.next = NextSlot::new();
+        p.next.set(NextTrack::Track(song(2, "gap_b.wav")));
+        let next = p.next.clone();
+        let mut feed = FeedHandle::spawn(p).expect("spawn");
+        let mut consumer = feed.take_consumer().expect("consumer").consumer;
+        let mut pcm = Vec::new();
+        let mut started = Vec::new();
+        let mut due: Option<(Instant, NextTrack)> = None;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let available = consumer.slots();
+            if available > 0 {
+                let chunk = consumer.read_chunk(available).expect("chunk");
+                let (a, b) = chunk.as_slices();
+                pcm.extend_from_slice(a);
+                pcm.extend_from_slice(b);
+                chunk.commit_all();
+            } else if feed.is_finished() && consumer.slots() == 0 {
+                break;
+            }
+            while let Ok(event) = rx.try_recv() {
+                if let FeedEvent::TrackStarted {
+                    item_id, at_frame, ..
+                } = event
+                {
+                    started.push((item_id, at_frame));
+                    let follows = match item_id {
+                        2 => Some(NextTrack::Track(song(3, "gap_a.wav"))),
+                        3 => Some(NextTrack::End),
+                        _ => None,
+                    };
+                    due = follows.map(|follows| (Instant::now() + late, follows));
+                }
+            }
+            if due.as_ref().is_some_and(|(at, _)| Instant::now() >= *at)
+                && let Some((_, follows)) = due.take()
+            {
+                next.set(follows);
+            }
+            assert!(Instant::now() < deadline, "feed never finished");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        (pcm, started)
+    }
+
+    /// The controller says what follows a song only when it has heard that the song
+    /// started; a short song may be decoded to its end by then (the ring has room for
+    /// a second, and decoding is far faster than playing). Its end is still mixed with
+    /// the song that follows, for as long as was asked and sample for sample as when
+    /// the announcement comes at once: nothing of it has gone by before it is known
+    /// what follows. (Once the decode thread took what it had decoded before the
+    /// announcement as not to be mixed: a crossfade was cut short, or left out, by
+    /// however late the announcement came. A test of three one-second songs failed
+    /// that way on a busy CI machine.)
+    #[test]
+    fn a_late_announcement_does_not_cut_the_crossfade_short() {
+        let fade = frames_of(100, 44_100) as u64;
+        let begins = vec![(1, 0), (2, 44_100 - fade), (3, 2 * (44_100 - fade))];
+        let (at_once, started) = three_crossfaded_songs_announced(Duration::ZERO);
+        assert_eq!(started, begins);
+        assert_eq!(at_once.len() as u64 / 2, 3 * 44_100 - 2 * fade);
+        // Fifty milliseconds: several times what a second of audio takes to decode.
+        let (late, started) = three_crossfaded_songs_announced(Duration::from_millis(50));
+        assert_eq!(started, begins, "each song begins where the mix begins");
+        assert_eq!(
+            late.len() as u64 / 2,
+            3 * 44_100 - 2 * fade,
+            "shorter than the three by what they share"
+        );
+        assert!(late == at_once, "the same samples as announced at once");
     }
 
     #[test]
