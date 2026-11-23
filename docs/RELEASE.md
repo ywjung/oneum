@@ -15,7 +15,7 @@
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 | 공개됨(2026-11-22) — https://github.com/ywjung/oneum (`github` 원격, `main`만 올림). 올리기 전에 추적 파일과 커밋에 비밀 값 · 개인 주소 · 홈 경로 · 서명 팀 ID · 기기 식별자가 없음을 확인했다. 커밋의 작성자는 모두 한 이름과 한 e-mail 주소다. CI는 여섯 번의 실행에 걸쳐 고친 뒤 네 작업(macOS · Windows · Android · 의존성 권고) 모두 통과(docs/TESTING.md "GitHub에 올린 뒤의 CI"). 올라간 커밋은 다시 쓰지 않는다 |
-| 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 서명 · 공증이 없어 시험판으로 표시했다(아래 "공개") |
+| 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
 | Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
 | iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리 결과, TestFlight로 실제 iPhone에서 보는 것, 스토어 정보와 심사는 **남음**([APP_STORE.md](APP_STORE.md)) |
@@ -186,7 +186,7 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
 - 공개 업로드는 권한이 있는 사람이 수행합니다. 공개 전에 결과물(`dist/*.dmg`, `SHA256SUMS.txt`)과 `CHANGELOG.md`를 검토합니다.
 - 라이선스 전문 묶음(`THIRD_PARTY_LICENSES.txt`)이 번들 `Resources`와 Windows zip에 들어 있는지 확인합니다. 각 crate 패키지에 든 LICENSE·COPYING·NOTICE 파일을 모은 것이고,
   파일이 없는 crate는 목록과 함께 표준 본문이 묶음 안에 있는지 스크립트가 검사합니다(없으면 실패).
-- 판매·공개 전 남은 일: 서명 · 공증한 dmg를 다른 Mac에서 내려받아 여는 확인(v0.1.0 시험판에 올라가 있는 dmg는 서명 전의 것), Windows 실제 실행 확인(docs/TESTING.md "Windows"), 그리고 가능하면 Windows 코드 서명(없으면 SmartScreen 경고).
+- 판매·공개 전 남은 일: 서명 · 공증한 dmg를 다른 Mac에서 내려받아 여는 확인(v0.1.0 시험판의 dmg는 2026-11-23에 서명 · 공증한 빌드 153으로 바꿈), Windows 실제 실행 확인(docs/TESTING.md "Windows"), 그리고 가능하면 Windows 코드 서명(없으면 SmartScreen 경고).
 
 ## iPhone: App Store 제출 준비 (2026-11-18 점검)
 **가입부터 심사까지의 순서, 아카이브 스크립트(`scripts/ios-archive.sh`), 스토어 정보 점검표는 [APP_STORE.md](APP_STORE.md)에 있습니다.** 아래는 서명 전까지 확인하고 고친 것과, 제출하는 사람이 할 일입니다. 서명 없는 아카이브(`xcodebuild … archive CODE_SIGNING_ALLOWED=NO`)는 앱과 위젯 확장이 같은 버전 · 빌드 번호로 들어간 정상 구조이고, 안에 아래 파일들이 있습니다.

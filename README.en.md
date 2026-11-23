@@ -51,7 +51,7 @@ open dist/OnEum.app
 ```
 
 `scripts/package.sh --dmg` makes a disk image for installing (`dist/OnEum-<version>-arm64.dmg`).
-The build is not signed with a Developer ID and not notarised, so Gatekeeper warns on other Macs.
+A build made this way is not signed with a Developer ID and not notarised, so Gatekeeper warns on other Macs (the disk image on the releases page is signed and notarised).
 Details: [docs/RELEASE.md](docs/RELEASE.md) (Korean).
 
 ## Windows

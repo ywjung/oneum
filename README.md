@@ -51,7 +51,7 @@ open dist/OnEum.app
 ```
 
 설치용 디스크 이미지는 `scripts/package.sh --dmg`로 만듭니다(`dist/OnEum-<버전>-arm64.dmg`).
-Developer ID로 서명·공증하지 않은 빌드이므로 다른 Mac에서는 Gatekeeper 경고가 나옵니다.
+이렇게 직접 만든 것은 Developer ID로 서명·공증하지 않은 빌드이므로 다른 Mac에서는 Gatekeeper 경고가 나옵니다(릴리스 페이지의 dmg는 서명·공증한 것입니다).
 자세한 내용은 [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Windows
