@@ -1579,12 +1579,40 @@ USB DAC(AKLIAM PD5)을 Mac에 꽂고 확인했습니다. 시스템의 기본 출
 - 옵션을 켠 채로의 장시간 연속 재생(위 "장시간 재생"은 옵션이 없던 때의 측정입니다).
 - 사람 귀로 듣는 확인. 위 확인은 모두 앱 볼륨 0에서 상태와 로그로 했습니다.
 
+## Developer ID 서명과 공증 (🖥, 2026-11-23)
+
+`ONEUM_MAC_TEAM=<팀 ID> scripts/package.sh --dmg --notarize`로 만든 0.1.0 빌드 153(docs/RELEASE.md 4 · 5절 "가").
+
+| 항목 | 결과 |
+|---|---|
+| 서명 | `Authority=Developer ID Application`, 지정한 팀, `flags=0x10000(runtime)`, Apple의 타임스탬프. `codesign --verify --deep --strict` 통과. entitlements 없음 |
+| 공증 | Xcode가 보낸 뒤 1분 안에 답이 옴. `stapler validate` 통과(`Notarization Ticket=stapled`) |
+| Gatekeeper | `spctl -a -t exec -vv` → **accepted**, `source=Notarized Developer ID`. `syspolicy_check distribution` → 배포 전 검사 모두 통과 |
+| 내려받은 것처럼 | dmg에 격리 표시(`com.apple.quarantine`)를 붙이고 마운트해 앱을 꺼냄: 꺼낸 앱에도 격리 표시가 따라옴, 스크립트의 검사 8항목과 `spctl` 통과 |
+| 바뀌지 않은 것 | `Info.plist`, 라이선스 파일은 서명 전과 같음(스크립트가 비교). 새로 생긴 파일은 티켓(`Contents/CodeResources`) 하나. 홈 경로(`/Users/`)가 든 파일 0, 검증 채널 없음, arm64 |
+| 체크섬 | `shasum -a 256 -c SHA256SUMS.txt` → OK |
+| 시작 | 꺼낸 앱을 격리 표시를 뗀 뒤 새 프로필로 실행(처음 열 때의 Gatekeeper 창은 사람이 눌러야 해서 거치지 않음): 떠서 5초 뒤에도 살아 있고 프로필 폴더를 만듦, 충돌 기록 없음 |
+| dmg 자체 | 서명 없음(`spctl -t open` → rejected, `no usable signature`). 이 방법에서는 서명할 인증서가 이 Mac에 없다. 앱이 통과하므로 여는 데는 지장이 없을 것으로 보지만 **다른 Mac에서는 확인하지 못함** |
+
+스크립트가 틀린 것을 잡는지(`scripts/mac-developer-id.sh --check`와 `scripts/package.sh`):
+- 임시(ad-hoc) 서명 앱 → Developer ID 아님 · 타임스탬프 없음으로 실패.
+- 서명만 하고 공증하지 않은 앱을 공증된 것으로 검사 → 티켓 없음으로 실패.
+- 다른 팀을 지정 → 실패. 서명 뒤 파일을 바꿈 → 서명 불일치 · Gatekeeper 거절로 실패.
+- 검증 채널의 이름이 든 실행 파일 → 서명하지 않고 끝남. 디버그 빌드, `ONEUM_AUTOMATION=1`, 팀 없이 `--notarize`, 두 서명 방법을 함께 지정, 형식이 틀린 팀 ID → 빌드 전에 끝남.
+- 화면이 잠긴 상태 → `xcodebuild`를 부르지 않고 끝남.
+
+겪은 것:
+- **계정이 두 팀에 속해 있어 처음에 다른 조직의 팀을 지정했다.** Apple이 거절했고(그 팀의 계정 소유자만 할 수 있는 일) 아무것도 만들어지지 않았다. 본인 팀으로 다시 해서 됐다.
+- **화면이 잠긴 채 돌린 한 번**은 18분 뒤 `No Accounts`로 끝났고, 그 뒤 Xcode의 저장된 계정 목록과 키체인의 로그인 항목이 비어 있었다. 켜져 있던 Xcode의 창에는 계정이 계속 보였지만 `xcodebuild`는 찾지 못했다. Xcode를 종료했다 열어 다시 로그인한 뒤 됐다.
+- 스크립트의 첫 잠금 확인은 `grep -q`를 써서 듣지 않았다(먼저 끝나 파이프가 실패로 끝남). 줄 수를 세는 것으로 고쳤다.
+
 ## 검증 대기 (⏳)
 구현은 되어 있으나 이 환경에서 확인하지 못한 항목입니다. 완료로 표기하지 않습니다.
 
 | 항목 | 이유 | 확인 방법 |
 |---|---|---|
-| Developer ID 서명, 공증, stapling, Gatekeeper(`spctl`) | Developer ID 인증서와 Apple 계정 자격 증명 없음 | docs/RELEASE.md 절차 |
+| 서명 · 공증한 dmg를 다른 Mac에서 내려받아 열기 | 이 Mac에서만 확인함(격리 표시를 붙인 dmg, `spctl`). 처음 열 때의 Gatekeeper 창은 사람이 눌러야 함 | 다른 Mac에서 dmg를 내려받아 앱을 응용 프로그램에 넣고 열기 |
+| 키체인의 Developer ID 인증서로 서명, notarytool로 공증 | 이 Mac에 그런 인증서와 저장된 자격 증명이 없음(Xcode의 계정으로 하는 길만 확인) | docs/RELEASE.md 4 · 5절 "나" |
 | VoiceOver 음성 안내 | 사람이 들어야 함. 접근성 트리의 이름·역할만 확인함 | VoiceOver(⌘F5)로 주요 흐름 탐색 |
 | 전체 화면에서 ⌘W | 코드로만 처리(앱 숨김). 전체 화면 전환은 자동화하지 않음 | 전체 화면 → ⌘W → Dock 아이콘 |
 | 멈춤 감시의 실제 상황(죽은 네트워크·USB 드라이브) | 열리지 않는 FIFO로만 재현 | 재생 중 드라이브 분리 |

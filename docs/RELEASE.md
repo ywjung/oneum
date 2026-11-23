@@ -8,8 +8,8 @@
 | 재현 가능한 빌드·번들·DMG | 완료 (`scripts/package.sh --dmg`) |
 | ad-hoc 서명(하드닝 런타임 포함), `codesign --verify` | 완료 |
 | 별도 위치에 설치해 실행 | 완료 (docs/TESTING.md "패키지 검증") |
-| Developer ID 서명 + Hardened Runtime | **검증 대기** — 인증서 없음 |
-| 공증(notarytool), stapling, `spctl` 평가 | **검증 대기** — Apple 계정 자격 증명 없음 |
+| Developer ID 서명 + Hardened Runtime | 완료(2026-11-23) — Xcode에 로그인된 계정으로(`ONEUM_MAC_TEAM`, 4절 "가"). 키체인의 인증서로 하는 길(4절 "나")은 **검증 대기** |
+| 공증, 티켓 붙이기, `spctl` 평가 | 완료(2026-11-23) — `scripts/package.sh --dmg --notarize`(5절 "가"): 앱이 `Notarized Developer ID`로 받아들여짐. 디스크 이미지 자체는 서명 없음. notarytool로 하는 길(5절 "나")과 **다른 Mac에서 내려받아 여는 것은 검증 대기** |
 | 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
@@ -112,16 +112,35 @@ scripts/package-android.sh
 
 음악은 "음악 및 오디오" 권한(`READ_MEDIA_AUDIO`)으로 읽는다. "모든 파일에 대한 접근"(`MANAGE_EXTERNAL_STORAGE`)은 설정에서 고르는 선택으로 남아 있고 매니페스트에 선언되어 있으므로, Play 스토어에 올리려면 그 권한의 사용 목적을 신고하거나 선언을 빼야 한다(빼면 WavPack · APE · DSD 파일과 옆의 표지 · 가사 · CUE를 못 읽는다, [ANDROID_PLAN.md](ANDROID_PLAN.md) 4.1).
 
-## 4. Developer ID 서명 (자격 증명 필요)
-필요한 것: Apple Developer Program의 **Developer ID Application** 인증서(키체인에 설치).
+## 4. Developer ID 서명
+Apple Developer Program 멤버십이 필요합니다. 방법은 둘이고, 하나만 씁니다. 어느 쪽이든 Hardened Runtime이 켜지고 서명에 Apple의 타임스탬프가 들어갑니다.
+OnEum은 JIT·외부 라이브러리 로딩·마이크·카메라를 쓰지 않으므로 **entitlements 파일이 필요 없습니다.**
+
+### 가. Xcode에 로그인된 계정으로 (확인된 방법)
+필요한 것: Xcode ▸ Settings ▸ Accounts에 로그인된 Apple 계정과 팀 ID(열 글자, developer.apple.com ▸ Membership details). 인증서를 직접 만들거나 키체인에 넣지 않습니다. Xcode가 Apple에 보관하는 Developer ID 인증서로 서명합니다(자동 서명). 암호를 묻지 않고, 계정의 어떤 값도 저장소에 남지 않습니다.
+```bash
+ONEUM_MAC_TEAM=<팀 ID> scripts/package.sh --dmg
+```
+- `scripts/package.sh`가 앱을 만든 뒤 `scripts/mac-developer-id.sh`를 부릅니다. 이 스크립트는 앱을 아카이브로 싸서 `xcodebuild -exportArchive`(`method=developer-id`)로 다시 서명하게 하고, 돌아온 앱을 검사한 뒤 `dist/OnEum.app`을 바꿉니다. 검사: 서명이 내용과 맞는지, Developer ID 인증서인지, 지정한 팀인지, Hardened Runtime, 타임스탬프, 검증 채널 없음.
+- **계정이 여러 팀에 속해 있으면 본인 팀의 ID를 줍니다.** 지정한 팀이 서명합니다. 다른 조직의 팀을 주면 그 팀의 계정 소유자만 할 수 있는 일이라 Xcode가 거절합니다(Developer ID 인증서는 계정 소유자만 만듭니다).
+- **화면 잠금이 풀려 있어야 합니다.** 잠긴 채 돌린 한 번(2026-11-23)은 Xcode가 키체인에서 계정을 읽지 못해 15분쯤 뒤 `No Accounts`로 끝났고, 그 뒤 Xcode의 계정 목록이 비어 **다시 로그인해야 했습니다.** 그래서 스크립트가 먼저 확인하고, 잠겨 있으면 `xcodebuild`를 부르지 않고 끝냅니다. 서명이 끝날 때까지 화면이 잠기지 않게 둡니다.
+- 디버그 빌드와 검증 채널이 든 빌드(`ONEUM_AUTOMATION=1`)는 거절합니다.
+- 이 방법에서는 **디스크 이미지 자체는 서명되지 않습니다**(서명할 인증서가 이 Mac에 없습니다). 안의 앱이 서명 · 공증되어 있으면 Gatekeeper는 앱을 통과시킵니다.
+
+있는 앱만 검사하려면:
+```bash
+scripts/mac-developer-id.sh --check dist/OnEum.app --notarized
+```
+
+### 나. 키체인의 인증서로 (**검증 대기** — 이 Mac에는 그런 인증서가 없음)
+필요한 것: 키체인에 설치된 **Developer ID Application** 인증서.
 ```bash
 security find-identity -v -p codesigning
 ```
 ```bash
 ONEUM_SIGN_IDENTITY="Developer ID Application: <이름> (<팀 ID>)" scripts/package.sh --dmg
 ```
-스크립트가 `--options runtime`(Hardened Runtime)과 `--timestamp`로 서명합니다.
-OnEum은 JIT·외부 라이브러리 로딩·마이크·카메라를 쓰지 않으므로 **entitlements 파일이 필요 없습니다.**
+스크립트가 `--options runtime`(Hardened Runtime)과 `--timestamp`로 앱과 디스크 이미지를 서명합니다.
 ```bash
 codesign --verify --deep --strict --verbose=2 dist/OnEum.app
 ```
@@ -129,8 +148,17 @@ codesign --verify --deep --strict --verbose=2 dist/OnEum.app
 codesign -d --entitlements - --verbose=2 dist/OnEum.app
 ```
 
-## 5. 공증 (자격 증명 필요)
-필요한 것: Apple ID, 앱 암호, 팀 ID. 비밀 값은 키체인 프로필에만 저장하고 저장소·로그에 남기지 않습니다.
+## 5. 공증
+### 가. Xcode에 로그인된 계정으로 (확인된 방법)
+```bash
+ONEUM_MAC_TEAM=<팀 ID> scripts/package.sh --dmg --notarize
+```
+- 서명한 앱을 Xcode가 Apple의 공증 서비스에 보내고(`destination=upload`), 스크립트가 답을 기다렸다가(`xcodebuild -exportNotarizedApp`, 기본 30분까지, `ONEUM_NOTARY_WAIT`로 바꿈) **티켓이 붙은 앱**을 받아 옵니다. 앱 암호나 키체인 프로필이 필요 없습니다.
+- 검사가 더해집니다: 티켓이 붙어 있는지(`stapler validate`), Gatekeeper가 공증된 앱으로 받아들이는지(`spctl -a -t exec` → `source=Notarized Developer ID`).
+- 디스크 이미지와 `SHA256SUMS.txt`는 그 앱으로 만들어집니다.
+
+### 나. notarytool로 직접 (**검증 대기** — 자격 증명을 저장한 적 없음)
+4절 "나"로 서명한 디스크 이미지에 씁니다. 필요한 것: Apple ID, 앱 암호, 팀 ID. 비밀 값은 키체인 프로필에만 저장하고 저장소·로그에 남기지 않습니다.
 ```bash
 xcrun notarytool store-credentials oneum-notary --apple-id <Apple ID> --team-id <팀 ID>
 ```
@@ -158,7 +186,7 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
 - 공개 업로드는 권한이 있는 사람이 수행합니다. 공개 전에 결과물(`dist/*.dmg`, `SHA256SUMS.txt`)과 `CHANGELOG.md`를 검토합니다.
 - 라이선스 전문 묶음(`THIRD_PARTY_LICENSES.txt`)이 번들 `Resources`와 Windows zip에 들어 있는지 확인합니다. 각 crate 패키지에 든 LICENSE·COPYING·NOTICE 파일을 모은 것이고,
   파일이 없는 crate는 목록과 함께 표준 본문이 묶음 안에 있는지 스크립트가 검사합니다(없으면 실패).
-- 판매·공개 전 남은 일: Developer ID 서명과 공증(4·5절), Windows 실제 실행 확인(docs/TESTING.md "Windows"), 그리고 가능하면 Windows 코드 서명(없으면 SmartScreen 경고).
+- 판매·공개 전 남은 일: 서명 · 공증한 dmg를 다른 Mac에서 내려받아 여는 확인(v0.1.0 시험판에 올라가 있는 dmg는 서명 전의 것), Windows 실제 실행 확인(docs/TESTING.md "Windows"), 그리고 가능하면 Windows 코드 서명(없으면 SmartScreen 경고).
 
 ## iPhone: App Store 제출 준비 (2026-11-18 점검)
 **가입부터 심사까지의 순서, 아카이브 스크립트(`scripts/ios-archive.sh`), 스토어 정보 점검표는 [APP_STORE.md](APP_STORE.md)에 있습니다.** 아래는 서명 전까지 확인하고 고친 것과, 제출하는 사람이 할 일입니다. 서명 없는 아카이브(`xcodebuild … archive CODE_SIGNING_ALLOWED=NO`)는 앱과 위젯 확장이 같은 버전 · 빌드 번호로 들어간 정상 구조이고, 안에 아래 파일들이 있습니다.
