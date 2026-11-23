@@ -31,13 +31,18 @@ jobs:
       - run: rustup show
       - run: rustup target add x86_64-pc-windows-gnu
       # The compiler that links the program (and compiles its icon and version details)
-      # and NSIS, which makes the setup program.
-      - name: mingw-w64 and NSIS
+      # and NSIS, which makes the setup program. The program is written for Windows'
+      # universal C run-time: Ubuntu's mingw-w64 for it is the "ucrt64" one, whose tools
+      # are named x86_64-w64-mingw32ucrt-... (the plain ones link msvcrt.dll, and the
+      # program does not link there).
+      - name: mingw-w64 (UCRT) and NSIS
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends mingw-w64 nsis zip unzip
+          sudo apt-get install --yes --no-install-recommends gcc-mingw-w64-ucrt64 nsis zip unzip
       - name: The zip and the setup program
         run: scripts/package-windows.sh
+        env:
+          ONEUM_MINGW: x86_64-w64-mingw32ucrt
       # The files name no folder of the machine that built them (scripts/release-paths.sh
       # takes the home folder and the checkout out of the paths Rust keeps).
       - name: No path of the runner in the files
