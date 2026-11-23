@@ -1219,7 +1219,9 @@ wgpu는 프레임을 보낼 때마다 `vkGetSemaphoreCounterValue`로 장치가 
 - 업로드(검사한 아카이브를 `destination=upload`로 다시 내보냄): App Store Connect에 앱이 없을 때 exit 70 — `App record with bundle identifier "app.oneum.OnEum" not found on App Store Connect`(올라간 것 없음). 사용자가 앱을 만든 뒤 같은 명령: `Upload succeeded` · `EXPORT SUCCEEDED`, 경고 둘(`Upload Symbols Failed … did not include a dSYM`, 앱과 위젯).
 - 그 뒤 스크립트에 `--upload <.xcarchive>`를 넣음(있는 아카이브를 검사하고 그대로 보냄, 버전과 빌드 번호는 아카이브의 것). `xcodebuild` 대역을 PATH 앞에 두고 확인: 아카이브를 검사하고, `ExportOptions.plist`의 `destination`이 `upload`이고, `-exportArchive -archivePath <준 것>`으로 부르며, 아카이브를 새로 만들지 않음. 없는 아카이브는 실패(1), `.xcarchive`가 아닌 인자는 사용법(2). 실제 업로드를 이 길로 다시 하지는 않았다(같은 빌드 번호는 한 번만 받는다): 실제로 올린 것은 같은 인자의 손으로 한 실행이다.
 
-확인하지 못한 것: 올린 빌드를 Apple이 처리한 결과(TestFlight에 나오는지, 자동 검사 e-mail), TestFlight로 설치한 앱의 위젯에 곡이 나오는지, 심사. 계정의 화면과 메일은 사용자만 볼 수 있다.
+- 사용자가 보고 알려 준 것(2026-11-23, 내가 본 것이 아님): 올린 빌드가 TestFlight에 "제출 준비 완료"로 나옴 → TestFlight 앱으로 본인 iPhone에 설치 → **위젯에 재생 중인 곡이 나옴**. 실제 iPhone의 위젯과 배포 서명의 키체인 그룹은 이것이 첫 확인이다(어느 위젯 — 홈 화면인지 잠금 화면인지 — 은 듣지 못함).
+
+확인하지 못한 것: 자동 검사 e-mail이 왔는지, TestFlight로 설치한 앱의 나머지(잠금 화면 위젯, 로컬 네트워크 권한 창의 문구, 연결한 폴더, 전화 · 이어폰 분리, 가로 화면), 심사. 계정의 화면과 메일은 사용자만 볼 수 있다.
 
 ## 공개 전 검토와 스크린샷 교체 (2026-11-18)
 GitHub에 올리기 전에 추적되는 파일 508개와 `main`의 커밋 117개 전체(추가된 모든 줄, 10.4MB)를 검사했다: 키 · 토큰 · 비밀번호 대입 · 서명 파일, 이메일 주소, 홈 경로와 계정 · 컴퓨터 이름, 팀 · 기기 식별자, 공인 IP. 나온 것은 예제 주소(example.org 등)와 지어낸 기기 UUID뿐이다. 커밋의 작성자 · 커미터는 117개 모두 같은 한 사람이다.
