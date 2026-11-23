@@ -3,6 +3,8 @@
 ;   VERSION   the version, as in Cargo.toml ("0.1.0")
 ;   STAGE     the folder that holds what is installed (OnEum.exe, the license, the notices)
 ;   OUTFILE   the setup program to write
+;   SIGN      (only when the files are signed) scripts/windows-sign.sh, to sign the
+;             uninstaller before it is packed: it is made here, so nothing else can
 ;
 ; It installs for the person who runs it, without asking for an administrator:
 ; the program goes into %LOCALAPPDATA%\Programs\OnEum, a shortcut into the Start menu,
@@ -36,6 +38,10 @@ RequestExecutionLevel user
 
 Name "${APP}"
 OutFile "${OUTFILE}"
+!ifdef SIGN
+  ; The setup program itself is signed by the packaging script once it is written.
+  !uninstfinalize '"${SIGN}" sign "%1"' = 0
+!endif
 InstallDir "$LOCALAPPDATA\Programs\${APP}"
 ; An earlier installation says where it went: an update goes to the same place.
 InstallDirRegKey HKCU "${APP_KEY}" "InstallDir"
