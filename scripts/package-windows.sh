@@ -23,19 +23,9 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 TARGET=x86_64-pc-windows-gnu
 # The program is written for Windows' universal C run-time (UCRT), and Homebrew's
-# mingw-w64 links it. On Debian and Ubuntu the tools of that name link the old
-# msvcrt.dll instead (the program does not even link there), and the ones for UCRT are
-# called x86_64-w64-mingw32ucrt-...: ONEUM_MINGW names the tools to use, as the
-# workflow that builds on a GitHub runner does (.github/workflows/windows-package.yml).
-MINGW=${ONEUM_MINGW:-x86_64-w64-mingw32}
-command -v "$MINGW-gcc" >/dev/null || { echo "$MINGW-gcc is not installed (on a Mac: brew install mingw-w64)" >&2; exit 1; }
-if [ "$MINGW" != x86_64-w64-mingw32 ]; then
-  # Other tools than .cargo/config.toml and build.rs name: the linker, the compiler of
-  # the C sources among the libraries (SQLite), and the resource compiler.
-  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$MINGW-gcc"
-  export CC_x86_64_pc_windows_gnu="$MINGW-gcc" AR_x86_64_pc_windows_gnu="$MINGW-ar"
-  export WINDRES="$MINGW-windres"
-fi
+# mingw-w64 links it. The tools of the same name on Debian and Ubuntu link the old
+# msvcrt.dll instead, and the program does not link there (it is checked below).
+command -v x86_64-w64-mingw32-gcc >/dev/null || { echo "mingw-w64 is not installed (brew install mingw-w64)" >&2; exit 1; }
 
 # Asked to sign: whatever that needs has to be there before the long build.
 SIGN=""
@@ -87,19 +77,19 @@ TXT
 
 # The icon is built in (File Explorer and the Start menu show it): a build without a
 # resource compiler would only have warned.
-"$MINGW-windres" --input-format=coff --output-format=rc "$STAGE/$NAME/OnEum.exe" 2>/dev/null \
+x86_64-w64-mingw32-windres --input-format=coff --output-format=rc "$STAGE/$NAME/OnEum.exe" 2>/dev/null \
   | grep -q "RT_GROUP_ICON" || { echo "the program has no icon built in (see build.rs)" >&2; exit 1; }
 
 # Only Windows' own libraries may be needed at run time (no compiler run-time DLLs).
-DLLS=$("$MINGW-objdump" -p "$STAGE/$NAME/OnEum.exe" | sed -n 's/.*DLL Name: //p')
+DLLS=$(x86_64-w64-mingw32-objdump -p "$STAGE/$NAME/OnEum.exe" | sed -n 's/.*DLL Name: //p')
 FOREIGN=$(printf '%s\n' "$DLLS" | grep -i -E 'libgcc|libwinpthread|libstdc' || true)
 [ -z "$FOREIGN" ] || { echo "the program needs run-time DLLs that Windows does not have: $FOREIGN" >&2; exit 1; }
 # And the C run-time is the universal one, as in every build that was checked.
 if printf '%s\n' "$DLLS" | grep -q -i '^msvcrt\.dll'; then
-  echo "the program was linked with msvcrt.dll, not the universal C run-time (see ONEUM_MINGW above)" >&2; exit 1
+  echo "the program was linked with msvcrt.dll, not the universal C run-time (this mingw-w64 is not one for UCRT)" >&2; exit 1
 fi
 printf '%s\n' "$DLLS" | grep -q -i '^api-ms-win-crt-' \
-  || { echo "the program does not use the universal C run-time (see ONEUM_MINGW above)" >&2; exit 1; }
+  || { echo "the program does not use the universal C run-time (this mingw-w64 is not one for UCRT)" >&2; exit 1; }
 
 # Signed here, once: the zip and the setup program carry the same signed program.
 [ -z "$SIGN" ] || "$SIGN" sign "$STAGE/$NAME/OnEum.exe"
