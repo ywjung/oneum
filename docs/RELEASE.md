@@ -13,7 +13,7 @@
 | 라이선스 전문 묶음 | 완료 — `THIRD_PARTY_LICENSES.txt`(`scripts/gen-licenses.py`, 패키징 때 자동 생성) |
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
-| Windows 코드 서명 | 서명하는 길과 검사는 준비됨(2026-11-23, `scripts/windows-sign.sh`, 시험용 인증서로 확인). **인증서가 없어 배포물은 서명되지 않음**. 무료 서명(SignPath Foundation) 신청 준비: 정책 페이지(게시됨)와 GitHub 러너 빌드 워크플로(2026-11-23 세 번째 실행에서 통과), **신청은 아직** — 아래 "Windows 코드 서명" |
+| Windows 코드 서명 | 서명하는 길과 검사는 준비됨(2026-11-23, `scripts/windows-sign.sh`, 시험용 인증서로 확인). **인증서가 없어 배포물은 서명되지 않음**. 무료 서명(SignPath Foundation) 신청 준비: 정책 페이지(게시됨)와 GitHub 러너 빌드 워크플로(2026-11-23 세 번째 실행에서 통과). **2026-11-24에 신청함, 심사 대기** — 아래 "Windows 코드 서명" |
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 | 공개됨(2026-11-22) — https://github.com/ywjung/oneum (`github` 원격, `main`만 올림). 올리기 전에 추적 파일과 커밋에 비밀 값 · 개인 주소 · 홈 경로 · 서명 팀 ID · 기기 식별자가 없음을 확인했다. 커밋의 작성자는 모두 한 이름과 한 e-mail 주소다. CI는 여섯 번의 실행에 걸쳐 고친 뒤 네 작업(macOS · Windows · Android · 의존성 권고) 모두 통과(docs/TESTING.md "GitHub에 올린 뒤의 CI"). 올라간 커밋은 다시 쓰지 않는다 |
 | 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
@@ -121,8 +121,10 @@ scripts/package-windows.sh
 1. 실제 Windows PC에서 지금의 설치 프로그램과 zip을 실행해 봅니다(docs/TESTING.md "Windows").
 2. GitHub 계정에 2단계 인증을 켭니다(조건: 팀 전원이 저장소와 SignPath 계정에 2단계 인증).
 3. (끝남, 2026-11-23) `main`에 합쳐 올려 정책 페이지가 게시되었고(https://ywjung.github.io/oneum/code-signing.html), "Windows package"가 GitHub에서 통과했습니다.
-4. https://signpath.org/apply 의 양식을 채워 신청합니다(로봇 확인이 있습니다). 조건은 https://signpath.org/terms.
+4. (끝남, 2026-11-24) https://signpath.org/apply 의 양식으로 신청했습니다. 접수 화면("Form submitted — Thank you, we'll be in touch soon.")까지 확인했고, 결과는 신청한 사람의 e-mail로 옵니다. 조건은 https://signpath.org/terms.
 5. 받아들여지면 SignPath의 계정 · 프로젝트 · 서명 정책을 만들고, API 토큰을 저장소의 secret(`SIGNPATH_API_TOKEN`)으로 넣고, 릴리스 때마다 서명 요청을 승인합니다.
+
+신청 양식이 물은 것(2026-11-24): 프로젝트 이름, 저장소 · 홈페이지 · 내려받는 페이지 · 개인정보 처리방침의 주소, 한 줄 소개, 분류(Audio), 설명, **평판**(널리 쓰이거나 신뢰받는다는 근거 — 필수), 유지하는 주체(개인), 빌드 시스템(GitHub Actions), SignPath 계정이 될 이름과 e-mail, 재단을 알게 된 경로, 행동 강령과 개인정보 처리에 대한 동의. 내려받는 페이지는 "SignPath Foundation을 코드 서명에 쓴다고 언급해야 한다"고 되어 있어, 두 홈페이지의 "받기"에 신청해 심사를 기다린다는 문장을 넣었습니다. 평판 칸에는 사실대로 적었습니다: 2026-11-22에 공개한 새 프로젝트이고 보도나 내려받기 기록이 없으며, 확인할 수 있는 것은 공개된 소스와 기록, CI, GitHub 러너에서의 빌드, 서명 · 공증된 macOS 릴리스라는 것. **이 때문에 거절될 수 있습니다.** 거절되면 서명 없이 시험판으로 두고, 릴리스 기록이 쌓인 뒤 다시 신청합니다.
 
 받아들여진 뒤에 할 일(아직 만들지 않음 — 조직 ID와 프로젝트 이름이 정해져야 쓸 수 있습니다):
 - 워크플로에 서명 단계를 넣습니다: `actions/upload-artifact`(v4 이상)로 올린 아티팩트의 ID를 `signpath/github-action-submit-signing-request@v3`에 넘깁니다(`organization-id`, `project-slug`, `signing-policy-slug`, `github-artifact-id`, `wait-for-completion`, `output-artifact-directory`; 승인을 기다리는 시간의 기본값은 600초).
@@ -140,7 +142,7 @@ scripts/package-windows.sh
 
 이 일로 `scripts/package-windows.sh`에 검사 하나를 더했습니다: 만든 프로그램이 UCRT를 쓰지 않으면(`msvcrt.dll`로 링크되었거나 `api-ms-win-crt-*`가 없으면) 실패합니다.
 
-확인하지 못한 것: 러너가 만든 아티팩트를 내려받아 보지 않았고 Windows에서 실행해 보지도 않았습니다. 버전 태그로 시작되는 실행(직접 실행만 해 봄). 신청 양식의 항목, 심사 기간과 결과, SignPath 쪽 설정 전부.
+확인하지 못한 것: 러너가 만든 아티팩트를 내려받아 보지 않았고 Windows에서 실행해 보지도 않았습니다. 버전 태그로 시작되는 실행(직접 실행만 해 봄). 심사 기간과 결과, SignPath 쪽 설정 전부.
 
 #### 서명해서 패키징하기 (이 Mac에서, 인증서가 있을 때)
 ```bash

@@ -24,7 +24,8 @@
 - docs/RELEASE.md "Windows 코드 서명": 개인이 인증서를 구하는 방법의 비교(비용 · 조건 · 한국의 개인이 되는지), 명령, 확인한 것과 못 한 것.
 - 시험용 인증서로만 확인했습니다. **진짜 인증서가 없어 배포물은 아직 서명되지 않고**, USB 토큰 · 클라우드 서명과 Windows에서의 서명 확인은 해 보지 못했습니다.
 - **무료 서명 신청 준비**(사용자의 결정: 인증서를 사지 않음): 오픈 소스 프로젝트에 무료로 서명해 주는 SignPath Foundation에 신청할 수 있게, 홈페이지에 **코드 서명 정책** 페이지(`site/code-signing.html`, `site/en/code-signing.html`)를 넣고 두 홈페이지와 README에서 연결했습니다. 페이지는 지금의 파일이 서명되지 않았고 신청 전이라고 적습니다.
-- **`.github/workflows/windows-package.yml`**: 버전 태그를 올리거나 직접 실행하면 GitHub의 macOS 러너에서 `scripts/package-windows.sh`로 zip과 설치 프로그램을 만들어 아티팩트로 남깁니다(서명 없음; 재단이 요구하는 빌드 방식). 처음 두 번은 Ubuntu 러너에서 실패했습니다(Ubuntu의 mingw-w64는 옛 C 런타임 `msvcrt.dll`로 링크하고, 범용 C 런타임용 패키지가 그 Ubuntu에 없음). Homebrew의 mingw-w64를 쓰는 macOS 러너로 바꿔 세 번째에 통과했습니다. 신청 · 심사와 서명 단계는 남아 있습니다.
+- **`.github/workflows/windows-package.yml`**: 버전 태그를 올리거나 직접 실행하면 GitHub의 macOS 러너에서 `scripts/package-windows.sh`로 zip과 설치 프로그램을 만들어 아티팩트로 남깁니다(서명 없음; 재단이 요구하는 빌드 방식). 처음 두 번은 Ubuntu 러너에서 실패했습니다(Ubuntu의 mingw-w64는 옛 C 런타임 `msvcrt.dll`로 링크하고, 범용 C 런타임용 패키지가 그 Ubuntu에 없음). Homebrew의 mingw-w64를 쓰는 macOS 러너로 바꿔 세 번째에 통과했습니다.
+- **2026-11-24에 SignPath Foundation에 신청했습니다.** 정책 페이지와 두 홈페이지의 "받기"가 신청해 심사를 기다린다고 적습니다. 심사 결과와, 받아들여진 뒤의 서명 단계는 남아 있습니다.
 - `scripts/package-windows.sh`는 만든 프로그램이 범용 C 런타임(UCRT)을 쓰지 않으면 실패합니다(지금까지 확인한 빌드는 모두 UCRT).
 
 ### iPhone: App Store용 아카이브 스크립트와 절차 문서 (2026-11-22)
