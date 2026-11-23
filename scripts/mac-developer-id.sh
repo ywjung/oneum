@@ -10,7 +10,8 @@
 # Needed: membership of the Apple Developer Program, and the Apple account signed in under
 # Xcode ▸ Settings ▸ Accounts. Xcode then signs with a Developer ID certificate that it
 # keeps at Apple (automatic signing): nothing is put in the keychain, no password is
-# asked for, and nothing of the account is kept in the repository.
+# asked for, and nothing of the account is kept in the repository. The screen has to be
+# unlocked while it runs.
 #   ONEUM_MAC_TEAM    the team's identifier (ten characters). An account that belongs to
 #                     several teams has to name its own here: the team that is named signs.
 #   ONEUM_NOTARY_WAIT how long Apple's answer is waited for, in seconds (default 1800).
@@ -111,6 +112,15 @@ esac
 EXECUTABLE=$APP/Contents/MacOS/$(value "$APP/Contents/Info.plist" CFBundleExecutable)
 if grep -a -q oneum-verification-channel "$EXECUTABLE"; then
   echo "an app with the verification channel is not signed for giving out" >&2
+  exit 1
+fi
+
+# Xcode reads the account from the keychain, and that is closed while the screen is
+# locked. Never run then: the one run that was (2026-11-23) waited a quarter of an hour,
+# ended with "No Accounts", and Xcode had lost the account: it had to be signed in anew.
+# (Counted, not grep -q: that one ends before ioreg does, and the pipe would have failed.)
+if [ "$(ioreg -n Root -d1 | grep -c '"CGSSessionScreenIsLocked" *= *Yes')" != 0 ]; then
+  echo "the screen is locked: Xcode cannot read the Apple account then. Unlock it and run again" >&2
   exit 1
 fi
 
