@@ -1,0 +1,60 @@
+# Builds the Windows packages (the zip and the setup program) on a GitHub runner, from
+# the commit's source, with the script that builds them on a Mac
+# (scripts/package-windows.sh), and keeps them as an artifact of the run.
+#
+# Nothing is signed here. This is the build that free signing for open-source projects
+# asks for: made by a workflow on a GitHub-hosted runner and kept as a workflow
+# artifact, so that what is signed can be traced to a commit. The steps that hand the
+# files to the signing service come after the project has been accepted there:
+# docs/RELEASE.md ("Windows 코드 서명").
+#
+# It runs for a version tag (v0.1.0, ...) and when started by hand.
+name: Windows package
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml selects the toolchain; rustup installs it on first use.
+      - run: rustup show
+      - run: rustup target add x86_64-pc-windows-gnu
+      # The compiler that links the program (and compiles its icon and version details)
+      # and NSIS, which makes the setup program.
+      - name: mingw-w64 and NSIS
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends mingw-w64 nsis zip unzip
+      - name: The zip and the setup program
+        run: scripts/package-windows.sh
+      # The files name no folder of the machine that built them (scripts/release-paths.sh
+      # takes the home folder and the checkout out of the paths Rust keeps).
+      - name: No path of the runner in the files
+        run: |
+          mkdir check
+          unzip -q -j dist/OnEum-*-windows-x86_64.zip '*/OnEum.exe' -d check
+          for file in check/OnEum.exe dist/OnEum-*-windows-x86_64-setup.exe; do
+            if grep -a -q -e "$HOME" -e "$GITHUB_WORKSPACE" "$file"; then
+              echo "$file names a folder of this runner" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OnEum-windows-x86_64
+          path: |
+            dist/OnEum-*-windows-x86_64.zip
+            dist/OnEum-*-windows-x86_64-setup.exe
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error

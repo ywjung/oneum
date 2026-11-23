@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>코드 서명 정책 · OnEum(온음)</title>
+  <meta name="description" content="OnEum(온음)의 코드 서명 정책(Code signing policy): Windows용 파일에 누가, 무엇을, 어떤 절차로 서명하는지와 지금의 상태.">
+  <link rel="canonical" href="https://ywjung.github.io/oneum/code-signing.html">
+  <link rel="alternate" hreflang="ko" href="https://ywjung.github.io/oneum/code-signing.html">
+  <link rel="alternate" hreflang="en" href="https://ywjung.github.io/oneum/en/code-signing.html">
+  <link rel="icon" href="img/favicon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+
+  <header class="wrap top">
+    <a class="name" href="./"><img src="img/icon-256.png" alt="" width="34" height="34">OnEum</a>
+    <nav aria-label="사이트">
+      <a href="./">소개</a>
+      <a href="en/code-signing.html" lang="en" hreflang="en">English</a>
+      <a href="https://github.com/ywjung/oneum">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <article class="wrap policy">
+      <h1>코드 서명 정책 <span lang="en">(Code signing policy)</span></h1>
+      <p class="dated">2026년 11월 23일부터 · Windows용 OnEum의 설치 프로그램과 zip에 적용</p>
+
+      <p class="lead">지금 릴리스 페이지에 있는 Windows용 파일은 서명되어 있지 않습니다. 오픈 소스 프로젝트의 서명을 맡아 주는 SignPath Foundation에 신청할 예정이고, 받아들여지면 아래대로 서명합니다.</p>
+
+      <h2>서명하는 곳</h2>
+      <p>신청이 받아들여진 뒤의 Windows 릴리스에는 다음이 적용됩니다.</p>
+      <p lang="en">Free code signing provided by <a href="https://signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a></p>
+      <p>그때 파일의 속성 → 디지털 서명에 보이는 게시자는 “SignPath Foundation”입니다. 그 전까지는 서명이 없으므로 Windows SmartScreen이 실행 전에 묻습니다.</p>
+
+      <h2>무엇에 서명하는가</h2>
+      <ul>
+        <li>이 저장소의 소스로 만든 <code>OnEum.exe</code>와 설치 프로그램뿐입니다. 다른 프로젝트의 파일에는 서명하지 않습니다.</li>
+        <li>서명할 파일은 개발자의 컴퓨터가 아니라 GitHub Actions(GitHub이 운영하는 러너)에서, 공개된 커밋으로부터 빌드합니다. 빌드 방법은 저장소의 <a href="https://github.com/ywjung/oneum/blob/main/.github/workflows/windows-package.yml">워크플로</a>와 <a href="https://github.com/ywjung/oneum/blob/main/scripts/package-windows.sh">패키징 스크립트</a>에 있습니다.</li>
+        <li>릴리스마다 아래의 승인자가 서명 요청을 직접 확인하고 승인합니다. 자동으로 서명되는 일은 없습니다.</li>
+      </ul>
+
+      <h2>역할</h2>
+      <p>OnEum은 한 사람이 유지하는 프로젝트입니다.</p>
+      <ul>
+        <li>커밋하는 사람과 검토하는 사람 <span lang="en">(Committers and reviewers)</span>: <a href="https://github.com/ywjung">ywjung</a> (저장소의 소유자). 다른 사람이 보낸 변경(pull request)은 소유자가 검토한 뒤에만 합칩니다.</li>
+        <li>승인하는 사람 <span lang="en">(Approvers)</span>: <a href="https://github.com/ywjung">ywjung</a></li>
+      </ul>
+
+      <h2>개인정보</h2>
+      <p>OnEum은 개인정보를 수집하지 않습니다. 기기에 남는 것과 기기 밖으로 나가는 것은 <a href="privacy.html">개인정보 처리방침</a>에 적혀 있습니다.</p>
+      <p lang="en">This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.</p>
+      <p>(이 프로그램은 사용자나 설치 · 운영하는 사람이 직접 요청한 경우가 아니면 어떤 정보도 네트워크의 다른 시스템으로 보내지 않습니다.)</p>
+
+      <h2>파일을 확인하는 방법</h2>
+      <ul>
+        <li>릴리스마다 체크섬 파일(<code>SHA256SUMS-windows.txt</code>)을 함께 올립니다. 내려받은 파일의 SHA-256이 거기 적힌 값과 같은지 볼 수 있습니다.</li>
+        <li>서명된 뒤에는 파일의 속성 → 디지털 서명에서 게시자와 타임스탬프를 볼 수 있습니다.</li>
+      </ul>
+
+      <h2>문제를 알릴 때</h2>
+      <p>파일이나 서명에 이상한 점이 있으면 <a href="https://github.com/ywjung/oneum/issues">GitHub의 이슈</a>로 알려 주세요. SignPath Foundation의 인증서로 서명된 파일이 그 재단의 조건을 어긴다고 보이면 <a href="https://signpath.org/terms">재단의 조건</a>에 적힌 대로 재단에 직접 알릴 수도 있습니다.</p>
+
+      <h2>바뀔 때</h2>
+      <p>이 정책이 바뀌면 이 페이지를 고치고 위의 날짜를 바꿉니다. 지난 판은 <a href="https://github.com/ywjung/oneum/commits/main/site/code-signing.html">저장소의 기록</a>에서 볼 수 있습니다.</p>
+    </article>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>OnEum은 0BSD 라이선스로 공개된 소프트웨어입니다. <a href="https://github.com/ywjung/oneum">github.com/ywjung/oneum</a></p>
+      <p>이 페이지는 쿠키를 쓰지 않고 방문 기록을 모으지 않습니다.</p>
+    </div>
+  </footer>
+</body>
+</html>

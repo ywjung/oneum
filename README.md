@@ -62,6 +62,7 @@ Mac에서 크로스 컴파일해 `dist/OnEum-<버전>-windows-x86_64.zip`(압축
 (`rustup target add x86_64-pc-windows-gnu`, `brew install mingw-w64` 필요. 설치 프로그램은 `brew install makensis`가 있을 때 만들어집니다).
 설치 프로그램은 관리자 권한 없이 사용자 계정에 설치하고, 시작 메뉴 바로 가기와 "설치된 앱"의 제거 항목을 만듭니다. `OnEum.exe`에는 아이콘과 버전 정보가 들어 있습니다.
 **Windows판은 컴파일과 링크까지만 확인했고 실제 Windows에서 실행해 보지 못했습니다. 설치 프로그램도 만들어지는 것까지만 확인했습니다.** (CI가 Windows 러너에서 빌드·테스트하고 띄워 보게 되어 있지만 아직 돌아간 적이 없습니다.)
+릴리스의 Windows용 파일은 아직 서명되어 있지 않습니다. 서명 계획과 절차는 [코드 서명 정책(Code signing policy)](https://ywjung.github.io/oneum/code-signing.html)에 있습니다. 같은 스크립트로 GitHub의 러너에서 패키지를 만드는 워크플로(`.github/workflows/windows-package.yml`)가 있으나 아직 돌아간 적이 없습니다.
 Windows에서 다른 점(창 안 메뉴 막대, Ctrl 단축키, 지원하지 않는 기능)은 [Windows 사용 안내](docs/USER_GUIDE_WINDOWS.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "플랫폼", [docs/TESTING.md](docs/TESTING.md)의 "Windows"에 있습니다.
 

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code signing policy · OnEum</title>
+  <meta name="description" content="The code signing policy of OnEum: who signs the files for Windows, what is signed, how, and where things stand today.">
+  <link rel="canonical" href="https://ywjung.github.io/oneum/en/code-signing.html">
+  <link rel="alternate" hreflang="ko" href="https://ywjung.github.io/oneum/code-signing.html">
+  <link rel="alternate" hreflang="en" href="https://ywjung.github.io/oneum/en/code-signing.html">
+  <link rel="icon" href="../img/favicon.png">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the text</a>
+
+  <header class="wrap top">
+    <a class="name" href="./"><img src="../img/icon-256.png" alt="" width="34" height="34">OnEum</a>
+    <nav aria-label="Site">
+      <a href="./">About</a>
+      <a href="../code-signing.html" lang="ko" hreflang="ko">한국어</a>
+      <a href="https://github.com/ywjung/oneum">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <article class="wrap policy">
+      <h1>Code signing policy</h1>
+      <p class="dated">From 23 November 2026 · for the setup program and the zip of OnEum for Windows</p>
+
+      <p class="lead">The files for Windows on the releases page today are not signed. OnEum is going to apply to SignPath Foundation, which signs for open-source projects; if the project is accepted, releases are signed as described here.</p>
+
+      <h2>Who signs</h2>
+      <p>For Windows releases made after the project has been accepted:</p>
+      <p>Free code signing provided by <a href="https://signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a></p>
+      <p>The publisher shown under Properties → Digital Signatures is then “SignPath Foundation”. Until then the files carry no signature, and Windows SmartScreen asks before it runs them.</p>
+
+      <h2>What is signed</h2>
+      <ul>
+        <li>Only <code>OnEum.exe</code> and the setup program, built from the source in this repository. Files of other projects are not signed.</li>
+        <li>The files to be signed are built by GitHub Actions on runners that GitHub hosts, from a public commit, and not on a developer’s computer. How they are built is in the repository: the <a href="https://github.com/ywjung/oneum/blob/main/.github/workflows/windows-package.yml">workflow</a> and the <a href="https://github.com/ywjung/oneum/blob/main/scripts/package-windows.sh">packaging script</a>.</li>
+        <li>For every release the approver below looks at the signing request and approves it by hand. Nothing is signed automatically.</li>
+      </ul>
+
+      <h2>Roles</h2>
+      <p>OnEum is maintained by one person.</p>
+      <ul>
+        <li>Committers and reviewers: <a href="https://github.com/ywjung">ywjung</a> (the owner of the repository). Changes sent by others (pull requests) are merged only after the owner has reviewed them.</li>
+        <li>Approvers: <a href="https://github.com/ywjung">ywjung</a></li>
+      </ul>
+
+      <h2>Privacy</h2>
+      <p>OnEum collects no personal data. What stays on the device and what leaves it is written in the <a href="privacy.html">privacy policy</a>.</p>
+      <p>This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.</p>
+
+      <h2>Checking a file</h2>
+      <ul>
+        <li>Every release comes with a file of checksums (<code>SHA256SUMS-windows.txt</code>): the SHA-256 of a downloaded file can be compared with the value written there.</li>
+        <li>Once the files are signed, Properties → Digital Signatures shows the publisher and the time stamp.</li>
+      </ul>
+
+      <h2>Reporting a problem</h2>
+      <p>If something about a file or its signature looks wrong, please open <a href="https://github.com/ywjung/oneum/issues">an issue on GitHub</a>. If a file signed with a certificate of SignPath Foundation seems to break the foundation’s conditions, it can also be reported to the foundation, as its <a href="https://signpath.org/terms">conditions</a> describe.</p>
+
+      <h2>Changes</h2>
+      <p>If this policy changes, this page is changed and the date above with it. Earlier versions can be seen in <a href="https://github.com/ywjung/oneum/commits/main/site/en/code-signing.html">the repository’s history</a>.</p>
+    </article>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>OnEum is open-source software under the 0BSD license. <a href="https://github.com/ywjung/oneum">github.com/ywjung/oneum</a></p>
+      <p>This page uses no cookies and keeps no record of visits.</p>
+    </div>
+  </footer>
+</body>
+</html>
