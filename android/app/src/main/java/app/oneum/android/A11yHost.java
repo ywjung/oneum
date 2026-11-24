@@ -8,6 +8,7 @@ import android.util.SparseArray;
 import android.view.View;
 import android.view.ViewParent;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
 
@@ -149,7 +150,28 @@ final class A11yHost extends View {
         }
         event.setPackageName(getContext().getPackageName());
         event.setSource(this);
-        parent.requestSendAccessibilityEvent(this, event);
+        deliver(parent, event);
+    }
+
+    /**
+     * Hands an event to the system, if a screen reader (or another accessibility
+     * service) is still there to hear it. Events are sent a moment after the screen
+     * changed, and the service may have been switched off by then: the system answers
+     * an event it has no one for with an exception ("Accessibility off"), which ended
+     * the app. The switch is thrown on another thread, so it can also fall between
+     * the question and the sending: that one exception is caught.
+     */
+    private void deliver(ViewParent parent, AccessibilityEvent event) {
+        AccessibilityManager manager =
+                (AccessibilityManager) getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
+        if (manager == null || !manager.isEnabled()) {
+            return;
+        }
+        try {
+            parent.requestSendAccessibilityEvent(this, event);
+        } catch (IllegalStateException off) {
+            Log.i(TAG, "accessibility was switched off as an event was sent");
+        }
     }
 
     private void send(int id, int type) {
@@ -165,7 +187,7 @@ final class A11yHost extends View {
         if (!node.text.isEmpty()) {
             event.getText().add(node.text);
         }
-        parent.requestSendAccessibilityEvent(this, event);
+        deliver(parent, event);
     }
 
     /**
