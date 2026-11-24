@@ -336,6 +336,29 @@ Why each App Sandbox entitlement is used:
 The app uses the network only when the user opens the Network screen, adds a server, or has switched on online lyrics.
 ```
 
+### Mac의 스크린샷
+
+```bash
+scripts/dev/mac-store-shots.sh
+```
+두 언어의 그림 여섯 장씩을 `dist/appstore/mac/ko`와 `dist/appstore/mac/en`에 만듭니다. 창 안의 화면만 담은 2560×1600(1280×800포인트 창, 한 포인트에 두 픽셀), 투명도 없는 PNG이고 저장소에는 넣지 않습니다. 음악과 가사는 iPhone 그림과 같은 지어낸 것입니다. 앱은 `dist/dev`의 검증용 빌드를 일회용 프로필로 띄우므로, 따로 실행 중인 OnEum과 그 데이터는 건드리지 않습니다.
+
+| 파일 | 화면 |
+|---|---|
+| `01-albums.png` | 앨범 목록과 재생 대기열 |
+| `02-playing.png` | 앨범의 곡 목록, 곡 정보, VU 미터와 스펙트럼(재생 중) |
+| `03-lyrics.png` | 곡 정보의 신호 경로와 가사(부르는 줄이 켜진 상태) |
+| `04-equalizer.png` | 이퀄라이저(재즈 프리셋) |
+| `05-search.png` | 검색(한국어는 초성 `ㄷㅂ`, 영어는 `light`) |
+| `06-output.png` | 설정의 재생 탭: 출력 장치와 출력 품질 |
+
+알아 둘 것:
+- **소리 없이 찍습니다.** 재생 중에는 앱 볼륨이 0입니다. 미터 그림(02)만 재생 중에 찍어서 볼륨 막대가 0이고 "처리"에 "앱 볼륨"이 나옵니다. 나머지는 곡을 멈춘 채 볼륨을 끝까지 올린 동안에 찍습니다.
+- 화면이 잠겨 있지 않아야 하고, 찍는 동안 마우스를 건드리지 않아야 합니다. 1280×800포인트 창이 들어가는 Retina 화면이 필요합니다(1440×900은 Dock이 있는 14인치 화면에 들어가지 않았습니다).
+- **출력 장치의 이름은 Mac이 알려 주는 그대로**라서 시스템 언어를 따릅니다. 한국어 Mac에서 찍으면 영어 그림에도 "MacBook Pro 스피커"로 나옵니다(02 · 03 · 06). `ONEUM_SHOTS_OUTPUT=<장치 이름의 일부>`로 그림에 나올 장치를 고를 수 있습니다(앱 자신의 선택일 뿐, 시스템의 기본 출력은 바꾸지 않습니다). 주지 않으면 시스템의 기본 출력 장치가 나옵니다.
+- 신호 경로에 "리샘플링"이 나오는 것은 내장 스피커가 48kHz이기 때문입니다.
+- 화면 안의 자리는 1280×800 창에 맞춰져 있습니다.
+
 ## iPhone의 심사 메모
 
 App Review Information ▸ Notes에 넣을 글은 [RELEASE.md](RELEASE.md) "iPhone: App Store 제출 준비"에 있습니다(샘플 음악 넣기로 음악 없이 써 보는 방법).
