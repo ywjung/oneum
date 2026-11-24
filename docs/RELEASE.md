@@ -21,7 +21,7 @@
 | Android: 배포용 서명 · Google Play용 번들 | 준비됨(2026-11-24) — `scripts/android-release.sh`: 배포용 키로 서명한 앱 번들(`.aab`, 모든 파일 접근 없는 Play용 빌드) · 같은 빌드의 APK · 직접 설치용 APK, 검사 7줄씩. 대상 API 36. 에뮬레이터에서 Play용 릴리스 APK와 번들에서 만든 APK를 깔아 확인. 스토어 글과 그림도 준비. **Play Console에는 아무것도 올리지 않음**: 계정, 앱 만들기, 테스터 12명 · 14일의 비공개 테스트, 프로덕션 신청이 남음([PLAY_STORE.md](PLAY_STORE.md)) |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
 | Mac App Store용 패키지 | 준비됨(2026-11-24) — `scripts/package.sh --app-store`: App Sandbox 안에서 도는 앱, 스토어용 서명, 설치 패키지, 검사 11항목. 샌드박스 동작은 시험용 앱으로 확인. 2026-11-24에 0.1.0 (174)를 App Store Connect에 올림(처리 끝, TestFlight에 있음). 스토어 정보와 스크린샷을 넣고 같은 날 심사에 냄(심사 대기 중, 수동 출시). **심사 결과와 TestFlight로 써 보기는 남음**([MAC_APP_STORE.md](MAC_APP_STORE.md)) |
-| iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리가 끝나 사용자가 TestFlight로 본인 iPhone에 설치했고 위젯에 곡이 나옴. 스토어 정보를 넣고 **2026-11-24에 심사에 제출**(무료, 147개 국가, 수동 출시). 같은 날 Apple이 지침 2.1 "Information Needed"로 돌려보냄: 실제 iPhone의 화면 녹화와 다섯 가지 설명을 넣어 같은 날 **다시 제출**(상태 "심사 대기 중"). 심사 결과 · 출시는 **남음**([APP_STORE.md](APP_STORE.md) 11절) |
+| iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리가 끝나 사용자가 TestFlight로 본인 iPhone에 설치했고 위젯에 곡이 나옴. 스토어 정보를 넣고 **2026-11-24에 심사에 제출**(무료, 147개 국가, 수동 출시). 같은 날 Apple이 지침 2.1 "Information Needed"로 돌려보냄: 실제 iPhone의 화면 녹화와 다섯 가지 설명을 넣어 같은 날 **다시 제출**. **2026-11-25에 승인되어 사용자가 출시함**(상태 "배포 준비됨"). 스토어에 나온 것은 아직 보지 못함([APP_STORE.md](APP_STORE.md) 12 · 14절) |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
 
