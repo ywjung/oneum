@@ -670,8 +670,17 @@ public final class MainActivity extends NativeActivity {
             } else {
                 intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
                         .addCategory(Intent.CATEGORY_OPENABLE)
-                        .setType(kind == 1 ? "audio/*" : "*/*")
+                        .setType("*/*")
                         .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, kind == 1);
+                if (kind == 1) {
+                    // Music, and files of no kind the system knows: WavPack, Monkey's
+                    // Audio and DSD files are such to Android, and asked for audio
+                    // alone the picker shows them greyed out. The picker is the only
+                    // way to them for the build that has no all files access. (What
+                    // is chosen and is not music does not become a song.)
+                    intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                            new String[] {"audio/*", "application/octet-stream"});
+                }
                 // Asked for music the first time, the picker opens on its "Recent"
                 // page, which lists nothing that is music to it and shows no way on:
                 // it is opened in the Music folder instead. Once music was chosen the
