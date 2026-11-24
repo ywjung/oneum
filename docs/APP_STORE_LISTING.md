@@ -361,7 +361,43 @@ scripts/dev/mac-store-shots.sh
 
 ## iPhone의 심사 메모
 
-App Review Information ▸ Notes에 넣을 글은 [RELEASE.md](RELEASE.md) "iPhone: App Store 제출 준비"에 있습니다(샘플 음악 넣기로 음악 없이 써 보는 방법).
+App Review Information ▸ Notes에 넣는 글입니다(4,000바이트까지, 영어). 2026-11-24에 Apple이 지침 2.1 "Information Needed - New App Submission"으로 여섯 가지를 물어서 그 번호대로 답하도록 다시 썼습니다(처음 낸 짧은 글은 [RELEASE.md](RELEASE.md) "iPhone: App Store 제출 준비"에 있습니다). 1번의 화면 녹화는 같은 칸 아래의 **첨부 파일**에 넣습니다(찍을 순서는 [APP_STORE.md](APP_STORE.md) 11절).
+
+- **앱이 바뀌면 이 글도 고칩니다.** 화면 이름(탭, 단추), 기기 밖으로 나가는 것(지금은 켰을 때의 LRCLIB뿐), 계정 · 결제 · 광고가 없다는 문장이 앱과 같아야 합니다.
+- 녹화에 없는 것을 1번에 적지 않습니다. 찍은 뒤에 영상과 맞춰 보세요.
+
+<!-- field review.notes bytes=4000 -->
+```text
+OnEum is an offline player for music files the user owns. It has no account, no sign-in, no purchases, no ads and no server of its own. Below are the six points asked for under Guideline 2.1 on 24 November 2026.
+
+1. SCREEN RECORDING
+Attached to this section (Attachment). Recorded on a physical iPhone running the latest iOS, with build 0.1.0 (147) installed from TestFlight. It begins with launching the app and shows: the empty Library, Add Sample Music, browsing albums, playing a song, the player (cover, level meters, queue), the equalizer, search, a playlist, the Lock Screen controls and the Home Screen widget.
+The app has no account registration, login or account deletion. It has no user-generated content: nothing a user makes is shown to anyone else or leaves the device. It has no paid content or features.
+
+2. PURPOSE AND AUDIENCE
+For people who keep their own music as files (CD rips, purchased downloads, their own recordings) and want to play them on the iPhone without a subscription service or an account. The problem: such files, lossless and high-resolution ones above all, need a player that reads them as they are. OnEum plays FLAC, ALAC, WAV, AIFF, DSD, MP3, AAC, Opus and others without gaps between the songs of an album, shows lyrics and level meters, offers an equalizer and headphone correction, and keeps the library, playlists and statistics on the device only.
+
+3. SETUP AND MAIN FEATURES
+No login and no credentials are needed.
+- Without music of your own: open the app; on the empty Library tab tap "Add Sample Music". Nine short songs in three albums come with the app (synthesized by the developer, not anyone's recordings) and are copied into the app's folder.
+- Play: Library > Albums > an album > a song. The bar at the bottom opens the player: cover, lyrics, level meters, queue. (The sample songs carry no lyrics; lyrics are shown for files that have them.)
+- Search tab: type a word, or a field such as genre:jazz.
+- Playlists tab: a song's "More" menu adds it to a playlist.
+- Settings tab: Equalizer, Playback, Library, General (language: Korean or English).
+- Your own files: in the Files app put them into On My iPhone > OnEum, or use Import Files, Import Folder or Link Folder in the app.
+- Playback goes on in the background, with controls on the Lock Screen and in Control Center (background audio mode).
+
+4. EXTERNAL SERVICES
+None for the core functionality: no analytics, no advertising, no authentication, no payment processor, no AI service, no backend. The app works without the internet. Two optional features use a network, and only when the user asks:
+- Find Lyrics Online (Settings > General), off by default. When switched on, the title, artist, album and length of the song whose lyrics are opened are sent to LRCLIB (lrclib.net), a free public lyrics database.
+- Network (Library tab): the user can enter the address of their own media server (DLNA) or WebDAV folder on their own network; the app reads music from it. These are the user's devices, not a service of ours.
+
+5. REGIONAL DIFFERENCES
+None. The app works the same in every region; only the interface language (Korean or English) differs.
+
+6. REGULATED INDUSTRY / THIRD-PARTY MATERIAL
+The app is not in a regulated industry. It contains and provides no third-party music or other protected content: it plays files the user already has, and the only music inside it is the sample music made by the developer. The source code is the developer's own, published under the 0BSD license; the open-source libraries it uses are listed in the app (Settings > About) with their licenses.
+```
 
 ## 스크린샷
 
