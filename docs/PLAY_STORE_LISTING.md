@@ -38,6 +38,19 @@ USB DAC, SD 카드의 폴더, 연결한 키보드의 단축키, TalkBack에 관�
 | 개인정보 처리방침 | 한국어 `https://ywjung.github.io/oneum/privacy.html`, 영어 `https://ywjung.github.io/oneum/en/privacy.html` (Play Console의 칸은 하나: 기본 언어의 것을 넣음) |
 | 버전 | `0.1.0`(`Cargo.toml`), 버전 코드는 커밋 수 |
 
+## 그림
+
+`scripts/dev/play-shots.sh`가 `dist/play/store/`에 만듭니다(저장소에는 넣지 않음). 요구되는 크기와 규칙은 [PLAY_STORE.md](PLAY_STORE.md) 6절.
+
+| 파일 | 무엇 |
+|---|---|
+| `ko/01-albums.png` … `07-search.png`, `en/…` | 휴대폰 스크린샷 일곱 장씩, 1080×1920: 앨범 목록, 앨범, 플레이어, 가사, VU 미터, 이퀄라이저, 검색 |
+| `feature-graphic-ko.png`, `feature-graphic-en.png` | 기능 그래픽 1024×500: 아이콘의 온음표, 이름, 한 줄("내 음악 파일을 있는 그대로" / "Your music files, as they are") |
+| `icon-512.png` | 스토어 아이콘 512×512 |
+| `foreground-service.mp4` | 재생 서비스 신고에 넣을 영상(링크로 넣어야 하므로 올릴 곳이 필요) |
+
+알아 둘 것: 에뮬레이터의 화면이고(실제 휴대폰이 아님), Play용 빌드를 찍은 것이며, 음악가 · 표지 · 가사는 모두 지어낸 것입니다. 한국어 앨범 목록은 목록의 끝쪽(한글 이름의 앨범)을 찍습니다. 검색 화면은 자판을 내린 뒤에 찍습니다.
+
 ## 한국어 (ko-KR)
 
 <!-- field ko.title chars=30 -->

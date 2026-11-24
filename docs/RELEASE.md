@@ -1,6 +1,6 @@
 # 릴리스 절차
 
-기본 배포 형태는 직접 내려받는 `.dmg`(안에 `OnEum.app`)입니다. Mac App Store에 내는 준비는 [MAC_APP_STORE.md](MAC_APP_STORE.md)에 있고, 자동 업데이트는 범위 밖입니다. iPhone 앱을 App Store에 내는 절차는 [APP_STORE.md](APP_STORE.md)에 있습니다.
+기본 배포 형태는 직접 내려받는 `.dmg`(안에 `OnEum.app`)입니다. Mac App Store에 내는 준비는 [MAC_APP_STORE.md](MAC_APP_STORE.md)에 있고, 자동 업데이트는 범위 밖입니다. iPhone 앱을 App Store에 내는 절차는 [APP_STORE.md](APP_STORE.md)에, Android 앱을 Google Play에 내는 절차는 [PLAY_STORE.md](PLAY_STORE.md)에 있습니다.
 
 ## 현재 상태 (0.1.0)
 | 단계 | 상태 |
@@ -17,7 +17,8 @@
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 | 공개됨(2026-11-22) — https://github.com/ywjung/oneum (`github` 원격, `main`만 올림). 올리기 전에 추적 파일과 커밋에 비밀 값 · 개인 주소 · 홈 경로 · 서명 팀 ID · 기기 식별자가 없음을 확인했다. 커밋의 작성자는 모두 한 이름과 한 e-mail 주소다. CI는 여섯 번의 실행에 걸쳐 고친 뒤 네 작업(macOS · Windows · Android · 의존성 권고) 모두 통과(docs/TESTING.md "GitHub에 올린 뒤의 CI"). 올라간 커밋은 다시 쓰지 않는다 |
 | 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
-| Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
+| Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). v0.1.0 시험판의 APK는 디버그 키 서명(빌드 149)이고 바꾸지 않았다. 실제 기기 설치는 **검증 대기** |
+| Android: 배포용 서명 · Google Play용 번들 | 준비됨(2026-11-24) — `scripts/android-release.sh`: 배포용 키로 서명한 앱 번들(`.aab`, 모든 파일 접근 없는 Play용 빌드) · 같은 빌드의 APK · 직접 설치용 APK, 검사 7줄씩. 대상 API 36. 에뮬레이터에서 Play용 릴리스 APK와 번들에서 만든 APK를 깔아 확인. 스토어 글과 그림도 준비. **Play Console에는 아무것도 올리지 않음**: 계정, 앱 만들기, 테스터 12명 · 14일의 비공개 테스트, 프로덕션 신청이 남음([PLAY_STORE.md](PLAY_STORE.md)) |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
 | Mac App Store용 패키지 | 준비됨(2026-11-24) — `scripts/package.sh --app-store`: App Sandbox 안에서 도는 앱, 스토어용 서명, 설치 패키지, 검사 11항목. 샌드박스 동작은 시험용 앱으로 확인. 2026-11-24에 0.1.0 (174)를 App Store Connect에 올림(처리 끝, TestFlight에 있음). 스토어 정보와 스크린샷을 넣고 같은 날 심사에 냄(심사 대기 중, 수동 출시). **심사 결과와 TestFlight로 써 보기는 남음**([MAC_APP_STORE.md](MAC_APP_STORE.md)) |
 | iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리가 끝나 사용자가 TestFlight로 본인 iPhone에 설치했고 위젯에 곡이 나옴. 스토어 정보를 넣고 **2026-11-24에 심사에 제출**(무료, 147개 국가, 수동 출시). 같은 날 Apple이 지침 2.1 "Information Needed"로 돌려보냄: 실제 iPhone의 화면 녹화와 다섯 가지 설명을 넣어 같은 날 **다시 제출**(상태 "심사 대기 중"). 심사 결과 · 출시는 **남음**([APP_STORE.md](APP_STORE.md) 11절) |
@@ -200,17 +201,19 @@ rustup target add aarch64-linux-android
 ```bash
 scripts/package-android.sh
 ```
-준비물: Android SDK(플랫폼 35, 빌드 도구)와 NDK(`scripts/android-env.sh`가 `ANDROID_NDK_HOME` 또는 SDK 아래에서 찾는다), JDK 17 또는 21. Gradle과 Android Gradle 플러그인은 처음 빌드할 때 받는다(`android/gradlew`).
+준비물: Android SDK(플랫폼 36, 빌드 도구)와 NDK(`scripts/android-env.sh`가 `ANDROID_NDK_HOME` 또는 SDK 아래에서 찾는다), JDK 17 또는 21. Gradle과 Android Gradle 플러그인은 처음 빌드할 때 받는다(`android/gradlew`).
 
-결과물: `dist/OnEum-<버전>-android-arm64.apk`와 `dist/SHA256SUMS-android.txt`(arm64 전용, Android 11 이상). 앱 ID는 `app.oneum.android`, 버전 이름은 `Cargo.toml`의 버전, 버전 코드는 커밋 수다. APK가 Android의 설치 파일이다. 스크립트는 릴리스 빌드(`scripts/android-build.sh --release`, 검증 채널 없음)를 만들고, OnEum의 라이선스와 오픈 소스 라이선스 전문(`scripts/gen-licenses.py --android`)을 APK의 `assets`에 넣으며, APK에 앱의 라이브러리와 그 두 파일이 들어 있는지, 서명이 맞는지, 디버그 가능한 빌드가 아닌지 확인한다.
+결과물: `dist/OnEum-<버전>-android-arm64.apk`와 `dist/SHA256SUMS-android.txt`(arm64 전용, Android 11 이상, 대상 API 36). 앱 ID는 `app.oneum.android`, 버전 이름은 `Cargo.toml`의 버전, 버전 코드는 커밋 수다. APK가 Android의 설치 파일이다. `scripts/package-android.sh`는 `scripts/android-release.sh --direct`다: 릴리스 빌드(`scripts/android-build.sh --release`, 검증 채널 없음)를 만들고, OnEum의 라이선스와 오픈 소스 라이선스 전문(`scripts/gen-licenses.py --android`)을 APK의 `assets`에 넣으며, 만든 APK를 검사한다(서명, 버전, 대상 API, 디버그 가능한 빌드가 아닌지, 권한 목록, 라이브러리의 16KB 정렬과 검증 채널 없음, 라이선스 파일, 이 컴퓨터의 경로 없음).
+
+**빌드는 둘이다.** 직접 설치하는 APK(`direct`)와 Google Play용(`play`, 앱 번들 `.aab`). 다른 점은 매니페스트의 한 줄("모든 파일 접근")뿐이고, Play용은 그 권한이 없어 설정에 그 줄이 나오지 않는다. 키 저장소를 주고 `scripts/android-release.sh`를 인자 없이 돌리면 셋(Play용 번들, 같은 빌드의 APK, 직접 설치용 APK)을 모두 만들고 검사한다 — [PLAY_STORE.md](PLAY_STORE.md) 3절.
 
 휴대폰에 설치: APK를 휴대폰으로 옮겨 파일 앱에서 연다. 처음에는 그 앱에 "출처를 알 수 없는 앱 설치"를 허용하라는 안내가 나오고(설정 → 이 출처 허용 → 뒤로), 다시 열면 설치를 묻는다. Google Play Protect가 "처음 보는 앱"이라며 검사를 권하면 **자세히 → 검사 없이 설치**로 진행할 수 있다("앱 검사"는 APK를 Google로 보낸다).
 
-서명: 환경 변수 `ONEUM_ANDROID_KEYSTORE`(키 저장소 파일), `ONEUM_ANDROID_KEYSTORE_PASSWORD`, `ONEUM_ANDROID_KEY_ALIAS`, `ONEUM_ANDROID_KEY_PASSWORD`를 주면 그 키로 서명하고, 없으면 이 컴퓨터의 디버그 키로 서명한다. **디버그 키로 서명한 APK는 내 기기에 넣어 쓰는 용도이며 배포물이 아니다**(다른 키로 서명한 다음 버전은 덮어 설치할 수 없다). 키 저장소와 비밀번호는 저장소에 넣지 않는다.
+서명: 환경 변수 `ONEUM_ANDROID_KEYSTORE`(키 저장소 파일)와 비밀번호(`ONEUM_ANDROID_KEYSTORE_PASSWORD_FILE`: 비밀번호가 든 파일, 주지 않으면 키 저장소 이름의 `.jks`를 `.pass`로 바꾼 파일. 또는 `ONEUM_ANDROID_KEYSTORE_PASSWORD`), `ONEUM_ANDROID_KEY_ALIAS`(기본 `upload`)를 주면 그 키로 서명하고, 없으면 이 컴퓨터의 디버그 키로 서명한다. 배포용 키 저장소는 `scripts/android-keystore.sh`가 저장소 밖(`~/.config/oneum-signing/`)에 만든다(2026-11-24에 만들어 둠, [PLAY_STORE.md](PLAY_STORE.md) 2절: **백업 필요**). **디버그 키로 서명한 APK는 내 기기에 넣어 쓰는 용도이며 배포물이 아니다**(다른 키로 서명한 다음 버전은 덮어 설치할 수 없다). 키 저장소와 비밀번호는 저장소에 넣지 않는다.
 
 연결된 기기나 에뮬레이터에 설치: `scripts/android-device.sh`(USB 디버깅을 켠 기기). `--automation`으로 만든 빌드는 검증 채널이 들어 있으므로 배포하지 않는다.
 
-음악은 "음악 및 오디오" 권한(`READ_MEDIA_AUDIO`)으로 읽는다. "모든 파일에 대한 접근"(`MANAGE_EXTERNAL_STORAGE`)은 설정에서 고르는 선택으로 남아 있고 매니페스트에 선언되어 있으므로, Play 스토어에 올리려면 그 권한의 사용 목적을 신고하거나 선언을 빼야 한다(빼면 WavPack · APE · DSD 파일과 옆의 표지 · 가사 · CUE를 못 읽는다, [ANDROID_PLAN.md](ANDROID_PLAN.md) 4.1).
+음악은 "음악 및 오디오" 권한(`READ_MEDIA_AUDIO`)으로 읽는다. "모든 파일에 대한 접근"(`MANAGE_EXTERNAL_STORAGE`)은 직접 설치용 빌드의 매니페스트에만 선언되어 있고(`android/app/src/direct/AndroidManifest.xml`) 설정에서 고르는 선택이다. Play용 빌드에는 없다: Google의 정책이 음악 앱에 허용하지 않는 권한이다. 그 빌드는 WavPack · APE · DSD 파일과 곡 옆의 표지 · 가사 · CUE를 폴더에서 읽지 못하고, 그 형식의 파일은 **음악 파일 열기**로 골라 듣는다([PLAY_STORE.md](PLAY_STORE.md) 3절, [ANDROID_PLAN.md](ANDROID_PLAN.md) 4.1).
 
 ## 4. Developer ID 서명
 Apple Developer Program 멤버십이 필요합니다. 방법은 둘이고, 하나만 씁니다. 어느 쪽이든 Hardened Runtime이 켜지고 서명에 Apple의 타임스탬프가 들어갑니다.
