@@ -159,6 +159,7 @@ The user guides are in Korean and English; the other documents are in Korean.
 | [docs/adr/0001-gui-stack.md](docs/adr/0001-gui-stack.md) · [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) | Decisions: the GUI stack, the iPhone version |
 | [docs/IOS_PLAN.md](docs/IOS_PLAN.md) | The plan for the iPhone version and how it went |
 | [docs/APP_STORE.md](docs/APP_STORE.md) | Putting the iPhone app on the App Store: signing, the archive, what a review asks (Korean) |
+| [docs/MAC_APP_STORE.md](docs/MAC_APP_STORE.md) | Preparing the Mac app for the Mac App Store: the sandbox, the package, what was checked (Korean) |
 | [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md) | The plan for the Android version and how it goes |
 | [site/](site/) | The homepage (published with GitHub Pages; see "홈페이지" in docs/RELEASE.md) |
 

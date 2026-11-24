@@ -1,6 +1,6 @@
 # 릴리스 절차
 
-기본 배포 형태는 직접 내려받는 `.dmg`(안에 `OnEum.app`)입니다. Mac App Store·자동 업데이트는 범위 밖입니다. iPhone 앱을 App Store에 내는 절차는 [APP_STORE.md](APP_STORE.md)에 있습니다.
+기본 배포 형태는 직접 내려받는 `.dmg`(안에 `OnEum.app`)입니다. Mac App Store에 내는 준비는 [MAC_APP_STORE.md](MAC_APP_STORE.md)에 있고, 자동 업데이트는 범위 밖입니다. iPhone 앱을 App Store에 내는 절차는 [APP_STORE.md](APP_STORE.md)에 있습니다.
 
 ## 현재 상태 (0.1.0)
 | 단계 | 상태 |
@@ -19,6 +19,7 @@
 | 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
 | Android: 에뮬레이터 실행, 릴리스 APK | 완료(2026-11-15) — `scripts/dev/smoke-android.sh`(44항목), 설치 파일 `scripts/package-android.sh` → `dist/OnEum-<버전>-android-arm64.apk`(에뮬레이터의 파일 앱에서 열어 설치·실행 확인). 디버그 키 서명이며 배포용 키 서명과 Play 스토어는 범위 밖. 실제 기기 설치는 **검증 대기** |
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
+| Mac App Store용 패키지 | 준비됨(2026-11-24) — `scripts/package.sh --app-store`: App Sandbox 안에서 도는 앱, 스토어용 서명, 설치 패키지, 검사 11항목. 샌드박스 동작은 시험용 앱으로 확인. **업로드 · TestFlight · 심사는 남음**([MAC_APP_STORE.md](MAC_APP_STORE.md)) |
 | iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리가 끝나 사용자가 TestFlight로 본인 iPhone에 설치했고 위젯에 곡이 나옴. 스토어 정보를 넣고 **2026-11-24에 심사에 제출**(무료, 147개 국가, 수동 출시, 상태 "심사 대기 중"). 심사 결과와 출시는 **남음**([APP_STORE.md](APP_STORE.md)) |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
@@ -306,10 +307,10 @@ stapling 후에는 체크섬이 바뀌므로 `SHA256SUMS.txt`를 다시 만듭�
 > OnEum plays music files that are on the device; it has no account and no server of its own. To try it without music of your own: open the app, and on the empty Library screen tap **Add Sample Music**. Nine short made-up songs (three albums, synthesized sound, no one's recordings) are copied into the app's folder; play any of them from Library → Albums. Media servers (DLNA) and WebDAV folders on a local network are optional. Online lyrics are off by default (Settings → General → Lyrics).
 
 ## 샌드박스와 권한
-- 직접 배포이므로 **App Sandbox는 쓰지 않습니다.** 사용자가 고른 폴더를 일반 파일 권한으로 읽습니다.
-  (샌드박스를 도입하려면 security-scoped bookmark의 저장·복원·해제를 함께 구현해야 합니다.)
-- Hardened Runtime은 Developer ID 서명 시 켭니다(샌드박스와 별개).
-- 마이크, 카메라, 전체 디스크 접근, 네트워크 권한을 요구하지 않습니다. 앱은 네트워크에 접속하지 않습니다.
+- **내려받는 앱은 App Sandbox를 쓰지 않습니다.** 사용자가 고른 폴더를 일반 파일 권한으로 읽습니다.
+- **Mac App Store의 앱은 App Sandbox 안에서 돕니다.** 넘겨받은 폴더 · 파일의 권한을 책갈피(security-scoped bookmark)로 저장하고 다음 실행에 되살립니다. 권한 파일은 `assets/OnEum.entitlements`, 자세한 것은 [MAC_APP_STORE.md](MAC_APP_STORE.md).
+- Hardened Runtime은 두 쪽 모두 켭니다(샌드박스와 별개).
+- 마이크, 카메라, 전체 디스크 접근 권한을 요구하지 않습니다. 네트워크는 사용자가 쓰는 기능에서만 씁니다: 같은 네트워크의 미디어 서버(DLNA), 등록한 네트워크 폴더(WebDAV), 켰을 때의 가사 검색(LRCLIB).
 
 ## 홈페이지 (GitHub Pages)
 프로그램을 소개하는 페이지가 `site/`에 있습니다. 한국어(`site/index.html`)와 영어(`site/en/index.html`) 두 장이고, 같은 스타일시트(`site/style.css`)와 스크립트(`site/meters.js`, 움직이는 VU 미터)를 씁니다. 개인정보 처리방침(`site/privacy.html`, `site/en/privacy.html`)도 여기 있습니다: 앱이 기기 밖으로 보내는 것이나 묻는 권한이 바뀌면 두 언어의 페이지와 날짜를 함께 고칩니다.

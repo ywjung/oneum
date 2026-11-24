@@ -1,6 +1,6 @@
 # iPhone: App Store 배포 절차
 
-작성 2026-11-22 · 대상은 iPhone 앱(`ios/OnEum.xcodeproj`, 위젯 확장 포함)입니다. Mac용 직접 배포(Developer ID · 공증)는 [RELEASE.md](RELEASE.md) 4 · 5절에 있습니다.
+작성 2026-11-22 · 대상은 iPhone 앱(`ios/OnEum.xcodeproj`, 위젯 확장 포함)입니다. Mac용 직접 배포(Developer ID · 공증)는 [RELEASE.md](RELEASE.md) 4 · 5절에, Mac App Store 준비는 [MAC_APP_STORE.md](MAC_APP_STORE.md)에 있습니다.
 
 이 문서는 **계정을 가진 사람이 직접 해야 하는 일**과 **저장소에 준비되어 있는 것**을 순서대로 적습니다. 아래 표시가 붙은 단계는 다른 사람이나 도구가 대신할 수 없습니다.
 

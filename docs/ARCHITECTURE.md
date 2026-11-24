@@ -419,7 +419,7 @@ ID3 태그는 "Latin-1"이라고 선언하고, `.lrc`·`.m3u`는 아무것도 �
   이번 실행에서 실제로 재생을 시작하기 전에는 Now Playing을 게시하지 않는다(실행만으로 다른 앱의 미디어 키를 빼앗지 않기 위해).
   실행 후 3초 안에 들어온 원격 "재생" 명령은 무시한다(실행 직후 자동으로 소리가 나지 않게).
 - 창이 가려져 UI 프레임이 멈춰도 Now Playing 갱신은 메인 큐 작업으로 수행하므로 영향이 없다.
-- 배포: 샌드박스 없는 직접 배포(.dmg). Hardened Runtime은 Developer ID 서명 시 켠다. 마이크·전체 디스크 접근 권한을 요구하지 않는다.
+- 배포: 두 가지. 내려받는 앱(.dmg)은 샌드박스 없이 Developer ID로 서명하고, Mac App Store의 앱(.pkg)은 App Sandbox 안에서 돈다. 프로그램은 하나이고, 실행 중에 샌드박스 안인지 보고(`platform::macos::files::in_sandbox`) 안에서만 넘겨받은 폴더 · 파일의 책갈피를 만들고 되살린다(`src/platform/macos/files.rs`, iPhone의 "연결한 폴더"와 같은 접점). 어느 쪽도 마이크·전체 디스크 접근 권한을 요구하지 않는다([MAC_APP_STORE.md](MAC_APP_STORE.md)).
 
 ## 플랫폼
 `platform` 모듈이 시스템별 구현을 같은 이름(`finder`, `menu`, `nowplaying`, `device` …)으로 내보낸다. 호출하는 쪽에는 `cfg`가 없다(경로와 글꼴처럼 값만 다른 곳 제외).

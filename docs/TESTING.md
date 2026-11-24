@@ -1608,6 +1608,18 @@ USB DAC(AKLIAM PD5)을 Mac에 꽂고 확인했습니다. 시스템의 기본 출
 - 옵션을 켠 채로의 장시간 연속 재생(위 "장시간 재생"은 옵션이 없던 때의 측정입니다).
 - 사람 귀로 듣는 확인. 위 확인은 모두 앱 볼륨 0에서 상태와 로그로 했습니다.
 
+## Mac App Store용 앱: 샌드박스 (🖥, 2026-11-24)
+
+확인한 것과 못 한 것의 목록은 [MAC_APP_STORE.md](MAC_APP_STORE.md) 5절에 있다. 여기는 어떻게 쟀는지다.
+
+- 시험용 앱: 디버그 빌드(검증 채널 포함)의 식별자를 `app.oneum.OnEum.sandboxtest`로 바꾸고, `assets/OnEum.entitlements`에 **프로필 폴더 하나만 읽고 쓰는 임시 예외**를 더해 임시 서명했다. 검증 채널의 스크립트와 결과 파일이 그 폴더에 있어야 하기 때문이고, 음악은 그 폴더 밖에 두었다. 스토어에 가는 권한 파일에는 그 예외가 없다.
+- 권한을 주는 길: `open -a <앱> <폴더나 파일>`. Finder에서 여는 것과 같이 시스템이 앱에 그 항목의 권한을 넘긴다. 검증 채널의 `open <경로>`는 앱 안에서 경로만 넘기므로 권한이 따라오지 않는다(넘겨받지 않은 폴더의 대조로 씀).
+- 순서: 넘겨받지 않은 폴더(0곡) → `open -a`로 넘김(20곡, 책갈피 848바이트) → 재생(볼륨 0, 끊김 0) → 종료 · 재시작(로그 `running in the App Sandbox links=1`, 스캔 21파일, 재생) → 낱개 파일을 넘김 → 재시작 뒤 재생 → 책갈피 파일을 치우고 재시작(0파일, 재생 실패, 곡은 남음) → 되돌림(재생) → 설정에서 폴더 제거(책갈피에서 빠짐, 같은 실행에서 다시 읽으려 하면 0파일).
+- 네트워크: `scripts/dev/fake-dlna.py --ssdp`를 띄우고 `net add http://…`(HTTP)와 `net add 127.0.0.1`(UDP 검색). 검색은 `network.client`만으로는 `Operation not permitted`였고 `network.server`를 넣은 뒤 서버를 찾았다. 키체인은 `net secret-selftest`.
+- 패키지: `ONEUM_MAC_TEAM=… scripts/package.sh --app-store` → `dist/mas/OnEum-0.1.0-169.pkg`(커밋한 뒤 다시 만든 것), 검사 11항목 통과. 검사가 틀린 것을 잡는지: 서명 없는 패키지(4항목 실패), 내려받는 앱으로 만든 패키지(6항목 실패), 다른 팀(1항목 실패). 잠긴 화면은 `ioreg`를 대역으로 바꿔 두 서명 스크립트가 `xcodebuild`를 부르지 않고 끝나는 것을 봤다.
+- 두 서명 스크립트가 함께 쓰는 부분을 `scripts/mac-archive.sh`로 옮긴 뒤, Developer ID 서명(공증 없이)을 사본으로 다시 돌려 검사 6항목 통과. 공증까지 가는 길은 다시 돌리지 않았다.
+- `scripts/check.sh` 통과(형식, 네 시스템의 린트, 테스트).
+
 ## Developer ID 서명과 공증 (🖥, 2026-11-23)
 
 `ONEUM_MAC_TEAM=<팀 ID> scripts/package.sh --dmg --notarize`로 만든 0.1.0 빌드 153(docs/RELEASE.md 4 · 5절 "가").
