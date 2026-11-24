@@ -68,6 +68,10 @@ What differs there (a menu bar inside the window, Ctrl shortcuts, features that 
 
 ## iPhone
 
+The iPhone app is on the App Store (free, iOS 16 or later): **[OnEum on the App Store](https://apps.apple.com/app/id6838073525)**. It is not on the App Store of France, mainland China and the member states of the EU.
+
+To build and run it from source:
+
 ```bash
 scripts/ios-sim.sh
 ```
@@ -85,7 +89,7 @@ The team to sign with is taken from the development certificate in the keychain.
 The iPhone has screens of its own: tabs for the library, search, playlists and settings; a player that shows the cover, the lyrics, the VU meters with the spectrum, or the queue; pins, sorting, choosing several songs at once, reordering playlists and the queue by dragging, smart playlists, song info with credits and the signal path, the file check, the equalizer and headphone correction; playback in the background; searching inside a list; linking a folder in iCloud Drive or on a plugged-in drive without copying it; output at the song's sample rate (asked of the iPhone); importing an Apple Music library; landscape.
 Not there: choosing an output device and exclusive output (the iPhone decides), the menu bar and keyboard shortcuts, the choice of list columns, and screens made for the iPad.
 
-**The iPhone version is verified in the iOS 27.0 Simulator. On a real iPhone (iOS 27.2.1) it has been installed and seen to start, draw and keep its library across an update; how its screens look and feel on the device has not been checked by us.**
+**The iPhone version is verified in the iOS 27.0 Simulator. On a real iPhone (iOS 27.2.1) the screens of the build that is on the App Store (0.1.0) have been seen: the library, playing, the player, the equalizer, search and Control Center. Sound, the Lock Screen, earphone buttons and linked folders have not been checked by us on a real iPhone.**
 Usage: [docs/USER_GUIDE_IOS.en.md](docs/USER_GUIDE_IOS.en.md). What differs and what was verified: [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md) and the "iPhone" section of [docs/TESTING.md](docs/TESTING.md) (both Korean).
 
 ## Android

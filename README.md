@@ -67,6 +67,9 @@ Windows에서 다른 점(창 안 메뉴 막대, Ctrl 단축키, 지원하지 않
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "플랫폼", [docs/TESTING.md](docs/TESTING.md)의 "Windows"에 있습니다.
 
 ## iPhone
+iPhone 앱은 App Store에서 받습니다(무료, iOS 16 이상): **[App Store의 OnEum](https://apps.apple.com/app/id6838073525)**. 프랑스, 중국 본토, EU 회원국의 App Store에는 없습니다.
+
+소스에서 빌드해 실행하려면:
 ```bash
 scripts/ios-sim.sh
 ```
@@ -83,7 +86,7 @@ iPhone에는 폰 전용 화면이 있습니다: 보관함 · 검색 · 플레이
 목록 안에서 찾기, iCloud Drive나 꽂은 저장 장치의 폴더를 복사 없이 연결하기, 곡의 샘플레이트로 출력(iPhone에 요청), Apple Music 보관함 가져오기, 가로 화면.
 없는 것: 출력 장치 선택과 독점 출력(iPhone이 정함), 메뉴 막대와 키보드 단축키, 목록의 열 고르기, iPad용 화면.
 
-**iPhone판은 iOS 27.0 시뮬레이터에서 확인했습니다. 실제 iPhone(iOS 27.2.1)에는 설치해서 시작되고, 그려지고, 업데이트 뒤에도 보관함이 그대로인 것까지 확인했습니다. 기기에서 화면이 어떻게 보이고 움직이는지는 저희가 확인하지 못했습니다.**
+**iPhone판은 iOS 27.0 시뮬레이터에서 확인했습니다. 실제 iPhone(iOS 27.2.1)에서는 App Store에 낸 빌드(0.1.0)로 보관함 · 재생 · 플레이어 · 이퀄라이저 · 검색 · 제어 센터의 화면을 확인했습니다. 소리, 잠금 화면, 이어폰 조작, 연결한 폴더는 실제 iPhone에서 저희가 확인하지 못했습니다.**
 화면과 사용법은 [docs/USER_GUIDE_IOS.md](docs/USER_GUIDE_IOS.md), 다른 점과 확인 범위는 [docs/adr/0002-iphone.md](docs/adr/0002-iphone.md)와 [docs/TESTING.md](docs/TESTING.md)의 "iPhone"에 있습니다.
 
 ## Android
