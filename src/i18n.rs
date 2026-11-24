@@ -362,6 +362,9 @@ strings! {
     licenses: "오픈 소스 라이선스", "Open Source Licenses";
     licenses_desc: "OnEum을 이루는 오픈 소스 구성 요소와 그 라이선스입니다.", "The open source components OnEum is built from, and their licenses.";
     licenses_show: "보기", "Show";
+    privacy_policy: "개인정보 처리방침", "Privacy Policy";
+    privacy_policy_desc: "OnEum은 개인정보를 수집하지 않습니다. 기기에 남는 것과 기기 밖으로 나가는 것을 적은 페이지를 브라우저로 엽니다.", "OnEum collects no personal data. Opens the page that says what stays on the device and what leaves it, in the browser.";
+    privacy_policy_open: "열기", "Open";
     licenses_hide: "접기", "Hide";
     close: "닫기", "Close";
     // Dialogs

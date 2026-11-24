@@ -1883,6 +1883,32 @@ impl OneumApp {
             self.copy_text(ui.ctx(), report);
         }
 
+        // The privacy policy, a page of the project's site. Google Play asks for a
+        // link to it inside the app as well as on the store's page.
+        if cfg!(target_os = "android") {
+            ui.add_space(14.0);
+            let mut open = false;
+            widgets::card(ui, |ui| {
+                widgets::setting_row(
+                    ui,
+                    s.privacy_policy,
+                    Some(s.privacy_policy_desc),
+                    true,
+                    |ui| {
+                        open = ui
+                            .add(
+                                egui::Button::new(s.privacy_policy_open)
+                                    .min_size(egui::vec2(0.0, 26.0)),
+                            )
+                            .clicked();
+                    },
+                );
+            });
+            if open {
+                crate::platform::open_web_page(privacy_policy_address(self.lang));
+            }
+        }
+
         if self.licenses_shown {
             // The notices themselves (THIRD_PARTY_NOTICES.md), below the card.
             ui.add_space(14.0);
@@ -1891,6 +1917,15 @@ impl OneumApp {
                 markdown::show(ui, license_notices(), NOTICES_LOOK, |_, _| {});
             });
         }
+    }
+}
+
+/// Where the privacy policy is, in the language of the app (site/privacy.html and
+/// site/en/privacy.html, published as the project's pages).
+pub(super) fn privacy_policy_address(lang: crate::i18n::Lang) -> &'static str {
+    match lang {
+        crate::i18n::Lang::Ko => "https://ywjung.github.io/oneum/privacy.html",
+        crate::i18n::Lang::En => "https://ywjung.github.io/oneum/en/privacy.html",
     }
 }
 
@@ -1934,6 +1969,26 @@ mod tests {
 
     fn plain(spans: &[Span]) -> String {
         spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    /// The privacy policy the About page opens is a page of the project's site, in
+    /// each language: an address the app will pass on to the browser, and a file that
+    /// is there to be published.
+    #[test]
+    fn the_privacy_policy_of_each_language_is_a_page_of_the_site() {
+        let site = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("site");
+        for (lang, file) in [
+            (crate::i18n::Lang::Ko, "privacy.html"),
+            (crate::i18n::Lang::En, "en/privacy.html"),
+        ] {
+            let address = privacy_policy_address(lang);
+            assert!(crate::platform::is_web_address(address), "{address}");
+            let page = address
+                .strip_prefix("https://ywjung.github.io/oneum/")
+                .expect("a page of the project's site");
+            assert_eq!(page, file);
+            assert!(site.join(page).is_file(), "site/{page} is not there");
+        }
     }
 
     /// A band's values as the list of a profile's values shows them: the kind by its
