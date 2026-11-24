@@ -103,10 +103,11 @@ fn pump(
         for e in &new_events {
             match e {
                 EngineEvent::TrackStarted { item_id, .. } => {
-                    // Announce what follows this item, as the player does.
+                    // Announce what follows this item, as the player does. (Not taken
+                    // when the decode thread is at the item after it by now.)
                     let pos = queue.iter().position(|r| r.item_id == *item_id);
                     let next = pos.and_then(|p| queue.get(p + 1)).cloned();
-                    slot.set(next.map_or(NextTrack::End, NextTrack::Track));
+                    slot.set_after(*item_id, next.map_or(NextTrack::End, NextTrack::Track));
                 }
                 EngineEvent::Drained { .. } => drained = true,
                 _ => {}
