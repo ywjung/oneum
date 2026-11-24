@@ -212,6 +212,16 @@ App Store Connect ▸ 버전 ▸ App Review Information.
 4. 찍은 것과 메모 1번의 목록이 다르면 **메모를 영상에 맞춥니다.**
 5. 첨부 파일은 `.mp4` · `.zip` · `.pdf` · `.png` 등을 받습니다(`.mov`는 목록에 없음). 사진 앱의 영상을 Mac으로 옮겨 `.mp4`가 아니거나 크면 `ffmpeg -i 받은파일 -vf scale=-2:1280 -c:v libx264 -crf 28 -c:a aac -b:a 96k review.mp4`로 바꿉니다.
 6. 메모와 첨부 파일을 저장하고, 앱 심사 ▸ 그 제출에서 **앱 심사에 다시 제출**을 누릅니다. 빌드는 그대로입니다.
+
+**손으로 누르지 않고 찍는 방법(2026-11-24에 이렇게 찍었습니다).** Mac에 연결한 iPhone에서 UI 테스트(XCUITest)가 TestFlight로 깐 앱을 열어 화면의 좌표를 누르고, Xcode가 그 화면을 녹화합니다. 저장소에는 넣지 않은 작은 프로젝트(빈 앱 하나와 UI 테스트 하나)로 했습니다.
+
+- 필요한 것: iPhone의 개발자 모드, 개발자 계정에 그 iPhone 등록(`xcodebuild build-for-testing … -allowProvisioningUpdates -allowProvisioningDeviceRegistration`이 합니다. 연 100대 중 한 자리), iPhone의 설정 ▸ 개발자 ▸ **UI 자동화 활성화**, 자동 잠금 "안 함".
+- 테스트는 `XCUIApplication(bundleIdentifier: "app.oneum.OnEum")`로 **깔려 있는 앱**을 엽니다. 같은 식별자의 개발용 빌드를 깔면 TestFlight의 앱을 덮어쓰므로 시험용 앱은 다른 식별자를 씁니다.
+- 앱은 egui로 그려서 단추를 이름으로 찾을 수 없습니다: 화면 비율 좌표로 누르고, 먼저 스크린샷을 찍어 자리를 맞춥니다. 설정 앱 같은 시스템 앱은 이름표로 누를 수 있습니다.
+- 녹화: 테스트 플랜의 `"preferredScreenCaptureFormat": "screenRecording"`과 `"uiTestingScreenshotsLifetime": "keepAlways"`. 결과 묶음에서 `xcrun xcresulttool export attachments --path X.xcresult --output-path 폴더`로 꺼내면 `.mp4`(소리 없음, 1882×4094)입니다. 앞의 홈 화면을 잘라 내고 줄였습니다: `ffmpeg -ss 2.7 -i 원본.mp4 -vf scale=-2:1600,fps=30 -c:v libx264 -crf 26 -an -map_metadata -1 review.mp4`(93초가 3.6MB).
+- 단계는 `TEST_RUNNER_STEPS=… xcodebuild test-without-building`으로 넘깁니다(`TEST_RUNNER_`를 뗀 이름으로 테스트에 들어옵니다). `-collect-test-diagnostics never`를 붙이지 않으면 실패할 때 기기 진단 묶음(기기 이름 · 일련번호 등)이 결과에 들어갑니다.
+- 걸린 곳: UI 자동화가 꺼져 있으면 `Failed to initialize for UI testing … LocalAuthentication -4`(iPhone이 인증을 물었는데 답이 없었던 것). iPhone이 잠겨 있으면 `xcodebuild`가 풀릴 때까지 기다립니다. 키보드가 올라와 있으면 아래 탭 막대 자리에 키보드의 받아쓰기 단추가 있습니다: 검색은 마지막 장면으로 두었습니다. 곡의 "더 보기" 메뉴는 맨 아래에 "라이브러리에서 제거"가 있고 그 높이가 탭 막대와 같아서, 좌표로 누르는 녹화에서는 열지 않았습니다. 화면을 잠그는 공개 API가 없어 잠금 화면 대신 제어 센터를 찍었습니다.
+- 끝나면 되돌립니다: 앱의 언어와 이퀄라이저, iPhone의 음량(소리가 나지 않게 0으로 내리고 찍음)과 자동 잠금.
 - 심사에서 물을 만한 것과 답:
 
 | 물을 것 | 답 |

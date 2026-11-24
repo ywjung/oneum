@@ -371,7 +371,8 @@ App Review Information ▸ Notes에 넣는 글입니다(4,000바이트까지, �
 OnEum is an offline player for music files the user owns. It has no account, no sign-in, no purchases, no ads and no server of its own. Below are the six points asked for under Guideline 2.1 on 24 November 2026.
 
 1. SCREEN RECORDING
-Attached to this section (Attachment). Recorded on a physical iPhone running the latest iOS, with build 0.1.0 (147) installed from TestFlight. It begins with launching the app and shows: the empty Library, Add Sample Music, browsing albums, playing a song, the player (cover, level meters, queue), the equalizer, search, a playlist, the Lock Screen controls and the Home Screen widget.
+Attached to this section (Attachment): oneum-review-0.1.0-147.mp4, 93 seconds, without sound. It is the screen of a physical iPhone 18 Pro running iOS 27.2.1, with build 0.1.0 (147) installed from TestFlight; the taps were made by a UI test on the device. It begins with launching the app and shows: the Library, the albums, an album, playing a song, the player (cover, level meters, queue, lyrics), the next song, pause and resume, the equalizer with a preset, the Playback settings, search and playing a result, and pausing from Control Center.
+The music in it is the developer's own files; on a new install the Library is empty and offers Add Sample Music (see 3). On that iPhone Find Lyrics Online (see 4) is switched on.
 The app has no account registration, login or account deletion. It has no user-generated content: nothing a user makes is shown to anyone else or leaves the device. It has no paid content or features.
 
 2. PURPOSE AND AUDIENCE
