@@ -1040,7 +1040,7 @@ impl<H: PlayerHost> Player<H> {
         let Some(chain) = &self.chain else { return };
         if self.stop_after == Some(item_id) {
             // Nothing follows in this feed: playback stops when it has been played.
-            chain.slot.set(NextTrack::End);
+            chain.slot.set_after(item_id, NextTrack::End);
             return;
         }
         let next = match self.queue.peek_after(item_id) {
@@ -1071,7 +1071,9 @@ impl<H: PlayerHost> Player<H> {
             }
             _ => NextTrack::End,
         };
-        chain.slot.set(next);
+        // (Not taken when the decode thread has gone on to the item after this one:
+        // what follows that one is told when its start is heard of.)
+        chain.slot.set_after(item_id, next);
     }
 
     /// For how long the end of `ending` is mixed with the beginning of `beginning`

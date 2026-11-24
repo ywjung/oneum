@@ -67,15 +67,48 @@ pub enum NextTrack {
 }
 
 /// Slot through which the controller tells the decode thread what follows the current track.
-pub struct NextSlot(Mutex<NextTrack>);
+pub struct NextSlot(Mutex<Announced>);
+
+struct Announced {
+    /// The item the decode thread is at (`None` until a feed has taken the slot).
+    at: Option<u64>,
+    next: NextTrack,
+}
 
 impl NextSlot {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(NextTrack::Pending)))
+        Arc::new(Self(Mutex::new(Announced {
+            at: None,
+            next: NextTrack::Pending,
+        })))
     }
+    /// Says what follows the track the decode thread is at, whichever that is: for a
+    /// controller that knows it (before the feed is started, or with nothing to follow
+    /// whatever plays).
     pub fn set(&self, next: NextTrack) {
         if let Ok(mut slot) = self.0.lock() {
-            *slot = next;
+            slot.next = next;
+        }
+    }
+    /// Says what follows the item `item_id`. Taken only while the decode thread is at
+    /// that item (`false` when it is not): the controller hears of a track's start a
+    /// moment after the fact, and by then the decode thread may have taken what follows
+    /// and be at that. What follows the track before is then not what follows the one
+    /// it is at (it would play that one twice); the controller says what does when it
+    /// hears that it has started.
+    pub fn set_after(&self, item_id: u64, next: NextTrack) -> bool {
+        match self.0.lock() {
+            Ok(mut slot) if slot.at.is_none_or(|at| at == item_id) => {
+                slot.next = next;
+                true
+            }
+            _ => false,
+        }
+    }
+    /// The decode thread starts with the item `item_id`.
+    fn begin(&self, item_id: u64) {
+        if let Ok(mut slot) = self.0.lock() {
+            slot.at = Some(item_id);
         }
     }
     /// How much of the end of the current track is to be held back for the track that
@@ -86,8 +119,14 @@ impl NextSlot {
     /// the audio it is about has not gone by.
     fn hold_ms(&self) -> u32 {
         match self.0.lock().as_deref() {
-            Ok(NextTrack::Track(next)) => next.crossfade_ms,
-            Ok(NextTrack::Pending) => LONGEST_CROSSFADE_MS,
+            Ok(Announced {
+                next: NextTrack::Track(next),
+                ..
+            }) => next.crossfade_ms,
+            Ok(Announced {
+                next: NextTrack::Pending,
+                ..
+            }) => LONGEST_CROSSFADE_MS,
             _ => 0,
         }
     }
@@ -95,15 +134,19 @@ impl NextSlot {
     /// What is announced right now, without taking it.
     fn peek(&self) -> NextTrack {
         match self.0.lock() {
-            Ok(slot) => slot.clone(),
+            Ok(slot) => slot.next.clone(),
             Err(_) => NextTrack::End,
         }
     }
-    /// Takes the announced track, leaving `Pending`. `End` stays in place.
+    /// Takes the announced track, leaving `Pending`: the decode thread is at that
+    /// track from here on. `End` stays in place.
     fn take(&self) -> NextTrack {
         match self.0.lock() {
-            Ok(mut slot) => match &*slot {
-                NextTrack::Track(_) => std::mem::replace(&mut *slot, NextTrack::Pending),
+            Ok(mut slot) => match &slot.next {
+                NextTrack::Track(next) => {
+                    slot.at = Some(next.item_id);
+                    std::mem::replace(&mut slot.next, NextTrack::Pending)
+                }
                 other => other.clone(),
             },
             Err(_) => NextTrack::End,
@@ -230,6 +273,9 @@ impl FeedHandle {
         let written = Arc::new(AtomicU64::new(0));
         let epoch = params.epoch;
         let from_start = params.start_ms == 0;
+        // (Here and not in the thread: what follows the first track may be said as
+        // soon as this returns.)
+        params.next.begin(params.first.item_id);
         let worker = Worker {
             current: (params.first.item_id, params.first.track_id),
             refill: ((f64::from(params.out_rate) * RING_REFILL_SECONDS) as usize * 2)
@@ -1419,7 +1465,8 @@ mod tests {
     /// Three songs of a second each, each mixed into the one before it for a tenth of
     /// a second, read as fast as they are decoded; what follows a song is announced
     /// `late` after the song has started, as the player announces it when it hears of
-    /// the start. Returns the samples and where each song began.
+    /// the start (of the first song too, after it was announced as the feed started).
+    /// Returns the samples and where each song began.
     fn three_crossfaded_songs_announced(late: Duration) -> (Vec<f32>, Vec<(u64, u64)>) {
         let song = |item_id: u64, name: &str| TrackRequest {
             item_id,
@@ -1438,7 +1485,7 @@ mod tests {
         let mut consumer = feed.take_consumer().expect("consumer").consumer;
         let mut pcm = Vec::new();
         let mut started = Vec::new();
-        let mut due: Option<(Instant, NextTrack)> = None;
+        let mut due: Vec<(Instant, u64, NextTrack)> = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let available = consumer.slots();
@@ -1458,17 +1505,16 @@ mod tests {
                 {
                     started.push((item_id, at_frame));
                     let follows = match item_id {
-                        2 => Some(NextTrack::Track(song(3, "gap_a.wav"))),
-                        3 => Some(NextTrack::End),
-                        _ => None,
+                        1 => NextTrack::Track(song(2, "gap_b.wav")),
+                        2 => NextTrack::Track(song(3, "gap_a.wav")),
+                        _ => NextTrack::End,
                     };
-                    due = follows.map(|follows| (Instant::now() + late, follows));
+                    due.push((Instant::now() + late, item_id, follows));
                 }
             }
-            if due.as_ref().is_some_and(|(at, _)| Instant::now() >= *at)
-                && let Some((_, follows)) = due.take()
-            {
-                next.set(follows);
+            while due.first().is_some_and(|(at, ..)| Instant::now() >= *at) {
+                let (_, item_id, follows) = due.remove(0);
+                next.set_after(item_id, follows);
             }
             assert!(Instant::now() < deadline, "feed never finished");
             std::thread::sleep(Duration::from_millis(1));
@@ -1485,8 +1531,14 @@ mod tests {
     /// announcement as not to be mixed: a crossfade was cut short, or left out, by
     /// however late the announcement came. A test of three one-second songs failed
     /// that way on a busy CI machine.)
+    ///
+    /// And no song is played twice: by the time the controller says what follows the
+    /// first song (again, having heard of its start), the decode thread is at the
+    /// second one. (Once that was taken for what follows the second song. The player
+    /// saw a song begin that the queue did not have there and started the feed anew:
+    /// a test of the player failed that way on a CI machine.)
     #[test]
-    fn a_late_announcement_does_not_cut_the_crossfade_short() {
+    fn a_late_announcement_does_not_cut_the_crossfade_short_or_repeat_a_song() {
         let fade = frames_of(100, 44_100) as u64;
         let begins = vec![(1, 0), (2, 44_100 - fade), (3, 2 * (44_100 - fade))];
         let (at_once, started) = three_crossfaded_songs_announced(Duration::ZERO);
@@ -1501,6 +1553,45 @@ mod tests {
             "shorter than the three by what they share"
         );
         assert!(late == at_once, "the same samples as announced at once");
+    }
+
+    /// What is said to follow an item is taken only while the decode thread is at
+    /// that item.
+    #[test]
+    fn what_follows_an_item_the_decode_thread_has_left_is_not_taken() {
+        let song = |item_id: u64| {
+            NextTrack::Track(TrackRequest {
+                item_id,
+                track_id: item_id as TrackId,
+                path: fixture("gap_a.wav"),
+                replaygain: ReplayGainTags::default(),
+                crossfade_ms: 0,
+            })
+        };
+        let slot = NextSlot::new();
+        // Before a feed has the slot, whatever is said stands.
+        assert!(slot.set_after(9, song(2)));
+        slot.begin(1);
+        assert!(slot.set_after(1, song(2)));
+        assert_eq!(slot.take(), song(2));
+        assert_eq!(slot.peek(), NextTrack::Pending);
+        // The decode thread is at item 2 now: what follows item 1 is none of its.
+        assert!(!slot.set_after(1, song(2)));
+        assert!(!slot.set_after(1, NextTrack::End));
+        assert_eq!(slot.peek(), NextTrack::Pending);
+        assert!(
+            slot.set_after(2, song(2)),
+            "the same item again (repeat one)"
+        );
+        assert_eq!(slot.take(), song(2));
+        assert!(slot.set_after(2, NextTrack::End));
+        assert_eq!(slot.take(), NextTrack::End);
+        // Nothing was taken: it is still at item 2.
+        assert!(slot.set_after(2, song(3)));
+        assert!(!slot.set_after(3, NextTrack::End));
+        // Said without an item, it stands whatever the decode thread is at.
+        slot.set(NextTrack::End);
+        assert_eq!(slot.peek(), NextTrack::End);
     }
 
     #[test]
