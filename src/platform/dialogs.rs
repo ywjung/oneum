@@ -68,6 +68,11 @@ pub fn has_all_files_access() -> bool {
     true
 }
 
+/// (There is no such right to offer but on Android.)
+pub fn offers_all_files_access() -> bool {
+    false
+}
+
 pub fn ask_all_files_access() {}
 
 /// Tries again to reach linked folders that could not be reached: nothing to do on a

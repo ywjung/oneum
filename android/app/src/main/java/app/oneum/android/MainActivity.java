@@ -576,6 +576,29 @@ public final class MainActivity extends NativeActivity {
         return Environment.isExternalStorageManager();
     }
 
+    /**
+     * Whether this build can be given all files access at all: only one whose manifest
+     * asks for it. The build for Google Play does not (Play does not permit it to a
+     * music player), and then the system's page has no switch for the app.
+     */
+    public boolean offersAllFilesAccess() {
+        try {
+            String[] asked = getPackageManager()
+                    .getPackageInfo(getPackageName(), PackageManager.GET_PERMISSIONS)
+                    .requestedPermissions;
+            if (asked != null) {
+                for (String permission : asked) {
+                    if (Manifest.permission.MANAGE_EXTERNAL_STORAGE.equals(permission)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (PackageManager.NameNotFoundException error) {
+            Log.w(TAG, "the app's own package was not found", error);
+        }
+        return false;
+    }
+
     /** The system's right to read music and audio, by Android's version. */
     private static String musicPermission() {
         return Build.VERSION.SDK_INT >= 33

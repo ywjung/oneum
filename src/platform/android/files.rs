@@ -156,6 +156,13 @@ pub fn has_all_files_access() -> bool {
     super::java::has_all_files_access()
 }
 
+/// Whether all files access can be given to this build at all: not to the one for
+/// Google Play, whose manifest does not ask for it (Play does not permit that right to
+/// a music player). Where it cannot, the settings do not offer it.
+pub fn offers_all_files_access() -> bool {
+    super::java::offers_all_files_access()
+}
+
 /// Shows the page of the system's settings where all files access is given.
 pub fn ask_all_files_access() {
     super::java::ask_all_files_access();

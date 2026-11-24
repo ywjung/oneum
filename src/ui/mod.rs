@@ -3479,6 +3479,17 @@ impl OneumApp {
             state["talkback_on"] = serde_json::json!(crate::platform::android::a11y::talkback_on());
             state["talkback_tree"] =
                 serde_json::json!(crate::platform::android::a11y::told_texts());
+            // (The language the app speaks, which on a phone follows the system's.)
+            state["language"] = serde_json::json!(match self.lang {
+                crate::i18n::Lang::Ko => "ko",
+                crate::i18n::Lang::En => "en",
+            });
+            // Which of the two builds this is: the one for Google Play cannot be
+            // given all files access, and does not offer it.
+            state["all_files_offered"] =
+                serde_json::json!(crate::platform::files::offers_all_files_access());
+            state["all_files_access"] =
+                serde_json::json!(crate::platform::files::has_all_files_access());
         }
         // What an iPhone's widgets would read now (the song the app left for them).
         #[cfg(all(target_os = "ios", any(debug_assertions, feature = "automation")))]

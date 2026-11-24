@@ -2737,8 +2737,11 @@ impl OneumApp {
                                     },
                                 );
                                 widgets::row_divider(ui);
-                            } else if crate::platform::STORAGE_NEEDS_ACCESS {
-                                // More than music, for who wants it (Android).
+                            } else if crate::platform::STORAGE_NEEDS_ACCESS
+                                && crate::platform::files::offers_all_files_access()
+                            {
+                                // More than music, for who wants it (Android; not in
+                                // the build for Google Play, which may not ask for it).
                                 let all = all_files_access();
                                 widgets::setting_row(
                                     ui,

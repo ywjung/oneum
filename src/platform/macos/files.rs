@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 pub use crate::platform::dialogs::{
     add_sample_music, ask_all_files_access, ask_storage_access, hand_out, has_all_files_access,
-    has_storage_access, sample_music,
+    has_storage_access, offers_all_files_access, sample_music,
 };
 
 /// Whether the app runs in the App Sandbox (the system sets this for a sandboxed

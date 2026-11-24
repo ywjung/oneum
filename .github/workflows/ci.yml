@@ -78,10 +78,12 @@ jobs:
       - run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - name: Lints (Android)
         run: . scripts/android-env.sh && cargo clippy --locked --lib --target aarch64-linux-android -- -D warnings
-      - name: The library and the release APK
+      - name: The library and the release APK (the build that is installed by hand)
         run: scripts/android-build.sh --release
-      - name: Android lint (an error fails the job)
-        run: cd android && ./gradlew --quiet lintRelease
+      - name: The app bundle for Google Play (the build without all files access)
+        run: scripts/android-build.sh --release --play --bundle
+      - name: Android lint of both builds (an error fails the job)
+        run: cd android && ./gradlew --quiet lintDirectRelease lintPlayRelease
 
   advisories:
     runs-on: ubuntu-latest

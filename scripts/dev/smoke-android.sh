@@ -190,8 +190,13 @@ ui 'wait 3500' 'dump b.json'
 check b.json 'd["library_tracks"] == 20 and not d["scan_running"]' "20 tracks read from the music folder with that right alone (1 unreadable file skipped)"
 check b.json 'd["albums"] == 7' "albums grouped"
 # All files access besides, as the library settings offer it: what lies beside the
-# music (lyrics files, a room's correction) is read later in the run.
+# music (lyrics files, a room's correction) is read later in the run. (This is the
+# build that is installed by hand; the one for Google Play does not ask for that
+# right and is looked at by scripts/dev/play-shots.sh.)
+check b.json 'd["all_files_offered"] and not d["all_files_access"]' "this build can be given all files access, and has not got it yet"
 $ADB shell appops set $PKG MANAGE_EXTERNAL_STORAGE allow
+ui 'wait 1200' 'dump b2.json'
+check b2.json 'd["all_files_access"]' "all files access is given"
 
 echo "== lists and the system's Back"
 ui "tap 200 $MENU0" 'wait 700' 'dump c1.json'

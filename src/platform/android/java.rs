@@ -279,6 +279,25 @@ pub(super) fn has_all_files_access() -> bool {
     .unwrap_or(false)
 }
 
+/// Whether this build asks for that right in its manifest, so that the system has a
+/// switch for it (the build for Google Play does not). It cannot change while the app
+/// runs: asked once.
+pub(super) fn offers_all_files_access() -> bool {
+    static OFFERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFFERED.get_or_init(|| {
+        with_activity("offersAllFilesAccess", |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("offersAllFilesAccess"),
+                jni_sig!("()Z"),
+                &[],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    })
+}
+
 /// Shows the system's page where that right is given.
 pub(super) fn ask_all_files_access() {
     ask(jni_str!("askAllFilesAccess"), "askAllFilesAccess");

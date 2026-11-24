@@ -9,17 +9,31 @@ def oneumBuild = providers.gradleProperty('oneumBuild').getOrElse('1').toInteger
 
 android {
     namespace 'app.oneum.android'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         applicationId 'app.oneum.android'
         // Android 11: the first with "all files access", which the library needs.
         minSdk 30
-        targetSdk 35
+        // What Google Play asks of a new app (since 2026-08-31: Android 16).
+        targetSdk 36
         versionCode oneumBuild
         versionName oneumVersion
         ndk {
             abiFilters 'arm64-v8a'
+        }
+    }
+
+    // Two builds of the one app. "direct" is the APK that is installed by hand and may
+    // be given "all files access"; "play" is what goes to Google Play, which does not
+    // let a music player declare that right (src/direct/AndroidManifest.xml).
+    flavorDimensions 'store'
+    productFlavors {
+        direct {
+            dimension 'store'
+        }
+        play {
+            dimension 'store'
         }
     }
 
@@ -30,10 +44,16 @@ android {
         release {
             def store = System.getenv('ONEUM_ANDROID_KEYSTORE')
             if (store) {
+                // The password itself, or the file it is kept in (one line).
+                def secret = System.getenv('ONEUM_ANDROID_KEYSTORE_PASSWORD')
+                def secretFile = System.getenv('ONEUM_ANDROID_KEYSTORE_PASSWORD_FILE')
+                if (!secret && secretFile) {
+                    secret = new File(secretFile).text.trim()
+                }
                 storeFile file(store)
-                storePassword System.getenv('ONEUM_ANDROID_KEYSTORE_PASSWORD')
-                keyAlias System.getenv('ONEUM_ANDROID_KEY_ALIAS')
-                keyPassword System.getenv('ONEUM_ANDROID_KEY_PASSWORD') ?: System.getenv('ONEUM_ANDROID_KEYSTORE_PASSWORD')
+                storePassword secret
+                keyAlias System.getenv('ONEUM_ANDROID_KEY_ALIAS') ?: 'upload'
+                keyPassword System.getenv('ONEUM_ANDROID_KEY_PASSWORD') ?: secret
             }
         }
     }

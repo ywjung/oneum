@@ -617,6 +617,11 @@ pub fn has_all_files_access() -> bool {
     true
 }
 
+/// (There is no such right to offer but on Android.)
+pub fn offers_all_files_access() -> bool {
+    false
+}
+
 pub fn ask_all_files_access() {}
 
 /// Forgets the link to `folder` (it was taken out of the library).

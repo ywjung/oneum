@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What only the build that is installed by hand has (the APK of the releases page).
+     The build for Google Play is without it: Play does not let a music player ask
+     for this right ("media files access" is not among its permitted uses). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Not needed, given on a page of the system's settings if the user wants it
+         ("all files access"): what lies beside the music too (cover pictures, lyrics
+         and CUE files), and files of kinds Android does not count as audio. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+</manifest>
