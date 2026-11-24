@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- What the app of the Mac App Store is allowed (scripts/package.sh, the app-store option). The
+     app that is downloaded is signed without any of these and is not in the sandbox.
+     - app-sandbox: the Mac App Store takes no app without it.
+     - files.user-selected.read-write: the folders and files the person chooses in the
+       open panel, drops on the window or opens from Finder are read; what the person
+       saves (a playlist, the data export, the log) is written where they say.
+     - files.bookmarks.app-scope: the right to read a chosen folder is kept for later
+       runs (src/platform/macos/files.rs).
+     - network.client: media servers (DLNA), network folders (WebDAV) and, when the
+       person switches it on, lyrics from LRCLIB.
+     - network.server: finding media servers. The app asks the home network who is
+       there from a UDP socket of its own and hears the answers on it; the sandbox
+       gives a socket an address only with this (without it the search ends with
+       "Operation not permitted"). The app listens for nothing else and serves
+       nothing. -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

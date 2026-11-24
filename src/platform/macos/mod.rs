@@ -1,6 +1,7 @@
 //! macOS integration through objc2 bindings. What iOS has as well lives in `apple`.
 pub mod app_hooks;
 pub mod coreaudio;
+pub mod files;
 pub mod finder;
 pub mod menu;
 pub mod power;
@@ -9,14 +10,17 @@ pub mod testing;
 pub mod window;
 
 pub use super::apple::{decode_cp949, locale, nowplaying, pump_main_loop, run_on_main, system};
-pub use super::dialogs as files;
 
-/// Hands a web address (already checked by the caller) to the default browser.
+/// Hands a web address (already checked by the caller) to the default browser. Asked of
+/// the workspace, not of `/usr/bin/open`: a process the app starts is held to the app's
+/// sandbox where it has one.
 pub(super) fn open_in_browser(address: &str) -> bool {
-    std::process::Command::new("/usr/bin/open")
-        .arg(address)
-        .spawn()
-        .is_ok()
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(address)) else {
+        return false;
+    };
+    NSWorkspace::sharedWorkspace().openURL(&url)
 }
 
 /// Shows a blocking error alert. Works before the event loop exists (start-up failures):

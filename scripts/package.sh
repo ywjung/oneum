@@ -6,6 +6,14 @@
 #   scripts/package.sh --dmg        also create the disk image and checksums
 #   scripts/package.sh --dmg --notarize
 #                                   also have Apple notarize the app (needs ONEUM_MAC_TEAM)
+#   scripts/package.sh --sandbox    the app as the Mac App Store runs it: in the App
+#                                   Sandbox (assets/OnEum.entitlements), ad-hoc signed,
+#                                   in dist/mas. For trying it on this Mac
+#   scripts/package.sh --app-store  that app, signed for the Mac App Store and put into
+#                                   dist/mas/OnEum-<version>-<build>.pkg (needs
+#                                   ONEUM_MAC_TEAM; scripts/mac-app-store.sh)
+#   scripts/package.sh --app-store --upload
+#                                   and sent to App Store Connect
 #
 # Signing, one of three ways (the hardened runtime is on in all of them, docs/RELEASE.md):
 #   nothing set           ad-hoc signed: runs on this Mac, another Mac's Gatekeeper stops it
@@ -21,14 +29,35 @@ export PATH="$HOME/.cargo/bin:$PATH"
 PROFILE=release
 MAKE_DMG=0
 NOTARIZE=0
+SANDBOX=0
+STORE=0
+UPLOAD=0
 for arg in "$@"; do
   case "$arg" in
     --debug) PROFILE=debug ;;
     --dmg) MAKE_DMG=1 ;;
     --notarize) NOTARIZE=1 ;;
+    --sandbox) SANDBOX=1 ;;
+    --app-store) SANDBOX=1; STORE=1 ;;
+    --upload) UPLOAD=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+# The store's app and the downloaded one are two packages: said before anything is built.
+if [ "$STORE" = 1 ]; then
+  [ "$MAKE_DMG" = 0 ] && [ "$NOTARIZE" = 0 ] && [ -z "${ONEUM_SIGN_IDENTITY:-}" ] \
+    || { echo "--app-store makes the store's package: without --dmg, --notarize and ONEUM_SIGN_IDENTITY" >&2; exit 2; }
+  [ "$PROFILE" = release ] && [ "${ONEUM_AUTOMATION:-0}" != 1 ] \
+    || { echo "only a release build without the verification channel goes to the store" >&2; exit 2; }
+  [ -n "${ONEUM_MAC_TEAM:-}" ] \
+    || { echo "--app-store needs ONEUM_MAC_TEAM (the team that signs the app)" >&2; exit 2; }
+elif [ "$UPLOAD" = 1 ]; then
+  echo "--upload goes with --app-store" >&2
+  exit 2
+elif [ "$SANDBOX" = 1 ] && { [ "$MAKE_DMG" = 1 ] || [ -n "${ONEUM_MAC_TEAM:-}" ] || [ -n "${ONEUM_SIGN_IDENTITY:-}" ]; }; then
+  echo "--sandbox makes an app to try here: without --dmg, ONEUM_MAC_TEAM and ONEUM_SIGN_IDENTITY" >&2
+  exit 2
+fi
 # Said before anything is built: what cannot be signed for giving out.
 if [ -n "${ONEUM_MAC_TEAM:-}" ]; then
   [ -z "${ONEUM_SIGN_IDENTITY:-}" ] \
@@ -68,7 +97,9 @@ BIN="$TARGET_DIR/$PROFILE/oneum"
 
 # ONEUM_APP_DIR redirects the bundle (development runs use dist/dev so that an OnEum
 # the user is running from dist/ is never replaced underneath them).
-APP="${ONEUM_APP_DIR:-dist}/OnEum.app"
+# (The store's app has a folder of its own: dist/OnEum.app stays the downloaded one.)
+if [ "$SANDBOX" = 1 ]; then DEFAULT_DIR=dist/mas; else DEFAULT_DIR=dist; fi
+APP="${ONEUM_APP_DIR:-$DEFAULT_DIR}/OnEum.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/OnEum"
@@ -89,9 +120,16 @@ for doc in THIRD_PARTY_NOTICES.md LICENSE; do
 done
 # The full license texts of everything linked in, gathered from the crates themselves.
 python3 scripts/gen-licenses.py "$APP/Contents/Resources/THIRD_PARTY_LICENSES.txt" >/dev/null
+# The store's app says what it does with the person's data (nothing leaves the Mac).
+[ "$SANDBOX" = 1 ] && cp assets/PrivacyInfo.xcprivacy "$APP/Contents/Resources/"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-if [ -n "${ONEUM_SIGN_IDENTITY:-}" ]; then
+if [ "$SANDBOX" = 1 ]; then
+  # In the App Sandbox, as the Mac App Store asks: ad-hoc here (the app runs on this
+  # Mac like that), signed anew by Xcode for the store below.
+  codesign --force --options runtime --entitlements assets/OnEum.entitlements --sign - "$APP"
+  echo "ad-hoc signed with the hardened runtime, in the App Sandbox"
+elif [ -n "${ONEUM_SIGN_IDENTITY:-}" ]; then
   codesign --force --timestamp --options runtime --sign "$ONEUM_SIGN_IDENTITY" "$APP"
   echo "signed with: $ONEUM_SIGN_IDENTITY (hardened runtime)"
 else
@@ -100,7 +138,14 @@ else
   codesign --force --options runtime --sign - "$APP"
   echo "ad-hoc signed with the hardened runtime (no Developer ID identity given)"
 fi
-if [ -n "${ONEUM_MAC_TEAM:-}" ]; then
+if [ "$STORE" = 1 ]; then
+  # Signed anew for the Mac App Store by Xcode and put into a package, with its checks.
+  if [ "$UPLOAD" = 1 ]; then
+    scripts/mac-app-store.sh "$APP" --upload
+  else
+    scripts/mac-app-store.sh "$APP"
+  fi
+elif [ -n "${ONEUM_MAC_TEAM:-}" ]; then
   # Signed anew with Developer ID by Xcode (and notarized), with its own checks.
   if [ "$NOTARIZE" = 1 ]; then
     scripts/mac-developer-id.sh "$APP" --notarize

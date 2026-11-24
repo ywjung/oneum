@@ -21,6 +21,9 @@
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <!-- The app has no encryption of its own: it only uses the system's HTTPS. (Asked of
+       every app that goes to the App Store; it says nothing to the downloaded one.) -->
+  <key>ITSAppUsesNonExemptEncryption</key><false/>
   <key>NSHumanReadableCopyright</key><string>OnEum — BSD Zero Clause License (0BSD)</string>
   <key>NSDownloadsFolderUsageDescription</key><string>추가한 음악 폴더의 파일을 읽어 재생합니다. 파일을 바꾸지 않습니다.</string>
   <key>NSDocumentsFolderUsageDescription</key><string>추가한 음악 폴더의 파일을 읽어 재생합니다. 파일을 바꾸지 않습니다.</string>

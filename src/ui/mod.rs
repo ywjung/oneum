@@ -803,7 +803,12 @@ impl OneumApp {
                 MenuAction::CycleRepeat => {
                     return player.send(Command::SetRepeat(next_repeat(player.snapshot().repeat)));
                 }
-                MenuAction::Rescan => return library.rescan(),
+                MenuAction::Rescan => {
+                    // A drive that was plugged in since the app started: what was
+                    // linked on it can be read again from here on.
+                    files::reach_linked_folders();
+                    return library.rescan();
+                }
                 MenuAction::ShowMainWindow => return window::show_main_window(),
                 MenuAction::Settings => UiRequest::Settings,
                 MenuAction::OpenFiles => UiRequest::OpenFiles,
@@ -2299,6 +2304,13 @@ impl OneumApp {
     /// Handles paths from Finder, the Dock, drag-and-drop or the open panel: folders
     /// become music folders, playlists are imported, audio files are played.
     fn open_paths(&mut self, paths: Vec<PathBuf>) {
+        // A Mac app in the sandbox may read what it was handed until it quits: the
+        // right is kept for later runs while it is there.
+        #[cfg(target_os = "macos")]
+        {
+            files::keep_access(&paths);
+            self.tell_links_not_kept();
+        }
         let mut files = Vec::new();
         for path in paths {
             let ext = path

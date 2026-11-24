@@ -476,6 +476,8 @@ impl OneumApp {
                 .add_enabled(!scan.running && !roots.is_empty(), rescan)
                 .clicked()
             {
+                // (A drive that was plugged in since the app started: see the menu's.)
+                crate::platform::files::reach_linked_folders();
                 self.announce_scan = true;
                 self.core.library.rescan();
             }
