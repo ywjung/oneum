@@ -4,6 +4,13 @@
 
 첫 버전.
 
+### Windows: Microsoft Store 준비 (2026-11-25)
+- **Windows용을 Microsoft Store에 올릴 패키지(MSIX)로 만들 준비를 했습니다.** Store는 심사를 통과한 MSIX 패키지를 Microsoft의 인증서로 서명해 주므로(무료) 인증서를 사지 않아도 됩니다. 프로그램(`OnEum.exe`)은 zip · 설치 프로그램의 것과 같은 파일입니다. 내려받는 파일의 서명과는 별개입니다(그쪽은 그대로 서명 없음).
+- `scripts/package-windows-store.sh`가 패키지가 될 폴더(매니페스트, 프로그램, 그림 21장, 라이선스)를 만들고 검사합니다. 폴더를 `.msix`로 묶는 일은 Windows SDK의 도구로 Windows에서 합니다(`scripts/pack-msix.ps1`, 워크플로 "Windows package"의 `store` 작업). **묶는 쪽은 아직 돌려 보지 못했습니다.**
+- 패키지의 버전은 `1.0.<커밋 수>.0`입니다(Store는 첫 자리가 0인 버전을 받지 않습니다). 프로그램 안에 보이는 버전은 그대로입니다.
+- 패키지의 주인을 정하는 값(Partner Center의 것)은 저장소에 적지 않고 환경 변수 · 저장소의 secret으로 받습니다. 없으면 Windows 11에서 서명 없이 설치해 볼 수 있는 시험용 패키지가 됩니다.
+- 순서와 확인한 것 · 못한 것: [docs/MICROSOFT_STORE.md](docs/MICROSOFT_STORE.md). 개발자 등록과 제출은 아직 하지 않았습니다.
+
 ### Android: Google Play 준비 (2026-11-24)
 - **Android 앱을 Google Play에 올릴 수 있는 앱 번들로 만들 수 있습니다.** `ONEUM_ANDROID_KEYSTORE=<키 저장소> scripts/android-release.sh` → `dist/play/OnEum-<버전>-<버전 코드>-play.aab`(Play용), 같은 빌드의 APK, 그리고 직접 설치하는 `dist/OnEum-<버전>-android-arm64.apk`. 셋 다 배포용 키로 서명하고 검사합니다: 서명과 키, 버전, 대상 API, 디버그 빌드 아님, 권한 목록, 라이브러리(arm64, 16KB 페이지, 검증 채널 없음), 라이선스, 이 컴퓨터의 경로 없음. **Play에는 아무것도 올리지 않았습니다**([docs/PLAY_STORE.md](docs/PLAY_STORE.md)).
 - **대상 Android를 16(API 36)으로 올렸습니다.** Google Play가 2026-08-31부터 새 앱에 요구하는 값입니다. 시스템의 뒤로 가기는 전처럼 앱이 화면마다 처리합니다.
