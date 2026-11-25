@@ -14,7 +14,7 @@
 | 검증 채널 제외 | 완료 — 배포 빌드에는 `automation` 기능이 없음 |
 | Windows 실제 실행 확인 | **검증 대기** — 실제 Windows 필요 |
 | Windows 코드 서명 | 서명하는 길과 검사는 준비됨(2026-11-23, `scripts/windows-sign.sh`, 시험용 인증서로 확인). **인증서가 없어 배포물은 서명되지 않음**. 무료 서명(SignPath Foundation) 신청 준비: 정책 페이지(게시됨)와 GitHub 러너 빌드 워크플로(2026-11-23 세 번째 실행에서 통과). **2026-11-24에 신청함, 심사 대기** — 아래 "Windows 코드 서명" |
-| Microsoft Store용 패키지 (MSIX) | 준비 중(2026-11-25) — Store가 서명해 주는 길. 매니페스트 · 그림 · 폴더를 만드는 스크립트(`scripts/package-windows-store.sh`, 이 Mac에서 확인)와 Windows 러너에서 묶는 스크립트 · 워크플로 작업(`scripts/pack-msix.ps1`, **돌려 보지 못함**). 개발자 등록과 제출은 계정을 가진 사람의 일. [MICROSOFT_STORE.md](MICROSOFT_STORE.md) |
+| Microsoft Store용 패키지 (MSIX) | 준비 중(2026-11-25) — Store가 서명해 주는 길. 매니페스트 · 그림 · 폴더를 만드는 스크립트(`scripts/package-windows-store.sh`, 이 Mac에서 확인)와 Windows 러너에서 묶는 스크립트 · 워크플로 작업(`scripts/pack-msix.ps1`, GitHub에서 한 번 통과: 실행 45523546345, 시험용 패키지). **Windows에 설치해 본 적은 없음.** 개발자 등록과 제출은 계정을 가진 사람의 일. [MICROSOFT_STORE.md](MICROSOFT_STORE.md) |
 | iPhone: 시뮬레이터 실행, 기기용 빌드 | 완료 — `scripts/dev/smoke-ios.sh`(69항목), Xcode 프로젝트로 기기용 릴리스 빌드 |
 | 소스 공개 | 공개됨(2026-11-22) — https://github.com/ywjung/oneum (`github` 원격, `main`만 올림). 올리기 전에 추적 파일과 커밋에 비밀 값 · 개인 주소 · 홈 경로 · 서명 팀 ID · 기기 식별자가 없음을 확인했다. 커밋의 작성자는 모두 한 이름과 한 e-mail 주소다. CI는 여섯 번의 실행에 걸쳐 고친 뒤 네 작업(macOS · Windows · Android · 의존성 권고) 모두 통과(docs/TESTING.md "GitHub에 올린 뒤의 CI"). 올라간 커밋은 다시 쓰지 않는다 |
 | 첫 릴리스 | **v0.1.0 시험판**(pre-release, 2026-11-22, 빌드 149): https://github.com/ywjung/oneum/releases/tag/v0.1.0 — dmg, Windows 설치 프로그램과 zip, Android APK, 체크섬 세 파일. 내려받은 파일이 만든 파일과 같음을 확인. 처음에는 서명 · 공증이 없었고, **2026-11-23에 dmg를 Developer ID 서명 · 공증한 빌드 153으로 바꿨다**(내려받아 같은 파일임과 검사 8항목 통과를 확인, 릴리스 노트도 고침). Windows는 서명이 없고 Android는 개발용 키라 시험판 표시는 그대로다(아래 "공개") |
@@ -206,7 +206,7 @@ scripts/package-windows-store.sh     # dist/OnEum-<버전>-windows-x86_64-store/
 
 폴더를 `.msix`로 묶는 일은 Windows SDK의 도구가 하므로 Windows에서 합니다(`scripts/pack-msix.ps1`). 워크플로 "Windows package"의 `store` 작업이 그 일을 하고 아티팩트 `OnEum-windows-store`를 남깁니다. 패키지의 주인을 정하는 세 값(`ONEUM_STORE_NAME` 등)이 없으면 Store에 올릴 수 없는 시험용 패키지가 만들어집니다.
 
-계정을 만드는 순서, PC에서 볼 것, 제출에 적을 글, 확인한 것과 못한 것은 [MICROSOFT_STORE.md](MICROSOFT_STORE.md)에 있습니다. **묶는 스크립트와 워크플로 작업은 아직 한 번도 돌려 보지 못했습니다.**
+계정을 만드는 순서, PC에서 볼 것, 제출에 적을 글, 확인한 것과 못한 것은 [MICROSOFT_STORE.md](MICROSOFT_STORE.md)에 있습니다. 묶는 스크립트와 워크플로 작업은 GitHub에서 한 번 통과했습니다(2026-11-25, 실행 45523546345: 시험용 패키지 `.msix` 15.9MB). **그 패키지를 Windows에 설치해 본 적은 없습니다.**
 
 ### Android판
 ```bash
