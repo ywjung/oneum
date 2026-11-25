@@ -147,6 +147,18 @@ sys.exit(0 if app.endswith("." + sys.argv[1]) and "ProvisionedDevices" not in p 
   else
     bad "the privacy manifest or the licenses are missing"
   fi
+  # No call into macOS that is not public API. App Review's automated check refuses a
+  # program that only names one (2026-11-26, guideline 2.5.1, 0.1.0 build 174:
+  # CGSSetWindowBackgroundBlurRadius, from winit; see vendor/winit/README-ONEUM.md).
+  # The names with "CGS" before a capital letter are the window server's private ones;
+  # the public CGShieldingWindowLevel is not among them.
+  program=$inner/Contents/MacOS/$(value "$inner/Contents/Info.plist" CFBundleExecutable)
+  private=$(nm -u "$program" 2>/dev/null | grep -E '^_CGS[A-Z]' || true)
+  if [ -f "$program" ] && [ -z "$private" ]; then
+    good "the program names no private call of the window server"
+  else
+    bad "the program names calls that are not public API: $(echo $private)"
+  fi
   # No path of the computer that built it (scripts/release-paths.sh).
   if grep -r -l -a '/Users/' "$inner" >/dev/null 2>&1; then
     bad "a file of the app has a home path in it"

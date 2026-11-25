@@ -136,3 +136,7 @@ opt-level = 2
 # (vendor/lofty/README-ONEUM.md). Remove together with the folder once upstream builds.
 [patch.crates-io]
 lofty = { path = "vendor/lofty" }
+# winit 0.30.13 without the two calls into macOS that are not public API; the Mac App
+# Store refuses a program that names them (vendor/winit/README-ONEUM.md). Remove
+# together with the folder once a winit release no longer names them.
+winit = { path = "vendor/winit" }
