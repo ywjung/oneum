@@ -336,7 +336,7 @@ Why each App Sandbox entitlement is used:
 The app uses the network only when the user opens the Network screen, adds a server, or has switched on online lyrics.
 ```
 
-2026-11-26에 App Review의 자동 검사가 `network.server` 권한에 맞는 기능이 보이지 않는다며 돌려보냈습니다(지침 2.4.5, [MAC_APP_STORE.md](MAC_APP_STORE.md) 3절). 권한은 실제로 필요해서(위 메모의 "Incoming network connections" 줄) 그대로 두고, Apple의 안내대로 메모에 쓰임을 자세히 적고 아래 글로 회신합니다.
+2026-11-26에 App Review의 자동 검사가 `network.server` 권한에 맞는 기능이 보이지 않는다며 돌려보냈습니다(지침 2.4.5, [MAC_APP_STORE.md](MAC_APP_STORE.md) 3절). 권한은 실제로 필요해서(위 메모의 "Incoming network connections" 줄) 그대로 두고, Apple의 안내대로 메모에 쓰임을 자세히 적고 아래 글로 회신했습니다(같은 날, 메모와 회신 모두 넣은 글을 해시로 대조).
 
 <!-- field mac.review-reply chars=4000 -->
 ```text
