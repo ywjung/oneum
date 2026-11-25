@@ -13,8 +13,12 @@
      - network.server: finding media servers. The app asks the home network who is
        there from a UDP socket of its own and hears the answers on it; the sandbox
        gives a socket an address only with this (without it the search ends with
-       "Operation not permitted"). The app listens for nothing else and serves
-       nothing. -->
+       "Operation not permitted"). A socket that is given no address is no way
+       around it: it can send, but reading the answers is refused the same way; only
+       a socket connected to one host hears that host, and the servers that answer
+       are not known beforehand (tried 2026-11-26, docs/TESTING.md). The app listens
+       for nothing else and serves nothing. App Review's automated check asks about
+       this entitlement; the answer is in docs/APP_STORE_LISTING.md. -->
 <plist version="1.0">
 <dict>
 	<key>com.apple.security.app-sandbox</key>

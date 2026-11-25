@@ -331,9 +331,30 @@ Why each App Sandbox entitlement is used:
 - User Selected File, read/write: the app reads the music folders and files the user chooses. Music files are never changed. It writes only where the user picks a place in a save panel (exporting a playlist, exporting the library data, saving the log).
 - App-scoped bookmarks: so that the chosen music folders can be read again the next time the app starts.
 - Outgoing network connections (client): browsing and playing from a media server (DLNA/UPnP) on the same network, WebDAV folders the user adds, and, only if the user switches it on in Settings, looking up lyrics at LRCLIB. There are no analytics and no accounts.
-- Incoming network connections (server): used only to find media servers. The app sends an SSDP search from its own UDP socket and receives the answers on that socket; in the sandbox the socket needs this entitlement to be bound. The app listens for nothing else and serves nothing.
+- Incoming network connections (server): needed to find the media servers (DLNA/UPnP) on the user's own network, and used for nothing else. Where it is used: the "Network" entry of the sidebar, which lists the servers found under "Found on the Network" ("Search Again" repeats the search). How: the app sends one SSDP search (a UDP datagram to the UPnP group 239.255.255.250:1900), and each media server answers with a UDP datagram of its own, sent from the server's address to the app's socket. Those answers are incoming datagrams from hosts the app has no connection to. With the client entitlement alone the App Sandbox refuses both giving that socket an address (bind) and reading the answers (recvfrom): each fails with "Operation not permitted", and no server is found. We tested this in the sandbox on macOS 27.2. The socket is open for about three seconds per search and is then closed. The app opens no TCP listener, accepts no connections and serves nothing.
 
 The app uses the network only when the user opens the Network screen, adds a server, or has switched on online lyrics.
+```
+
+2026-11-26에 App Review의 자동 검사가 `network.server` 권한에 맞는 기능이 보이지 않는다며 돌려보냈습니다(지침 2.4.5, [MAC_APP_STORE.md](MAC_APP_STORE.md) 3절). 권한은 실제로 필요해서(위 메모의 "Incoming network connections" 줄) 그대로 두고, Apple의 안내대로 메모에 쓰임을 자세히 적고 아래 글로 회신합니다.
+
+<!-- field mac.review-reply chars=4000 -->
+```text
+Hello,
+
+Thank you for the review. Both points are addressed in the new build (0.1.0, a higher build number) that is attached to this submission.
+
+1. Guideline 2.5.1, _CGSSetWindowBackgroundBlurRadius
+The name came from the open-source windowing library the app is built with (winit), which declares that function for a blurred window background. OnEum never used it. We removed the declaration and the call from the library's source that we build, and the new binary no longer references it, nor CGSMainConnectionID, the other function declared next to it (checked with "nm -u" on the program in the package).
+
+2. Guideline 2.4.5, com.apple.security.network.server
+The app does need this entitlement, for one function: finding the media servers (DLNA/UPnP) on the user's own network. It is in the "Network" entry of the sidebar, under "Found on the Network".
+- The app sends an SSDP search: one UDP datagram to the UPnP group 239.255.255.250:1900.
+- Each media server answers with a UDP datagram of its own, sent from the server's address to the app's socket. These are incoming datagrams from hosts the app has no connection to, so a connected (client-only) socket cannot receive them.
+- With com.apple.security.network.client alone, the App Sandbox refuses bind() on that UDP socket and also recvfrom() on it without bind(): both fail with "Operation not permitted" (EPERM), and no server is found. We tested this in the sandbox on macOS 27.2.
+The socket is open for about three seconds per search and is then closed. The app opens no TCP listener, accepts no connections and serves nothing. We have added this description to the App Review Information notes as well.
+
+Thank you.
 ```
 
 ### Mac의 스크린샷

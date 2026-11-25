@@ -1685,6 +1685,25 @@ USB DAC(AKLIAM PD5)을 Mac에 꽂고 확인했습니다. 시스템의 기본 출
 - 스토어용 스크린샷(`scripts/dev/mac-store-shots.sh`, 14인치 Retina 화면, 1280×800포인트 창): 일회용 프로필의 검증용 빌드에 지어낸 음악 33곡(앨범 8장)을 넣고 처음부터 끝까지 돌려 두 언어의 그림 12장이 모두 2560×1600 · 투명도 없음으로 나옴. 눈으로 확인: 앨범 목록과 대기열, 재생 중인 앨범과 미터(바늘과 스펙트럼이 움직인 상태), 신호 경로와 가사(넷째 줄이 켜짐), 이퀄라이저(재즈), 검색(초성 `ㄷㅂ` → 5곡, `light` → 6곡), 설정의 재생 탭. 재생 중에는 앱 볼륨이 0이고(단계마다 상태로 확인), 볼륨을 올린 것은 곡을 멈춘 동안뿐. 출력은 `ONEUM_SHOTS_OUTPUT=MacBook`으로 내장 스피커를 골라 찍음(시스템의 기본 출력은 그대로).
 - ★ 1440×900 창은 Dock이 있는 이 화면에 들어가지 않아(859까지) 1280×800으로 정했다. 처음 판은 끝내라는 명령 뒤에 앱의 응답을 기다리다 멈췄다(끝난 앱은 답하지 않는다). 영어 그림의 출력 장치 이름은 한국어로 나온다: 앱을 영어로 띄워도(`-AppleLanguages`) Mac이 알려 주는 장치 이름은 시스템 언어를 따른다.
 
+### 심사에서 돌아온 두 가지 (2026-11-26)
+
+App Review의 자동 검사가 0.1.0 (174)를 두 가지로 돌려보냈다([MAC_APP_STORE.md](MAC_APP_STORE.md) 3절). 각각을 이렇게 쟀다.
+
+- **공개되지 않은 함수의 이름**: 돌아온 패키지의 프로그램에 `nm -u`를 하면 `_CGSMainConnectionID`, `_CGSSetWindowBackgroundBlurRadius`가 나온다(`_CGShieldingWindowLevel`은 공개된 함수). 출처는 winit 0.30.13의 `src/platform_impl/macos/ffi.rs`와 `window_delegate.rs`의 `set_blur` 한 곳뿐이고, OnEum과 egui는 `set_blur`를 부르지 않는다(소스 검색). `vendor/winit`으로 바꾼 뒤의 릴리스 빌드에서는 두 이름이 `nm -u`에도 `strings`에도 없다. `vendor/winit`과 crates.io의 0.30.13을 `diff -r`로 비교: 다른 파일은 그 둘뿐이고, 뺀 것은 `docs` 폴더와 crates.io가 붙이는 파일들.
+- 스토어 패키지 검사의 새 항목: 돌아온 패키지(`dist/mas/OnEum-0.1.0-174.pkg`)로 `scripts/mac-app-store.sh --check`를 돌리면 이 항목 하나만 실패한다(대조).
+- **"네트워크 듣기" 권한 없이 서버 찾기가 되는가**: 되지 않는다. 샌드박스와 나가기 권한만 준 작은 C 프로그램(임시 서명, 시험용 식별자)으로 127.0.0.1의 되받아치는 UDP 서버에 보내고 답을 기다림.
+
+| 소켓 | 결과 |
+|---|---|
+| `bind`(주소 0.0.0.0, 포트 0) | `bind: Operation not permitted` |
+| `bind` 없이 `sendto` → `recvfrom` | 보내기는 됨(서버가 받음), `recvfrom: Operation not permitted` |
+| `connect` → `send` → `recvfrom` | 됨(4바이트 받음) |
+
+  서버 찾기의 답은 미리 알 수 없는 서버들이 각자의 주소에서 보내므로 연결한 소켓으로는 받을 수 없다. 그래서 권한을 그대로 둔다. 참고: 샌드박스 프로그램을 번들 없이 실행 파일 하나로 만들 때는 `Info.plist`를 프로그램 안에 넣어야 한다(`-sectcreate __TEXT __info_plist`). 없으면 시작하자마자 SIGTRAP으로 끝난다.
+
+- 바꾼 창 라이브러리로 빌드한 것: 형식, 네 시스템의 린트(Mac, Windows, iPhone, Android), 테스트 856개 통과(`scripts/ci-test.sh`). 검증용 릴리스 빌드를 일회용 프로필로 띄워(볼륨 0) 창 크기 바꾸기(1100×700, 한 포인트에 두 픽셀), 설정 창 열기, 화면 그림 두 장: 전과 같이 그려지고 로그에 오류 없음.
+- ★ 테스트를 처음 돌렸을 때 `library::watch`의 `a_watcher_that_could_not_be_made_is_made_later_and_rescans_fill_in`이 연달아 두 번 실패했다(단위 테스트 전체 실행에서, "not tried again yet": 다시 읽기가 새 파일을 찾기 전에 8초 뒤의 두 번째 감시 시도가 먼저 옴). 혼자 돌리면 통과하고, 그 뒤 전체 실행 세 번과 `scripts/ci-test.sh` 한 번은 통과했다. 이번에 바꾼 것(창 라이브러리)은 이 테스트가 지나가지 않는 코드다. 컴퓨터가 바쁠 때의 시간 여유 문제로 보이지만 원인을 재지는 않았다.
+
 ## Developer ID 서명과 공증 (🖥, 2026-11-23)
 
 `ONEUM_MAC_TEAM=<팀 ID> scripts/package.sh --dmg --notarize`로 만든 0.1.0 빌드 153(docs/RELEASE.md 4 · 5절 "가").
