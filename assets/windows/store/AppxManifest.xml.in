@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The manifest of the package for the Microsoft Store (MSIX): the same OnEum.exe as in
+  the zip and the setup program, described to Windows as a packaged desktop program.
+  scripts/package-windows-store.sh fills in the four values between @ signs and puts
+  the result, as AppxManifest.xml, into the folder that is packed. docs/MICROSOFT_STORE.md.
+
+  Identity: Name and Publisher are the values Partner Center shows for the reserved
+  name (Product identity); the Store refuses a package that carries others. The Store
+  signs the package, so Publisher is not the subject of a certificate of ours.
+  Version: four numbers; the Store wants the first above 0 and the last 0.
+
+  The program is an ordinary Windows program and runs with the rights of the person
+  who starts it ("full trust"): it reads the music folders that person chooses, on any
+  drive. That is the restricted capability runFullTrust, which every packaged desktop
+  program declares. The two network capabilities say what the program does on the
+  network (they do not confine a full-trust program): it reaches web servers the
+  person names (WebDAV, and lyrics when switched on), and it looks for media servers
+  on the home network.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="@NAME@"
+    Publisher="@PUBLISHER@"
+    Version="@VERSION@"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>OnEum</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_NAME@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!-- Windows 10 (version 1809) and later; MaxVersionTested is Windows 11 24H2. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <!-- The program speaks English and Korean, following Windows' language. -->
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="ko-kr" />
+  </Resources>
+
+  <Applications>
+    <Application Id="OnEum" Executable="OnEum.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="OnEum"
+        Description="A music player for the music files you own"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <Capability Name="privateNetworkClientServer" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

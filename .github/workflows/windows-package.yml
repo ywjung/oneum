@@ -1,6 +1,7 @@
-# Builds the Windows packages (the zip and the setup program) on a GitHub runner, from
-# the commit's source, with the script that builds them on a Mac
-# (scripts/package-windows.sh), and keeps them as an artifact of the run.
+# Builds the Windows packages (the zip, the setup program, and the package for the
+# Microsoft Store) on GitHub runners, from the commit's source, and keeps them as
+# artifacts of the run. The zip and the setup program are made by the script that
+# makes them on a Mac (scripts/package-windows.sh).
 #
 # The runner is a Mac, with Homebrew's mingw-w64 as on the Mac the releases were made
 # on: it links Windows' universal C run-time, which the program is written for.
@@ -12,6 +13,15 @@
 # artifact, so that what is signed can be traced to a commit. The steps that hand the
 # files to the signing service come after the project has been accepted there:
 # docs/RELEASE.md ("Windows 코드 서명").
+#
+# The package for the Microsoft Store (MSIX) holds the same OnEum.exe. Its folder is
+# put together on the Mac runner (scripts/package-windows-store.sh) and packed on a
+# Windows runner, which has the Windows SDK's tools for that (scripts/pack-msix.ps1).
+# It is not signed either: the Store signs a package it has accepted. Whose package it
+# is comes from three secrets of the repository (ONEUM_STORE_NAME,
+# ONEUM_STORE_PUBLISHER, ONEUM_STORE_PUBLISHER_NAME: the values Partner Center shows
+# for the app). Without them the package is one for trying out, not for the Store.
+# docs/MICROSOFT_STORE.md.
 #
 # It runs for a version tag (v0.1.0, ...) and when started by hand.
 name: Windows package
@@ -31,7 +41,10 @@ jobs:
   package:
     runs-on: macos-latest
     steps:
+      # With the history: the Store package's version counts the commits.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # rust-toolchain.toml selects the toolchain; rustup installs it on first use.
       - run: rustup show
       - run: rustup target add x86_64-pc-windows-gnu
@@ -63,4 +76,39 @@ jobs:
             dist/OnEum-*-windows-x86_64.zip
             dist/OnEum-*-windows-x86_64-setup.exe
             dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+      - name: The folder of the Store package
+        run: scripts/package-windows-store.sh
+        env:
+          ONEUM_STORE_NAME: ${{ secrets.ONEUM_STORE_NAME }}
+          ONEUM_STORE_PUBLISHER: ${{ secrets.ONEUM_STORE_PUBLISHER }}
+          ONEUM_STORE_PUBLISHER_NAME: ${{ secrets.ONEUM_STORE_PUBLISHER_NAME }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OnEum-windows-store-folder
+          path: dist/OnEum-*-windows-x86_64-store
+          if-no-files-found: error
+
+  # Packs the folder into the package for the Microsoft Store.
+  store:
+    needs: package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: OnEum-windows-store-folder
+          path: store
+      - name: The package for the Microsoft Store
+        shell: pwsh
+        run: |
+          $folders = @(Get-ChildItem -Path store -Directory)
+          if ($folders.Count -ne 1) { throw "expected one folder in the artifact, found $($folders.Count)" }
+          $name = $folders[0].Name -replace '-store$', ''
+          New-Item -ItemType Directory -Path dist | Out-Null
+          ./scripts/pack-msix.ps1 -Layout $folders[0].FullName -Package "dist/$name.msix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OnEum-windows-store
+          path: dist/OnEum-*-windows-x86_64.msix
           if-no-files-found: error
