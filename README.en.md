@@ -62,7 +62,7 @@ scripts/package-windows.sh
 
 Cross-compiles on a Mac and makes `dist/OnEum-<version>-windows-x86_64.zip` (unzip and run) and the setup program `dist/OnEum-<version>-windows-x86_64-setup.exe` (needs `rustup target add x86_64-pc-windows-gnu` and `brew install mingw-w64`; the setup program is made when `brew install makensis` is there).
 The setup program installs for the user who runs it, without administrator rights, and adds a Start menu shortcut and an entry in "Installed apps" for removing it. `OnEum.exe` carries its icon and version details.
-**The Windows build has only been compiled and linked. It has not been run on a real Windows machine, and the setup program has only been built, not run.** (The CI workflow builds, tests and starts it on a Windows runner; that has not run yet.)
+**Nobody has used the Windows build on a real Windows PC yet, and the setup program has only been built, not run.** The CI on GitHub builds it on a Windows runner, runs the tests, starts the program and reads its state, and that passes (a machine without a graphics card that draws in software; nobody has seen its screen or heard its sound).
 The files for Windows on the releases page are not signed yet; the plan and the procedure are in the [Code signing policy](https://ywjung.github.io/oneum/en/code-signing.html). A workflow (`.github/workflows/windows-package.yml`) builds the packages with the same script on a GitHub runner. A package for the Microsoft Store (MSIX) is being prepared: [docs/MICROSOFT_STORE.md](docs/MICROSOFT_STORE.md) (in Korean).
 What differs there (a menu bar inside the window, Ctrl shortcuts, features that are missing) is in the [Windows user guide](docs/USER_GUIDE_WINDOWS.en.md), and in "플랫폼" of [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and "Windows" of [docs/TESTING.md](docs/TESTING.md) (Korean).
 
@@ -113,7 +113,7 @@ Music plays on with the screen off (controls in the notification and on the lock
 The shortcuts of a keyboard that is plugged in or paired (Space, Ctrl+→ …), opening single music files without adding their folder, showing a song's folder in the Files app, and saving the log are there.
 Not there: TalkBack's explore by touch and focus frame, choosing an output device, matching a USB DAC's sample rate, exclusive output, and screens made for tablets.
 
-**The Android version is verified in an Android 16 emulator. It has not been installed on a real Android device yet.**
+**The Android version is verified in an Android 16 emulator, and has been used on one real phone only (a Samsung):** the app ending while it drew the screen was measured and fixed on that phone. Unplugging earphones, Bluetooth, the buttons of the notification and the lock screen, and TalkBack have no record of being checked on a real device.
 Usage: [docs/USER_GUIDE_ANDROID.en.md](docs/USER_GUIDE_ANDROID.en.md). The plan and how it went: [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md); what was verified: "Android" in [docs/TESTING.md](docs/TESTING.md) (both Korean).
 
 ## Development

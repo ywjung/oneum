@@ -61,7 +61,7 @@ scripts/package-windows.sh
 Mac에서 크로스 컴파일해 `dist/OnEum-<버전>-windows-x86_64.zip`(압축을 풀어 바로 실행)과 설치 프로그램 `dist/OnEum-<버전>-windows-x86_64-setup.exe`를 만듭니다
 (`rustup target add x86_64-pc-windows-gnu`, `brew install mingw-w64` 필요. 설치 프로그램은 `brew install makensis`가 있을 때 만들어집니다).
 설치 프로그램은 관리자 권한 없이 사용자 계정에 설치하고, 시작 메뉴 바로 가기와 "설치된 앱"의 제거 항목을 만듭니다. `OnEum.exe`에는 아이콘과 버전 정보가 들어 있습니다.
-**Windows판은 컴파일과 링크까지만 확인했고 실제 Windows에서 실행해 보지 못했습니다. 설치 프로그램도 만들어지는 것까지만 확인했습니다.** (CI가 Windows 러너에서 빌드·테스트하고 띄워 보게 되어 있지만 아직 돌아간 적이 없습니다.)
+**Windows판은 실제 Windows PC에서 사람이 써 본 적이 없습니다. 설치 프로그램도 만들어지는 것까지만 확인했습니다.** GitHub의 CI가 Windows 러너에서 빌드하고, 테스트를 돌리고, 프로그램을 띄워 상태를 받아 보는 것까지는 통과합니다(그래픽 카드 없이 소프트웨어로 그리는 환경이고, 소리와 화면을 사람이 본 것은 아닙니다).
 릴리스의 Windows용 파일은 아직 서명되어 있지 않습니다. 서명 계획과 절차는 [코드 서명 정책(Code signing policy)](https://ywjung.github.io/oneum/code-signing.html)에 있습니다. 같은 스크립트로 GitHub의 러너에서 패키지를 만드는 워크플로(`.github/workflows/windows-package.yml`)도 있습니다. Microsoft Store에 올릴 패키지(MSIX)는 준비 중입니다: [docs/MICROSOFT_STORE.md](docs/MICROSOFT_STORE.md).
 Windows에서 다른 점(창 안 메뉴 막대, Ctrl 단축키, 지원하지 않는 기능)은 [Windows 사용 안내](docs/USER_GUIDE_WINDOWS.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "플랫폼", [docs/TESTING.md](docs/TESTING.md)의 "Windows"에 있습니다.
@@ -106,7 +106,7 @@ iPhone과 같은 폰 화면을 씁니다. 처음 열 때 시스템이 묻는 "�
 꽂거나 블루투스로 연결한 키보드의 단축키(Space, Ctrl+→ …), 폴더를 추가하지 않고 음악 파일만 열기, 곡이 있는 폴더를 파일 앱에서 보기, 로그 저장이 됩니다.
 없는 것: TalkBack의 터치하여 탐색과 초점 테두리, 출력 장치 선택과 USB DAC의 샘플레이트 맞춤, 독점 출력, 태블릿용 화면.
 
-**Android판은 Android 16 에뮬레이터에서 확인했습니다. 실제 Android 기기에는 아직 설치해 보지 못했습니다.**
+**Android판은 Android 16 에뮬레이터에서 확인했습니다. 실제 휴대폰은 한 대(삼성)에서만 써 봤습니다:** 그 폰에서 화면을 그리다 끝나던 문제를 재고 고쳤습니다. 이어폰 분리, 블루투스, 알림과 잠금 화면의 버튼, TalkBack 같은 항목은 실제 기기에서 확인한 기록이 없습니다.
 사용법은 [docs/USER_GUIDE_ANDROID.md](docs/USER_GUIDE_ANDROID.md), 계획과 진행은 [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md), 확인 범위는 [docs/TESTING.md](docs/TESTING.md)의 "Android"에 있습니다.
 
 ## 개발
