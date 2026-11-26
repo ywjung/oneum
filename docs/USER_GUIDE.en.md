@@ -25,7 +25,7 @@
 - Click an album, artist or genre to see its songs, and the **Back** button to return. **Genres** gathers the genres in your tags, with the number of songs in each (a song with several genres is in each of them).
 - **Pin to Sidebar**: right-click an album, artist, genre or playlist → **Pin to Sidebar** to keep it under "Pinned" at the top on the left (up to 12). Right-click a pinned entry → **Unpin**.
 - **Folders**: browse your music folders the way they are laid out on disk. Click a name in the path at the top to go to that folder, or a button below it to go into a folder inside. The list shows every song in the folder, in path order.
-- **Statistics**: from the play history kept on this computer, how often and how long you listened in the last 7 days or 30 days, in this year and the last (years of the calendar, named by their numbers: a year in review) or in all time, with your top artists, albums, songs and genres; and what your library is made of (formats, sample rates). Click a name to go there.
+- **Statistics**: from the play history kept on this computer, how often and how long you listened in the last 7 days or 30 days, in this year and the last (years of the calendar, named by their numbers: a year in review) or in all time, with your top artists, albums, songs and genres; and what your library is made of (formats, sample rates). Click a name to go there. The time is how long the plays that were counted were really listened to (not the lengths of the songs; a play counted before this was noted has no such time, and counts with its song's length).
 
 ## Listening
 - Double-click a song (or select it and press Return): the whole list you are looking at becomes the queue, starting from that song. If you have searched or sorted, the results become the queue just as they are.
@@ -105,8 +105,8 @@ Stop :: With nothing to follow, playback stops. The last song stays, and Play st
 - Right-click → **Export as M3U8…**, and File → **Import Playlist…** (or open an `.m3u8` or `.m3u` file with OnEum). Playlists made on older Korean Windows (EUC-KR) are read as well. Network paths that point to another computer are not followed.
 - The playlist that is open can also be renamed, exported and deleted from the File menu.
 - **Smart playlists** are saved searches (magnifier icon). They do not hold songs: each time one is opened it gathers the songs that match, so it changes by itself as you add music or listen. For example: `genre:jazz format:lossless`, `added:30d` (what came in this month), `plays:0` (songs not heard yet), `fav:yes year:1990-1999`.
-  - To make one: search in Songs, then click **＋** in the search field. Up to 100 can be kept.
-  - Right-click: **Play**, **Edit Search** (puts the search back into the search field — change it, then save it under the same name with ＋), **Rename**, **Delete**.
+  - To make one: **File → New Smart Playlist…**, or the magnifier button beside the "Playlists" heading of the sidebar. In the editor, type a name and choose the conditions: words · artist · genre (the genres with the most songs in your library are buttons) · years · rating · favorites · times played · added within · played within · order · number of songs. Below them it shows how those conditions read as a search and how many songs they find now. Searching in Songs and clicking **＋** in the search field makes one too. Up to 100 can be kept.
+  - Right-click: **Play**, **Edit Conditions** (the same editor, for the conditions and the name. A condition without a button — `format:lossless`, `dr:>10` and the like — stays in the "Words" field as it was typed and goes on counting), **Rename**, **Delete**.
   - Inside a smart playlist the search field narrows it further. Songs cannot be dragged into it or reordered.
 - Deleting a playlist does not delete any music files.
 
@@ -360,7 +360,7 @@ MP3, MP2 (.mp2), FLAC, WAV (ADPCM included), AIFF, ALAC (.m4a), AAC (.m4a), Ogg 
 | Leveling is on, but some songs are still louder or quieter | Those songs have no leveling values (ReplayGain "None" in Song Info). Run Settings → Playback → **Analyze Songs Without Tags**. If they have values and still sound different, the tags may be of the older kind (see "Volume Leveling"). |
 | Only one song played, then playback stopped | **Stop After Current Song** was set ("Stops after song" next to the volume). Press play to go on with the next song. |
 | The sound faded out and stopped while listening | The **Sleep Timer** ran out. Press play to go on from where it stopped, at your usual volume. |
-| A smart playlist is empty | No songs match it at the moment. Right-click → **Edit Search** to check the search. A value that cannot be understood (`year:abc`, `fav:maybe`) finds nothing. |
+| A smart playlist is empty | No songs match it at the moment. Right-click → **Edit Conditions** to check the search. A value that cannot be understood (`year:abc`, `fav:maybe`) finds nothing. |
 | A correction file cannot be imported | The notice says why. "a filter that is not supported" means it contains filters other than PK, LSC and HSC; "this line could not be understood" means that line has another form (it should look like `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70`). Choose `ParametricEQ.txt`, not the file for graphic equalizers (`GraphicEQ.txt`). |
 | The sound is odd (too much bass, a narrow stereo image) | Check whether the equalizer, headphone correction or headphone crossfeed is on. The **Signal Path** in Song Info lists everything that is being applied. |
 | No lyrics are shown | The file's tags hold no lyrics, and there is no `.lrc` or `.txt` with the song's name in its folder. Switch on Settings → General → Lyrics → Find Lyrics Online, or name the lyrics file exactly like the song file, with only the extension different. |
@@ -371,5 +371,5 @@ MP3, MP2 (.mp2), FLAC, WAV (ADPCM included), AIFF, ALAC (.m4a), AAC (.m4a), Ogg 
 ## Where Your Data Is
 - Library and settings: `~/Library/Application Support/OnEum/` — the song list, favorites, play counts, playlists and smart playlists, the queue, the loudness the app measured, equalizer presets, headphone correction profiles and the columns you chose. Deleting this folder starts OnEum afresh; your music files are not affected. Other user accounts on the same Mac cannot read this folder.
 - Album art cache: `~/Library/Caches/OnEum/` (can be deleted; it is made again).
-- Log: `~/Library/Logs/OnEum/oneum.log`
+- Log: `~/Library/Logs/OnEum/oneum.log` (it does not hold paths of files or folders; where a file has to be told from another it is written as `<file 3f9a2c.flac>`)
 - Settings → About opens the data and log folders directly.

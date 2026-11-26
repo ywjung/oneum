@@ -12,7 +12,7 @@ The name is the Korean word **온음** ("on-eum"): a whole, unaltered sound, and
 - FLAC, WAV, AIFF, ALAC, WavPack, MP3, AAC, Opus and DSD play gapless. Monkey's Audio (APE) plays too. Mono and 5.1/7.1 files are mixed to stereo.
 - DSD (.dsf, .dff, DSD64 to DSD512) is converted to PCM (88.2/96 kHz); Matroska/WebM audio (.mka, .webm) and ADPCM WAV play too.
 - An album that is one file is split into its songs by the CUE sheet beside it, and those songs follow each other without a gap.
-- Queue, playlists (M3U8 import and export), smart playlists (saved searches), favourites, recently played, shuffle and repeat, stop after the current song, sleep timer.
+- Queue, playlists (M3U8 import and export), smart playlists (saved searches, with an editor that sets the conditions with buttons), favourites, recently played, shuffle and repeat, stop after the current song, sleep timer.
 - Browse by album, artist, genre and folder; pin things to the sidebar; choose the columns of the song list (year, genre, plays, added, last played, format).
 - File check: damage (a FLAC is compared with the MD5 it carries), dynamic range (DR), true peak. Statistics (time listened per period, most played artists, albums, songs and genres). Play history and playlists can be brought over from an Apple Music library.
 - Volume leveling (ReplayGain): the file's tags are used, and songs without tags are measured by the app (EBU R 128). Music files are never changed.

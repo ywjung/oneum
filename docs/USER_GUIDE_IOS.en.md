@@ -75,7 +75,7 @@ Stop :: With nothing to follow, playback stops
 - **＋** at the top right of the **Playlists** tab makes a new playlist. So does ⋯ → **Add to Playlist** on a song.
 - Open a playlist and press **⋯** at the top right (or press and hold it in the list): Play · Play Next · Add to Queue · Pin · Rename · Export as M3U8 · Delete.
 - Inside a playlist, drag the **≡** handle at the right of a song to move it. A song taken out with ⋯ → **Remove from Playlist** comes back with **Undo** in the message below.
-- A **smart playlist** is a saved search. It gathers the songs that match each time it is opened. ⋯ → **Edit Search** brings its search into the Search tab; change it and press ＋ to save it under the same name. Rename and Delete are under ⋯ too.
+- A **smart playlist** is a saved search. It gathers the songs that match each time it is opened. The magnifier button at the top of the Playlists tab makes a new one, and ⋯ → **Edit Conditions** changes one: type a name and choose genre, years, rating, favorites, times played, added within, played within, order and number of songs; below them it shows the search they make and how many songs it finds now. A condition without a button stays in the "Words" field as it was typed. Rename and Delete are under ⋯ too.
 - **Settings → Library → Import Playlist** reads an M3U8 file. A playlist that lies in OnEum's folder finds the music files beside it.
 
 ## Media servers on the network
@@ -120,7 +120,7 @@ Output :: What comes after it is up to the system and to earphones, speakers or 
 - **Room Correction** (Settings → Playback → Room Correction, for speakers): a correction filter made by measuring your room and speakers (an impulse response file — WAV or FLAC, up to 6 seconds) is put in with **Import…** and applied to everything. The app keeps its own copy, and turns the filter down as a whole so that no frequency gets louder than it was. It can be switched off and on; leave it off for earphones.
 - **Equalizer**: ten bands and presets. Double-tap a slider to return it to 0 dB.
 - **General**: language and appearance (light · dark · system).
-- **About**: the version, the open source licenses, and **Save the Log**: it saves a copy of the records to look at when something goes wrong, where you want it. If the app ever ended with an error, **Errors of Earlier Runs** is shown here. **Copy the Record** in it copies the version, that record and the warnings and errors of the log all at once: paste it when you report a problem.
+- **About**: the version, the open source licenses, and **Save the Log**: it saves a copy of the records to look at when something goes wrong, where you want it (paths of files and folders are left out of the copy). If the app ever ended with an error, **Errors of Earlier Runs** is shown here. **Copy the Record** in it copies the version, that record and the warnings and errors of the log all at once: paste it when you report a problem.
 
 ## What differs from the Mac and Windows versions
 - The iPhone decides where the sound goes. There is no choice of output device and no exclusive output. The iPhone decides the sample rate too; **Output at the song's sample rate** asks it for one.

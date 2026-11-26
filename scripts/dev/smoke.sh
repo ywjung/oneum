@@ -566,6 +566,35 @@ check ld2.json 'd["smart_playlists"] == [["Late", "year:2019-2020"], ["Loud", "d
 check ld3.json 'len(d["playlists"]) == 3 and len(d["smart_playlists"]) == 2' "taking the same file in again changes nothing more"
 check ld4.json 'len(d["playlists"]) == 3 and d["toast"] is not None and d["library_tracks"] == 20' "a file that is not library data is refused, and said so"
 
+echo "== the smart playlist editor"
+# What the editor shows is pressed by the names its state gives (src/ui/smart_editor.rs):
+# the window is as tall as its conditions, and they scroll.
+press() { # press <name>…
+  for name in "$@"; do
+    ui 'dump ed.json'
+    ui "$(python3 -c 'import json, sys
+x, y, w, h = json.load(open(sys.argv[1]))["smart_editor"]["shown"][sys.argv[2]]
+print(f"click {x + w / 2:.0f} {y + h / 2:.0f}")' "$PROFILE/ed.json" "$name")" 'wait 250'
+  done
+}
+ui 'menu new_smart_playlist' 'wait 600' 'dump se0.json'
+check se0.json 'd["smart_editor"] is not None and d["smart_editor"]["query"] == "" and d["smart_editor"]["original"] is None' "File → New Smart Playlist opens the editor, with nothing chosen"
+# (The name's field has the keyboard. The genre that is offered first is the one with
+# the most songs; the order and the number of songs are further down.)
+ui 'text Rock by title' 'wait 200'
+press genre_pick:0
+ui 'dump se1.json' 'scroll 590 400 -600' 'wait 400' 'scroll 590 400 -600' 'wait 400'
+press order:1
+# (An order brings the button that turns it round: what is below moves down.)
+ui 'scroll 590 400 -600' 'wait 400'
+press limit:1
+ui 'dump se2.json'
+press save
+ui 'wait 500' 'dump se3.json'
+check se1.json 'd["smart_editor"]["query"] == "genre:Rock" and d["smart_editor"]["songs"] == 6 and d["smart_editor"]["name"] == "Rock by title"' "a tap on a genre of the library makes it a condition, and the editor says how many songs it finds"
+check se2.json 'd["smart_editor"]["query"] == "genre:Rock sort:title limit:25"' "…an order and a number of songs join it"
+check se3.json 'd["smart_editor"] is None and d["nav"] == "Smart(\"Rock by title\")" and d["rows"] == 6 and d["smart_playlists"][-1] == ["Rock by title", "genre:Rock sort:title limit:25"] and len(d["smart_playlists"]) == 3' "Save keeps it as a smart playlist and opens it with its songs"
+
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'
 sleep 2

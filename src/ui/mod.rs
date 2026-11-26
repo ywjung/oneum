@@ -3181,6 +3181,7 @@ impl OneumApp {
                         "song_toggle_favorite" => Some(UiRequest::SongToggleFavorite),
                         "song_info" => Some(UiRequest::SongInfo),
                         "toggle_mute" => Some(UiRequest::ToggleMute),
+                        "new_smart_playlist" => Some(UiRequest::NewSmartPlaylist),
                         "playlist_rename" => Some(UiRequest::PlaylistRename),
                         "playlist_delete" => Some(UiRequest::PlaylistDelete),
                         "toggle_queue" => Some(UiRequest::ToggleQueue),
