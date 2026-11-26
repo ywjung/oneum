@@ -398,20 +398,14 @@ impl Library {
             .iter()
             .filter(|list| !list.empty_there && list.tracks.is_empty())
             .count();
-        let made = self.take_over(&rows, &playlists, MARK)?;
-
         // The plays themselves, for the statistics and for what was heard last.
         let plays: Vec<(TrackId, i64)> = data
             .plays
             .iter()
             .filter_map(|(song, at)| Some((*found.get(song)?, *at)))
             .collect();
-        if !plays.is_empty() {
-            let mut db = lock(&self.inner.db);
-            if db.merge_plays(&plays)? > 0 {
-                *lock(&self.inner.recent_plays) = db.recent_plays(super::RECENT_PLAYS_KEPT)?;
-            }
-        }
+        // All of it at once, or none of it (see `Library::take_over`).
+        let made = self.take_over(&rows, &playlists, MARK, &plays)?;
 
         let (matched, ambiguous) = (found.len(), doubtful.len());
         tracing::info!(

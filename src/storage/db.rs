@@ -1023,22 +1023,7 @@ impl Db {
     /// `(track, plays, last played, added, loved, rating)`.
     pub fn merge_listening(&mut self, rows: &[ListeningRow]) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE tracks SET \
-                 play_count = MAX(play_count, ?2), \
-                 last_played_at = CASE WHEN ?3 IS NULL THEN last_played_at \
-                     WHEN last_played_at IS NULL OR ?3 > last_played_at THEN ?3 \
-                     ELSE last_played_at END, \
-                 added_at = CASE WHEN ?4 IS NOT NULL AND ?4 < added_at THEN ?4 ELSE added_at END, \
-                 favorite = favorite OR ?5, \
-                 rating = CASE WHEN rating = 0 THEN ?6 ELSE rating END \
-                 WHERE id = ?1",
-            )?;
-            for (id, plays, last, added, loved, rating) in rows {
-                stmt.execute(params![id, plays, last, added, loved, rating.min(&5)])?;
-            }
-        }
+        merge_listening_in(&tx, rows)?;
         tx.commit()
     }
 
@@ -1103,36 +1088,58 @@ impl Db {
     /// plays were added.
     pub fn merge_plays(&mut self, plays: &[(TrackId, i64)]) -> SqlResult<usize> {
         let tx = self.conn.transaction()?;
-        let mut all: Vec<(TrackId, i64)> = {
-            let mut stmt = tx.prepare("SELECT track_id, played_at FROM history ORDER BY id")?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            rows.collect::<SqlResult<_>>()?
-        };
-        let mut known: std::collections::HashSet<(TrackId, i64)> = all.iter().copied().collect();
-        let before = all.len();
-        all.extend(plays.iter().copied().filter(|play| known.insert(*play)));
-        let added = all.len() - before;
-        if added == 0 {
-            return Ok(0);
-        }
-        // (Stable: plays of the same second stay in the order they were in.)
-        all.sort_by_key(|&(_, at)| at);
-        let keep = usize::try_from(HISTORY_KEEP_ROWS).unwrap_or(usize::MAX);
-        let dropped = all.len().saturating_sub(keep);
-        tx.execute("DELETE FROM history", [])?;
-        {
-            // (A song that was taken out of the library since the plays were matched
-            // has no plays any more: a scan may run beside this.)
-            let mut stmt = tx.prepare(
-                "INSERT INTO history (track_id, played_at)
-                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1)",
-            )?;
-            for (id, at) in &all[dropped..] {
-                stmt.execute(params![id, at])?;
-            }
-        }
+        let added = merge_plays_in(&tx, plays)?;
         tx.commit()?;
         Ok(added)
+    }
+
+    /// Takes in what another record brings (a library export of another player, the
+    /// app's own library data), all of it in one transaction: the listening rows
+    /// ([`Self::merge_listening`]), then the playlists, then the plays
+    /// ([`Self::merge_plays`]). If any of it fails, none of it is in, and the same
+    /// record can be taken in again as if it had never been tried. `lists` is given
+    /// the playlists the database holds (`(name, tracks)`, as read inside the
+    /// transaction, not as some earlier moment remembers them) and says which to make.
+    /// Returns how many playlists were made and how many plays were added.
+    pub fn take_over(
+        &mut self,
+        rows: &[ListeningRow],
+        plays: &[(TrackId, i64)],
+        unix_secs: i64,
+        lists: impl FnOnce(Vec<(String, Vec<TrackId>)>) -> Vec<(String, Vec<TrackId>)>,
+    ) -> SqlResult<(usize, usize)> {
+        let tx = self.conn.transaction()?;
+        merge_listening_in(&tx, rows)?;
+        let existing: Vec<(String, Vec<TrackId>)> = {
+            let mut held: Vec<(i64, String, Vec<TrackId>)> = playlists_in(&tx)?
+                .into_iter()
+                .map(|(id, name)| (id, name, Vec::new()))
+                .collect();
+            let place: std::collections::HashMap<i64, usize> = held
+                .iter()
+                .enumerate()
+                .map(|(at, (id, _, _))| (*id, at))
+                .collect();
+            for (playlist, _, track) in playlist_items_in(&tx)? {
+                if let Some(&at) = place.get(&playlist) {
+                    held[at].2.push(track);
+                }
+            }
+            held.into_iter()
+                .map(|(_, name, tracks)| (name, tracks))
+                .collect()
+        };
+        let wanted = lists(existing);
+        for (name, tracks) in &wanted {
+            create_playlist_in(&tx, name, unix_secs, tracks)?;
+        }
+        let added = if plays.is_empty() {
+            0
+        } else {
+            merge_plays_in(&tx, plays)?
+        };
+        tx.commit()?;
+        Ok((wanted.len(), added))
     }
 
     /// `(track, unix seconds)` of every play at or after `since`, oldest first.
@@ -1158,22 +1165,13 @@ impl Db {
 
     /// `(id, name)` of every playlist in creation order.
     pub fn playlists(&self) -> SqlResult<Vec<(i64, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name FROM playlists ORDER BY id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        rows.collect()
+        playlists_in(&self.conn)
     }
 
     /// `(playlist id, item id, track id)` of every playlist item, grouped by playlist and
     /// ordered by position.
     pub fn all_playlist_items(&self) -> SqlResult<Vec<(i64, i64, TrackId)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT playlist_id, id, track_id FROM playlist_items \
-             ORDER BY playlist_id, position, id",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        rows.collect()
+        playlist_items_in(&self.conn)
     }
 
     pub fn create_playlist(&self, name: &str, unix_secs: i64) -> SqlResult<i64> {
@@ -1226,14 +1224,9 @@ impl Db {
         tracks: &[TrackId],
     ) -> SqlResult<(i64, usize)> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO playlists (name, created_at) VALUES (?1, ?2)",
-            params![name, unix_secs],
-        )?;
-        let id = tx.last_insert_rowid();
-        let added = append_items(&tx, id, tracks)?;
+        let made = create_playlist_in(&tx, name, unix_secs, tracks)?;
         tx.commit()?;
-        Ok((id, added))
+        Ok(made)
     }
 
     /// Gives the tracks that take the place of `old` (a CUE sheet's tracks, for the file
@@ -1650,6 +1643,93 @@ impl Db {
             [],
         )
     }
+}
+
+/// Every playlist as `(id, name)`, in the order they were made.
+fn playlists_in(conn: &Connection) -> SqlResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, name FROM playlists ORDER BY id")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// `(playlist id, item id, track id)` of every playlist item (see
+/// `Db::all_playlist_items`).
+fn playlist_items_in(conn: &Connection) -> SqlResult<Vec<(i64, i64, TrackId)>> {
+    let mut stmt = conn.prepare(
+        "SELECT playlist_id, id, track_id FROM playlist_items \
+         ORDER BY playlist_id, position, id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect()
+}
+
+/// Makes a playlist and fills it (see `Db::create_playlist_with_items`). Returns
+/// `(playlist id, items added)`.
+fn create_playlist_in(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    unix_secs: i64,
+    tracks: &[TrackId],
+) -> SqlResult<(i64, usize)> {
+    tx.execute(
+        "INSERT INTO playlists (name, created_at) VALUES (?1, ?2)",
+        params![name, unix_secs],
+    )?;
+    let id = tx.last_insert_rowid();
+    let added = append_items(tx, id, tracks)?;
+    Ok((id, added))
+}
+
+/// See `Db::merge_listening`.
+fn merge_listening_in(tx: &rusqlite::Transaction<'_>, rows: &[ListeningRow]) -> SqlResult<()> {
+    let mut stmt = tx.prepare_cached(
+        "UPDATE tracks SET \
+             play_count = MAX(play_count, ?2), \
+             last_played_at = CASE WHEN ?3 IS NULL THEN last_played_at \
+                 WHEN last_played_at IS NULL OR ?3 > last_played_at THEN ?3 \
+                 ELSE last_played_at END, \
+             added_at = CASE WHEN ?4 IS NOT NULL AND ?4 < added_at THEN ?4 ELSE added_at END, \
+             favorite = favorite OR ?5, \
+             rating = CASE WHEN rating = 0 THEN ?6 ELSE rating END \
+             WHERE id = ?1",
+    )?;
+    for (id, plays, last, added, loved, rating) in rows {
+        stmt.execute(params![id, plays, last, added, loved, rating.min(&5)])?;
+    }
+    Ok(())
+}
+
+/// See `Db::merge_plays`.
+fn merge_plays_in(tx: &rusqlite::Transaction<'_>, plays: &[(TrackId, i64)]) -> SqlResult<usize> {
+    let mut all: Vec<(TrackId, i64)> = {
+        let mut stmt = tx.prepare("SELECT track_id, played_at FROM history ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<SqlResult<_>>()?
+    };
+    let mut known: std::collections::HashSet<(TrackId, i64)> = all.iter().copied().collect();
+    let before = all.len();
+    all.extend(plays.iter().copied().filter(|play| known.insert(*play)));
+    let added = all.len() - before;
+    if added == 0 {
+        return Ok(0);
+    }
+    // (Stable: plays of the same second stay in the order they were in.)
+    all.sort_by_key(|&(_, at)| at);
+    let keep = usize::try_from(HISTORY_KEEP_ROWS).unwrap_or(usize::MAX);
+    let dropped = all.len().saturating_sub(keep);
+    tx.execute("DELETE FROM history", [])?;
+    {
+        // (A song that was taken out of the library since the plays were matched
+        // has no plays any more: a scan may run beside this.)
+        let mut stmt = tx.prepare(
+            "INSERT INTO history (track_id, played_at)
+             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1)",
+        )?;
+        for (id, at) in &all[dropped..] {
+            stmt.execute(params![id, at])?;
+        }
+    }
+    Ok(added)
 }
 
 fn append_items(tx: &rusqlite::Transaction<'_>, id: i64, tracks: &[TrackId]) -> SqlResult<usize> {

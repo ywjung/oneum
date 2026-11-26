@@ -1157,3 +1157,107 @@ fn ratings_are_kept_found_and_carried() {
     assert_eq!(other.track(theirs[2]).unwrap().rating, 0);
     assert_eq!(other.snapshot().get(theirs[0]).unwrap().rating, 5);
 }
+
+/// Taking in library data is all or nothing: when it fails in the middle (the second
+/// playlist cannot be written; the plays cannot), nothing of the file is in, neither in
+/// the database nor in what the app shows, and trying again right away ends with
+/// exactly what the file holds: no list twice, none missing.
+#[test]
+fn library_data_that_fails_halfway_is_taken_in_whole_at_the_next_try() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    library.record_play(ids[0]);
+    library.set_rating(&[ids[1]], 4).unwrap();
+    library.set_favorite(&[ids[2]], true).unwrap();
+    let morning = library.create_playlist("Morning").unwrap();
+    library.add_to_playlist(morning, &[ids[0], ids[1]]).unwrap();
+    let night = library.create_playlist("Night").unwrap();
+    library.add_to_playlist(night, &[ids[2]]).unwrap();
+    let file = env.dir.path().join("data.json");
+    let written = library.export_data(&file, &[]).expect("writes");
+    assert_eq!(written.playlists, 2);
+
+    let there = TestEnv::new();
+    let (other, theirs) = library_with_tracks(&there);
+    let db = rusqlite::Connection::open(there.paths().data_dir.join("library.db")).unwrap();
+    let lists_in_the_database = || -> Vec<String> {
+        db.prepare("SELECT name FROM playlists ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+    let nothing_is_in = |when: &str| {
+        assert_eq!(lists_in_the_database(), [""; 0], "{when}");
+        assert!(other.playlists().is_empty(), "{when}");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM tracks WHERE rating > 0 OR favorite OR play_count > 0"),
+            0,
+            "{when}"
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM history"), 0, "{when}");
+        let rated = other.track(theirs[1]).unwrap();
+        assert_eq!((rated.rating, rated.favorite), (0, false), "{when}");
+        assert!(!other.track(theirs[2]).unwrap().favorite, "{when}");
+        assert_eq!(other.track(theirs[0]).unwrap().play_count, 0, "{when}");
+        assert_eq!(other.snapshot().get(theirs[1]).unwrap().rating, 0, "{when}");
+        assert!(other.plays_since(0).is_empty(), "{when}");
+        assert!(other.recent_plays(10).is_empty(), "{when}");
+    };
+
+    // The second playlist cannot be written.
+    db.execute_batch(
+        "CREATE TRIGGER refuse_night BEFORE INSERT ON playlists WHEN NEW.name = 'Night'
+         BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;",
+    )
+    .unwrap();
+    assert!(other.import_data(&file).is_err());
+    nothing_is_in("the second playlist failed");
+    db.execute_batch("DROP TRIGGER refuse_night").unwrap();
+
+    // The plays, which are written last, cannot be.
+    db.execute_batch(
+        "CREATE TRIGGER refuse_plays BEFORE INSERT ON history
+         BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;",
+    )
+    .unwrap();
+    assert!(other.import_data(&file).is_err());
+    nothing_is_in("the plays failed");
+    db.execute_batch("DROP TRIGGER refuse_plays").unwrap();
+
+    // Again, at once: what the file holds, once.
+    let whole = |other: &Library| {
+        let mut lists: Vec<(String, Vec<TrackId>)> = other
+            .playlists()
+            .into_iter()
+            .map(|list| (list.name, track_ids(other, list.id)))
+            .collect();
+        lists.sort();
+        assert_eq!(
+            lists,
+            [
+                ("Morning".to_string(), vec![theirs[0], theirs[1]]),
+                ("Night".to_string(), vec![theirs[2]]),
+            ]
+        );
+        assert_eq!(other.track(theirs[1]).unwrap().rating, 4);
+        assert!(other.track(theirs[2]).unwrap().favorite);
+        assert_eq!(other.track(theirs[0]).unwrap().play_count, 1);
+        assert_eq!(other.plays_since(0).len(), 1);
+        assert_eq!(other.recent_plays(10), [theirs[0]]);
+    };
+    let result = other.import_data(&file).expect("takes in");
+    assert_eq!((result.matched, result.playlists), (5, 2));
+    whole(&other);
+    assert_eq!(lists_in_the_database(), ["Morning", "Night"]);
+    let again = other.import_data(&file).expect("takes in");
+    assert_eq!(again.playlists, 0);
+    whole(&other);
+
+    // And after a new start.
+    drop(other);
+    let other = there.open();
+    whole(&other);
+}

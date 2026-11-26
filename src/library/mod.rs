@@ -2806,7 +2806,7 @@ impl Library {
                 empty_there: false,
             })
             .collect();
-        let made = self.take_over(&rows, &playlists, "Apple Music")?;
+        let made = self.take_over(&rows, &playlists, "Apple Music", &[])?;
         let matched = found.len();
         tracing::info!(matched, playlists = made, "Apple Music library imported");
         Ok(AppleImport {
@@ -2816,22 +2816,72 @@ impl Library {
         })
     }
 
-    /// Gives songs of the library what another record knew of them (an Apple Music
-    /// library export, the app's own library data from another device). The listening
-    /// rows are merged, not added up (see `Db::merge_listening`). The playlists are
-    /// made, each with its songs in one step: one that is here already (same name,
-    /// same songs: an earlier import) is not made again, one without a song that is
-    /// here is left out unless it was empty in the record too, and a name taken by
-    /// another list gets `mark` behind it. Returns how many playlists were made.
+    /// Takes in what another record knows of the library's songs (another player's
+    /// library export, the app's own library data from another device), all of it in
+    /// one database transaction (`Db::take_over`): if any of it cannot be written,
+    /// none of it is in, and what the app shows is as it was. The listening rows are
+    /// merged, not added up (see `Db::merge_listening`). The playlists are made, each
+    /// with its songs: one that is here already (same name, same songs: an earlier
+    /// import) is not made again, one without a song that is here is left out unless
+    /// it was empty in the record too, and a name taken by another list gets `mark`
+    /// behind it. Which lists are here is asked of the database inside that
+    /// transaction, not of what the app remembers. `plays` are the plays the record
+    /// remembers one by one (`Db::merge_plays`). Returns how many playlists were made.
     fn take_over(
         &self,
         rows: &[crate::storage::db::ListeningRow],
         playlists: &[ListIn],
         mark: &str,
+        plays: &[(TrackId, i64)],
     ) -> Result<usize, LibraryError> {
-        let changed: Vec<TrackId> = {
+        let lists = |mut existing: Vec<(String, Vec<TrackId>)>| {
+            let known = existing.len();
+            for ListIn {
+                name,
+                tracks,
+                empty_there,
+            } in playlists
+            {
+                if tracks.is_empty() && !empty_there {
+                    continue;
+                }
+                // The list is here already, under its name or one marked as below:
+                // passed over. (A name the listener gave, "Drive (Live)" beside "Drive",
+                // is another list, whatever its songs.)
+                if existing
+                    .iter()
+                    .any(|(known, items)| items == tracks && is_marked_name(known, name, mark))
+                {
+                    continue;
+                }
+                // A name that stands for another list here gets a mark, and where that
+                // one is taken too, the next ("Drive (2)", "Drive (3)").
+                let taken = |wanted: &str| existing.iter().any(|(known, _)| known == wanted);
+                let name = if !taken(name) {
+                    name.clone()
+                } else {
+                    // (A mark that is a number counts on; one that is a word gets a
+                    // number behind it.)
+                    let counted = mark.parse::<u32>().ok();
+                    let mut marked = format!("{name} ({mark})");
+                    let mut number = counted.unwrap_or(1);
+                    while taken(&marked) {
+                        number += 1;
+                        marked = match counted {
+                            Some(_) => format!("{name} ({number})"),
+                            None => format!("{name} ({mark} {number})"),
+                        };
+                    }
+                    marked
+                };
+                existing.push((name, tracks.clone()));
+            }
+            existing.split_off(known)
+        };
+        let (made, changed): (usize, Vec<TrackId>) = {
             let mut db = lock(&self.inner.db);
-            db.merge_listening(rows)?;
+            let (made, plays_added) = db.take_over(rows, plays, unix_now(), lists)?;
+            // It is in the database: now what the app shows follows.
             let mut state = lock(&self.inner.state);
             for &(id, plays, last, added, loved, rating) in rows {
                 state.update(id, |t| {
@@ -2852,65 +2902,18 @@ impl Library {
                     t.favorite |= loved;
                 });
             }
-            rows.iter().map(|r| r.0).collect()
+            drop(state);
+            if plays_added > 0 {
+                // (What was taken in stays in: a list that could not be read again is
+                // read at the next start.)
+                match db.recent_plays(RECENT_PLAYS_KEPT) {
+                    Ok(recent) => *lock(&self.inner.recent_plays) = recent,
+                    Err(err) => tracing::warn!(%err, "could not read what was played last"),
+                }
+            }
+            (made, rows.iter().map(|r| r.0).collect())
         };
         self.inner.publish_patch(&changed);
-
-        let mut existing: Vec<(String, Vec<TrackId>)> = self
-            .playlists()
-            .into_iter()
-            .map(|p| {
-                let tracks = self
-                    .playlist_items(p.id)
-                    .into_iter()
-                    .map(|i| i.track_id)
-                    .collect();
-                (p.name, tracks)
-            })
-            .collect();
-        let mut made = 0;
-        for ListIn {
-            name,
-            tracks,
-            empty_there,
-        } in playlists
-        {
-            if tracks.is_empty() && !empty_there {
-                continue;
-            }
-            // The list is here already, under its name or one marked as below:
-            // passed over. (A name the listener gave, "Drive (Live)" beside "Drive",
-            // is another list, whatever its songs.)
-            if existing
-                .iter()
-                .any(|(known, items)| items == tracks && is_marked_name(known, name, mark))
-            {
-                continue;
-            }
-            // A name that stands for another list here gets a mark, and where that
-            // one is taken too, the next ("Drive (2)", "Drive (3)").
-            let taken = |wanted: &str| existing.iter().any(|(known, _)| known == wanted);
-            let name = if !taken(name) {
-                name.clone()
-            } else {
-                // (A mark that is a number counts on; one that is a word gets a
-                // number behind it.)
-                let counted = mark.parse::<u32>().ok();
-                let mut marked = format!("{name} ({mark})");
-                let mut number = counted.unwrap_or(1);
-                while taken(&marked) {
-                    number += 1;
-                    marked = match counted {
-                        Some(_) => format!("{name} ({number})"),
-                        None => format!("{name} ({mark} {number})"),
-                    };
-                }
-                marked
-            };
-            lock(&self.inner.db).create_playlist_with_items(&name, unix_now(), tracks)?;
-            existing.push((name, tracks.clone()));
-            made += 1;
-        }
         if made > 0 {
             self.playlists_changed();
         }
