@@ -111,6 +111,8 @@ strings! {
     smart_limit: "곡 수", "Number of songs";
     smart_lossless: "무손실", "Lossless";
     smart_lossy: "손실", "Lossy";
+    smart_hires: "하이레조", "Hi-res";
+    smart_unplayed: "마지막으로 들은 지", "Last played over";
     smart_length: "길이", "Length";
     smart_minutes: "분", "min";
     smart_empty: "조건을 하나 이상 고르면 저장할 수 있습니다.", "Choose at least one condition to save.";
@@ -776,8 +778,8 @@ strings! {
     stop_after_short: "곡 끝에 정지", "Stops after song";
     stop_after_cancel_hint: "이 곡이 끝나면 재생을 멈춥니다. 누르면 끕니다.",
         "Playback stops when this song ends. Click to switch it off.";
-    search_syntax_hint: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac · length:>=10\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y\n여러 낱말을 하나로: \"let it be\"\n모든 곡에서 검색한 뒤 ＋를 누르면 스마트 플레이리스트로 저장됩니다.",
-        "Narrow it to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac · length:>=10\nBy what you listened to: plays:>=5 · fav:yes · added:30d · played:1y\nKeep words together: \"let it be\"\nSearch in Songs, then press ＋ to keep the search as a smart playlist.";
+    search_syntax_hint: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac · length:>=10\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y · played:>6m\n여러 낱말을 하나로: \"let it be\"\n모든 곡에서 검색한 뒤 ＋를 누르면 스마트 플레이리스트로 저장됩니다.",
+        "Narrow it to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac · length:>=10\nBy what you listened to: plays:>=5 · fav:yes · added:30d · played:1y · played:>6m\nKeep words together: \"let it be\"\nSearch in Songs, then press ＋ to keep the search as a smart playlist.";
     menu_go_to_current: "재생 중인 곡으로 이동", "Go to Current Song";
     menu_show_queue: "재생 대기열 보기/가리기", "Show/Hide Up Next";
     menu_show_info: "곡 정보 보기/가리기", "Show/Hide Song Info";
@@ -837,8 +839,8 @@ strings! {
     phone_reorder: "순서 바꾸기", "Reorder";
     phone_show_total: "전체 길이 보기", "Show the whole length";
     phone_show_left: "남은 시간 보기", "Show the time left";
-    phone_search_tips: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac · length:>=10\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y\n파일 검사 결과로: check:damaged · dr:<8\n여러 낱말을 하나로: \"let it be\"\n곡을 검색한 뒤 ＋를 누르면 그 검색이 스마트 플레이리스트로 저장됩니다.",
-        "A search can be narrowed to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac · length:>=10\nBy what was listened to: plays:>=5 · fav:yes · added:30d · played:1y\nBy what the file check found: check:damaged · dr:<8\nSeveral words as one: \"let it be\"\nSearch for songs, then press ＋ to keep the search as a smart playlist.";
+    phone_search_tips: "찾을 곳을 정할 수 있습니다: artist:아이유 · album:… · title:… · genre:재즈 · year:1990-1999 · format:flac · length:>=10\n들은 기록으로: plays:>=5 · fav:yes · added:30d · played:1y · played:>6m\n파일 검사 결과로: check:damaged · dr:<8\n여러 낱말을 하나로: \"let it be\"\n곡을 검색한 뒤 ＋를 누르면 그 검색이 스마트 플레이리스트로 저장됩니다.",
+        "A search can be narrowed to a field: artist:beatles · album:… · title:… · genre:jazz · year:1990-1999 · format:flac · length:>=10\nBy what was listened to: plays:>=5 · fav:yes · added:30d · played:1y · played:>6m\nBy what the file check found: check:damaged · dr:<8\nSeveral words as one: \"let it be\"\nSearch for songs, then press ＋ to keep the search as a smart playlist.";
     phone_empty_body_folders: "휴대폰의 Music 폴더에 있는 음악이 여기에 나타납니다. 다른 폴더는 아래에서 추가할 수 있습니다.", "Music in the phone's Music folder appears here. Other folders can be added below.";
     phone_storage_needed: "음악 파일을 읽으려면 ‘음악 및 오디오’ 접근을 허용해야 합니다. 아래 버튼을 누르면 시스템이 허용할지 묻습니다.", "To read music files OnEum needs access to music and audio. The button below has the system ask you.";
     phone_storage_allow: "접근 허용", "Allow Access";

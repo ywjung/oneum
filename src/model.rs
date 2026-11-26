@@ -164,6 +164,13 @@ impl Track {
         ) || self.codec.starts_with("DSD")
     }
 
+    /// True for a recording finer than a CD's: lossless, with more than 16 bits or
+    /// more than 48 kHz (DSD, whose rate is millions, is one).
+    pub fn is_hires(&self) -> bool {
+        self.is_lossless()
+            && (self.bit_depth.is_some_and(|bits| bits > 16) || self.sample_rate > 48_000)
+    }
+
     /// The values volume leveling works with: the file's tags, and where a gain is
     /// missing there, what the app measured. A gain always comes with the peak from
     /// the same source.

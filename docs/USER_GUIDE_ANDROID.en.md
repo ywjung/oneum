@@ -69,7 +69,7 @@ Stop :: With nothing to follow, playback stops
 ## Search
 - The **Search** tab finds by title, artist and album.
 - Below the field, choose what to look for: **Songs · Albums · Artists**. Moving the results up or down puts the keyboard away.
-- A search can be narrowed to a field: `artist:beatles` · `album:…` · `genre:jazz` · `year:1990-1999` · `format:flac` · `length:>=10` (minutes) · `fav:yes` · `plays:>=5` · `added:30d` · `check:damaged` · `dr:<8`.
+- A search can be narrowed to a field: `artist:beatles` · `album:…` · `genre:jazz` · `year:1990-1999` · `format:flac` · `length:>=10` (minutes) · `fav:yes` · `plays:>=5` · `added:30d` · `played:>6m` (not heard for six months) · `format:hires` · `check:damaged` · `dr:<8`.
 - A search can also say the order and the number of what it finds: `sort:plays` (most played first) · `sort:added` · `sort:rating` · `sort:-title` (`-` turns the order round) · `limit:50`. Kept as a smart playlist it makes a list such as "the 25 most played of four stars and more" (`rating:>=4 sort:plays limit:25`).
 - **Keeping a search**: search for songs, press **＋** in the search field and give it a name: the search becomes a smart playlist.
 
@@ -77,7 +77,7 @@ Stop :: With nothing to follow, playback stops
 - **＋** at the top right of the **Playlists** tab makes a new playlist. So does ⋯ → **Add to Playlist** on a song.
 - Open a playlist and press **⋯** at the top right (or press and hold it in the list): Play · Play Next · Add to Queue · Pin · Rename · Export as M3U8 · Delete.
 - Inside a playlist, drag the **≡** handle at the right of a song to move it. A song taken out with ⋯ → **Remove from Playlist** comes back with **Undo** in the message below.
-- A **smart playlist** is a saved search. It gathers the songs that match each time it is opened. The magnifier button at the top of the Playlists tab makes a new one, and ⋯ → **Edit Conditions** changes one: type a name and set words, artist, genre, format, years, length, rating, favorites, times played, added within, played within, order and number of songs; below them it shows the search they make and how many songs it finds now. A condition without a button stays in the "Words" field as it was typed. Rename and Delete are under ⋯ too.
+- A **smart playlist** is a saved search. It gathers the songs that match each time it is opened. The magnifier button at the top of the Playlists tab makes a new one, and ⋯ → **Edit Conditions** changes one: type a name and set words, artist, genre, format, years, length, rating, favorites, times played, added within, played within, last played over, order and number of songs; below them it shows the search they make and how many songs it finds now. A condition without a button stays in the "Words" field as it was typed. Rename and Delete are under ⋯ too.
 - **Settings → Library → Import Playlist** reads an M3U8 file. **Export as M3U8** asks where to keep the file.
 
 ## Media servers on the network

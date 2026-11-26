@@ -588,6 +588,8 @@ ui 'dump se1.json'
 # The length is typed in whole minutes: the test songs are all under one.)
 press format:1
 ui 'dump se1f.json'
+press format:3
+ui 'dump se1h.json'
 press format:2 length_to
 ui 'text 0' 'wait 250' 'dump se1l.json' 'scroll 590 400 -600' 'wait 400' 'scroll 590 400 -600' 'wait 400'
 press order:1
@@ -599,6 +601,7 @@ press save
 ui 'wait 500' 'dump se3.json'
 check se1.json 'd["smart_editor"]["query"] == "genre:Rock" and d["smart_editor"]["songs"] == 6 and d["smart_editor"]["name"] == "Rock by title"' "a tap on a genre of the library makes it a condition, and the editor says how many songs it finds"
 check se1f.json 'd["smart_editor"]["query"] == "genre:Rock format:lossless" and d["smart_editor"]["songs"] == 0' "…the format row asks for lossless files: none of these"
+check se1h.json 'd["smart_editor"]["query"] == "genre:Rock format:hires" and d["smart_editor"]["songs"] == 0' "…hi-res files: none of these either"
 check se1l.json 'd["smart_editor"]["query"] == "genre:Rock format:lossy length:<=0" and d["smart_editor"]["songs"] == 6' "…lossy ones, and a length typed in minutes"
 check se2.json 'd["smart_editor"]["query"] == "genre:Rock format:lossy length:<=0 sort:title limit:25"' "…an order and a number of songs join it"
 check se3.json 'd["smart_editor"] is None and d["nav"] == "Smart(\"Rock by title\")" and d["rows"] == 6 and d["smart_playlists"][-1] == ["Rock by title", "genre:Rock format:lossy length:<=0 sort:title limit:25"] and len(d["smart_playlists"]) == 3' "Save keeps it as a smart playlist and opens it with its songs"
@@ -613,6 +616,12 @@ press cancel
 ui 'wait 300' 'dump se5.json'
 check se4.json 'd["smart_editor"] is not None and d["smart_editor"]["too_long"] and len(d["smart_editor"]["query"]) == 301 and len(d["smart_playlists"]) == 3' "a search too long to keep stays whole in the editor and is not saved"
 check se5.json 'd["smart_editor"] is None and len(d["smart_playlists"]) == 3' "…and Cancel leaves the list as it was"
+# Songs played, but not in the last year: a row of its own, further down.
+ui 'menu new_smart_playlist' 'wait 600' 'text Not lately' 'wait 200' 'scroll 590 400 -600' 'wait 400' 'scroll 590 400 -600' 'wait 400'
+press unplayed:4
+ui 'dump se6.json'
+press cancel
+check se6.json 'd["smart_editor"]["query"] == "played:>365d" and d["smart_editor"]["songs"] == 0' "a song last played over a year ago is asked for with a tap (none here: the test songs were played today or never)"
 
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'

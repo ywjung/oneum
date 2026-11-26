@@ -101,6 +101,7 @@ impl TrackIndex {
             return match text {
                 "lossless" | "무손실" => lossless,
                 "lossy" | "손실" => !lossless,
+                "hires" | "hi-res" | "하이레조" | "고해상도" => track.is_hires(),
                 _ => {
                     track.codec.to_lowercase().contains(text)
                         || track.container.to_lowercase().contains(text)
@@ -397,6 +398,8 @@ impl LibrarySnapshot {
             Filter::Rating(from, to) => (*from..=*to).contains(&i32::from(track.rating)),
             Filter::AddedSince(since) => track.added_at >= *since,
             Filter::PlayedSince(since) => track.last_played_at.is_some_and(|at| at >= *since),
+            Filter::AddedBefore(before) => track.added_at < *before,
+            Filter::PlayedBefore(before) => track.last_played_at.is_some_and(|at| at < *before),
             Filter::Check(wanted) => {
                 use super::search::CheckWanted;
                 use crate::model::CheckVerdict;
@@ -1174,6 +1177,39 @@ mod tests {
         assert_eq!(found("played:1w"), ["often"]);
         assert_eq!(found("played:1y"), ["new", "often"]);
         assert!(found("fav:perhaps").is_empty());
+        // Longer ago: a song never played is not one of those played long ago.
+        assert_eq!(found("played:>30d"), ["new"]);
+        assert_eq!(found("played:>1d"), ["new", "often"]);
+        assert!(found("played:>1y").is_empty());
+        assert_eq!(found("added:>1y"), ["never", "often"]);
+        assert_eq!(found("added:>1y played:>1d"), ["often"]);
+
+        // Hi-res: lossless and finer than a CD.
+        let mut fine = vec![
+            track(1, "Cd", "A", "X"),
+            track(2, "Deep", "A", "X"),
+            track(3, "Fast", "A", "X"),
+            track(4, "Dsd", "A", "X"),
+            track(5, "Lossy", "A", "X"),
+            track(6, "Dvd", "A", "X"),
+        ];
+        for (song, (codec, rate, bits)) in fine.iter_mut().zip([
+            ("FLAC", 44_100, Some(16)),
+            ("FLAC", 44_100, Some(24)),
+            ("ALAC", 96_000, Some(16)),
+            ("DSD64", 2_822_400, Some(1)),
+            ("AAC", 96_000, None),
+            ("PCM", 48_000, Some(16)),
+        ]) {
+            song.codec = codec.into();
+            song.sample_rate = rate;
+            song.bit_depth = bits;
+        }
+        let f = LibrarySnapshot::from_tracks(fine);
+        let found = |query: &str| titles(&f, &f.search(query));
+        assert_eq!(found("format:hires"), ["deep", "dsd", "fast"]);
+        assert_eq!(found("형식:하이레조"), ["deep", "dsd", "fast"]);
+        assert_eq!(found("format:hi-res"), ["deep", "dsd", "fast"]);
 
         // Length, in whole minutes: 2:59, 3:00, 9:59, 10:00, and one not known.
         let mut long = vec![

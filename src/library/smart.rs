@@ -9,7 +9,7 @@
 //! lost by opening the editor.
 use super::search::yes_or_no;
 use super::search::{
-    FIELD_NAMES, Field, Subject, minutes_range, normalize, sort_order, time_span, year_range,
+    FIELD_NAMES, Field, Subject, minutes_range, normalize, sort_order, time_since, year_range,
 };
 use super::snapshot::SortKey;
 
@@ -73,6 +73,8 @@ pub struct Rules {
     pub added_days: Option<u32>,
     /// Played within this many days.
     pub played_days: Option<u32>,
+    /// Played, but last longer ago than this many days.
+    pub unplayed_days: Option<u32>,
     /// The order, and whether it is turned round (`sort:-plays`).
     pub order: Option<(SortKey, bool)>,
     /// How many songs at most.
@@ -238,13 +240,27 @@ impl Rules {
                 };
                 true
             }
+            // (Added longer ago than a span has no control: it stays as typed.)
             Subject::Added if self.added_days.is_none() => {
-                self.added_days = time_span(&value).map(|secs| (secs / 86_400) as u32);
+                self.added_days = time_since(&value)
+                    .filter(|(over, _)| !over)
+                    .map(|(_, secs)| (secs / 86_400) as u32);
                 self.added_days.is_some()
             }
-            Subject::Played if self.played_days.is_none() => {
-                self.played_days = time_span(&value).map(|secs| (secs / 86_400) as u32);
-                self.played_days.is_some()
+            Subject::Played => {
+                let Some((over, secs)) = time_since(&value) else {
+                    return false;
+                };
+                let days = if over {
+                    &mut self.unplayed_days
+                } else {
+                    &mut self.played_days
+                };
+                if days.is_some() {
+                    return false;
+                }
+                *days = Some((secs / 86_400) as u32);
+                true
             }
             // (Of two orders or two numbers the search goes by the later one: so does
             // this, and the earlier one, which asked for nothing any more, goes.)
@@ -315,6 +331,9 @@ impl Rules {
         }
         if let Some(days) = self.played_days.filter(|days| *days > 0) {
             parts.push(format!("played:{days}d"));
+        }
+        if let Some(days) = self.unplayed_days.filter(|days| *days > 0) {
+            parts.push(format!("played:>{days}d"));
         }
         if let Some((key, turned)) = self.order
             && let Some((_, name)) = ORDERS.iter().find(|(known, _)| *known == key)
@@ -393,6 +412,7 @@ mod tests {
                 plays: Plays::AtLeast(5),
                 added_days: Some(30),
                 played_days: Some(14),
+                unplayed_days: None,
                 order: Some((SortKey::PlayCount, true)),
                 limit: Some(50),
             }
@@ -438,6 +458,17 @@ mod tests {
         assert_eq!(Rules::of("year:1994").query(), "year:1994");
         assert_eq!(Rules::of("length:>=10m").length_from, Some(10));
         assert_eq!(Rules::of("duration:4").query(), "length:4");
+        // Played long ago, beside played lately; hi-res.
+        let rules = Rules::of("played:>6m 들은:2주 형식:하이레조 added:<30d");
+        assert_eq!(rules.unplayed_days, Some(180));
+        assert_eq!(rules.played_days, Some(14));
+        assert_eq!(rules.added_days, Some(30));
+        assert_eq!(rules.format, "하이레조");
+        assert_eq!(rules.words, "");
+        assert_eq!(
+            rules.query(),
+            "format:하이레조 added:30d played:14d played:>180d"
+        );
         assert_eq!(Rules::of("  ").query(), "");
     }
 
@@ -459,6 +490,8 @@ mod tests {
             ("length:long", "length:long"),
             ("length:3h", "length:3h"),
             ("length:1m30", "length:1m30"),
+            ("added:>1y", "added:>1y"),
+            ("played:>1y played:>2y", "played:>2y"),
             ("length:12000-", "length:12000-"),
             ("limit:0", "limit:0"),
             ("limit:many", "limit:many"),
@@ -515,6 +548,9 @@ mod tests {
             "형식:무손실 길이:<3 genre:jazz",
             "format:\"wavpack\" length:4 length:5-",
             "length:0-3 duration:2m-",
+            "format:hires played:>6m",
+            "played:2w played:>1y fav:yes",
+            "added:>1y added:<30d plays:>=3",
         ] {
             let rules = Rules::of(query);
             let written = rules.query();

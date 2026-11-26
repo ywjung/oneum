@@ -171,7 +171,8 @@ pub(crate) enum Field {
     Artist,
     Album,
     Genre,
-    /// Codec or container ("flac", "mp3"); "lossless" stands for the lossless codecs.
+    /// Codec or container ("flac", "mp3"); "lossless" stands for the lossless codecs,
+    /// "hires" for the lossless files finer than a CD.
     Format,
 }
 
@@ -194,6 +195,11 @@ pub(crate) enum Filter {
     AddedSince(i64),
     /// Last played at or after this time (Unix seconds).
     PlayedSince(i64),
+    /// Added to the library before this time (Unix seconds).
+    AddedBefore(i64),
+    /// Played, and last played before this time (Unix seconds): a song never played
+    /// is not one of them (`plays:0` asks for those).
+    PlayedBefore(i64),
     /// What the file check found (see `library::check`).
     Check(CheckWanted),
     /// DR value (rounded) from the first to the second, both included.
@@ -417,6 +423,24 @@ pub(super) fn yes_or_no(value: &str) -> Option<bool> {
     }
 }
 
+/// What an `added:` or `played:` value asks for: within a span of time counted back
+/// from now (`30d`, also `<30d`), or longer ago than that (`>30d`, also `>=30d`). Says
+/// whether it is longer ago, and the span in seconds.
+pub(super) fn time_since(value: &str) -> Option<(bool, i64)> {
+    let (over, span) = if let Some(span) = value.strip_prefix(">=").or(value.strip_prefix('>')) {
+        (true, span)
+    } else {
+        (
+            false,
+            value
+                .strip_prefix("<=")
+                .or(value.strip_prefix('<'))
+                .unwrap_or(value),
+        )
+    };
+    time_span(span.trim()).map(|span| (over, span))
+}
+
 /// A span of time counted back from now: `30d`, `2w`, `6m`, `1y` (also `30일`, `2주`,
 /// `6달`, `6개월`, `1년`); a bare number is days. In seconds.
 pub(super) fn time_span(value: &str) -> Option<i64> {
@@ -499,10 +523,22 @@ impl PreparedQuery {
                         Subject::Rating => {
                             year_range(value).map(|(from, to)| Filter::Rating(from, to))
                         }
-                        Subject::Added => time_span(value)
-                            .map(|span| Filter::AddedSince(now.saturating_sub(span))),
-                        Subject::Played => time_span(value)
-                            .map(|span| Filter::PlayedSince(now.saturating_sub(span))),
+                        Subject::Added => time_since(value).map(|(over, span)| {
+                            let at = now.saturating_sub(span);
+                            if over {
+                                Filter::AddedBefore(at)
+                            } else {
+                                Filter::AddedSince(at)
+                            }
+                        }),
+                        Subject::Played => time_since(value).map(|(over, span)| {
+                            let at = now.saturating_sub(span);
+                            if over {
+                                Filter::PlayedBefore(at)
+                            } else {
+                                Filter::PlayedSince(at)
+                            }
+                        }),
                         Subject::Check => check_wanted(value).map(Filter::Check),
                         Subject::Dr => year_range(value).map(|(from, to)| Filter::Dr(from, to)),
                         Subject::Length => {
@@ -825,6 +861,20 @@ mod tests {
                 Filter::AddedSince(NOW - 180 * 86_400),
                 Filter::PlayedSince(NOW - 365 * 86_400),
             ]
+        );
+        // Longer ago than a span, and within it said the other way.
+        assert_eq!(
+            PreparedQuery::new_at("added:>1y played:>=6m played:<2w 들은:>6개월", NOW).filters,
+            [
+                Filter::AddedBefore(NOW - 365 * 86_400),
+                Filter::PlayedBefore(NOW - 180 * 86_400),
+                Filter::PlayedSince(NOW - 14 * 86_400),
+                Filter::PlayedBefore(NOW - 180 * 86_400),
+            ]
+        );
+        assert_eq!(
+            PreparedQuery::new_at("played:>soon added:<", NOW).filters,
+            [Filter::Never]
         );
         assert_eq!(time_span("7"), Some(7 * 86_400));
         assert_eq!(time_span("3weeks"), Some(21 * 86_400));

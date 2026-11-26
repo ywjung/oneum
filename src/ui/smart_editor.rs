@@ -103,12 +103,13 @@ fn codec_entries(tracks: &[std::sync::Arc<crate::model::Track>]) -> Vec<(String,
         .collect()
 }
 
-/// A `format:` value as the format row knows it: lowercase, and the Korean words
-/// for lossless and lossy as the English ones.
+/// A `format:` value as the format row knows it: lowercase, and the other words for
+/// lossless, lossy and hi-res as the ones the row writes.
 fn format_value(text: &str) -> String {
     match crate::library::normalize(text.trim()).as_str() {
         "무손실" => "lossless".into(),
         "손실" => "lossy".into(),
+        "hi-res" | "하이레조" | "고해상도" => "hires".into(),
         other => other.to_string(),
     }
 }
@@ -147,10 +148,21 @@ fn too_long(query: &str) -> bool {
 fn days_label(lang: Lang, days: u32) -> String {
     match (lang, days) {
         (Lang::Ko, 365) => "1년".into(),
+        (Lang::Ko, 180) => "6개월".into(),
         (Lang::Ko, days) => format!("{days}일"),
         (Lang::En, 365) => "1 year".into(),
+        (Lang::En, 180) => "6 months".into(),
         (Lang::En, 1) => "1 day".into(),
         (Lang::En, days) => format!("{days} days"),
+    }
+}
+
+/// What the row "last played over" says for a number of days.
+fn over_label(lang: Lang, days: u32) -> String {
+    let span = days_label(lang, days);
+    match lang {
+        Lang::Ko => format!("{span} 넘음"),
+        Lang::En => format!("{span} ago"),
     }
 }
 
@@ -413,6 +425,7 @@ impl OneumApp {
                     (s.smart_any.to_string(), String::new()),
                     (s.smart_lossless.to_string(), "lossless".to_string()),
                     (s.smart_lossy.to_string(), "lossy".to_string()),
+                    (s.smart_hires.to_string(), "hires".to_string()),
                 ];
                 options.extend(editor.codecs.iter().cloned());
                 let mut current = format_value(&rules.format);
@@ -528,6 +541,28 @@ impl OneumApp {
                     );
                     choices(ui, touch, key, shown, days, &options);
                 }
+
+                // Played, but not lately: songs to come back to.
+                heading(ui, s.smart_unplayed);
+                let mut spans = vec![30u32, 90, 180, 365];
+                if let Some(own) = rules.unplayed_days.filter(|own| !spans.contains(own)) {
+                    spans.push(own);
+                    spans.sort_unstable();
+                }
+                let mut options = vec![(s.smart_any.to_string(), None)];
+                options.extend(
+                    spans
+                        .into_iter()
+                        .map(|span| (over_label(lang, span), Some(span))),
+                );
+                choices(
+                    ui,
+                    touch,
+                    "unplayed",
+                    shown,
+                    &mut rules.unplayed_days,
+                    &options,
+                );
 
                 heading(ui, s.smart_order);
                 let mut key: Option<SortKey> = rules.order.map(|(key, _)| key);
