@@ -382,12 +382,27 @@ pub(super) fn year_range(value: &str) -> Option<(i32, i32)> {
 /// The minutes a `length:` value asks for: written like a `year:` value (`3-6`,
 /// `>=10`, `<2`, `4`), each number with or without its unit (`10m`, `10min`, `10분`).
 pub(super) fn minutes_range(value: &str) -> Option<(i32, i32)> {
-    let mut bare = value.to_string();
-    for unit in ["minutes", "minute", "mins", "min", "분", "m"] {
-        bare = bare.replace(unit, "");
+    const UNITS: [&str; 6] = ["minutes", "minute", "mins", "min", "분", "m"];
+    let mut bare = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        bare.push(c);
+        let number_ends = c.is_ascii_digit() && !rest.starts_with(|n: char| n.is_ascii_digit());
+        if let Some(unit) = UNITS
+            .iter()
+            .find(|unit| number_ends && rest.starts_with(**unit))
+        {
+            rest = &rest[unit.len()..];
+            // A unit ends its number: after it comes the end or the sign of a span, not
+            // more of a length (`1m30` is no number of minutes).
+            if rest.starts_with(char::is_alphanumeric) {
+                return None;
+            }
+        }
     }
-    // (What is left is digits and the signs of a span; anything else was no unit.)
-    if bare.chars().any(|c| c.is_alphabetic()) {
+    // (A letter that is left was no unit, or no unit right behind a number.)
+    if bare.chars().any(char::is_alphabetic) {
         return None;
     }
     year_range(&bare)
@@ -539,6 +554,18 @@ impl PreparedQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_length_is_minutes_with_a_unit_only_behind_its_number() {
+        assert_eq!(minutes_range("10"), Some((10, 10)));
+        assert_eq!(minutes_range(">=10m"), Some((10, i32::MAX)));
+        assert_eq!(minutes_range("3min-6mins"), Some((3, 6)));
+        assert_eq!(minutes_range("10분-"), Some((10, i32::MAX)));
+        assert_eq!(minutes_range("<2minutes"), Some((i32::MIN, 1)));
+        for value in ["1m30", "3m30s", "m3", "3mm", "3:30", "3h", "long", "1분30"] {
+            assert_eq!(minutes_range(value), None, "{value}");
+        }
+    }
 
     #[test]
     fn ascii_is_lowercased() {

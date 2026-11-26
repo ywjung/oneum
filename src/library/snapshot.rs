@@ -1198,6 +1198,13 @@ mod tests {
         assert_eq!(found("length:0"), Vec::<String>::new());
         assert!(found("length:long").is_empty());
         assert!(found("length:3h").is_empty());
+        // A unit only right behind its number, and nothing after it but a span's sign.
+        assert_eq!(found("length:3min-9mins"), ["nine", "three"]);
+        assert!(found("length:1m30").is_empty());
+        assert!(found("length:3m30s").is_empty());
+        assert!(found("length:m3").is_empty());
+        assert!(found("length:3mm").is_empty());
+        assert!(found("length:3:30").is_empty());
 
         // A field still being typed changes nothing; `matches` agrees with `search`.
         assert_eq!(s.search("artist:").len(), 5);

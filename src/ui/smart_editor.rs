@@ -31,6 +31,9 @@ pub(super) struct SmartEditor {
     /// The name's field takes the keyboard when the editor opens (a new playlist on a
     /// desk; on a phone the keyboard would cover half of what there is to choose).
     focus: bool,
+    /// The conditions are shown from their top in the first frame: the place they
+    /// were scrolled to is kept by their id, from the editor that was open before.
+    from_top: bool,
     /// The genres of the library with the most songs.
     genres: Vec<String>,
     /// The codecs of the library with the most songs: as shown, and as searched for.
@@ -42,9 +45,11 @@ pub(super) struct SmartEditor {
 }
 
 impl SmartEditor {
-    /// The search the editor's conditions make.
+    /// The search the editor's conditions make, whole: one that is longer than a
+    /// search can be kept is not cut (its end, where the order and the number of
+    /// songs stand, would go, or be left as a stray word) but cannot be saved.
     fn query(&self) -> String {
-        tidy_text(&self.rules.query(), MAX_SMART_QUERY_CHARS)
+        tidy_text(&self.rules.query(), usize::MAX)
     }
 
     /// What a dump of the app's state tells of the open editor.
@@ -64,6 +69,7 @@ impl SmartEditor {
             "original": self.original,
             "query": self.query(),
             "songs": self.counted.as_ref().map(|(_, songs)| *songs),
+            "too_long": too_long(&self.query()),
             "shown": shown,
         })
     }
@@ -105,6 +111,36 @@ fn format_value(text: &str) -> String {
         "손실" => "lossy".into(),
         other => other.to_string(),
     }
+}
+
+/// A field of the editor that is typed into: `hint` shows while it is empty, `name` is
+/// what a screen reader says it is.
+fn text_field(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    name: &str,
+    key: &str,
+    width: f32,
+    touch: bool,
+) -> egui::Response {
+    let mut edit = egui::TextEdit::singleline(text)
+        .hint_text(hint)
+        .desired_width(width)
+        .id(egui::Id::unique(("oneum-smart", key.to_string())));
+    if touch {
+        edit = edit
+            .font(egui::FontId::proportional(17.0))
+            .margin(egui::Margin::symmetric(10, 9));
+    }
+    let response = ui.add(edit);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, name));
+    response
+}
+
+/// Whether a search is longer than one can be kept.
+fn too_long(query: &str) -> bool {
+    query.chars().count() > MAX_SMART_QUERY_CHARS
 }
 
 /// What a row of choices says for a number of days.
@@ -175,6 +211,7 @@ impl OneumApp {
             length_to: year(rules.length_to),
             rules,
             focus: original.is_none() && !self.phone_mode,
+            from_top: true,
             genres: genres
                 .into_iter()
                 .take(GENRES_OFFERED)
@@ -278,25 +315,17 @@ impl OneumApp {
             );
             ui.add_space(8.0);
             // A field that is typed into: its rectangle is noted, and it is brought
-            // into what shows when it takes the keyboard.
+            // into what shows when it takes the keyboard. A screen reader is told
+            // `name`, which says what the field is for where the hint alone does not
+            // (two fields that both say "From").
             let field = |ui: &mut egui::Ui,
                          shown: &mut Vec<(String, egui::Rect)>,
                          text: &mut String,
                          hint: &str,
+                         name: &str,
                          key: &str,
                          width: f32| {
-                let mut edit = egui::TextEdit::singleline(text)
-                    .hint_text(hint)
-                    .desired_width(width)
-                    .id(egui::Id::unique(("oneum-smart", key.to_string())));
-                if touch {
-                    edit = edit
-                        .font(egui::FontId::proportional(17.0))
-                        .margin(egui::Margin::symmetric(10, 9));
-                }
-                let response = ui.add(edit);
-                response
-                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, hint));
+                let response = text_field(ui, text, hint, name, key, width, touch);
                 if response.gained_focus() {
                     response.scroll_to_me(Some(egui::Align::Center));
                 }
@@ -307,6 +336,7 @@ impl OneumApp {
                 ui,
                 &mut editor.shown,
                 &mut editor.name,
+                s.smart_name,
                 s.smart_name,
                 "name",
                 f32::INFINITY,
@@ -321,218 +351,228 @@ impl OneumApp {
                 ui.label(RichText::new(text).small().strong().color(dim(ui)));
                 ui.add_space(2.0);
             };
-            egui::ScrollArea::vertical()
+            let mut conditions = egui::ScrollArea::vertical()
                 .id_salt("oneum-smart-conditions")
                 .max_height(room)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    let rules = &mut editor.rules;
-                    let shown = &mut editor.shown;
-                    ui.label(RichText::new(s.smart_words).small().strong().color(dim(ui)));
-                    ui.add_space(2.0);
-                    field(
-                        ui,
-                        shown,
-                        &mut rules.words,
-                        s.smart_words_hint,
-                        "words",
-                        f32::INFINITY,
-                    );
-                    heading(ui, s.col_artist);
-                    field(
-                        ui,
-                        shown,
-                        &mut rules.artist,
-                        s.smart_text_hint,
-                        "artist",
-                        f32::INFINITY,
-                    );
-                    heading(ui, s.col_genre);
-                    field(
-                        ui,
-                        shown,
-                        &mut rules.genre,
-                        s.smart_text_hint,
-                        "genre",
-                        f32::INFINITY,
-                    );
-                    if !editor.genres.is_empty() {
-                        // The library's own genres, to be taken with a tap; the one
-                        // that stands in the field is the one that holds.
-                        ui.add_space(4.0);
-                        let options: Vec<(String, String)> = editor
-                            .genres
-                            .iter()
-                            .map(|genre| (genre.clone(), genre.clone()))
-                            .collect();
-                        let mut current = rules.genre.trim().to_string();
-                        if choices(ui, touch, "genre_pick", shown, &mut current, &options) {
-                            rules.genre = current;
-                        }
+                .auto_shrink([false, true]);
+            if std::mem::take(&mut editor.from_top) {
+                conditions = conditions.vertical_scroll_offset(0.0);
+            }
+            conditions.show(ui, |ui| {
+                let rules = &mut editor.rules;
+                let shown = &mut editor.shown;
+                ui.label(RichText::new(s.smart_words).small().strong().color(dim(ui)));
+                ui.add_space(2.0);
+                field(
+                    ui,
+                    shown,
+                    &mut rules.words,
+                    s.smart_words_hint,
+                    s.smart_words_hint,
+                    "words",
+                    f32::INFINITY,
+                );
+                heading(ui, s.col_artist);
+                field(
+                    ui,
+                    shown,
+                    &mut rules.artist,
+                    s.smart_text_hint,
+                    &format!("{}: {}", s.col_artist, s.smart_text_hint),
+                    "artist",
+                    f32::INFINITY,
+                );
+                heading(ui, s.col_genre);
+                field(
+                    ui,
+                    shown,
+                    &mut rules.genre,
+                    s.smart_text_hint,
+                    &format!("{}: {}", s.col_genre, s.smart_text_hint),
+                    "genre",
+                    f32::INFINITY,
+                );
+                if !editor.genres.is_empty() {
+                    // The library's own genres, to be taken with a tap; the one
+                    // that stands in the field is the one that holds.
+                    ui.add_space(4.0);
+                    let options: Vec<(String, String)> = editor
+                        .genres
+                        .iter()
+                        .map(|genre| (genre.clone(), genre.clone()))
+                        .collect();
+                    let mut current = rules.genre.trim().to_string();
+                    if choices(ui, touch, "genre_pick", shown, &mut current, &options) {
+                        rules.genre = current;
                     }
-                    heading(ui, s.col_format);
-                    // Lossless, lossy, and the library's own codecs; one that was
-                    // typed into the search and is none of these is offered too.
-                    let mut options = vec![
-                        (s.smart_any.to_string(), String::new()),
-                        (s.smart_lossless.to_string(), "lossless".to_string()),
-                        (s.smart_lossy.to_string(), "lossy".to_string()),
-                    ];
-                    options.extend(editor.codecs.iter().cloned());
-                    let mut current = format_value(&rules.format);
-                    if !options.iter().any(|(_, value)| *value == current) {
-                        options.push((rules.format.trim().to_string(), current.clone()));
-                    }
-                    if choices(ui, touch, "format", shown, &mut current, &options) {
-                        rules.format = current;
-                    }
+                }
+                heading(ui, s.col_format);
+                // Lossless, lossy, and the library's own codecs; one that was
+                // typed into the search and is none of these is offered too.
+                let mut options = vec![
+                    (s.smart_any.to_string(), String::new()),
+                    (s.smart_lossless.to_string(), "lossless".to_string()),
+                    (s.smart_lossy.to_string(), "lossy".to_string()),
+                ];
+                options.extend(editor.codecs.iter().cloned());
+                let mut current = format_value(&rules.format);
+                if !options.iter().any(|(_, value)| *value == current) {
+                    options.push((rules.format.trim().to_string(), current.clone()));
+                }
+                if choices(ui, touch, "format", shown, &mut current, &options) {
+                    rules.format = current;
+                }
 
-                    // Two spans typed as numbers: the years, and the length in minutes.
-                    let width = if touch { 92.0 } else { 64.0 };
-                    for (title, from, to, keys, unit) in [
-                        (
-                            s.col_year,
-                            &mut editor.year_from,
-                            &mut editor.year_to,
-                            ["year_from", "year_to"],
-                            None,
-                        ),
-                        (
-                            s.smart_length,
-                            &mut editor.length_from,
-                            &mut editor.length_to,
-                            ["length_from", "length_to"],
-                            Some(s.smart_minutes),
-                        ),
-                    ] {
-                        heading(ui, title);
-                        ui.horizontal(|ui| {
-                            for (nth, (text, hint)) in
-                                [(from, s.smart_year_from), (to, s.smart_year_to)]
-                                    .into_iter()
-                                    .enumerate()
-                            {
-                                field(ui, shown, text, hint, keys[nth], width);
-                                // (Digits, four at most: a year, or minutes.)
-                                text.retain(|c| c.is_ascii_digit());
-                                text.truncate(4);
-                                if nth == 0 {
-                                    ui.label("–");
-                                }
-                            }
-                            if let Some(unit) = unit {
-                                ui.label(RichText::new(unit).color(dim(ui)));
-                            }
-                        });
-                    }
-                    rules.year_from = editor.year_from.parse().ok();
-                    rules.year_to = editor.year_to.parse().ok();
-                    rules.length_from = editor.length_from.parse().ok();
-                    rules.length_to = editor.length_to.parse().ok();
-
-                    heading(ui, s.col_rating);
-                    let mut stars = vec![(s.smart_any.to_string(), Stars::Any)];
-                    stars.extend((1..=5u8).map(|least| {
-                        let label = if least == 5 {
-                            "★5".to_string()
-                        } else {
-                            lang.at_least(&format!("★{least}"))
-                        };
-                        (label, Stars::AtLeast(least))
-                    }));
-                    stars.push((s.rating_none.to_string(), Stars::Unrated));
-                    choices(ui, touch, "stars", shown, &mut rules.stars, &stars);
-
-                    heading(ui, s.favorites);
-                    let favorite = [
-                        (s.smart_any.to_string(), None),
-                        (s.smart_fav_yes.to_string(), Some(true)),
-                        (s.smart_fav_no.to_string(), Some(false)),
-                    ];
-                    choices(ui, touch, "favorite", shown, &mut rules.favorite, &favorite);
-
-                    heading(ui, s.smart_plays);
-                    let mut plays = vec![
-                        (s.smart_any.to_string(), Plays::Any),
-                        (s.smart_never_played.to_string(), Plays::Never),
-                    ];
-                    let mut counts = vec![1u32, 5, 10];
-                    if let Plays::AtLeast(least) = rules.plays
-                        && !counts.contains(&least)
-                    {
-                        counts.push(least);
-                        counts.sort_unstable();
-                    }
-                    plays.extend(
-                        counts
-                            .into_iter()
-                            .map(|least| (lang.plays_at_least(least), Plays::AtLeast(least))),
-                    );
-                    choices(ui, touch, "plays", shown, &mut rules.plays, &plays);
-
-                    for (title, key, days) in [
-                        (s.smart_added, "added", &mut rules.added_days),
-                        (s.smart_played, "played", &mut rules.played_days),
-                    ] {
-                        heading(ui, title);
-                        let mut spans = vec![7u32, 30, 90, 365];
-                        if let Some(own) = days.filter(|own| !spans.contains(own)) {
-                            spans.push(own);
-                            spans.sort_unstable();
-                        }
-                        let mut options = vec![(s.smart_any.to_string(), None)];
-                        options.extend(
-                            spans
+                // Two spans typed as numbers: the years, and the length in minutes.
+                let width = if touch { 92.0 } else { 64.0 };
+                for (title, from, to, keys, unit) in [
+                    (
+                        s.col_year,
+                        &mut editor.year_from,
+                        &mut editor.year_to,
+                        ["year_from", "year_to"],
+                        None,
+                    ),
+                    (
+                        s.smart_length,
+                        &mut editor.length_from,
+                        &mut editor.length_to,
+                        ["length_from", "length_to"],
+                        Some(s.smart_minutes),
+                    ),
+                ] {
+                    heading(ui, title);
+                    ui.horizontal(|ui| {
+                        for (nth, (text, hint)) in
+                            [(from, s.smart_year_from), (to, s.smart_year_to)]
                                 .into_iter()
-                                .map(|span| (days_label(lang, span), Some(span))),
-                        );
-                        choices(ui, touch, key, shown, days, &options);
-                    }
-
-                    heading(ui, s.smart_order);
-                    let mut key: Option<SortKey> = rules.order.map(|(key, _)| key);
-                    let mut options = vec![(s.smart_order_default.to_string(), None)];
-                    options.extend(ORDERS.iter().map(|(order, _)| {
-                        let label = match order {
-                            SortKey::Title => s.col_title,
-                            SortKey::Artist => s.col_artist,
-                            SortKey::Album => s.col_album,
-                            SortKey::Year => s.col_year,
-                            SortKey::Duration => s.col_duration,
-                            SortKey::PlayCount => s.col_plays,
-                            SortKey::DateAdded => s.col_added,
-                            SortKey::LastPlayed => s.col_last_played,
-                            SortKey::Rating => s.col_rating,
-                            _ => s.col_format,
-                        };
-                        (label.to_string(), Some(*order))
-                    }));
-                    if choices(ui, touch, "order", shown, &mut key, &options) {
-                        rules.order = key.map(|key| (key, false));
-                    }
-                    if let Some((_, turned)) = rules.order.as_mut() {
-                        ui.add_space(4.0);
-                        // (A button like the choices above it: as easy to hit.)
-                        let button = egui::Button::selectable(*turned, s.smart_reversed)
-                            .min_size(egui::vec2(0.0, if touch { 36.0 } else { 24.0 }));
-                        let response = ui.add(button);
-                        shown.push(("reversed".into(), response.rect));
-                        if response.clicked() {
-                            *turned = !*turned;
+                                .enumerate()
+                        {
+                            let name = match unit {
+                                Some(unit) => format!("{title}: {hint} ({unit})"),
+                                None => format!("{title}: {hint}"),
+                            };
+                            field(ui, shown, text, hint, &name, keys[nth], width);
+                            // (Digits, four at most: a year, or minutes.)
+                            text.retain(|c| c.is_ascii_digit());
+                            text.truncate(4);
+                            if nth == 0 {
+                                ui.label("–");
+                            }
                         }
-                    }
+                        if let Some(unit) = unit {
+                            ui.label(RichText::new(unit).color(dim(ui)));
+                        }
+                    });
+                }
+                rules.year_from = editor.year_from.parse().ok();
+                rules.year_to = editor.year_to.parse().ok();
+                rules.length_from = editor.length_from.parse().ok();
+                rules.length_to = editor.length_to.parse().ok();
 
-                    heading(ui, s.smart_limit);
-                    let mut most = vec![25usize, 50, 100, 200];
-                    if let Some(own) = rules.limit.filter(|own| !most.contains(own)) {
-                        most.push(own);
-                        most.sort_unstable();
+                heading(ui, s.col_rating);
+                let mut stars = vec![(s.smart_any.to_string(), Stars::Any)];
+                stars.extend((1..=5u8).map(|least| {
+                    let label = if least == 5 {
+                        "★5".to_string()
+                    } else {
+                        lang.at_least(&format!("★{least}"))
+                    };
+                    (label, Stars::AtLeast(least))
+                }));
+                stars.push((s.rating_none.to_string(), Stars::Unrated));
+                choices(ui, touch, "stars", shown, &mut rules.stars, &stars);
+
+                heading(ui, s.favorites);
+                let favorite = [
+                    (s.smart_any.to_string(), None),
+                    (s.smart_fav_yes.to_string(), Some(true)),
+                    (s.smart_fav_no.to_string(), Some(false)),
+                ];
+                choices(ui, touch, "favorite", shown, &mut rules.favorite, &favorite);
+
+                heading(ui, s.smart_plays);
+                let mut plays = vec![
+                    (s.smart_any.to_string(), Plays::Any),
+                    (s.smart_never_played.to_string(), Plays::Never),
+                ];
+                let mut counts = vec![1u32, 5, 10];
+                if let Plays::AtLeast(least) = rules.plays
+                    && !counts.contains(&least)
+                {
+                    counts.push(least);
+                    counts.sort_unstable();
+                }
+                plays.extend(
+                    counts
+                        .into_iter()
+                        .map(|least| (lang.plays_at_least(least), Plays::AtLeast(least))),
+                );
+                choices(ui, touch, "plays", shown, &mut rules.plays, &plays);
+
+                for (title, key, days) in [
+                    (s.smart_added, "added", &mut rules.added_days),
+                    (s.smart_played, "played", &mut rules.played_days),
+                ] {
+                    heading(ui, title);
+                    let mut spans = vec![7u32, 30, 90, 365];
+                    if let Some(own) = days.filter(|own| !spans.contains(own)) {
+                        spans.push(own);
+                        spans.sort_unstable();
                     }
                     let mut options = vec![(s.smart_any.to_string(), None)];
-                    options.extend(most.into_iter().map(|n| (lang.song_count(n), Some(n))));
-                    choices(ui, touch, "limit", shown, &mut rules.limit, &options);
+                    options.extend(
+                        spans
+                            .into_iter()
+                            .map(|span| (days_label(lang, span), Some(span))),
+                    );
+                    choices(ui, touch, key, shown, days, &options);
+                }
+
+                heading(ui, s.smart_order);
+                let mut key: Option<SortKey> = rules.order.map(|(key, _)| key);
+                let mut options = vec![(s.smart_order_default.to_string(), None)];
+                options.extend(ORDERS.iter().map(|(order, _)| {
+                    let label = match order {
+                        SortKey::Title => s.col_title,
+                        SortKey::Artist => s.col_artist,
+                        SortKey::Album => s.col_album,
+                        SortKey::Year => s.col_year,
+                        SortKey::Duration => s.col_duration,
+                        SortKey::PlayCount => s.col_plays,
+                        SortKey::DateAdded => s.col_added,
+                        SortKey::LastPlayed => s.col_last_played,
+                        SortKey::Rating => s.col_rating,
+                        _ => s.col_format,
+                    };
+                    (label.to_string(), Some(*order))
+                }));
+                if choices(ui, touch, "order", shown, &mut key, &options) {
+                    rules.order = key.map(|key| (key, false));
+                }
+                if let Some((_, turned)) = rules.order.as_mut() {
                     ui.add_space(4.0);
-                });
+                    // (A button like the choices above it: as easy to hit.)
+                    let button = egui::Button::selectable(*turned, s.smart_reversed)
+                        .min_size(egui::vec2(0.0, if touch { 36.0 } else { 24.0 }));
+                    let response = ui.add(button);
+                    shown.push(("reversed".into(), response.rect));
+                    if response.clicked() {
+                        *turned = !*turned;
+                    }
+                }
+
+                heading(ui, s.smart_limit);
+                let mut most = vec![25usize, 50, 100, 200];
+                if let Some(own) = rules.limit.filter(|own| !most.contains(own)) {
+                    most.push(own);
+                    most.sort_unstable();
+                }
+                let mut options = vec![(s.smart_any.to_string(), None)];
+                options.extend(most.into_iter().map(|n| (lang.song_count(n), Some(n))));
+                choices(ui, touch, "limit", shown, &mut rules.limit, &options);
+                ui.add_space(4.0);
+            });
 
             // The search these make, as it is kept (and as it can be typed into the
             // search field), and how many songs it finds now.
@@ -555,7 +595,19 @@ impl OneumApp {
                 let songs = editor.counted.as_ref().map_or(0, |(_, songs)| *songs);
                 ui.label(RichText::new(lang.song_count(songs)).small().color(dim(ui)));
             }
-            let can_save = !editor.name.trim().is_empty() && !query.is_empty();
+            let too_long = too_long(&query);
+            if too_long {
+                let length = query.chars().count();
+                ui.label(
+                    RichText::new(format!(
+                        "{} ({length} / {MAX_SMART_QUERY_CHARS})",
+                        s.smart_too_long
+                    ))
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+                );
+            }
+            let can_save = !editor.name.trim().is_empty() && !query.is_empty() && !too_long;
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let dark = ui.visuals().dark_mode;
@@ -593,5 +645,56 @@ impl OneumApp {
             return;
         }
         self.smart_editor = Some(editor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A search is too long one character past what can be kept, and the editor says
+    /// how long that is in both languages.
+    #[test]
+    fn a_search_too_long_to_keep_is_told() {
+        assert!(!too_long(&"가".repeat(MAX_SMART_QUERY_CHARS)));
+        assert!(too_long(&"가".repeat(MAX_SMART_QUERY_CHARS + 1)));
+        for lang in [Lang::Ko, Lang::En] {
+            let said = lang.strings().smart_too_long;
+            assert!(said.contains(&MAX_SMART_QUERY_CHARS.to_string()), "{said}");
+        }
+    }
+
+    /// What a screen reader is told of a field: its name, not the hint that both fields
+    /// of a span share.
+    #[test]
+    fn a_field_tells_a_screen_reader_its_name() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut text = String::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            text_field(
+                ui,
+                &mut text,
+                "From",
+                "Length: From (min)",
+                "t",
+                64.0,
+                false,
+            );
+        });
+        // (The font texture is not drawn anywhere here.)
+        output.textures_delta.clear();
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("an accessibility tree");
+        let labels: Vec<String> = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::TextInput)
+            .map(|(_, node)| node.label().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(labels, ["Length: From (min)"]);
     }
 }

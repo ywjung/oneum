@@ -602,6 +602,17 @@ check se1f.json 'd["smart_editor"]["query"] == "genre:Rock format:lossless" and 
 check se1l.json 'd["smart_editor"]["query"] == "genre:Rock format:lossy length:<=0" and d["smart_editor"]["songs"] == 6' "…lossy ones, and a length typed in minutes"
 check se2.json 'd["smart_editor"]["query"] == "genre:Rock format:lossy length:<=0 sort:title limit:25"' "…an order and a number of songs join it"
 check se3.json 'd["smart_editor"] is None and d["nav"] == "Smart(\"Rock by title\")" and d["rows"] == 6 and d["smart_playlists"][-1] == ["Rock by title", "genre:Rock format:lossy length:<=0 sort:title limit:25"] and len(d["smart_playlists"]) == 3' "Save keeps it as a smart playlist and opens it with its songs"
+# A search longer than can be kept is not cut but refused, and the editor says so.
+LONG=$(python3 -c 'print("x" * 301)')
+ui 'menu new_smart_playlist' 'wait 600' 'text Too long' 'wait 200'
+press words
+ui "text $LONG" 'wait 300'
+press save
+ui 'wait 300' 'dump se4.json'
+press cancel
+ui 'wait 300' 'dump se5.json'
+check se4.json 'd["smart_editor"] is not None and d["smart_editor"]["too_long"] and len(d["smart_editor"]["query"]) == 301 and len(d["smart_playlists"]) == 3' "a search too long to keep stays whole in the editor and is not saved"
+check se5.json 'd["smart_editor"] is None and len(d["smart_playlists"]) == 3' "…and Cancel leaves the list as it was"
 
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'

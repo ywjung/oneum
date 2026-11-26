@@ -114,6 +114,7 @@ strings! {
     smart_length: "길이", "Length";
     smart_minutes: "분", "min";
     smart_empty: "조건을 하나 이상 고르면 저장할 수 있습니다.", "Choose at least one condition to save.";
+    smart_too_long: "조건이 너무 길어 저장할 수 없습니다. 검색어로 적었을 때 300자까지입니다.", "The conditions are too long to save: written as a search, they may take up to 300 characters.";
     smart_hint: "저장한 검색입니다. 조건에 맞는 곡이 그때그때 모입니다.", "A saved search: it holds whatever matches at the moment.";
     never: "—", "—";
     col_track_no: "#", "#";

@@ -458,6 +458,7 @@ mod tests {
             ("year:12000-", "year:12000-"),
             ("length:long", "length:long"),
             ("length:3h", "length:3h"),
+            ("length:1m30", "length:1m30"),
             ("length:12000-", "length:12000-"),
             ("limit:0", "limit:0"),
             ("limit:many", "limit:many"),
