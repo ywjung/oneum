@@ -570,27 +570,33 @@ mod tests {
         let timing = Timing {
             coalesce: Duration::from_millis(50),
             online_check: Duration::from_millis(50),
-            // Long enough for the rescan below to find its file first, also when the
-            // computer is busy with the other tests (with three seconds it was not,
-            // once there were more of them: the second attempt came before the file
-            // was found, and the test could no longer tell who found it).
-            watcher_retry: Duration::from_millis(8000),
+            // (How soon the rescan below finds its file against how soon the watcher
+            // is tried again is not left to the clock: on a computer busy with the
+            // other tests the second attempt came first, with three seconds and with
+            // eight. A watcher can be made only once the test allows it.)
+            watcher_retry: Duration::from_millis(300),
             unwatched_rescan: Duration::from_millis(200),
             remote_rescan: Duration::from_millis(200),
             watch_settle: Duration::from_millis(200),
             file_events: true,
         };
+        // How often a watcher was asked for, how often one was made, and whether one
+        // may be made yet (until then the system refuses, as it might).
         let attempts = Arc::new(AtomicUsize::new(0));
+        let made = Arc::new(AtomicUsize::new(0));
+        let allowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let thread = {
-            let (inner, attempts, tx) = (library.inner.clone(), attempts.clone(), tx.clone());
+            let (inner, tx) = (library.inner.clone(), tx.clone());
+            let (attempts, made, allowed) = (attempts.clone(), made.clone(), allowed.clone());
             std::thread::spawn(move || {
                 run(&inner, &rx, &tx, timing, |tx| {
-                    if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
-                        Err(notify::Error::generic("refused, as a system might"))
-                    } else {
-                        new_watcher(tx)
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    if !allowed.load(Ordering::Relaxed) {
+                        return Err(notify::Error::generic("refused, as a system might"));
                     }
+                    made.fetch_add(1, Ordering::Relaxed);
+                    new_watcher(tx)
                 })
             })
         };
@@ -609,21 +615,39 @@ mod tests {
             }
         };
 
-        // No watcher yet: a file added now is found by a rescan.
+        // No watcher, however often one is asked for: a file added now is found by
+        // a rescan.
         std::thread::sleep(Duration::from_millis(100));
         crate::library::tests::write_wav(&music.join("one.wav"));
         wait_for("the rescan to find the new file", &|| has("one.wav"));
-        assert_eq!(attempts.load(Ordering::Relaxed), 1, "not tried again yet");
+        assert!(
+            attempts.load(Ordering::Relaxed) >= 1,
+            "a watcher was asked for"
+        );
+        assert_eq!(made.load(Ordering::Relaxed), 0, "and none was made");
         // The watcher is tried again, made, and then not tried any more.
-        wait_for("a second attempt", &|| {
-            attempts.load(Ordering::Relaxed) >= 2
+        let refused = attempts.load(Ordering::Relaxed);
+        allowed.store(true, Ordering::Relaxed);
+        wait_for("an attempt that makes the watcher", &|| {
+            made.load(Ordering::Relaxed) == 1
         });
+        let tried = attempts.load(Ordering::Relaxed);
+        assert!(
+            tried > refused,
+            "it was tried again: {tried} after {refused}"
+        );
         crate::library::tests::write_wav(&music.join("two.wav"));
         wait_for("the watched folder to report the new file", &|| {
             has("two.wav")
         });
+        // (Several times the wait between attempts.)
         std::thread::sleep(Duration::from_millis(1600));
-        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            tried,
+            "not tried any more"
+        );
+        assert_eq!(made.load(Ordering::Relaxed), 1);
 
         let _ = tx.send(WatchMsg::Stop);
         thread.join().unwrap();
