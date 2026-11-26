@@ -8,7 +8,9 @@
 //! cannot show) stays as text in [`Rules::words`], so that nothing a person typed is
 //! lost by opening the editor.
 use super::search::yes_or_no;
-use super::search::{FIELD_NAMES, Field, Subject, normalize, sort_order, time_span, year_range};
+use super::search::{
+    FIELD_NAMES, Field, Subject, minutes_range, normalize, sort_order, time_span, year_range,
+};
 use super::snapshot::SortKey;
 
 /// The stars a search asks for.
@@ -55,9 +57,14 @@ pub struct Rules {
     pub words: String,
     pub artist: String,
     pub genre: String,
+    /// A codec (`flac`), or `lossless` or `lossy`, as a `format:` value.
+    pub format: String,
     /// The first and the last year, either or both.
     pub year_from: Option<u16>,
     pub year_to: Option<u16>,
+    /// The shortest and the longest length, in whole minutes, either or both.
+    pub length_from: Option<u16>,
+    pub length_to: Option<u16>,
     pub stars: Stars,
     /// In the favourites (`true`), or not in them.
     pub favorite: Option<bool>,
@@ -114,9 +121,37 @@ fn quoted(value: &str) -> String {
     }
 }
 
-/// A year the editor can show.
+/// A year, or a number of minutes, the editor can show (in a field of four digits).
 fn shown_year(year: i32) -> Option<u16> {
     u16::try_from(year).ok().filter(|year| *year <= 9999)
+}
+
+/// The first and the last of a span (`1990-1999`, `>=10`) as the editor shows them,
+/// either or both; `None` where it cannot show them.
+fn shown_span(span: Option<(i32, i32)>) -> Option<(Option<u16>, Option<u16>)> {
+    let (from, to) = span?;
+    let from = (from != i32::MIN).then_some(from);
+    let to = (to != i32::MAX).then_some(to);
+    let shown = |end: Option<i32>| match end {
+        Some(end) => shown_year(end).map(Some),
+        None => Some(None),
+    };
+    match (shown(from)?, shown(to)?) {
+        (None, None) => None,
+        both => Some(both),
+    }
+}
+
+/// A span as it goes into a search, by the name of its field (`year:1990-1999`).
+fn span_part(name: &str, from: Option<u16>, to: Option<u16>) -> Option<String> {
+    Some(match (from, to) {
+        (Some(from), Some(to)) if from == to => format!("{name}:{from}"),
+        // (Typed the wrong way round: the span is meant all the same.)
+        (Some(from), Some(to)) => format!("{name}:{}-{}", from.min(to), from.max(to)),
+        (Some(from), None) => format!("{name}:>={from}"),
+        (None, Some(to)) => format!("{name}:<={to}"),
+        (None, None) => return None,
+    })
 }
 
 impl Rules {
@@ -164,23 +199,23 @@ impl Rules {
                 self.genre = text.to_string();
                 true
             }
+            Subject::Text(Field::Format) if self.format.is_empty() => {
+                self.format = text.to_string();
+                true
+            }
             Subject::Year if self.year_from.is_none() && self.year_to.is_none() => {
-                let Some((from, to)) = year_range(&value) else {
+                let Some(span) = shown_span(year_range(&value)) else {
                     return false;
                 };
-                let from = (from != i32::MIN).then_some(from);
-                let to = (to != i32::MAX).then_some(to);
-                let shown = |year: Option<i32>| match year {
-                    Some(year) => shown_year(year).map(Some),
-                    None => Some(None),
+                (self.year_from, self.year_to) = span;
+                true
+            }
+            Subject::Length if self.length_from.is_none() && self.length_to.is_none() => {
+                let Some(span) = shown_span(minutes_range(&value)) else {
+                    return false;
                 };
-                match (shown(from), shown(to)) {
-                    (Some(from), Some(to)) if from.is_some() || to.is_some() => {
-                        (self.year_from, self.year_to) = (from, to);
-                        true
-                    }
-                    _ => false,
-                }
+                (self.length_from, self.length_to) = span;
+                true
             }
             Subject::Rating if self.stars == Stars::Any => {
                 self.stars = match year_range(&value) {
@@ -248,22 +283,18 @@ impl Rules {
                 })
             });
         let mut parts = plain;
-        for (name, value) in [("artist", &self.artist), ("genre", &self.genre)] {
+        for (name, value) in [
+            ("artist", &self.artist),
+            ("genre", &self.genre),
+            ("format", &self.format),
+        ] {
             let value = quoted(value);
             if !value.is_empty() {
                 parts.push(format!("{name}:{value}"));
             }
         }
-        match (self.year_from, self.year_to) {
-            (Some(from), Some(to)) if from == to => parts.push(format!("year:{from}")),
-            // (Typed the wrong way round: the span is meant all the same.)
-            (Some(from), Some(to)) => {
-                parts.push(format!("year:{}-{}", from.min(to), from.max(to)));
-            }
-            (Some(from), None) => parts.push(format!("year:>={from}")),
-            (None, Some(to)) => parts.push(format!("year:<={to}")),
-            (None, None) => {}
-        }
+        parts.extend(span_part("year", self.year_from, self.year_to));
+        parts.extend(span_part("length", self.length_from, self.length_to));
         match self.stars {
             Stars::Any => {}
             Stars::AtLeast(least) => parts.push(format!("rating:>={}", least.clamp(1, 5))),
@@ -344,7 +375,7 @@ mod tests {
     fn a_search_is_read_into_its_conditions() {
         let rules = Rules::of(
             "가을 genre:\"hip hop\" artist:아이유 year:1990-1999 rating:>=4 fav:yes \
-             plays:>=5 added:30d played:2w sort:-plays limit:50",
+             plays:>=5 added:30d played:2w sort:-plays limit:50 format:flac length:3-6",
         );
         assert_eq!(
             rules,
@@ -352,8 +383,11 @@ mod tests {
                 words: "가을".into(),
                 artist: "아이유".into(),
                 genre: "hip hop".into(),
+                format: "flac".into(),
                 year_from: Some(1990),
                 year_to: Some(1999),
+                length_from: Some(3),
+                length_to: Some(6),
                 stars: Stars::AtLeast(4),
                 favorite: Some(true),
                 plays: Plays::AtLeast(5),
@@ -365,8 +399,8 @@ mod tests {
         );
         assert_eq!(
             rules.query(),
-            "가을 artist:아이유 genre:\"hip hop\" year:1990-1999 rating:>=4 fav:yes \
-             plays:>=5 added:30d played:14d sort:-plays limit:50"
+            "가을 artist:아이유 genre:\"hip hop\" format:flac year:1990-1999 length:3-6 \
+             rating:>=4 fav:yes plays:>=5 added:30d played:14d sort:-plays limit:50"
         );
         // Plain words stay in front; other conditions follow those of the controls.
         assert_eq!(
@@ -375,13 +409,16 @@ mod tests {
         );
         // The names in Korean, and other ways to write the same values.
         let rules = Rules::of(
-            "장르:재즈 별점:5 즐겨찾기:아니오 재생:0 연도:>1999 정렬:별점 개수:25 추가:1년",
+            "장르:재즈 별점:5 즐겨찾기:아니오 재생:0 연도:>1999 정렬:별점 개수:25 추가:1년 \
+             형식:무손실 길이:<3",
         );
         assert_eq!(
             rules,
             Rules {
                 genre: "재즈".into(),
+                format: "무손실".into(),
                 year_from: Some(2000),
+                length_to: Some(2),
                 stars: Stars::AtLeast(5),
                 favorite: Some(false),
                 plays: Plays::Never,
@@ -393,11 +430,14 @@ mod tests {
         );
         assert_eq!(
             rules.query(),
-            "genre:재즈 year:>=2000 rating:>=5 fav:no plays:0 added:365d sort:rating limit:25"
+            "genre:재즈 format:무손실 year:>=2000 length:<=2 rating:>=5 fav:no plays:0 \
+             added:365d sort:rating limit:25"
         );
         assert_eq!(Rules::of("rating:0").stars, Stars::Unrated);
         assert_eq!(Rules::of("year:<=1980").year_to, Some(1980));
         assert_eq!(Rules::of("year:1994").query(), "year:1994");
+        assert_eq!(Rules::of("length:>=10m").length_from, Some(10));
+        assert_eq!(Rules::of("duration:4").query(), "length:4");
         assert_eq!(Rules::of("  ").query(), "");
     }
 
@@ -408,14 +448,17 @@ mod tests {
         for (query, words) in [
             // Plain words, quoted ones, other fields.
             (
-                "\"Let It Be\" title:love album:\"Abbey Road\" format:lossless",
-                "\"Let It Be\" title:love album:\"Abbey Road\" format:lossless",
+                "\"Let It Be\" title:love album:\"Abbey Road\"",
+                "\"Let It Be\" title:love album:\"Abbey Road\"",
             ),
             // Values the controls cannot show.
             ("rating:2-3", "rating:2-3"),
             ("plays:3-7", "plays:3-7"),
             ("year:abc", "year:abc"),
             ("year:12000-", "year:12000-"),
+            ("length:long", "length:long"),
+            ("length:3h", "length:3h"),
+            ("length:12000-", "length:12000-"),
             ("limit:0", "limit:0"),
             ("limit:many", "limit:many"),
             ("sort:colour", "sort:colour"),
@@ -428,6 +471,8 @@ mod tests {
             // A second condition on a field that has one.
             ("genre:jazz genre:blues", "genre:blues"),
             ("year:1990..1995 year:2000", "year:2000"),
+            ("format:flac format:mp3", "format:mp3"),
+            ("length:>=10 length:<2", "length:<2"),
             // Of two orders or numbers the later one counts; one that is none stays.
             ("limit:10 limit:20", ""),
             ("sort:plays sort:-title", ""),
@@ -465,6 +510,10 @@ mod tests {
             "ARTIST:IU Genre:Ballad SORT:Rating",
             "rating:4- plays:2- limit:100 sort:length",
             "artist:\"a b\" \"c d\" e",
+            "format:lossless length:>=10",
+            "형식:무손실 길이:<3 genre:jazz",
+            "format:\"wavpack\" length:4 length:5-",
+            "length:0-3 duration:2m-",
         ] {
             let rules = Rules::of(query);
             let written = rules.query();

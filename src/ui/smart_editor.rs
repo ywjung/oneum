@@ -13,6 +13,8 @@ use eframe::egui::{self, RichText};
 
 /// How many of the library's genres are offered to be chosen with a tap.
 const GENRES_OFFERED: usize = 8;
+/// How many of the library's codecs are offered (after lossless and lossy).
+const CODECS_OFFERED: usize = 6;
 
 /// The editor while it is open.
 pub(super) struct SmartEditor {
@@ -23,11 +25,16 @@ pub(super) struct SmartEditor {
     /// The years as they stand in their fields.
     year_from: String,
     year_to: String,
+    /// The minutes of the length as they stand in their fields.
+    length_from: String,
+    length_to: String,
     /// The name's field takes the keyboard when the editor opens (a new playlist on a
     /// desk; on a phone the keyboard would cover half of what there is to choose).
     focus: bool,
     /// The genres of the library with the most songs.
     genres: Vec<String>,
+    /// The codecs of the library with the most songs: as shown, and as searched for.
+    codecs: Vec<(String, String)>,
     /// How many songs a search finds: the search and the count.
     counted: Option<(String, usize)>,
     /// Where what can be pressed was drawn last, by a name (for verification).
@@ -59,6 +66,44 @@ impl SmartEditor {
             "songs": self.counted.as_ref().map(|(_, songs)| *songs),
             "shown": shown,
         })
+    }
+}
+
+/// The codecs of a library with the most songs first (of as many, by name): as they
+/// are shown, and as a `format:` value. The kinds of DSD are one.
+fn codec_entries(tracks: &[std::sync::Arc<crate::model::Track>]) -> Vec<(String, String)> {
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for track in tracks {
+        let codec = if track.codec.starts_with("DSD") {
+            "DSD"
+        } else {
+            track.codec.trim()
+        };
+        if codec.is_empty() {
+            continue;
+        }
+        match found.iter_mut().find(|(known, _)| known == codec) {
+            Some((_, songs)) => *songs += 1,
+            None => found.push((codec.to_string(), 1)),
+        }
+    }
+    found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    found
+        .into_iter()
+        .map(|(codec, _)| {
+            let value = crate::library::normalize(&codec);
+            (codec, value)
+        })
+        .collect()
+}
+
+/// A `format:` value as the format row knows it: lowercase, and the Korean words
+/// for lossless and lossy as the English ones.
+fn format_value(text: &str) -> String {
+    match crate::library::normalize(text.trim()).as_str() {
+        "무손실" => "lossless".into(),
+        "손실" => "lossy".into(),
+        other => other.to_string(),
     }
 }
 
@@ -113,6 +158,8 @@ impl OneumApp {
         });
         let rules = Rules::of(existing.as_ref().map_or("", |smart| smart.query.as_str()));
         let year = |year: Option<u16>| year.map(|year| year.to_string()).unwrap_or_default();
+        let mut codecs = codec_entries(&self.snapshot.tracks);
+        codecs.truncate(CODECS_OFFERED);
         let mut genres = super::lists::genre_entries(&self.snapshot.tracks);
         // (Stable: those with as many songs stay in the order of their names.)
         genres.sort_by_key(|genre| std::cmp::Reverse(genre.songs));
@@ -124,6 +171,8 @@ impl OneumApp {
             original: existing.map(|smart| smart.name),
             year_from: year(rules.year_from),
             year_to: year(rules.year_to),
+            length_from: year(rules.length_from),
+            length_to: year(rules.length_to),
             rules,
             focus: original.is_none() && !self.phone_mode,
             genres: genres
@@ -131,6 +180,7 @@ impl OneumApp {
                 .take(GENRES_OFFERED)
                 .map(|genre| genre.name)
                 .collect(),
+            codecs,
             counted: None,
             shown: Vec::new(),
         });
@@ -320,24 +370,65 @@ impl OneumApp {
                             rules.genre = current;
                         }
                     }
-                    heading(ui, s.col_year);
-                    ui.horizontal(|ui| {
-                        let width = if touch { 92.0 } else { 64.0 };
-                        for (text, hint, key) in [
-                            (&mut editor.year_from, s.smart_year_from, "year_from"),
-                            (&mut editor.year_to, s.smart_year_to, "year_to"),
-                        ] {
-                            field(ui, shown, text, hint, key, width);
-                            // (Digits, four at most: a year.)
-                            text.retain(|c| c.is_ascii_digit());
-                            text.truncate(4);
-                            if key == "year_from" {
-                                ui.label("–");
+                    heading(ui, s.col_format);
+                    // Lossless, lossy, and the library's own codecs; one that was
+                    // typed into the search and is none of these is offered too.
+                    let mut options = vec![
+                        (s.smart_any.to_string(), String::new()),
+                        (s.smart_lossless.to_string(), "lossless".to_string()),
+                        (s.smart_lossy.to_string(), "lossy".to_string()),
+                    ];
+                    options.extend(editor.codecs.iter().cloned());
+                    let mut current = format_value(&rules.format);
+                    if !options.iter().any(|(_, value)| *value == current) {
+                        options.push((rules.format.trim().to_string(), current.clone()));
+                    }
+                    if choices(ui, touch, "format", shown, &mut current, &options) {
+                        rules.format = current;
+                    }
+
+                    // Two spans typed as numbers: the years, and the length in minutes.
+                    let width = if touch { 92.0 } else { 64.0 };
+                    for (title, from, to, keys, unit) in [
+                        (
+                            s.col_year,
+                            &mut editor.year_from,
+                            &mut editor.year_to,
+                            ["year_from", "year_to"],
+                            None,
+                        ),
+                        (
+                            s.smart_length,
+                            &mut editor.length_from,
+                            &mut editor.length_to,
+                            ["length_from", "length_to"],
+                            Some(s.smart_minutes),
+                        ),
+                    ] {
+                        heading(ui, title);
+                        ui.horizontal(|ui| {
+                            for (nth, (text, hint)) in
+                                [(from, s.smart_year_from), (to, s.smart_year_to)]
+                                    .into_iter()
+                                    .enumerate()
+                            {
+                                field(ui, shown, text, hint, keys[nth], width);
+                                // (Digits, four at most: a year, or minutes.)
+                                text.retain(|c| c.is_ascii_digit());
+                                text.truncate(4);
+                                if nth == 0 {
+                                    ui.label("–");
+                                }
                             }
-                        }
-                    });
+                            if let Some(unit) = unit {
+                                ui.label(RichText::new(unit).color(dim(ui)));
+                            }
+                        });
+                    }
                     rules.year_from = editor.year_from.parse().ok();
                     rules.year_to = editor.year_to.parse().ok();
+                    rules.length_from = editor.length_from.parse().ok();
+                    rules.length_to = editor.length_to.parse().ok();
 
                     heading(ui, s.col_rating);
                     let mut stars = vec![(s.smart_any.to_string(), Stars::Any)];

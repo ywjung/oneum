@@ -198,6 +198,9 @@ pub(crate) enum Filter {
     Check(CheckWanted),
     /// DR value (rounded) from the first to the second, both included.
     Dr(i32, i32),
+    /// Length in whole minutes (3:59 is 3) from the first to the second, both
+    /// included. A song whose length is not known has none.
+    Length(i32, i32),
     /// A value that cannot be understood (`year:abc`): nothing matches, which says more
     /// than silently showing everything.
     Never,
@@ -215,6 +218,7 @@ pub(super) enum Subject {
     Played,
     Check,
     Dr,
+    Length,
     /// Not a condition: the order the songs that match are given in (`sort:plays`).
     Sort,
     /// Not a condition: how many of them, at most (`limit:50`).
@@ -244,7 +248,7 @@ fn check_wanted(value: &str) -> Option<CheckWanted> {
 }
 
 /// The names a field can be asked for by, in normalised form.
-pub(super) const FIELD_NAMES: [(&str, Subject); 39] = [
+pub(super) const FIELD_NAMES: [(&str, Subject); 42] = [
     ("title", Subject::Text(Field::Title)),
     ("제목", Subject::Text(Field::Title)),
     ("artist", Subject::Text(Field::Artist)),
@@ -278,6 +282,9 @@ pub(super) const FIELD_NAMES: [(&str, Subject); 39] = [
     ("check", Subject::Check),
     ("검사", Subject::Check),
     ("dr", Subject::Dr),
+    ("length", Subject::Length),
+    ("duration", Subject::Length),
+    ("길이", Subject::Length),
     ("sort", Subject::Sort),
     ("order", Subject::Sort),
     ("정렬", Subject::Sort),
@@ -370,6 +377,20 @@ pub(super) fn year_range(value: &str) -> Option<(i32, i32)> {
         }
     }
     year(value).map(|y| (y, y))
+}
+
+/// The minutes a `length:` value asks for: written like a `year:` value (`3-6`,
+/// `>=10`, `<2`, `4`), each number with or without its unit (`10m`, `10min`, `10분`).
+pub(super) fn minutes_range(value: &str) -> Option<(i32, i32)> {
+    let mut bare = value.to_string();
+    for unit in ["minutes", "minute", "mins", "min", "분", "m"] {
+        bare = bare.replace(unit, "");
+    }
+    // (What is left is digits and the signs of a span; anything else was no unit.)
+    if bare.chars().any(|c| c.is_alphabetic()) {
+        return None;
+    }
+    year_range(&bare)
 }
 
 /// A yes or a no, in the ways people write it.
@@ -469,6 +490,9 @@ impl PreparedQuery {
                             .map(|span| Filter::PlayedSince(now.saturating_sub(span))),
                         Subject::Check => check_wanted(value).map(Filter::Check),
                         Subject::Dr => year_range(value).map(|(from, to)| Filter::Dr(from, to)),
+                        Subject::Length => {
+                            minutes_range(value).map(|(from, to)| Filter::Length(from, to))
+                        }
                         // An order and a number are no conditions; one that cannot
                         // be understood finds nothing, like any other.
                         Subject::Sort => match sort_order(value) {

@@ -583,7 +583,13 @@ check se0.json 'd["smart_editor"] is not None and d["smart_editor"]["query"] == 
 # the most songs; the order and the number of songs are further down.)
 ui 'text Rock by title' 'wait 200'
 press genre_pick:0
-ui 'dump se1.json' 'scroll 590 400 -600' 'wait 400' 'scroll 590 400 -600' 'wait 400'
+ui 'dump se1.json'
+# (The format row: lossless finds none of the Rock songs, which are MP3s; lossy all.
+# The length is typed in whole minutes: the test songs are all under one.)
+press format:1
+ui 'dump se1f.json'
+press format:2 length_to
+ui 'text 0' 'wait 250' 'dump se1l.json' 'scroll 590 400 -600' 'wait 400' 'scroll 590 400 -600' 'wait 400'
 press order:1
 # (An order brings the button that turns it round: what is below moves down.)
 ui 'scroll 590 400 -600' 'wait 400'
@@ -592,8 +598,10 @@ ui 'dump se2.json'
 press save
 ui 'wait 500' 'dump se3.json'
 check se1.json 'd["smart_editor"]["query"] == "genre:Rock" and d["smart_editor"]["songs"] == 6 and d["smart_editor"]["name"] == "Rock by title"' "a tap on a genre of the library makes it a condition, and the editor says how many songs it finds"
-check se2.json 'd["smart_editor"]["query"] == "genre:Rock sort:title limit:25"' "…an order and a number of songs join it"
-check se3.json 'd["smart_editor"] is None and d["nav"] == "Smart(\"Rock by title\")" and d["rows"] == 6 and d["smart_playlists"][-1] == ["Rock by title", "genre:Rock sort:title limit:25"] and len(d["smart_playlists"]) == 3' "Save keeps it as a smart playlist and opens it with its songs"
+check se1f.json 'd["smart_editor"]["query"] == "genre:Rock format:lossless" and d["smart_editor"]["songs"] == 0' "…the format row asks for lossless files: none of these"
+check se1l.json 'd["smart_editor"]["query"] == "genre:Rock format:lossy length:<=0" and d["smart_editor"]["songs"] == 6' "…lossy ones, and a length typed in minutes"
+check se2.json 'd["smart_editor"]["query"] == "genre:Rock format:lossy length:<=0 sort:title limit:25"' "…an order and a number of songs join it"
+check se3.json 'd["smart_editor"] is None and d["nav"] == "Smart(\"Rock by title\")" and d["rows"] == 6 and d["smart_playlists"][-1] == ["Rock by title", "genre:Rock format:lossy length:<=0 sort:title limit:25"] and len(d["smart_playlists"]) == 3' "Save keeps it as a smart playlist and opens it with its songs"
 
 echo "== quit and restore"
 ui 'key Space' 'wait 300' 'dump q0.json' 'quit'

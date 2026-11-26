@@ -415,6 +415,10 @@ impl LibrarySnapshot {
                 .check
                 .and_then(|c| c.dr)
                 .is_some_and(|dr| (*from..=*to).contains(&(dr.round() as i32))),
+            Filter::Length(from, to) => {
+                let minutes = i32::try_from(track.duration_ms / 60_000).unwrap_or(i32::MAX);
+                track.duration_ms > 0 && (*from..=*to).contains(&minutes)
+            }
             Filter::Never => false,
         }
     }
@@ -1170,6 +1174,30 @@ mod tests {
         assert_eq!(found("played:1w"), ["often"]);
         assert_eq!(found("played:1y"), ["new", "often"]);
         assert!(found("fav:perhaps").is_empty());
+
+        // Length, in whole minutes: 2:59, 3:00, 9:59, 10:00, and one not known.
+        let mut long = vec![
+            track(1, "Short", "A", "X"),
+            track(2, "Three", "A", "X"),
+            track(3, "Nine", "A", "X"),
+            track(4, "Ten", "A", "X"),
+            track(5, "Unknown", "A", "X"),
+        ];
+        for (song, ms) in long.iter_mut().zip([179_999, 180_000, 599_999, 600_000, 0]) {
+            song.duration_ms = ms;
+        }
+        let l = LibrarySnapshot::from_tracks(long);
+        let found = |query: &str| titles(&l, &l.search(query));
+        assert_eq!(found("length:>=10"), ["ten"]);
+        assert_eq!(found("length:>=10m"), ["ten"]);
+        assert_eq!(found("길이:10분-"), ["ten"]);
+        assert_eq!(found("length:<3"), ["short"]);
+        assert_eq!(found("length:<=2"), ["short"]);
+        assert_eq!(found("duration:3-9"), ["nine", "three"]);
+        assert_eq!(found("length:9"), ["nine"]);
+        assert_eq!(found("length:0"), Vec::<String>::new());
+        assert!(found("length:long").is_empty());
+        assert!(found("length:3h").is_empty());
 
         // A field still being typed changes nothing; `matches` agrees with `search`.
         assert_eq!(s.search("artist:").len(), 5);
