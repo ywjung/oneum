@@ -23,6 +23,7 @@
 | iPhone: 실제 기기 설치·실행 | 설치·실행 확인(2026-11-14, 개인 팀 서명, `scripts/ios-device.sh`). 기기에서의 화면·재생 확인은 **검증 대기** |
 | Mac App Store용 패키지 | 준비됨(2026-11-24) — `scripts/package.sh --app-store`: App Sandbox 안에서 도는 앱, 스토어용 서명, 설치 패키지, 검사(처음 11항목). 샌드박스 동작은 시험용 앱으로 확인. 2026-11-24에 0.1.0 (174)를 App Store Connect에 올림(처리 끝, TestFlight에 있음). 스토어 정보와 스크린샷을 넣고 같은 날 심사에 냄(수동 출시). **2026-11-26에 자동 검사에서 돌아옴**: 공개되지 않은 함수의 이름(`CGSSetWindowBackgroundBlurRadius`, winit의 것 — `vendor/winit`으로 뺌)과 "네트워크 듣기" 권한의 쓰임(필요한 권한이라 설명으로 답함). 검사는 12항목이 됨. 같은 날 0.1.0 (196)을 올려 회신과 함께 **다시 냄**(심사 대기 중, 수동 출시). **심사 결과와 TestFlight로 써 보기는 남음**([MAC_APP_STORE.md](MAC_APP_STORE.md) 3절) |
 | iPhone: App Store용 아카이브 | 서명된 아카이브 · `.ipa` · 검사 · 업로드까지 완료(2026-11-23, 유료 팀, 0.1.0 빌드 147이 App Store Connect에 올라감). Apple의 처리가 끝나 사용자가 TestFlight로 본인 iPhone에 설치했고 위젯에 곡이 나옴. 스토어 정보를 넣고 **2026-11-24에 심사에 제출**(무료, 147개 국가, 수동 출시). 같은 날 Apple이 지침 2.1 "Information Needed"로 돌려보냄: 실제 iPhone의 화면 녹화와 다섯 가지 설명을 넣어 같은 날 **다시 제출**. **2026-11-25에 승인되어 사용자가 출시함**(상태 "배포 준비됨"). 약 한 시간 뒤 **App Store에 나옴**(한국 포함, 앱 페이지로 확인. [APP_STORE.md](APP_STORE.md) 12 · 14절) |
+| 0.2.0의 스토어 제출 | 2026-11-26 — iPhone 0.2.0 (213) 업데이트 제출, Mac은 0.1.0 (196)의 제출을 취소하고 0.2.0 (213)으로 다시 제출. 둘 다 심사 대기 중, 수동 출시(docs/APP_STORE.md 15절, docs/MAC_APP_STORE.md 3절) |
 
 서명·공증되지 않은 빌드를 정식 배포물로 취급하지 마세요. 다른 Mac에서는 Gatekeeper가 실행을 막습니다.
 
