@@ -45,7 +45,7 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
                 match fs::rename(path, &aside) {
                     Ok(()) => tracing::warn!(
                         error = %err,
-                        aside = %aside.display(),
+                        aside = %aside.file_name().unwrap_or_default().to_string_lossy(),
                         "could not read the settings file; moved it aside and using defaults"
                     ),
                     Err(rename_err) => tracing::warn!(

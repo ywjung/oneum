@@ -160,7 +160,10 @@ fn bookmark_of(path: &Path) -> Option<String> {
     match made {
         Ok(data) => Some(to_hex(&data.to_vec())),
         Err(error) => {
-            tracing::warn!("cannot keep the right to read {}: {error}", path.display());
+            tracing::warn!(
+                "cannot keep the right to read {}: {error}",
+                crate::storage::files::for_log(path)
+            );
             None
         }
     }
@@ -273,14 +276,20 @@ fn reach(link: &Link) -> Option<(PathBuf, Option<String>)> {
     let url = match resolved {
         Ok(url) => url,
         Err(error) => {
-            tracing::warn!("{} cannot be reached: {error}", link.path);
+            tracing::warn!(
+                "{} cannot be reached: {error}",
+                crate::storage::files::for_log(Path::new(&link.path))
+            );
             return None;
         }
     };
     // SAFETY: a plain call; the right is kept until the link is forgotten or the app
     // quits.
     if !unsafe { url.startAccessingSecurityScopedResource() } {
-        tracing::warn!("the system did not let {} be read", link.path);
+        tracing::warn!(
+            "the system did not let {} be read",
+            crate::storage::files::for_log(Path::new(&link.path))
+        );
     }
     let now = PathBuf::from(url.path()?.to_string());
     // A bookmark that has aged is made anew while the place can be reached.

@@ -39,6 +39,45 @@ pub fn same_content(a: &Path, b: &Path) -> io::Result<bool> {
     }
 }
 
+/// A file or a folder as the log names it: not by its path, which tells of the person
+/// (the home folder's name) and of their music (artist, album and song in the names of
+/// folders and files), but by a short number made from the path, with the file's kind
+/// behind it: `<file 3f9a2c.flac>`, `<path 81c0d4>`. The same path gets the same number,
+/// so that the lines about one file can be told from those about another. The log is
+/// what a person passes on with a report (see `app::logging`).
+pub fn for_log(path: &Path) -> ForLog {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    // A kind as files have them: a few letters and digits. Anything else may be part
+    // of a name ("Vol. 2 (Live)").
+    let kind = path
+        .extension()
+        .and_then(|kind| kind.to_str())
+        .filter(|kind| kind.len() <= 8 && kind.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(str::to_ascii_lowercase);
+    ForLog {
+        number: (hasher.finish() & 0xff_ffff) as u32,
+        kind,
+    }
+}
+
+/// See [`for_log`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForLog {
+    number: u32,
+    kind: Option<String>,
+}
+
+impl std::fmt::Display for ForLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            Some(kind) => write!(f, "<file {:06x}.{kind}>", self.number),
+            None => write!(f, "<path {:06x}>", self.number),
+        }
+    }
+}
+
 /// Brings `from` (a file, or a folder with all that is in it; links are not followed)
 /// into the folder `into` under its own name, and says where it is then.
 ///
@@ -67,7 +106,7 @@ pub fn take_in(from: &Path, into: &Path) -> io::Result<PathBuf> {
         for entry in std::fs::read_dir(from)? {
             let entry = entry?;
             if let Err(error) = take_in(&entry.path(), &to) {
-                tracing::warn!("left out {}: {error}", entry.path().display());
+                tracing::warn!("left out {}: {error}", for_log(&entry.path()));
             }
         }
         Ok(to)
@@ -96,7 +135,7 @@ pub fn add_samples(from: &Path, music: &Path, name: &str) -> io::Result<PathBuf>
         let entry = entry?;
         match take_in(&entry.path(), &to) {
             Ok(_) => added += 1,
-            Err(error) => tracing::warn!("left out {}: {error}", entry.path().display()),
+            Err(error) => tracing::warn!("left out {}: {error}", for_log(&entry.path())),
         }
     }
     if added == 0 {
@@ -149,6 +188,32 @@ pub fn free_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_log_names_a_file_by_a_number_and_its_kind() {
+        let song = Path::new("/Users/someone/Music/아이유/Palette/01 팔레트 (feat. G-DRAGON).FLAC");
+        let named = for_log(song).to_string();
+        assert!(
+            named.starts_with("<file ") && named.ends_with(".flac>"),
+            "{named}"
+        );
+        for part in ["someone", "Music", "아이유", "Palette", "팔레트", "/"] {
+            assert!(!named.contains(part), "{named} tells {part}");
+        }
+        // The same file again, and another one.
+        assert_eq!(for_log(song).to_string(), named);
+        let other = for_log(Path::new(
+            "/Users/someone/Music/아이유/Palette/02 이 지금.flac",
+        ));
+        assert_ne!(other.to_string(), named);
+        // What stands behind the last dot of a folder's name is not a kind of file.
+        let folder = for_log(Path::new("/Users/someone/Music/Vol. 2 (Live)")).to_string();
+        assert!(
+            folder.starts_with("<path ") && !folder.contains("Live"),
+            "{folder}"
+        );
+        assert!(for_log(Path::new("/m/a")).to_string().starts_with("<path "));
+    }
 
     /// Brought in again, what is there already stays as it is: the same file is the
     /// same file, a folder takes in only what is new, and only another file of the

@@ -1656,8 +1656,8 @@ impl OneumApp {
     /// and reads it.
     pub(super) fn add_sample_music(&mut self) {
         match crate::platform::files::add_sample_music(self.s().phone_sample_folder) {
-            Ok(folder) => {
-                tracing::info!(folder = %folder.display(), "sample music added");
+            Ok(_) => {
+                tracing::info!("sample music added");
                 self.announce_scan = true;
                 self.core.library.rescan();
             }
@@ -2167,9 +2167,10 @@ impl OneumApp {
     /// the About page shows: a screen has room for a few lines, the clipboard for all.
     pub(super) fn error_report(&self) -> String {
         let log_dir = &self.core.paths.log_dir;
+        // (Without the paths lines of earlier builds may hold: the text is passed on.)
         let read = |name: &str| {
             std::fs::read(log_dir.join(name))
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .map(|bytes| app::logging::without_paths(&String::from_utf8_lossy(&bytes)))
                 .unwrap_or_default()
         };
         let mut about = vec![format!(
@@ -2224,6 +2225,8 @@ impl OneumApp {
                         text.extend_from_slice(&more);
                     }
                 }
+                // What is handed out holds no paths (see `logging::without_paths`).
+                let text = app::logging::without_paths(&String::from_utf8_lossy(&text));
                 std::fs::write(&dest, text)
             });
             match copied {

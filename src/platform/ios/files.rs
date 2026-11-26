@@ -280,7 +280,9 @@ fn bring(url: &NSURL, keep: Keep) -> Option<PathBuf> {
             // same song chosen again is not there twice afterwards.)
             let imported = documents.join(IMPORTED);
             std::fs::create_dir_all(&imported)
-                .inspect_err(|error| tracing::warn!("cannot make {}: {error}", imported.display()))
+                .inspect_err(|error| {
+                    tracing::warn!("cannot make the folder for imported files: {error}")
+                })
                 .ok()?;
             let to = crate::storage::files::free_name(&imported, path.file_name()?, Some(&path))
                 .inspect_err(|error| tracing::warn!("cannot keep an imported file: {error}"))
@@ -312,12 +314,22 @@ fn bring(url: &NSURL, keep: Keep) -> Option<PathBuf> {
     let copied = match keep {
         Keep::Scratch => free_name(&into, path.file_name()?).and_then(|to| {
             copy_tree(&path, &to)
-                .inspect_err(|error| tracing::warn!("cannot bring in {}: {error}", path.display()))
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        "cannot bring in {}: {error}",
+                        crate::storage::files::for_log(&path)
+                    )
+                })
                 .ok()
                 .map(|()| to)
         }),
         Keep::Music | Keep::InPlace => crate::storage::files::take_in(&path, &into)
-            .inspect_err(|error| tracing::warn!("cannot bring in {}: {error}", path.display()))
+            .inspect_err(|error| {
+                tracing::warn!(
+                    "cannot bring in {}: {error}",
+                    crate::storage::files::for_log(&path)
+                )
+            })
             .ok(),
     };
     if scoped {
@@ -470,7 +482,7 @@ fn link(url: &NSURL) -> Option<PathBuf> {
     if !unsafe { url.startAccessingSecurityScopedResource() } {
         tracing::warn!(
             "the system did not let the folder be read: {}",
-            path.display()
+            crate::storage::files::for_log(&path)
         );
     }
     lock(&REACHED).push(path.to_string_lossy().into_owned());
@@ -678,7 +690,12 @@ fn clean_name(name: &str) -> String {
 /// "Album", "Album 2", "Album 3" …
 fn free_name(folder: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
     std::fs::create_dir_all(folder)
-        .inspect_err(|error| tracing::warn!("cannot make {}: {error}", folder.display()))
+        .inspect_err(|error| {
+            tracing::warn!(
+                "cannot make {}: {error}",
+                crate::storage::files::for_log(folder)
+            )
+        })
         .ok()?;
     let first = folder.join(name);
     if !first.exists() {
@@ -712,7 +729,10 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         if let Err(error) = copy_tree(&entry.path(), &to.join(entry.file_name())) {
-            tracing::warn!("left out {}: {error}", entry.path().display());
+            tracing::warn!(
+                "left out {}: {error}",
+                crate::storage::files::for_log(&entry.path())
+            );
         }
     }
     Ok(())

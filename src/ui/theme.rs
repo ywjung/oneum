@@ -198,7 +198,10 @@ fn android_korean_font() -> Option<(Vec<u8>, u32)> {
             continue;
         };
         if let Some(index) = korean_face(&bytes) {
-            tracing::info!(font = %path.display(), index, "Korean is drawn with this font");
+            // (The file's name, not where it lies: a font of the user's own lies in
+            // their home folder.)
+            let font = path.file_name().unwrap_or_default().to_string_lossy();
+            tracing::info!(%font, index, "Korean is drawn with this font");
             return Some((bytes, index));
         }
     }
