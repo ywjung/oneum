@@ -185,6 +185,30 @@ It is not a streaming service. You need music files of your own.
 • Open-source software (0BSD)
 ```
 
+## 다음 업데이트의 "이 버전의 새로운 기능" (초안, 2026-11-26)
+
+App Store는 업데이트를 낼 때마다 이 칸을 요구합니다(첫 버전에는 없음). 아래는 iPhone 앱의 빌드 147(2026-11-22 ~ 23의 코드) 뒤에 들어간 것 가운데 쓰는 사람에게 보이는 변경입니다. Mac 앱의 첫 업데이트에도 같은 글을 쓸 수 있습니다. 업데이트를 낼 때 CHANGELOG.md를 다시 보고, 그 사이에 더 들어간 것을 더하세요.
+
+<!-- field ko.whatsnew chars=4000 -->
+```text
+• 스마트 플레이리스트 편집 창: 장르, 연도, 별점, 즐겨찾기, 재생 횟수, 순서, 곡 수 같은 조건을 눌러서 만들고 고칩니다
+• 통계의 들은 시간이 실제로 들은 시간이 되었습니다. 이 버전부터 듣는 것에 적용되고, 그 전의 재생은 전처럼 곡의 길이로 셉니다
+• 보관함 데이터 가져오기가 도중에 실패해도 반만 들어가지 않습니다. 다시 가져와도 플레이리스트가 두 번 생기지 않습니다
+• 이름이 긴 스마트 플레이리스트 둘을 가져오면 다음에 열 때 하나로 합쳐지던 문제를 고쳤습니다
+• 로그에 파일과 폴더의 경로를 적지 않고, 저장하는 로그 사본에서도 뺍니다
+• 크로스페이드: 다음 곡이 늦게 정해져도 겹치는 길이가 줄지 않고, 같은 곡이 두 번 재생되지 않습니다
+```
+
+<!-- field en.whatsnew chars=4000 -->
+```text
+• An editor for smart playlists: make and change them by choosing conditions such as genre, years, rating, favorites, times played, order and number of songs
+• The time listened in Statistics is now the time you really listened. It applies to what you play from this version on; earlier plays count with their songs' lengths as before
+• Importing library data no longer leaves half of a file behind when it fails, and importing again does not make a playlist twice
+• Fixed: two imported smart playlists with long names became one at the next start
+• The log no longer holds paths of files and folders, and they are left out of a copy of the log you save
+• Crossfade: the overlap is no longer shortened when the next song is known late, and a song is no longer played twice
+```
+
 ## Mac (Mac App Store)
 
 작성 2026-11-24 · 절차는 [MAC_APP_STORE.md](MAC_APP_STORE.md). 이름과 부제는 iPhone 앱과 같은 것을 씁니다(앱 하나의 정보). 프로모션 텍스트 · 키워드 · 주소 · 저작권은 위의 것과 같고, **설명과 심사 메모만 Mac의 것**입니다.
