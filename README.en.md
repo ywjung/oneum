@@ -108,10 +108,10 @@ scripts/android-device.sh
 
 The folder `android/` can also be opened in Android Studio (the script above builds the app's library first).
 
-Android uses the same phone screens as the iPhone. Allow access to "music and audio" when the system asks on the first start and the phone's Music folder is read where it is; other folders (also on a card) can be added. WavPack, Monkey's Audio and DSD files, and cover pictures, lyrics and CUE files, are read once "All files access" is allowed as well, in the settings. It can be used with TalkBack (swiping from item to item, double taps).
+Android uses the same phone screens as the iPhone. Allow access to "music and audio" when the system asks on the first start and the phone's Music folder is read where it is; other folders (also on a card) can be added. WavPack, Monkey's Audio and DSD files, and cover pictures, lyrics and CUE files, are read once "All files access" is allowed as well, in the settings. TalkBack works in part: swiping from item to item and double-tapping to use an item (checked in the emulator, not on a real phone). Explore by touch does not work, and no frame is drawn around the item TalkBack is on.
 Music plays on with the screen off (controls in the notification and on the lock screen) and pauses for a call. The system's Back works throughout.
 The shortcuts of a keyboard that is plugged in or paired (Space, Ctrl+→ …), opening single music files without adding their folder, showing a song's folder in the Files app, and saving the log are there.
-Not there: screen-reader (TalkBack) support, choosing an output device, matching a USB DAC's sample rate, exclusive output, and screens made for tablets.
+Not there: TalkBack's explore by touch and focus frame, choosing an output device, matching a USB DAC's sample rate, exclusive output, and screens made for tablets.
 
 **The Android version is verified in an Android 16 emulator. It has not been installed on a real Android device yet.**
 Usage: [docs/USER_GUIDE_ANDROID.en.md](docs/USER_GUIDE_ANDROID.en.md). The plan and how it went: [docs/ANDROID_PLAN.md](docs/ANDROID_PLAN.md); what was verified: "Android" in [docs/TESTING.md](docs/TESTING.md) (both Korean).
