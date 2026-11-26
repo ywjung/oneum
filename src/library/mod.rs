@@ -25,6 +25,7 @@ pub mod radio;
 pub mod remote;
 mod scan;
 mod search;
+pub mod smart;
 mod snapshot;
 pub mod stats;
 mod tags;

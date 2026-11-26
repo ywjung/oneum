@@ -205,7 +205,7 @@ pub(crate) enum Filter {
 
 /// What a `name:value` term is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Subject {
+pub(super) enum Subject {
     Text(Field),
     Year,
     Plays,
@@ -244,7 +244,7 @@ fn check_wanted(value: &str) -> Option<CheckWanted> {
 }
 
 /// The names a field can be asked for by, in normalised form.
-const FIELD_NAMES: [(&str, Subject); 39] = [
+pub(super) const FIELD_NAMES: [(&str, Subject); 39] = [
     ("title", Subject::Text(Field::Title)),
     ("제목", Subject::Text(Field::Title)),
     ("artist", Subject::Text(Field::Artist)),
@@ -290,7 +290,7 @@ const FIELD_NAMES: [(&str, Subject); 39] = [
 /// front of it for the other way round. Without that, what one looks for first comes
 /// first: the songs played most, added or heard last, rated highest; names and
 /// numbers from their beginning.
-fn sort_order(value: &str) -> Option<(SortKey, bool)> {
+pub(super) fn sort_order(value: &str) -> Option<(SortKey, bool)> {
     let (name, turned) = match value.strip_prefix('-') {
         Some(name) => (name, true),
         None => (value, false),
@@ -341,7 +341,7 @@ fn tokens(normalized: &str) -> Vec<String> {
 
 /// The numbers a `year:` or `plays:` value asks for: `1994`, `1990-1999` (also `..`
 /// and `~`), `1990-` (from then on), `>=2000`, `>2000`, `<1980`, `<=1980`.
-fn year_range(value: &str) -> Option<(i32, i32)> {
+pub(super) fn year_range(value: &str) -> Option<(i32, i32)> {
     let year = |text: &str| {
         text.trim()
             .parse::<i32>()
@@ -373,7 +373,7 @@ fn year_range(value: &str) -> Option<(i32, i32)> {
 }
 
 /// A yes or a no, in the ways people write it.
-fn yes_or_no(value: &str) -> Option<bool> {
+pub(super) fn yes_or_no(value: &str) -> Option<bool> {
     match value {
         "yes" | "y" | "true" | "1" | "on" | "예" | "네" | "응" => Some(true),
         "no" | "n" | "false" | "0" | "off" | "아니오" | "아니요" | "아니" => Some(false),
@@ -383,7 +383,7 @@ fn yes_or_no(value: &str) -> Option<bool> {
 
 /// A span of time counted back from now: `30d`, `2w`, `6m`, `1y` (also `30일`, `2주`,
 /// `6달`, `6개월`, `1년`); a bare number is days. In seconds.
-fn time_span(value: &str) -> Option<i64> {
+pub(super) fn time_span(value: &str) -> Option<i64> {
     let digits = value.chars().take_while(char::is_ascii_digit).count();
     let number: i64 = value[..digits]
         .parse()
