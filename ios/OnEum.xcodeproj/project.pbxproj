@@ -310,7 +310,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(ONEUM_BUNDLE_ID)";
 				PRODUCT_NAME = OnEum;
 				STRIP_INSTALLED_PRODUCT = NO;
@@ -333,7 +333,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(ONEUM_BUNDLE_ID)";
 				PRODUCT_NAME = OnEum;
 				STRIP_INSTALLED_PRODUCT = NO;
@@ -355,7 +355,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(ONEUM_BUNDLE_ID).widget";
 				PRODUCT_NAME = OnEumWidget;
 				SKIP_INSTALL = YES;
@@ -379,7 +379,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(ONEUM_BUNDLE_ID).widget";
 				PRODUCT_NAME = OnEumWidget;
 				SKIP_INSTALL = YES;

@@ -4,7 +4,7 @@ plugins {
 
 // The version and the build number come from Cargo.toml and git (the build script
 // passes them); the defaults are for a build started from Android Studio.
-def oneumVersion = providers.gradleProperty('oneumVersion').getOrElse('0.1.0')
+def oneumVersion = providers.gradleProperty('oneumVersion').getOrElse('0.2.0')
 def oneumBuild = providers.gradleProperty('oneumBuild').getOrElse('1').toInteger()
 
 android {
