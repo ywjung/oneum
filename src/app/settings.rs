@@ -239,7 +239,53 @@ pub fn tidy_text(text: &str, max: usize) -> String {
         .to_string()
 }
 
+/// `name` with a number behind it ("Rock (2)"), for a name that is taken. No longer
+/// than a name is kept ([`MAX_SMART_NAME_CHARS`]): a long name gives up its end for
+/// the number. (Cut at the next start, the number would be what went, and the name
+/// would be the taken one again: of two searches one would be left.)
+fn numbered_name(name: &str, number: u32) -> String {
+    let mark = format!(" ({number})");
+    let room = MAX_SMART_NAME_CHARS.saturating_sub(mark.chars().count());
+    let kept: String = name.chars().take(room).collect();
+    format!("{}{mark}", kept.trim_end())
+}
+
 impl Settings {
+    /// Saved searches that came with library data (`(name, search)`) join those kept
+    /// here: one that is here already (the same search, under any name) is passed
+    /// over, and a name that stands for another search here gets a number, the first
+    /// that is free ("Rock (2)", "Rock (3)"). Returns how many were taken in.
+    pub fn take_in_searches<'a>(
+        &mut self,
+        searches: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> usize {
+        let list = &mut self.smart_playlists;
+        let mut taken = 0;
+        for (name, query) in searches {
+            // (As they are kept: one line, of a length that is kept.)
+            let wanted = tidy_text(name, MAX_SMART_NAME_CHARS);
+            let query = tidy_text(query, MAX_SMART_QUERY_CHARS);
+            if wanted.is_empty() || query.is_empty() {
+                continue;
+            }
+            if list.iter().any(|own| own.query == query) {
+                continue;
+            }
+            if list.len() >= MAX_SMART_PLAYLISTS {
+                break;
+            }
+            let mut name = wanted.clone();
+            let mut number = 1u32;
+            while list.iter().any(|own| own.name == name) {
+                number += 1;
+                name = numbered_name(&wanted, number);
+            }
+            list.push(SmartPlaylist { name, query });
+            taken += 1;
+        }
+        taken
+    }
+
     /// Brings the pinned albums along when albums got other keys (`changed`: old and
     /// new, see `library::OpenReport`). Says whether a pin was changed.
     pub fn follow_album_keys(&mut self, changed: &[(u64, u64)]) -> bool {
@@ -517,6 +563,56 @@ mod tests {
         let round: Settings =
             serde_json::from_str(&serde_json::to_string(&s).expect("serializes")).expect("parses");
         assert_eq!(round, s);
+    }
+
+    /// Saved searches that come in with library data stay apart after the settings
+    /// are written and read again, also where their names are as long as a name may
+    /// be: the number a taken name gets has to fit into what is kept of a name.
+    #[test]
+    fn saved_searches_that_came_in_under_one_long_name_stay_apart() {
+        let long = "가".repeat(MAX_SMART_NAME_CHARS);
+        let longer = format!("{long} and more");
+        let came = [
+            (long.as_str(), "genre:jazz"),
+            (long.as_str(), "genre:rock"),
+            (longer.as_str(), "genre:folk"),
+            ("Short", "year:1990"),
+            ("Short", "year:1991"),
+        ];
+        let mut s = Settings::default();
+        assert_eq!(s.take_in_searches(came), 5);
+        // The same file again: nothing more.
+        assert_eq!(s.take_in_searches(came), 0);
+        let taken = s.smart_playlists.clone();
+        assert_eq!(taken[3].name, "Short");
+        assert_eq!(taken[4].name, "Short (2)");
+        assert_eq!(taken[0].name, long);
+        // Written, and read at the next start: each is still there with its search.
+        let read: Settings =
+            serde_json::from_str::<Settings>(&serde_json::to_string(&s).expect("serializes"))
+                .expect("parses")
+                .sanitized();
+        assert_eq!(read.smart_playlists, taken);
+        let searches: Vec<&str> = read
+            .smart_playlists
+            .iter()
+            .map(|smart| smart.query.as_str())
+            .collect();
+        assert_eq!(
+            searches,
+            [
+                "genre:jazz",
+                "genre:rock",
+                "genre:folk",
+                "year:1990",
+                "year:1991"
+            ]
+        );
+        // The long names gave up their ends for their numbers.
+        for (smart, mark) in taken[1..3].iter().zip([" (2)", " (3)"]) {
+            assert!(smart.name.ends_with(mark), "{}", smart.name);
+            assert_eq!(smart.name.chars().count(), MAX_SMART_NAME_CHARS);
+        }
     }
 
     #[test]

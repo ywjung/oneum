@@ -2101,40 +2101,14 @@ impl OneumApp {
         self.edit(move |library| Some(AppEvent::DataImported(library.import_data(&file))));
     }
 
-    /// The saved searches that came with library data join those of the settings: one
-    /// that is here already (same name, same search) is passed over, and a name that
-    /// stands for another search here gets a mark. Returns how many were taken in.
+    /// The saved searches that came with library data join those of the settings (see
+    /// `Settings::take_in_searches`). Returns how many were taken in.
     fn take_in_searches(&mut self, searches: &[crate::library::backup::Search]) -> usize {
-        let mut taken = 0;
-        for search in searches {
-            let list = &mut self.settings.smart_playlists;
-            // (As the settings keep them: one line, of a length that is kept.)
-            let wanted =
-                app::settings::tidy_text(&search.name, app::settings::MAX_SMART_NAME_CHARS);
-            let query =
-                app::settings::tidy_text(&search.query, app::settings::MAX_SMART_QUERY_CHARS);
-            if wanted.is_empty() || query.is_empty() {
-                continue;
-            }
-            // The search is here already, under any name: passed over.
-            if list.iter().any(|own| own.query == query) {
-                continue;
-            }
-            if list.len() >= app::settings::MAX_SMART_PLAYLISTS {
-                break;
-            }
-            // A name that stands for another search here gets a number, the first
-            // that is free ("Rock (2)", "Rock (3)").
-            let mut name = wanted.clone();
-            let mut number = 1u32;
-            while list.iter().any(|own| own.name == name) {
-                number += 1;
-                name = format!("{wanted} ({number})");
-            }
-            list.push(app::settings::SmartPlaylist { name, query });
-            taken += 1;
-        }
-        taken
+        self.settings.take_in_searches(
+            searches
+                .iter()
+                .map(|search| (search.name.as_str(), search.query.as_str())),
+        )
     }
 
     fn export_playlist(&mut self, id: i64, name: &str) {
