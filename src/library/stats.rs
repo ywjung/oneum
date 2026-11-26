@@ -12,7 +12,9 @@ pub const TOP: usize = 10;
 pub struct ListeningStats {
     /// Plays counted (see the player's play credit).
     pub plays: usize,
-    /// The lengths of the songs played, added up.
+    /// How long those plays were listened to, added up (see `model::Play`). A play
+    /// of which that is not known (one counted before it was noted) counts with the
+    /// length of its song.
     pub listened_ms: u64,
     /// Different songs played.
     pub songs: usize,
@@ -100,9 +102,8 @@ fn ranked<K: Clone + Ord>(counts: HashMap<K, usize>, limit: usize) -> Vec<(K, us
     all
 }
 
-/// Statistics of the given plays (`(track, unix seconds)`), for the tracks that are
-/// still in the library.
-pub fn listening(snapshot: &LibrarySnapshot, plays: &[(TrackId, i64)]) -> ListeningStats {
+/// Statistics of the given plays, for the tracks that are still in the library.
+pub fn listening(snapshot: &LibrarySnapshot, plays: &[crate::model::Play]) -> ListeningStats {
     let mut stats = ListeningStats::default();
     let mut songs: HashMap<TrackId, usize> = HashMap::new();
     let mut artists: HashMap<String, usize> = HashMap::new();
@@ -110,12 +111,12 @@ pub fn listening(snapshot: &LibrarySnapshot, plays: &[(TrackId, i64)]) -> Listen
     let mut genres: HashMap<String, usize> = HashMap::new();
     // Different spellings of a genre count as one: the first one met names it.
     let mut genre_names: HashMap<String, String> = HashMap::new();
-    for &(id, _) in plays {
+    for &(id, _, listened_ms) in plays {
         let Some(track) = snapshot.get(id) else {
             continue;
         };
         stats.plays += 1;
-        stats.listened_ms += track.duration_ms;
+        stats.listened_ms += listened_ms.unwrap_or(track.duration_ms);
         *songs.entry(id).or_default() += 1;
         let artist = if track.album_artist.is_empty() {
             &track.artist
@@ -215,10 +216,42 @@ mod tests {
         LibrarySnapshot::from_tracks(tracks)
     }
 
+    /// The time listened is what was heard, not the songs' lengths: a long file that
+    /// was left after four minutes counts as one play of four minutes. A play of
+    /// which that is not known counts with its song's length, as all did before.
+    #[test]
+    fn time_listened_is_what_was_heard_of_each_play() {
+        let mut long = test_track(1);
+        long.duration_ms = 3_600_000;
+        let mut short = test_track(2);
+        short.duration_ms = 200_000;
+        let snap = LibrarySnapshot::from_tracks(vec![long, short]);
+        let stats = listening(&snap, &[(1, 10, Some(240_000))]);
+        assert_eq!((stats.plays, stats.listened_ms), (1, 240_000));
+        // Heard twice over (a seek back), and an old play.
+        let stats = listening(
+            &snap,
+            &[
+                (1, 10, Some(240_000)),
+                (2, 20, Some(350_000)),
+                (2, 30, None),
+            ],
+        );
+        assert_eq!(stats.plays, 3);
+        assert_eq!(stats.listened_ms, 240_000 + 350_000 + 200_000);
+    }
+
     #[test]
     fn plays_add_up_per_song_artist_album_and_genre() {
         let snap = snapshot();
-        let plays = [(1, 10), (1, 20), (2, 30), (3, 40), (999, 50)];
+        // (How long they were listened to is not known: each counts with its length.)
+        let plays = [
+            (1, 10, None),
+            (1, 20, None),
+            (2, 30, None),
+            (3, 40, None),
+            (999, 50, None),
+        ];
         let stats = listening(&snap, &plays);
         assert_eq!(
             stats.plays, 4,
@@ -280,7 +313,7 @@ mod tests {
         let snap = LibrarySnapshot::from_tracks(tracks);
         assert_eq!(makeup(&snap).total_bytes, 500_000_000);
         assert_eq!(snap.albums().len(), 1, "the library shows one album");
-        let stats = listening(&snap, &[(1, 0), (2, 0), (3, 0)]);
+        let stats = listening(&snap, &[(1, 0, None), (2, 0, None), (3, 0, None)]);
         assert_eq!(stats.top_albums.len(), 1, "{:?}", stats.top_albums);
         assert_eq!(stats.top_albums[0].3, 3);
     }

@@ -110,6 +110,12 @@ pub trait PlayerHost: Send + Sync + 'static {
     }
     /// A track was listened to (see `PLAY_CREDIT_MS`).
     fn record_play(&self, id: TrackId);
+    /// How long the playthrough that was counted last for this track (see
+    /// [`Self::record_play`]) has been listened to, in milliseconds of sound that came
+    /// out (not of the song: a seek back is heard twice, a skip is not heard, and a song
+    /// at twice the speed takes half as long). Told when the play is counted, now and
+    /// then while it goes on, and when it ends: each time with the whole of it so far.
+    fn record_listened(&self, _id: TrackId, _listened_ms: u64) {}
     /// Radio: up to `count` tracks to follow `seed` when the queue has run out, none of
     /// them in `exclude`. A host without a library to pick from has none.
     fn radio_picks(&self, _seed: TrackId, _exclude: &[TrackId], _count: usize) -> Vec<TrackId> {
@@ -630,31 +636,67 @@ struct Listen {
     /// How much of the song was heard, in microseconds (frames are converted at the
     /// feed's rate and speed).
     heard_us: u64,
+    /// How long sound of it came out, in microseconds: what the statistics count as
+    /// time listened (see `PlayerHost::record_listened`).
+    listened_us: u64,
+    /// The track, once anything of it was heard.
+    track_id: Option<TrackId>,
     credited: bool,
+    /// What the host was last told of `listened_us`, in milliseconds.
+    told_ms: Option<u64>,
     /// Feed position up to which audio has been accounted: `(epoch, frames)`.
     mark: Option<(u16, u64)>,
 }
 
 impl Listen {
-    fn reset(&mut self) {
+    /// The playthrough is over. If it was counted as a play, what the host is still to
+    /// be told of it: the track and how long it was listened to.
+    #[must_use = "the host is told how long a counted play was listened to"]
+    fn end(&mut self) -> Option<(TrackId, u64)> {
+        let last = self.untold();
         *self = Self::default();
+        last
+    }
+
+    /// How long a counted play has been listened to, if the host has not been told
+    /// that much yet; it counts as told.
+    #[must_use = "the host is told how long a counted play was listened to"]
+    fn untold(&mut self) -> Option<(TrackId, u64)> {
+        let listened_ms = self.listened_us / 1000;
+        if !self.credited || self.told_ms == Some(listened_ms) {
+            return None;
+        }
+        self.told_ms = Some(listened_ms);
+        Some((self.track_id?, listened_ms))
     }
 
     /// Accounts for feed `epoch` having played up to `frames` while `seg` is audible.
-    fn hear(&mut self, seg: &Segment, epoch: u16, frames: u64, rate: u32, speed_percent: u16) {
+    /// Where that begins another playthrough, the one before it is over: see
+    /// [`Self::end`] for what is returned.
+    #[must_use = "the host is told how long a counted play was listened to"]
+    fn hear(
+        &mut self,
+        seg: &Segment,
+        epoch: u16,
+        frames: u64,
+        rate: u32,
+        speed_percent: u16,
+    ) -> Option<(TrackId, u64)> {
+        let mut ended = None;
         if self.item_id != Some(seg.item_id) {
-            *self = Self {
-                item_id: Some(seg.item_id),
-                ..Self::default()
-            };
+            ended = self.end();
+            self.item_id = Some(seg.item_id);
         }
+        self.track_id = Some(seg.track_id);
         let from = match self.mark {
             Some((e, f)) if e == epoch => f.max(seg.at_frame),
             _ => seg.at_frame,
         };
         let upto = frames.max(from);
         self.heard_us += song_ms((upto - from).saturating_mul(1_000), rate, speed_percent);
+        self.listened_us += (u128::from(upto - from) * 1_000_000 / u128::from(rate.max(1))) as u64;
         self.mark = Some((epoch, upto));
+        ended
     }
 
     /// True exactly once per playthrough: when `threshold_ms` of audio has been heard.
@@ -1245,7 +1287,9 @@ impl<H: PlayerHost> Player<H> {
         self.engine.set_playing(false);
         self.resume_ms = 0;
         self.state = PlayState::Paused;
-        self.listen.reset();
+        if let Some((id, ms)) = self.listen.end() {
+            self.host.record_listened(id, ms);
+        }
         self.dirty = true;
         self.release_device();
     }
@@ -1466,7 +1510,9 @@ impl<H: PlayerHost> Player<H> {
                 self.mark_queue_changed();
                 self.want_playing = true;
                 self.consecutive_failures = 0;
-                self.listen.reset();
+                if let Some((id, ms)) = self.listen.end() {
+                    self.host.record_listened(id, ms);
+                }
                 self.start_fresh();
             }
             Command::PlayNext(tracks) => self.add_tracks(&tracks, true),
@@ -1476,7 +1522,9 @@ impl<H: PlayerHost> Player<H> {
                 if self.queue.jump_to(id).is_some() {
                     self.want_playing = true;
                     self.consecutive_failures = 0;
-                    self.listen.reset();
+                    if let Some((id, ms)) = self.listen.end() {
+                        self.host.record_listened(id, ms);
+                    }
                     self.meta_dirty_since.get_or_insert_with(Instant::now);
                     self.start_fresh();
                 }
@@ -1539,7 +1587,9 @@ impl<H: PlayerHost> Player<H> {
                 self.remember_position();
                 match self.queue.next_manual() {
                     Some(_) => {
-                        self.listen.reset();
+                        if let Some((id, ms)) = self.listen.end() {
+                            self.host.record_listened(id, ms);
+                        }
                         self.meta_dirty_since.get_or_insert_with(Instant::now);
                         self.start_fresh();
                     }
@@ -1564,7 +1614,9 @@ impl<H: PlayerHost> Player<H> {
                         self.seek_to(0);
                     }
                     Some(Previous::Item(_)) => {
-                        self.listen.reset();
+                        if let Some((id, ms)) = self.listen.end() {
+                            self.host.record_listened(id, ms);
+                        }
                         self.meta_dirty_since.get_or_insert_with(Instant::now);
                         self.start_fresh();
                     }
@@ -1809,7 +1861,9 @@ impl<H: PlayerHost> Player<H> {
         {
             self.queue.rewind();
             self.want_playing = true;
-            self.listen.reset();
+            if let Some((id, ms)) = self.listen.end() {
+                self.host.record_listened(id, ms);
+            }
             self.start_current(0, false);
             return;
         }
@@ -2060,23 +2114,30 @@ impl<H: PlayerHost> Player<H> {
             };
             let boundary = next.at_frame;
             let next_id = next.item_id;
-            self.listen.hear(
+            if let Some((id, ms)) = self.listen.hear(
                 &finished,
                 chain.epoch,
                 boundary,
                 chain.rate,
                 chain.speed_percent,
-            );
+            ) {
+                self.host.record_listened(id, ms);
+            }
             let length_ms =
                 finished.start_ms + chain.song_ms(boundary.saturating_sub(finished.at_frame));
             if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                 self.host.record_play(finished.track_id);
+                if let Some((id, ms)) = self.listen.untold() {
+                    self.host.record_listened(id, ms);
+                }
             }
             // Heard to the end: next time it starts from the beginning.
             if finished.duration_ms >= RESUME_MIN_DURATION_MS {
                 self.host.set_resume_point(finished.track_id, None);
             }
-            self.listen.reset();
+            if let Some((id, ms)) = self.listen.end() {
+                self.host.record_listened(id, ms);
+            }
             if self.queue.advance_auto().map(|i| i.id) != Some(next_id) {
                 self.queue.jump_to(next_id);
             }
@@ -2085,13 +2146,20 @@ impl<H: PlayerHost> Player<H> {
         if let Some(seg) = chain.segments.front() {
             // The feed length is only known as "what was played": the track's real length.
             let end = end_frames.unwrap_or(seg.at_frame).max(seg.at_frame);
-            self.listen
-                .hear(seg, chain.epoch, end, chain.rate, chain.speed_percent);
+            if let Some((id, ms)) =
+                self.listen
+                    .hear(seg, chain.epoch, end, chain.rate, chain.speed_percent)
+            {
+                self.host.record_listened(id, ms);
+            }
             let length_ms = seg.start_ms + chain.song_ms(end - seg.at_frame);
             // A track that broke mid-way did not play to its end.
             if failed != Some(seg.item_id) {
                 if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                     self.host.record_play(seg.track_id);
+                    if let Some((id, ms)) = self.listen.untold() {
+                        self.host.record_listened(id, ms);
+                    }
                 }
                 // The feed ran out at its end (the queue is over, or what follows needs a
                 // feed of its own): next time it starts from the beginning.
@@ -2100,7 +2168,9 @@ impl<H: PlayerHost> Player<H> {
                 }
             }
         }
-        self.listen.reset();
+        if let Some((id, ms)) = self.listen.end() {
+            self.host.record_listened(id, ms);
+        }
         self.meta_dirty_since.get_or_insert_with(Instant::now);
         let current = self.queue.current().map(|c| c.id);
         if current.is_some() && self.stop_after == current {
@@ -2170,24 +2240,31 @@ impl<H: PlayerHost> Player<H> {
                     break;
                 };
                 // Played to its natural end.
-                self.listen.hear(
+                if let Some((id, ms)) = self.listen.hear(
                     &finished,
                     chain.epoch,
                     boundary,
                     chain.rate,
                     chain.speed_percent,
-                );
+                ) {
+                    self.host.record_listened(id, ms);
+                }
                 let length_ms =
                     finished.start_ms + chain.song_ms(boundary.saturating_sub(finished.at_frame));
                 if self.listen.take_credit(credit_threshold_ms(length_ms)) {
                     self.host.record_play(finished.track_id);
+                    if let Some((id, ms)) = self.listen.untold() {
+                        self.host.record_listened(id, ms);
+                    }
                 }
                 // Heard to the end: next time it starts from the beginning.
                 if finished.duration_ms >= RESUME_MIN_DURATION_MS {
                     self.host.set_resume_point(finished.track_id, None);
                 }
                 // The next segment is a new playthrough, also of the same item (repeat one).
-                self.listen.reset();
+                if let Some((id, ms)) = self.listen.end() {
+                    self.host.record_listened(id, ms);
+                }
                 let Some(next) = chain.segments.front().map(|s| s.item_id) else {
                     break;
                 };
@@ -2225,13 +2302,20 @@ impl<H: PlayerHost> Player<H> {
         if played_epoch == chain.epoch
             && let Some(seg) = chain.segments.front()
         {
-            self.listen
-                .hear(seg, chain.epoch, frames, chain.rate, chain.speed_percent);
+            if let Some((id, ms)) =
+                self.listen
+                    .hear(seg, chain.epoch, frames, chain.rate, chain.speed_percent)
+            {
+                self.host.record_listened(id, ms);
+            }
             if self
                 .listen
                 .take_credit(credit_threshold_ms(seg.duration_ms))
             {
                 self.host.record_play(seg.track_id);
+                if let Some((id, ms)) = self.listen.untold() {
+                    self.host.record_listened(id, ms);
+                }
             }
             // Real audio proves this track plays: earlier failures are history.
             if self.consecutive_failures > 0
@@ -2302,7 +2386,9 @@ impl<H: PlayerHost> Player<H> {
             self.queue.jump_to(item.0);
         }
         self.note_failure(item.1, PlaybackErrorKind::FileUnreadable);
-        self.listen.reset();
+        if let Some((id, ms)) = self.listen.end() {
+            self.host.record_listened(id, ms);
+        }
         self.skip_failed_current();
     }
 
@@ -2438,6 +2524,11 @@ impl<H: PlayerHost> Player<H> {
 
     fn save_session(&mut self, force: bool) {
         self.remember_position();
+        // (A play that goes on: how long it has been listened to by now. If the app is
+        // ended without a word, that is what stays.)
+        if let Some((id, ms)) = self.listen.untold() {
+            self.host.record_listened(id, ms);
+        }
         let queue_changed = self.queue_dirty_since.is_some() || force;
         let session = Session {
             queue: self.queue.to_state(),

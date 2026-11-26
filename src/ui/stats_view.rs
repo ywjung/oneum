@@ -75,7 +75,7 @@ impl OneumApp {
                     .map_or(0, |d| d.as_secs() as i64);
                 let (since, until) = period.span(now, crate::platform::clock::utc_offset_secs());
                 let mut plays = library.plays_since(since);
-                plays.retain(|&(_, at)| at < until);
+                plays.retain(|&(_, at, _)| at < until);
                 let snapshot = library.snapshot();
                 let data = StatsData {
                     period,

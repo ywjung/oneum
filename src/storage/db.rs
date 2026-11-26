@@ -3,7 +3,7 @@
 //! The database is the source of truth; `crate::library` keeps an in-memory copy of the
 //! track table and talks to this type through a mutex. All user-provided values are bound
 //! as parameters. SQL text is only ever assembled from the constant column lists below.
-use crate::model::{CheckVerdict, FileCheck, ReplayGainTags, Track, TrackId};
+use crate::model::{CheckVerdict, FileCheck, Play, ReplayGainTags, Track, TrackId};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, params};
 use std::fmt;
 use std::fs;
@@ -21,7 +21,7 @@ const HISTORY_KEEP_ROWS: i64 = 20_000;
 /// Ordered migration list. Entry `i` upgrades the schema from version `i` to `i + 1`;
 /// the current version is stored in `PRAGMA user_version`.
 const MIGRATIONS: &[&str] = &[
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
 ];
 
 const SCHEMA_V1: &str = "
@@ -168,6 +168,12 @@ CREATE TABLE removed_files (
 /// The listener's rating of a song: 1 to 5 stars, 0 for none.
 const SCHEMA_V7: &str = "
 ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;
+";
+
+/// How long a counted play was listened to, in milliseconds (see `model::Play`). The
+/// plays that were counted before there was this column have none.
+const SCHEMA_V8: &str = "
+ALTER TABLE history ADD COLUMN listened_ms INTEGER;
 ";
 
 /// Tracks of media servers on the network (see `library::remote`). They are not part of
@@ -1079,14 +1085,15 @@ impl Db {
         Ok(true)
     }
 
-    /// Adds plays that another record knew of (`(track, unix seconds)`; the app's own
-    /// library data from another device) to the history, each only if it is not there
-    /// yet. The rows are then in the order of time again: what was played last is told
-    /// by the order of the rows ([`Self::recent_plays`]), and a play of last year that
-    /// came in today must not count as the latest. The oldest rows beyond what the
-    /// history keeps are dropped, as [`Self::record_play`] drops them. Returns how many
-    /// plays were added.
-    pub fn merge_plays(&mut self, plays: &[(TrackId, i64)]) -> SqlResult<usize> {
+    /// Adds plays that another record knew of (the app's own library data from another
+    /// device) to the history, each only if it is not there yet (the same track at the
+    /// same second); of one that is there, how long it was listened to is taken where
+    /// that is not known here. The rows are then in the order of time again: what was
+    /// played last is told by the order of the rows ([`Self::recent_plays`]), and a
+    /// play of last year that came in today must not count as the latest. The oldest
+    /// rows beyond what the history keeps are dropped, as [`Self::record_play`] drops
+    /// them. Returns how many plays were added.
+    pub fn merge_plays(&mut self, plays: &[Play]) -> SqlResult<usize> {
         let tx = self.conn.transaction()?;
         let added = merge_plays_in(&tx, plays)?;
         tx.commit()?;
@@ -1104,7 +1111,7 @@ impl Db {
     pub fn take_over(
         &mut self,
         rows: &[ListeningRow],
-        plays: &[(TrackId, i64)],
+        plays: &[Play],
         unix_secs: i64,
         lists: impl FnOnce(Vec<(String, Vec<TrackId>)>) -> Vec<(String, Vec<TrackId>)>,
     ) -> SqlResult<(usize, usize)> {
@@ -1142,13 +1149,25 @@ impl Db {
         Ok((wanted.len(), added))
     }
 
-    /// `(track, unix seconds)` of every play at or after `since`, oldest first.
-    pub fn plays_since(&self, since: i64) -> SqlResult<Vec<(TrackId, i64)>> {
+    /// Every play at or after `since`, oldest first.
+    pub fn plays_since(&self, since: i64) -> SqlResult<Vec<Play>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT track_id, played_at FROM history WHERE played_at >= ?1 ORDER BY id",
+            "SELECT track_id, played_at, listened_ms FROM history \
+             WHERE played_at >= ?1 ORDER BY id",
         )?;
-        let rows = stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = stmt.query_map(params![since], play_of_row)?;
         rows.collect()
+    }
+
+    /// Notes how long the play that was counted last for a track has been listened to
+    /// (see `model::Play`). Returns whether there was such a play.
+    pub fn set_listened(&self, id: TrackId, listened_ms: u64) -> SqlResult<bool> {
+        let changed = self.conn.execute(
+            "UPDATE history SET listened_ms = ?2 \
+             WHERE id = (SELECT MAX(id) FROM history WHERE track_id = ?1)",
+            params![id, to_i64(listened_ms)],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Distinct recently played tracks, most recent first.
@@ -1699,22 +1718,50 @@ fn merge_listening_in(tx: &rusqlite::Transaction<'_>, rows: &[ListeningRow]) -> 
     Ok(())
 }
 
+/// A row of the history as a play: `track_id, played_at, listened_ms`.
+fn play_of_row(row: &Row<'_>) -> SqlResult<Play> {
+    let listened: Option<i64> = row.get(2)?;
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        listened.and_then(|ms| u64::try_from(ms).ok()),
+    ))
+}
+
 /// See `Db::merge_plays`.
-fn merge_plays_in(tx: &rusqlite::Transaction<'_>, plays: &[(TrackId, i64)]) -> SqlResult<usize> {
-    let mut all: Vec<(TrackId, i64)> = {
-        let mut stmt = tx.prepare("SELECT track_id, played_at FROM history ORDER BY id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+fn merge_plays_in(tx: &rusqlite::Transaction<'_>, plays: &[Play]) -> SqlResult<usize> {
+    let mut all: Vec<Play> = {
+        let mut stmt =
+            tx.prepare("SELECT track_id, played_at, listened_ms FROM history ORDER BY id")?;
+        let rows = stmt.query_map([], play_of_row)?;
         rows.collect::<SqlResult<_>>()?
     };
-    let mut known: std::collections::HashSet<(TrackId, i64)> = all.iter().copied().collect();
-    let before = all.len();
-    all.extend(plays.iter().copied().filter(|play| known.insert(*play)));
-    let added = all.len() - before;
-    if added == 0 {
+    let mut known: std::collections::HashMap<(TrackId, i64), usize> = all
+        .iter()
+        .enumerate()
+        .map(|(at, &(track, when, _))| ((track, when), at))
+        .collect();
+    let (mut added, mut filled) = (0usize, 0usize);
+    for &(track, when, listened) in plays {
+        match known.get(&(track, when)) {
+            Some(&at) => {
+                if all[at].2.is_none() && listened.is_some() {
+                    all[at].2 = listened;
+                    filled += 1;
+                }
+            }
+            None => {
+                known.insert((track, when), all.len());
+                all.push((track, when, listened));
+                added += 1;
+            }
+        }
+    }
+    if added == 0 && filled == 0 {
         return Ok(0);
     }
     // (Stable: plays of the same second stay in the order they were in.)
-    all.sort_by_key(|&(_, at)| at);
+    all.sort_by_key(|&(_, at, _)| at);
     let keep = usize::try_from(HISTORY_KEEP_ROWS).unwrap_or(usize::MAX);
     let dropped = all.len().saturating_sub(keep);
     tx.execute("DELETE FROM history", [])?;
@@ -1722,11 +1769,11 @@ fn merge_plays_in(tx: &rusqlite::Transaction<'_>, plays: &[(TrackId, i64)]) -> S
         // (A song that was taken out of the library since the plays were matched
         // has no plays any more: a scan may run beside this.)
         let mut stmt = tx.prepare(
-            "INSERT INTO history (track_id, played_at)
-             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1)",
+            "INSERT INTO history (track_id, played_at, listened_ms)
+             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1)",
         )?;
-        for (id, at) in &all[dropped..] {
-            stmt.execute(params![id, at])?;
+        for (id, at, listened) in &all[dropped..] {
+            stmt.execute(params![id, at, listened.map(to_i64)])?;
         }
     }
     Ok(added)
@@ -2937,6 +2984,96 @@ mod tests {
             .unwrap();
         assert!(db.create_playlist_with_items("실패", 6, &ids).is_err());
         assert_eq!(db.playlists().unwrap().len(), 1);
+    }
+
+    /// How long a play was listened to is kept with the play that was counted last
+    /// for its track, and comes along when plays of another record are merged in:
+    /// taken where it is not known here, never put in the place of what is known.
+    #[test]
+    fn how_long_a_play_was_listened_to_is_kept_and_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&db_path(&dir)).unwrap().db;
+        let ids = db
+            .upsert_tracks(&[
+                sample_track("/m/a.flac", None),
+                sample_track("/m/b.flac", None),
+            ])
+            .unwrap();
+        // Nothing is counted yet: there is no play to note it for.
+        assert!(!db.set_listened(ids[0], 1_000).unwrap());
+        assert!(db.record_play(ids[0], 100).unwrap());
+        assert!(db.record_play(ids[1], 200).unwrap());
+        assert!(db.record_play(ids[0], 300).unwrap());
+        assert_eq!(
+            db.plays_since(0).unwrap(),
+            [
+                (ids[0], 100, None),
+                (ids[1], 200, None),
+                (ids[0], 300, None)
+            ]
+        );
+        // The last play of the track, told twice as it goes on.
+        assert!(db.set_listened(ids[0], 240_000).unwrap());
+        assert!(db.set_listened(ids[0], 250_000).unwrap());
+        assert_eq!(
+            db.plays_since(0).unwrap(),
+            [
+                (ids[0], 100, None),
+                (ids[1], 200, None),
+                (ids[0], 300, Some(250_000))
+            ]
+        );
+        // Another record: a play that is here without its time, one that is here with
+        // it, and one that is new.
+        let added = db
+            .merge_plays(&[
+                (ids[1], 200, Some(90_000)),
+                (ids[0], 300, Some(1)),
+                (ids[1], 150, Some(60_000)),
+                (ids[0], 100, None),
+            ])
+            .unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(
+            db.plays_since(0).unwrap(),
+            [
+                (ids[0], 100, None),
+                (ids[1], 150, Some(60_000)),
+                (ids[1], 200, Some(90_000)),
+                (ids[0], 300, Some(250_000))
+            ]
+        );
+        // The same again changes nothing.
+        assert_eq!(db.merge_plays(&[(ids[1], 200, Some(5))]).unwrap(), 0);
+        assert_eq!(db.plays_since(0).unwrap().len(), 4);
+    }
+
+    /// A database of the version before plays had their time: its plays are kept, and
+    /// none of them has one.
+    #[test]
+    fn plays_of_an_earlier_version_have_no_time_listened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let before = &MIGRATIONS[..7];
+        let id = {
+            let mut old = Db::open_with_migrations(&path, before).unwrap().db;
+            assert_eq!(old.schema_version().unwrap(), 7);
+            let id = old
+                .upsert_tracks(&[sample_track("/m/a.flac", None)])
+                .unwrap()[0];
+            old.conn
+                .execute(
+                    "INSERT INTO history (track_id, played_at) VALUES (?1, 100)",
+                    params![id],
+                )
+                .unwrap();
+            id
+        };
+        let db = Db::open(&path).unwrap().db;
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        assert_eq!(db.plays_since(0).unwrap(), [(id, 100, None)]);
+        assert!(db.set_listened(id, 42_000).unwrap());
+        assert_eq!(db.plays_since(0).unwrap(), [(id, 100, Some(42_000))]);
     }
 
     #[test]

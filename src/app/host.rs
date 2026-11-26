@@ -64,6 +64,10 @@ impl PlayerHost for LibraryHost {
         self.library.record_play(id);
     }
 
+    fn record_listened(&self, id: TrackId, listened_ms: u64) {
+        self.library.record_listened(id, listened_ms);
+    }
+
     fn may_sound(&self) -> bool {
         crate::platform::sound::claim()
     }

@@ -43,6 +43,8 @@ fn decode_all(name: &str) -> Vec<f32> {
 struct TestHost {
     tracks: HashMap<TrackId, PlayableTrack>,
     plays: Mutex<Vec<TrackId>>,
+    /// What the player told of how long counted plays were listened to, as it came.
+    listened: Mutex<Vec<(TrackId, u64)>>,
     session: Mutex<Option<Session>>,
     saved: Mutex<Option<Session>>,
     saves: AtomicUsize,
@@ -127,6 +129,9 @@ impl TestHost {
     fn plays(&self) -> Vec<TrackId> {
         self.plays.lock().expect("lock").clone()
     }
+    fn listened(&self) -> Vec<(TrackId, u64)> {
+        self.listened.lock().expect("lock").clone()
+    }
 }
 
 impl PlayerHost for TestHost {
@@ -138,6 +143,9 @@ impl PlayerHost for TestHost {
     }
     fn record_play(&self, id: TrackId) {
         self.plays.lock().expect("lock").push(id);
+    }
+    fn record_listened(&self, id: TrackId, listened_ms: u64) {
+        self.listened.lock().expect("lock").push((id, listened_ms));
     }
     fn radio_picks(&self, seed: TrackId, exclude: &[TrackId], count: usize) -> Vec<TrackId> {
         self.radio_asked.lock().expect("lock").push(seed);
@@ -1135,6 +1143,67 @@ fn a_playthrough_counts_once_however_often_it_is_refed() {
     rig.wait("the queued track follows", |s| Rig::track(s) == Some(A));
     rig.wait("end", |s| s.state == PlayState::Ended);
     assert_eq!(rig.host.plays(), vec![LONG, A]);
+}
+
+/// How long a counted play was listened to is what came out of the device, not the
+/// song's length: a song left after its play was counted, by a jump to its end, was
+/// listened to for a little more than what it took to be counted. A song that was not
+/// counted tells nothing.
+#[test]
+fn a_counted_play_tells_how_long_it_was_listened_to() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host = TestHost::new().with_track(LONG, write_long_wav(dir.path(), 4), 4_000);
+    let rig = Rig::start(host);
+    // (About the pace of a clock: the jump is to come before the song is over.)
+    rig.pace_ms.store(12, Ordering::Relaxed);
+
+    // Left at once: no play, and nothing told.
+    rig.send(play(&[LONG, A], 0));
+    rig.wait("playing", |s| s.state == PlayState::Playing);
+    rig.send(Command::Next);
+    rig.wait("the next song", |s| Rig::track(s) == Some(A));
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A]);
+    assert!(
+        rig.host.listened().iter().all(|(id, _)| *id == A),
+        "{:?}",
+        rig.host.listened()
+    );
+    let of_a = rig.host.listened().last().copied().expect("told of A");
+    assert!((900..=1_100).contains(&of_a.1), "a second of A: {of_a:?}");
+
+    // Half of the long song is heard: counted, and told how long that took.
+    rig.send(play(&[LONG, A], 0));
+    rig.wait_host("credit", |h| h.plays() == vec![A, LONG]);
+    rig.wait_host("told with the credit", |h| {
+        h.listened().iter().any(|(id, _)| *id == LONG)
+    });
+    let at_credit = rig
+        .host
+        .listened()
+        .into_iter()
+        .find(|(id, _)| *id == LONG)
+        .expect("told");
+    assert!(
+        (2_000..2_600).contains(&at_credit.1),
+        "counted after half of four seconds: {at_credit:?}"
+    );
+    // A jump to its last half second: it ends having been heard for about three of
+    // its four seconds at most, and that, not its length, is what is told last.
+    rig.send(Command::SeekTo(3_500));
+    rig.wait("the next song", |s| Rig::track(s) == Some(A));
+    let last = rig
+        .host
+        .listened()
+        .into_iter()
+        .rfind(|(id, _)| *id == LONG)
+        .expect("told");
+    assert!(
+        last.1 > at_credit.1 && last.1 < 3_600,
+        "what was heard, not the four seconds of the song: {last:?} after {at_credit:?}"
+    );
+    rig.wait("end", |s| s.state == PlayState::Ended);
+    assert_eq!(rig.host.plays(), vec![A, LONG, A]);
 }
 
 #[test]

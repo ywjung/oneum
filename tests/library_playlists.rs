@@ -1261,3 +1261,58 @@ fn library_data_that_fails_halfway_is_taken_in_whole_at_the_next_try() {
     let other = there.open();
     whole(&other);
 }
+
+/// How long a play was listened to: noted for the play that was counted last, counted
+/// by the statistics in place of the song's length, written with the library data and
+/// taken in on another device, where a play that is there already gets it if it had
+/// none.
+#[test]
+fn how_long_plays_were_listened_to_is_kept_counted_and_carried() {
+    let env = TestEnv::new();
+    let (library, ids) = library_with_tracks(&env);
+    library.record_play(ids[0]);
+    library.record_listened(ids[0], 1_000);
+    library.record_listened(ids[0], 1_234);
+    library.record_play(ids[1]);
+    let plays = library.plays_since(0);
+    let times: Vec<Option<u64>> = plays.iter().map(|play| play.2).collect();
+    assert_eq!(times, [Some(1_234), None]);
+    // In the statistics: what was listened to, and for the play of which that is not
+    // known the length of its song.
+    let snapshot = library.snapshot();
+    let stats = oneum::library::stats::listening(&snapshot, &plays);
+    let length = snapshot.get(ids[1]).unwrap().duration_ms;
+    assert!(length > 0);
+    assert_eq!((stats.plays, stats.listened_ms), (2, 1_234 + length));
+
+    // A new start keeps it.
+    drop(snapshot);
+    drop(library);
+    let library = env.open();
+    assert_eq!(library.plays_since(0), plays);
+
+    // On another device, which has the first play already (taken in from an earlier
+    // file, without its time) and one of its own.
+    let file = env.dir.path().join("data.json");
+    library.export_data(&file, &[]).expect("writes");
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains(r#""listened":[1234,null]"#), "{text}");
+    let mut earlier: serde_json::Value = serde_json::from_str(&text).unwrap();
+    earlier.as_object_mut().unwrap().remove("listened");
+    earlier["plays"].as_array_mut().unwrap().truncate(1);
+    let earlier_file = env.dir.path().join("earlier.json");
+    fs::write(&earlier_file, earlier.to_string()).unwrap();
+
+    let there = TestEnv::new();
+    let (other, theirs) = library_with_tracks(&there);
+    other.import_data(&earlier_file).expect("takes in");
+    assert_eq!(other.plays_since(0), [(theirs[0], plays[0].1, None)]);
+    other.import_data(&file).expect("takes in");
+    assert_eq!(
+        other.plays_since(0),
+        [
+            (theirs[0], plays[0].1, Some(1_234)),
+            (theirs[1], plays[1].1, None)
+        ]
+    );
+}

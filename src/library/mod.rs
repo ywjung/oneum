@@ -2450,9 +2450,17 @@ impl Library {
         self.inner.publish_patch(&[id]);
     }
 
-    /// Every counted play at or after `since` (Unix seconds): `(track, when)`, oldest
-    /// first. Blocking; not for the UI thread.
-    pub fn plays_since(&self, since: i64) -> Vec<(TrackId, i64)> {
+    /// Notes how long the play that was counted last for a track has been listened to
+    /// (see `model::Play` and the player's `PlayerHost::record_listened`).
+    pub fn record_listened(&self, id: TrackId, listened_ms: u64) {
+        if let Err(err) = lock(&self.inner.db).set_listened(id, listened_ms) {
+            tracing::warn!(%err, "could not note how long a play was listened to");
+        }
+    }
+
+    /// Every counted play at or after `since` (Unix seconds), oldest first. Blocking;
+    /// not for the UI thread.
+    pub fn plays_since(&self, since: i64) -> Vec<crate::model::Play> {
         lock(&self.inner.db)
             .plays_since(since)
             .unwrap_or_else(|err| {
@@ -2832,7 +2840,7 @@ impl Library {
         rows: &[crate::storage::db::ListeningRow],
         playlists: &[ListIn],
         mark: &str,
-        plays: &[(TrackId, i64)],
+        plays: &[crate::model::Play],
     ) -> Result<usize, LibraryError> {
         let lists = |mut existing: Vec<(String, Vec<TrackId>)>| {
             let known = existing.len();

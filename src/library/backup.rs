@@ -36,6 +36,12 @@ pub struct LibraryData {
     /// oldest first.
     #[serde(default)]
     pub plays: Vec<(u32, i64)>,
+    /// How long each of `plays` was listened to, in their order, in milliseconds
+    /// (`null`: not known; see `model::Play`). Left out where none is known; a list of
+    /// another length than `plays` tells nothing. (Beside `plays`, not in it: a build
+    /// that does not know of this reads the file as before.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listened: Vec<Option<u64>>,
     #[serde(default)]
     pub playlists: Vec<Playlist>,
     #[serde(default)]
@@ -170,7 +176,14 @@ pub fn parse(bytes: &[u8]) -> Result<LibraryData, Unreadable> {
     let mut data: LibraryData = serde_json::from_slice(bytes).map_err(|_| Unreadable::NotData)?;
     let songs = data.songs.len();
     let known = |index: &u32| (*index as usize) < songs;
-    data.plays.retain(|(song, _)| known(song));
+    if data.listened.len() != data.plays.len() {
+        data.listened.clear();
+    }
+    let kept: Vec<bool> = data.plays.iter().map(|(song, _)| known(song)).collect();
+    let mut keep = kept.iter();
+    data.plays.retain(|_| *keep.next().unwrap_or(&true));
+    let mut keep = kept.iter();
+    data.listened.retain(|_| *keep.next().unwrap_or(&true));
     data.playlists.retain_mut(|playlist| {
         let empty = playlist.songs.is_empty();
         playlist.songs.retain(known);
@@ -258,11 +271,14 @@ impl Library {
                 rating: track.rating,
             })
             .collect();
-        let plays: Vec<(u32, i64)> = lock(&self.inner.db)
+        let (plays, mut listened): (Vec<(u32, i64)>, Vec<Option<u64>>) = lock(&self.inner.db)
             .plays_since(i64::MIN)?
             .into_iter()
-            .filter_map(|(id, at)| Some((*index.get(&id)?, at)))
-            .collect();
+            .filter_map(|(id, at, listened)| Some(((*index.get(&id)?, at), listened)))
+            .unzip();
+        if listened.iter().all(Option::is_none) {
+            listened.clear();
+        }
         // A list of songs the file does not hold (those of a media server) is left out:
         // in the file it would be a list that was empty, and come back as one.
         let playlists: Vec<Playlist> = lock(&self.inner.playlists)
@@ -285,6 +301,7 @@ impl Library {
             written_at: super::unix_now(),
             songs,
             plays,
+            listened,
             playlists,
             searches: searches.to_vec(),
         };
@@ -399,10 +416,14 @@ impl Library {
             .filter(|list| !list.empty_there && list.tracks.is_empty())
             .count();
         // The plays themselves, for the statistics and for what was heard last.
-        let plays: Vec<(TrackId, i64)> = data
+        let plays: Vec<crate::model::Play> = data
             .plays
             .iter()
-            .filter_map(|(song, at)| Some((*found.get(song)?, *at)))
+            .enumerate()
+            .filter_map(|(nth, (song, at))| {
+                let listened = data.listened.get(nth).copied().flatten();
+                Some((*found.get(song)?, *at, listened))
+            })
             .collect();
         // All of it at once, or none of it (see `Library::take_over`).
         let made = self.take_over(&rows, &playlists, MARK, &plays)?;
@@ -482,6 +503,7 @@ mod tests {
                 },
             ],
             plays: vec![(0, 1_700_000_000)],
+            listened: vec![Some(123_000)],
             playlists: vec![Playlist {
                 name: "드라이브".into(),
                 songs: vec![1, 0],
@@ -520,6 +542,34 @@ mod tests {
         assert_eq!(parse(later.as_bytes()), Err(Unreadable::Newer));
         assert!(is_of_a_later_version(&unreadable(Unreadable::Newer)));
         assert!(!is_of_a_later_version(&unreadable(Unreadable::NotData)));
+    }
+
+    /// How long plays were listened to stands beside the plays: it stays with its
+    /// play when plays that point at nothing are left out, a list of another length
+    /// tells nothing, and a file without it (an earlier build's) reads as before.
+    #[test]
+    fn how_long_plays_were_listened_to_stays_with_its_play() {
+        let file = |listened: &str| {
+            format!(
+                r#"{{"format":"oneum-library-data","version":1,"written_at":5,
+                "songs":[{{"file":"a/b/c.mp3","plays":2}}],
+                "plays":[[0,10],[7,11],[0,12]]{listened}}}"#
+            )
+        };
+        let data = parse(file(r#","listened":[1000,2000,null]"#).as_bytes()).expect("reads");
+        assert_eq!(data.plays, [(0, 10), (0, 12)]);
+        assert_eq!(data.listened, [Some(1000), None]);
+        let data = parse(file(r#","listened":[1000]"#).as_bytes()).expect("reads");
+        assert_eq!(data.plays, [(0, 10), (0, 12)]);
+        assert!(data.listened.is_empty());
+        let data = parse(file("").as_bytes()).expect("reads");
+        assert_eq!(data.plays.len(), 2);
+        assert!(data.listened.is_empty());
+        // Where none is known, the file does not hold the list at all.
+        let mut written = sample();
+        written.listened.clear();
+        let text = serde_json::to_string(&written).unwrap();
+        assert!(!text.contains("listened"), "{text}");
     }
 
     #[test]

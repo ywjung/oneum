@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 /// the row exists; survives rescans and relinking of moved files.
 pub type TrackId = i64;
 
+/// A play that was counted: the track, when it was counted (Unix seconds), and how
+/// long it was listened to, in milliseconds of sound that came out (see
+/// `PlayerHost::record_listened`). `None`: not known, which is so for every play that
+/// a version of the app counted that did not note it.
+pub type Play = (TrackId, i64, Option<u64>);
+
 /// The address a track's "path" stands for when the track is on a media server of the
 /// network rather than in a file: such a track's `http://` address travels where a
 /// file's path does (see `library::remote`).
