@@ -305,18 +305,19 @@ mod tests {
 
     const NOW: i64 = 1_800_000_000;
 
-    /// What a search asks for, in a form in which two searches that ask for the same
-    /// are equal: the conditions in one order (all of them have to hold, in whatever
-    /// order they stand), and the numbers within what there is (no song has fewer than
-    /// no stars or more than five, none was played fewer than no times).
-    fn asked(
-        query: &str,
-    ) -> (
+    /// The words, the conditions, the order and the number of songs of a search.
+    type Asked = (
         Vec<String>,
         Vec<String>,
         Option<(SortKey, bool)>,
         Option<usize>,
-    ) {
+    );
+
+    /// What a search asks for, in a form in which two searches that ask for the same
+    /// are equal: the conditions in one order (all of them have to hold, in whatever
+    /// order they stand), and the numbers within what there is (no song has fewer than
+    /// no stars or more than five, none was played fewer than no times).
+    fn asked(query: &str) -> Asked {
         use super::super::search::Filter;
         let prepared = PreparedQuery::new_at(query, NOW);
         let mut filters: Vec<String> = prepared

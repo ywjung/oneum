@@ -91,7 +91,25 @@ strings! {
     smart_playlist: "스마트 플레이리스트", "Smart Playlist";
     smart_save: "이 검색을 스마트 플레이리스트로 저장", "Save this search as a smart playlist";
     smart_name: "스마트 플레이리스트 이름", "Smart playlist name";
-    smart_edit: "검색 조건 고치기", "Edit Search";
+    smart_edit: "조건 편집", "Edit Conditions";
+    smart_new: "새 스마트 플레이리스트", "New Smart Playlist";
+    smart_words: "찾을 말", "Words";
+    smart_words_hint: "제목 · 아티스트 · 앨범에서 찾을 말", "Words to find in title, artist and album";
+    smart_text_hint: "들어 있는 말", "Contains";
+    smart_year_from: "부터", "From";
+    smart_year_to: "까지", "To";
+    smart_any: "전체", "Any";
+    smart_fav_yes: "즐겨찾기만", "Favorites only";
+    smart_fav_no: "즐겨찾기 아님", "Not favorites";
+    smart_plays: "재생 횟수", "Times played";
+    smart_never_played: "들은 적 없음", "Never played";
+    smart_added: "추가한 때", "Added within";
+    smart_played: "들은 때", "Played within";
+    smart_order: "순서", "Order";
+    smart_order_default: "보관함 순서", "Library order";
+    smart_reversed: "거꾸로", "Reversed";
+    smart_limit: "곡 수", "Number of songs";
+    smart_empty: "조건을 하나 이상 고르면 저장할 수 있습니다.", "Choose at least one condition to save.";
     smart_hint: "저장한 검색입니다. 조건에 맞는 곡이 그때그때 모입니다.", "A saved search: it holds whatever matches at the moment.";
     never: "—", "—";
     col_track_no: "#", "#";
@@ -715,6 +733,7 @@ strings! {
     menu_open_files: "음악 파일 열기…", "Open Music Files…";
     menu_add_folder: "음악 폴더 추가…", "Add Music Folder…";
     menu_new_playlist: "새 플레이리스트", "New Playlist";
+    menu_new_smart_playlist: "새 스마트 플레이리스트…", "New Smart Playlist…";
     menu_close_window: "윈도우 닫기", "Close Window";
     menu_undo: "실행 취소", "Undo";
     menu_redo: "실행 복귀", "Redo";
@@ -878,6 +897,23 @@ impl Lang {
             Lang::Ko => format!("{}곡", group_digits(n)),
             Lang::En if n == 1 => "1 song".to_string(),
             Lang::En => format!("{} songs", group_digits(n)),
+        }
+    }
+
+    /// "★3 이상" / "★3+": a value and anything above it.
+    pub fn at_least(self, value: &str) -> String {
+        match self {
+            Lang::Ko => format!("{value} 이상"),
+            Lang::En => format!("{value}+"),
+        }
+    }
+
+    /// "5회 이상" / "5+ plays".
+    pub fn plays_at_least(self, n: u32) -> String {
+        match self {
+            Lang::Ko => format!("{n}회 이상"),
+            Lang::En if n == 1 => "1+ play".to_string(),
+            Lang::En => format!("{n}+ plays"),
         }
     }
 

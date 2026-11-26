@@ -853,6 +853,7 @@ impl OneumApp {
             || ui.ctx().text_edit_focused()
             || self.key_pane != KeyPane::List
             || self.dialog.is_some()
+            || self.smart_editor_open()
             || self.sheet_open()
             || state.rows.is_empty()
         {

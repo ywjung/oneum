@@ -27,6 +27,7 @@ mod phone;
 mod player_bar;
 pub mod renderer;
 mod settings_window;
+mod smart_editor;
 mod spectrum;
 mod stats_view;
 pub mod theme;
@@ -168,6 +169,8 @@ enum Action {
     /// Rename a smart playlist (asks for the new name).
     RenameSmart(String),
     DeleteSmart(String),
+    /// Open the editor for a new smart playlist.
+    NewSmart,
     /// Put a smart playlist's search into the search field of the song list.
     EditSmart(String),
     /// Pin to the sidebar, or unpin if pinned.
@@ -293,6 +296,7 @@ enum UiRequest {
     OpenFiles,
     AddFolder,
     NewPlaylist,
+    NewSmartPlaylist,
     ImportPlaylist,
     Find,
     GoToCurrent,
@@ -460,6 +464,8 @@ pub struct OneumApp {
     dialog: Option<Dialog>,
     /// The form that adds a network folder, while it is open.
     folder_form: Option<network_folders::FolderForm>,
+    /// The editor of a smart playlist, while it is open.
+    smart_editor: Option<smart_editor::SmartEditor>,
     renaming: Option<(i64, String, bool)>,
     settings_open: bool,
     settings_tab: settings_window::Tab,
@@ -644,6 +650,7 @@ impl OneumApp {
             alert: None,
             dialog: None,
             folder_form: None,
+            smart_editor: None,
             renaming: None,
             settings_open: false,
             guide_open: false,
@@ -814,6 +821,7 @@ impl OneumApp {
                 MenuAction::OpenFiles => UiRequest::OpenFiles,
                 MenuAction::AddFolder => UiRequest::AddFolder,
                 MenuAction::NewPlaylist => UiRequest::NewPlaylist,
+                MenuAction::NewSmartPlaylist => UiRequest::NewSmartPlaylist,
                 MenuAction::ImportPlaylist => UiRequest::ImportPlaylist,
                 MenuAction::Find => UiRequest::Find,
                 MenuAction::GoToCurrent => UiRequest::GoToCurrent,
@@ -1299,6 +1307,7 @@ impl OneumApp {
             UiRequest::NewPlaylist => {
                 self.dialog = Some(Dialog::new_playlist(self.s().untitled_playlist, Vec::new()))
             }
+            UiRequest::NewSmartPlaylist => self.open_smart_editor(None),
             UiRequest::ImportPlaylist => self.pick_playlist_to_import(),
             UiRequest::Find => self.focus_search = true,
             UiRequest::GoToCurrent => self.go_to_current(),
@@ -2001,6 +2010,7 @@ impl OneumApp {
                 self.guide_open = false;
                 self.dialog = None;
                 self.folder_form = None;
+                self.smart_editor = None;
                 let size = egui::vec2(MINI_WIDTH, theme::PLAYER_BAR_HEIGHT);
                 ctx.send_viewport_cmd(Tell::MinInnerSize(size));
                 ctx.send_viewport_cmd(Tell::InnerSize(size));
@@ -2520,18 +2530,8 @@ impl OneumApp {
                     self.go(Nav::Songs);
                 }
             }
-            Action::EditSmart(name) => {
-                if let Some(query) = self
-                    .settings
-                    .smart_playlists
-                    .iter()
-                    .find(|p| p.name == name)
-                    .map(|p| p.query.clone())
-                {
-                    self.show_search(Nav::Songs, &query);
-                    self.focus_search = true;
-                }
-            }
+            Action::EditSmart(name) => self.open_smart_editor(Some(&name)),
+            Action::NewSmart => self.open_smart_editor(None),
             Action::Sort(key) => {
                 let state = self.views.entry(self.nav.clone()).or_default();
                 state.sort = match state.sort {
@@ -2741,7 +2741,7 @@ impl OneumApp {
         let popup_open = egui::Popup::is_any_open(ctx);
         let popup_was_open = std::mem::replace(&mut self.popup_was_open, popup_open) || popup_open;
         self.widget_focused = !typing && ctx.memory(|m| m.focused()).is_some();
-        if self.dialog.is_some() {
+        if self.dialog.is_some() || self.smart_editor_open() {
             return;
         }
         let (space, escape) = ctx.input(|i| {
@@ -3380,6 +3380,7 @@ impl OneumApp {
             "added": self.settings.list_columns.added,
             "last_played": self.settings.list_columns.last_played,
         });
+        state["smart_editor"] = self.smart_editor_state();
         state["smart_playlists"] = serde_json::json!(
             self.settings
                 .smart_playlists
@@ -4008,6 +4009,7 @@ impl eframe::App for OneumApp {
                 || self.eq_open
                 || self.guide_open
                 || self.folder_form.is_some()
+                || self.smart_editor_open()
                 || self.alert.is_some())
         {
             self.toggle_mini(&ctx);
@@ -4080,6 +4082,7 @@ impl eframe::App for OneumApp {
             self.equalizer_window(&ctx);
             self.dialogs(&ctx);
             self.folder_form_window(&ctx);
+            self.smart_editor_window(&ctx);
             for action in actions {
                 self.apply(action);
             }

@@ -219,9 +219,6 @@ pub(super) struct Phone {
     /// The list in which several songs are being chosen.
     selecting: Option<Nav>,
     reorder: Option<Reorder>,
-    /// The smart playlist whose search was put into the search field to be changed:
-    /// saving the search offers its name again.
-    editing_smart: Option<String>,
     /// The list whose own search field is shown (it is also shown while it holds a
     /// search), and whether that field is to get the keyboard.
     searching: Option<Nav>,
@@ -271,7 +268,6 @@ impl Phone {
             lyrics_line: None,
             selecting: None,
             reorder: None,
-            editing_smart: None,
             searching: None,
             focus_list_search: false,
             reveal: None,
@@ -761,24 +757,11 @@ impl OneumApp {
         self.phone_sheet(&ctx, &mut actions);
         self.dialogs(&ctx);
         self.folder_form_window(&ctx);
+        self.smart_editor_window(&ctx);
         for action in actions {
             match action {
                 Action::Go(nav) => self.phone_open(nav),
                 Action::ShowInfo(track) => self.phone.sheet = Some(Sheet::Info(track)),
-                // On a desk the search of a smart playlist goes into the search field
-                // of the song list; here, into the search tab.
-                Action::EditSmart(name) => {
-                    if let Some(query) = self
-                        .settings
-                        .smart_playlists
-                        .iter()
-                        .find(|p| p.name == name)
-                        .map(|p| p.query.clone())
-                    {
-                        self.phone_show_search(&query);
-                        self.phone.editing_smart = Some(name);
-                    }
-                }
                 other => self.apply(other),
             }
         }
@@ -807,6 +790,13 @@ impl OneumApp {
                     self.phone.show_tab(Tab::Playlists);
                 }
                 self.dialog = Some(Dialog::new_playlist(self.s().untitled_playlist, Vec::new()));
+            }
+            UiRequest::NewSmartPlaylist => {
+                self.phone.player_open = false;
+                if self.phone.tab != Tab::Playlists {
+                    self.phone.show_tab(Tab::Playlists);
+                }
+                self.open_smart_editor(None);
             }
             UiRequest::OpenFiles => {
                 if crate::platform::COPIES_MUSIC_IN {
@@ -913,7 +903,6 @@ impl OneumApp {
         self.phone.stack().clear();
         self.phone.query = query.to_string();
         self.phone.search_kind = SearchKind::Songs;
-        self.phone.editing_smart = None;
     }
 
     /// The system's Back: what lies topmost goes first (a dialog, a sheet, the keyboard,
@@ -926,6 +915,8 @@ impl OneumApp {
         } else if self.folder_form.is_some() {
             // The form for a network folder is put away, like a dialog.
             self.folder_form = None;
+        } else if self.smart_editor_open() {
+            self.smart_editor = None;
         } else if let Some(sheet) = self.phone.sheet.clone() {
             if self.phone.sheet_leaving.is_none() {
                 self.phone.sheet_leaving = Some((Instant::now(), sheet));
@@ -959,7 +950,7 @@ impl OneumApp {
     }
 
     /// Shows `nav` as a page above the ones of the tab it belongs to.
-    fn phone_open(&mut self, nav: Nav) {
+    pub(super) fn phone_open(&mut self, nav: Nav) {
         self.phone.player_open = false;
         // A sheet that is up goes back down (rather than vanishing) while the page
         // comes in.
@@ -1083,7 +1074,8 @@ impl OneumApp {
             && self.phone.transition.is_none()
             && self.phone.sheet.is_none()
             && !self.phone.player_open
-            && self.dialog.is_none();
+            && self.dialog.is_none()
+            && !self.smart_editor_open();
         let (origin, at, down, speed) = ui.input(|i| {
             (
                 i.pointer.press_origin(),
@@ -1263,6 +1255,28 @@ impl OneumApp {
             );
             if response.clicked() {
                 self.dialog = Some(Dialog::new_playlist(s.untitled_playlist, Vec::new()));
+            }
+            right = button.left();
+            // Beside it: a new smart playlist, made in its editor.
+            let button = Rect::from_min_size(
+                pos2(right - TOUCH, header.center().y - TOUCH / 2.0),
+                egui::Vec2::splat(TOUCH),
+            );
+            let response = ui.interact(
+                button,
+                ui.scope_id().with("phone-new-smart"),
+                Sense::click(),
+            );
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, s.smart_new));
+            icons::paint(
+                ui.painter(),
+                Rect::from_center_size(button.center(), egui::Vec2::splat(22.0)),
+                Icon::Search,
+                theme::accent(ui.visuals().dark_mode),
+            );
+            if response.clicked() {
+                self.open_smart_editor(None);
             }
             right = button.left();
         }
@@ -2333,26 +2347,10 @@ impl OneumApp {
             self.phone.query.clear();
             self.phone.focus_search = true;
         }
-        if self.phone.query.is_empty() {
-            self.phone.editing_smart = None;
-        }
         if save {
             use crate::app::settings::{MAX_SMART_QUERY_CHARS, tidy_text};
             let query = tidy_text(&self.phone.query, MAX_SMART_QUERY_CHARS);
-            // The search of a smart playlist that was brought here to be changed is
-            // offered its name again: saved under it, it takes the old one's place.
-            let name = self
-                .phone
-                .editing_smart
-                .clone()
-                .filter(|name| {
-                    self.settings
-                        .smart_playlists
-                        .iter()
-                        .any(|p| &p.name == name)
-                })
-                .unwrap_or_else(|| query.clone());
-            self.dialog = Some(Dialog::smart_playlist(&name, query, None));
+            self.dialog = Some(Dialog::smart_playlist(&query, query.clone(), None));
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {

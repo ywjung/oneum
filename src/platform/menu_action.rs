@@ -7,6 +7,8 @@ pub enum MenuAction {
     OpenFiles,
     AddFolder,
     NewPlaylist,
+    /// Open the editor for a new smart playlist.
+    NewSmartPlaylist,
     ImportPlaylist,
     Find,
     PlayPause,

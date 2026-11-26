@@ -1020,6 +1020,13 @@ impl OneumApp {
                                     self.dialog =
                                         Some(Dialog::new_playlist(s.untitled_playlist, Vec::new()));
                                 }
+                                // (To the left of the button above, which stays where
+                                // it was.)
+                                if widgets::icon_button(ui, Icon::Search, s.smart_new, 22.0, false)
+                                    .clicked()
+                                {
+                                    actions.push(Action::NewSmart);
+                                }
                             });
                         })
                         .response;
@@ -2258,6 +2265,7 @@ impl OneumApp {
             || self.widget_focused
             || ui.ctx().text_edit_focused()
             || self.dialog.is_some()
+            || self.smart_editor_open()
             || self.sheet_open()
             || queue.is_empty()
         {
