@@ -87,19 +87,23 @@ impl Write for Turning {
     }
 }
 
-/// Where a path of a person's files begins, on the systems the app runs on.
+/// The folders a path of a person's files begins with, on the systems the app runs
+/// on: a path is looked for as one of these between two slashes ("/Users/"). They
+/// stand here without the slashes on purpose: the checks of a release look through
+/// the program for "/Users/", which is how a path of the computer it was built on
+/// would show, and would take this list for one.
 const PATH_STARTS: [&str; 11] = [
-    "/Users/",
-    "/home/",
-    "/Volumes/",
-    "/private/var/",
-    "/var/mobile/",
-    "/var/folders/",
-    "/storage/",
-    "/sdcard/",
-    "/mnt/",
-    "/data/user/",
-    "/data/data/",
+    "Users",
+    "home",
+    "Volumes",
+    "private/var",
+    "var/mobile",
+    "var/folders",
+    "storage",
+    "sdcard",
+    "mnt",
+    "data/user",
+    "data/data",
 ];
 
 /// What stands for a path in a log that is handed out.
@@ -118,9 +122,16 @@ pub fn without_paths(text: &str) -> String {
             Some(body) => (body, "\n"),
             None => (line, ""),
         };
+        let text = body.as_bytes();
         let unix = PATH_STARTS
             .iter()
-            .filter_map(|start| body.find(start))
+            .filter_map(|start| {
+                body.match_indices(start)
+                    .find(|(at, _)| {
+                        *at > 0 && text[at - 1] == b'/' && text.get(at + start.len()) == Some(&b'/')
+                    })
+                    .map(|(at, _)| at - 1)
+            })
             .min();
         // Windows: a drive ("C:\Users\…"), a share ("\\nas\music\…").
         let bytes = body.as_bytes();
@@ -237,6 +248,10 @@ mod tests {
         assert!(lines[5].ends_with("could not read <path left out>"));
         assert!(!out.ends_with('\n'), "no line end is added");
         assert_eq!(without_paths("a\nb\n"), "a\nb\n");
+        // One of those folders' names as a word, or with a slash on one side only,
+        // is no path.
+        let words = "INFO storage is low; home/ and /home, Users and data/user stay";
+        assert_eq!(without_paths(words), words);
     }
 
     /// What a `tracing` call is given, for every call of the levels that reach the log
